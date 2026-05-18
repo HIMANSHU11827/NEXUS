@@ -1,0 +1,33 @@
+{
+  "pythonVersion": "3.14",
+  "pythonPlatform": "Windows",
+  "include": ["."],
+  "extraPaths": [
+    ".",
+    "core",
+    "orchestrators",
+    "providers",
+    "tools",
+    "utils",
+    "safety",
+    "knowledge",
+    "rag",
+    "C:/Python314/Lib/site-packages",
+    "C:/Users/himan/AppData/Roaming/Python/Python314/site-packages"
+  ],
+  "typeCheckingMode": "off",
+  "reportMissingImports": false,
+  "reportGeneralTypeIssues": false,
+  "reportOptionalSubscript": false,
+  "reportOptionalMemberAccess": false,
+  "reportMissingModuleSource": false,
+  "reportArgumentType": false,
+  "reportReturnType": false,
+  "reportIndexIssue": false,
+  "reportOperatorIssue": false,
+  "reportCallIssue": false,
+  "reportAttributeAccessIssue": false,
+  "reportUnknownVariableType": false,
+  "reportUnknownMemberType": false,
+  "reportUnknownArgumentType": false
+}

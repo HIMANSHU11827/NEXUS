@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NEXUS | Vector Simple Agent</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body { margin: 0; background-color: #111; color: #fff; font-family: 'Courier New', Courier, monospace; overflow: hidden; }
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        #ui-layer { position: relative; z-index: 10; padding: 40px; display: flex; flex-direction: column; height: 90vh; pointer-events: none; }
+        .header { font-size: 32px; font-weight: 900; color: #A4C639; text-transform: uppercase; margin-bottom: 5px; }
+        .status { color: #fff; opacity: 0.6; font-size: 12px; margin-bottom: 20px; }
+        .chat-box { margin-top: auto; max-width: 350px; background: #222; border: 4px solid #A4C639; padding: 15px; border-radius: 0; }
+        .msg { margin-bottom: 10px; font-size: 14px; }
+        .msg.nexus { color: #A4C639; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div id="canvas-container"></div>
+    <div id="ui-layer">
+        <div class="header">NEXUS v1.0</div>
+        <div class="status">SYSTEM: FLAT_MINIMALIST | STATUS: ACTIVE</div>
+        
+        <div class="chat-box">
+            <div class="msg nexus">NEXUS: SYSTEM_READY.</div>
+            <div class="msg nexus">NEXUS: I AM SIMPLE. I AM CLEAN. I AM NEXUS.</div>
+        </div>
+    </div>
+
+    <script>
+        let scene, camera, renderer, agent;
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setClearColor(0x111111);
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            // Flat Material (No lighting needed)
+            const mat = new THREE.MeshBasicMaterial({ color: 0xA4C639 }); // Android Green
+            
+            agent = new THREE.Group();
+            scene.add(agent);
+
+            // Torso (Rounded Block)
+            const torsoGeo = new THREE.CylinderGeometry(0.8, 0.8, 1.2, 32);
+            const torso = new THREE.Mesh(torsoGeo, mat);
+            agent.add(torso);
+
+            // Head (Half Sphere / Dome)
+            const headGeo = new THREE.SphereGeometry(0.8, 32, 32, 0, Math.PI * 2, 0, Math.PI / 2);
+            const head = new THREE.Mesh(headGeo, mat);
+            head.position.y = 0.65; // Floating head like Android
+            agent.add(head);
+
+            // Eyes (White Dots)
+            const eyeGeo = new THREE.CircleGeometry(0.1, 16);
+            const eyeMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+            
+            const leftEye = new THREE.Mesh(eyeGeo, eyeMat);
+            leftEye.position.set(0.3, 0.3, 0.75);
+            head.add(leftEye);
+
+            const rightEye = new THREE.Mesh(eyeGeo, eyeMat);
+            rightEye.position.set(-0.3, 0.3, 0.75);
+            head.add(rightEye);
+
+            // Antennae
+            const antGeo = new THREE.CylinderGeometry(0.03, 0.03, 0.4);
+            const leftAnt = new THREE.Mesh(antGeo, mat);
+            leftAnt.position.set(0.3, 0.8, 0);
+            leftAnt.rotation.z = -0.5;
+            head.add(leftAnt);
+
+            const rightAnt = new THREE.Mesh(antGeo, mat);
+            rightAnt.position.set(-0.3, 0.8, 0);
+            rightAnt.rotation.z = 0.5;
+            head.add(rightAnt);
+
+            // Simple Limbs
+            const limbGeo = new THREE.CylinderGeometry(0.15, 0.15, 0.8, 32);
+            
+            const leftArm = new THREE.Mesh(limbGeo, mat);
+            leftArm.position.set(1.1, 0, 0);
+            agent.add(leftArm);
+
+            const rightArm = new THREE.Mesh(limbGeo, mat);
+            rightArm.position.set(-1.1, 0, 0);
+            agent.add(rightArm);
+
+            const leftLeg = new THREE.Mesh(limbGeo, mat);
+            leftLeg.position.set(0.4, -1, 0);
+            agent.add(leftLeg);
+
+            const rightLeg = new THREE.Mesh(limbGeo, mat);
+            rightLeg.position.set(-0.4, -1, 0);
+            agent.add(rightLeg);
+
+            camera.position.z = 5;
+            camera.position.y = 0.5;
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            // Slow rotation and bobbing
+            agent.position.y = Math.sin(Date.now() * 0.001) * 0.1;
+            agent.rotation.y += 0.01;
+            
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

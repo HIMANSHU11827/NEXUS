@@ -1,0 +1,20 @@
+laws:
+  - name: "system_destruction_prevention"
+    pattern: "rm -rf|del /s /q /f|format|mkfs"
+    action: "BLOCK"
+    reason: "Destructive system commands are prohibited by sovereign protocol."
+
+  - name: "unauthorized_network_ingress"
+    pattern: "curl.*http://|wget.*http://|nc -l"
+    action: "AUDIT"
+    reason: "Outbound network requests and listener spawns are being monitored."
+
+  - name: "private_key_protection"
+    pattern: "\\.pem|\\.key|id_rsa|\\.env"
+    action: "AUDIT"
+    reason: "Access to sensitive credential files is restricted and logged."
+
+  - name: "process_termination_guardian"
+    pattern: "taskkill /f|kill -9"
+    action: "BLOCK"
+    reason: "Forced termination of system processes is prohibited without explicit elevation."

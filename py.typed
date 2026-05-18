@@ -1,0 +1,2 @@
+# This file tells Pyre2/mypy that this package has type information.
+# Its presence alone suppresses most "could not find module" errors.

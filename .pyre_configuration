@@ -1,0 +1,8 @@
+{
+  "source_directories": [
+    {
+      "root": "."
+    }
+  ],
+  "ignore_all_errors": true
+}

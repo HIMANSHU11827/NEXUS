@@ -1,0 +1,8 @@
+# Ignore binary and junk
+node_modules/
+__pycache__/
+.git/
+workspace/
+venv/
+*.pyc
+nul

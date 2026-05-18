@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "NodeNext",
+    "lib": ["ESNext", "DOM"],
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "jsx": "react",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "outDir": "dist",
+    "types": ["node"]
+  },
+  "include": ["**/*.tsx", "**/*.ts"]
+}

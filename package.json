@@ -1,0 +1,11 @@
+{
+  "name": "nexus-sovereign",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "cd cli && npm start",
+    "api": "cd dashboard && python api.py",
+    "ui": "npm start"
+  }
+}
