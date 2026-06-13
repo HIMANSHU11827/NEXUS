@@ -1,0 +1,32 @@
+# Debugger profile — fast inference, full debug tools, git revert
+system:
+  default_provider: cloud
+  provider_name: DEBUGGER_BRAIN
+  brain_mode: AUTO
+  branding: "🐛"
+  log_level: DEBUG
+
+security:
+  safety_strictness: 0.75
+  prover_gate_active: false
+
+providers:
+  cloud:
+    openrouter:
+      active: true
+      model: google/gemini-2.0-flash-lite-preview-02-05:free
+    groq:
+      active: false
+      model: llama-3.1-70b-versatile
+    deepseek:
+      active: false
+      model: deepseek-coder
+  local:
+    DEBUGGER_BRAIN:
+      active: true
+      parent_provider: openrouter
+      model: google/gemini-2.0-flash-lite-preview-02-05:free
+    lm_studio:
+      active: true
+      endpoint: http://127.0.0.1:1234/v1/chat/completions
+      model: lmstudio-community/gemma-3-270m-it-qat

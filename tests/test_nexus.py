@@ -1,12 +1,12 @@
 import os
 import sys
+print("DEBUG sys.executable:", sys.executable)
+print("DEBUG sys.path:", sys.path)
 import json
 from orchestrators.architect import NexusArchitect
 
 def main():
     print("--- NEXUS RUNTIME AUDIT (A-Z) ---")
-    
-    # 1. Initialize Coordinator
     try:
         coord = NexusArchitect()
         print(f"[OK] Master Coordinator Initialized.")

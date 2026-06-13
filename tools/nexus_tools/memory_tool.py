@@ -1,5 +1,5 @@
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
-from core.neural.memory_kernel import MemoryKernel
+from neural.memory_kernel import MemoryKernel
 import os
 
 class MemoryTool(BaseTool):

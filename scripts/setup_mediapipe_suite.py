@@ -14,7 +14,7 @@ def setup(download: bool = True):
         from scripts.setup_holistic import vendor_dashboard_assets
 
         copied_public, copied_model = vendor_dashboard_assets()
-        print(f"[+] Holistic dashboard files vendored: {copied_public}")
+        print(f"[+] Holistic gui files vendored: {copied_public}")
         print(f"[+] Holistic local runtime files saved: {copied_model}")
     except Exception as exc:
         print(f"[!] Holistic asset vendoring failed: {exc}")

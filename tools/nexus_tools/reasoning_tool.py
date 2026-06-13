@@ -37,7 +37,7 @@ class ReasoningTool:
         Sync wrapper for async MoA solve.
         """
         try:
-            from core.kernel import get_nexus_kernel
+            from kernel import get_nexus_kernel
             moa = get_nexus_kernel().moa
             
             full_task = f"{task}\n\n[CONTEXT]: {context}" if context else task

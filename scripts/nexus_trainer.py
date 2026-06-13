@@ -7,7 +7,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def _training_model_path(root):
     try:
-        from core.config_loader import NexusConfigLoader
+        from config_loader import NexusConfigLoader
         config = NexusConfigLoader().get_provider_config("SOVEREIGN_BRAIN")
         rel_path = config.get("model_path")
         if rel_path:

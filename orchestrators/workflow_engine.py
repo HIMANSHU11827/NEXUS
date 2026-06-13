@@ -6,21 +6,27 @@ Each workflow is a YAML/dict plan executed sequentially by the LangChain chain.
 import sys, os, yaml, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from orchestrators.langchain_agents import create_chat_chain
-from core.tool_adapters import RegistryTerminalTool as TerminalTool
-from core.tool_adapters import RegistryFileTools as NexusFileTools
+try:
+    from orchestrators.langchain_agents import create_chat_chain
+except Exception:
+    create_chat_chain = None
 
+from tool_adapters import RegistryTerminalTool as TerminalTool
+from tool_adapters import RegistryFileTools as NexusFileTools
+
+
+import concurrent.futures
 
 class NexusWorkflow:
     def __init__(self):
-        self.chain = create_chat_chain()
+        self.chain = create_chat_chain() if create_chat_chain else None
         self.terminal = TerminalTool("./workspace")
         self.files = NexusFileTools("./workspace")
 
     def run_workflow(self, steps: list) -> dict:
         """
         Execute a list of workflow steps in order.
-        Each step is a dict: {type: 'prompt'|'bash'|'write_file', payload: '...'}
+        Each step is a dict: {type: 'prompt'|'bash'|'write_file'|'parallel', payload: '...'}
         """
         results = {}
         for i, step in enumerate(steps, 1):
@@ -28,10 +34,13 @@ class NexusWorkflow:
             payload = step.get("payload", "")
             label = step.get("label", f"step_{i}")
 
-            print(f"\n[Workflow] Step {i}: {label}")
+            print(f"\n[Workflow] Step {i}: {label} ({step_type})")
 
             if step_type == "prompt":
-                out = "".join(self.chain.stream({"input": payload}))
+                if self.chain is None:
+                    out = "[ERROR]: LangChain LLM environment not available on this python version."
+                else:
+                    out = "".join(self.chain.stream({"input": payload}))
                 results[label] = out.strip()
                 print(out)
 
@@ -46,6 +55,38 @@ class NexusWorkflow:
                 msg = self.files.write_file(filename, content)
                 results[label] = msg
                 print(msg)
+
+            elif step_type == "parallel":
+                sub_steps = step.get("steps", [])
+                print(f"[Workflow] Running {len(sub_steps)} sub-steps in parallel...")
+                
+                def _run_sub_step(sub_idx, sub_step):
+                    sub_type = sub_step.get("type", "prompt")
+                    sub_payload = sub_step.get("payload", "")
+                    sub_label = sub_step.get("label", f"{label}_sub_{sub_idx}")
+                    
+                    if sub_type == "prompt":
+                        if self.chain is None:
+                            sub_out = "[ERROR]: LangChain LLM environment not available on this python version."
+                        else:
+                            sub_out = "".join(self.chain.stream({"input": sub_payload}))
+                        return sub_label, sub_out.strip()
+                    elif sub_type == "bash":
+                        sub_out = self.terminal.execute(sub_payload)
+                        return sub_label, sub_out.strip()
+                    elif sub_type == "write_file":
+                        sub_filename = sub_step.get("filename", f"output_{sub_idx}.txt")
+                        sub_content = sub_step.get("content", "")
+                        sub_msg = self.files.write_file(sub_filename, sub_content)
+                        return sub_label, sub_msg
+                    return sub_label, ""
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(sub_steps), 8)) as executor:
+                    futures = {executor.submit(_run_sub_step, idx, s): s for idx, s in enumerate(sub_steps, 1)}
+                    for future in concurrent.futures.as_completed(futures):
+                        sub_label, sub_res = future.result()
+                        results[sub_label] = sub_res
+                        print(f"[{sub_label} finished]")
 
             time.sleep(0.1)
 

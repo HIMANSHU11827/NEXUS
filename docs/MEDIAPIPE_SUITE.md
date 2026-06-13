@@ -2,20 +2,20 @@
 
 NEXUS connects Google MediaPipe through two local paths:
 
-- Real-time Holistic webcam tracking uses the official vendored web runtime in `dashboard/public/mediapipe`.
+- Real-time Holistic webcam tracking uses the official vendored web runtime in `gui/public/mediapipe`.
 - Python task runners use local model files in `models/local/mediapipe/tasks`.
 
-## Dashboard Runtime Status
+## gui Runtime Status
 
-The Vision dashboard keeps every MediaPipe capability visible, but the labels mean different things:
+The Vision gui keeps every MediaPipe capability visible, but the labels mean different things:
 
-- `LIVE`: works in the webcam dashboard now and can be turned on/off.
-- `READY`: model files are downloaded locally, but the live webcam runner is not wired into the dashboard yet.
+- `LIVE`: works in the webcam gui now and can be turned on/off.
+- `READY`: model files are downloaded locally, but the live webcam runner is not wired into the gui yet.
 - `SLOT`: NEXUS knows the capability, but it still needs a compatible model file, runner wiring, or both.
 
 ### Truly Live Today
 
-| Capability | Dashboard behavior |
+| Capability | gui behavior |
 | --- | --- |
 | Body tracking | Live Holistic pose overlay |
 | Face tracking | Live Holistic face mesh overlay |
@@ -39,7 +39,7 @@ The Vision dashboard keeps every MediaPipe capability visible, but the labels me
 
 | Capability | Status |
 | --- | --- |
-| Hair segmentation | Graph exists in source; dashboard runner not wired |
+| Hair segmentation | Graph exists in source; gui runner not wired |
 | Image embedding/search | Needs compatible embedder model and runner |
 | Audio classification | Needs audio capture/tensor runner |
 | Text classification | Needs compatible model and text UI/runner |
@@ -51,14 +51,14 @@ The Vision dashboard keeps every MediaPipe capability visible, but the labels me
 
 | Capability | MediaPipe Task | Status |
 | --- | --- | --- |
-| Body tracking | Pose Landmarker | Model downloaded; dashboard uses Holistic live path |
-| Face tracking | Face Landmarker | Model downloaded; dashboard uses Holistic live path |
-| Hand tracking | Hand Landmarker | Model downloaded; dashboard uses Holistic live path |
-| Full body + face + hands | Holistic | Connected through dashboard webcam runtime |
-| Image segmentation | Image Segmenter | Selfie model downloaded; dashboard uses Holistic mask live path |
-| Object detection | Object Detector | EfficientDet-Lite0 downloaded; not live in dashboard yet |
-| Gesture recognition | Gesture Recognizer | Model downloaded; not live in dashboard yet |
-| Image classification | Image Classifier | EfficientNet-Lite0 downloaded; not live in dashboard yet |
+| Body tracking | Pose Landmarker | Model downloaded; gui uses Holistic live path |
+| Face tracking | Face Landmarker | Model downloaded; gui uses Holistic live path |
+| Hand tracking | Hand Landmarker | Model downloaded; gui uses Holistic live path |
+| Full body + face + hands | Holistic | Connected through gui webcam runtime |
+| Image segmentation | Image Segmenter | Selfie model downloaded; gui uses Holistic mask live path |
+| Object detection | Object Detector | EfficientDet-Lite0 downloaded; not live in gui yet |
+| Gesture recognition | Gesture Recognizer | Model downloaded; not live in gui yet |
+| Image classification | Image Classifier | EfficientNet-Lite0 downloaded; not live in gui yet |
 | Image embedding/search | Image Embedder | Slot only; needs compatible model file |
 | Audio classification | Audio Classifier | Slot only; audio tensor runner pending |
 | Text classification | Text Classifier | Slot only; needs compatible model file |
@@ -68,7 +68,7 @@ The Vision dashboard keeps every MediaPipe capability visible, but the labels me
 
 ## Performance Notes
 
-The dashboard defaults to an optimized adaptive webcam path:
+The gui defaults to an optimized adaptive webcam path:
 
 - It starts with practical camera profiles, then falls back to basic `video: true` if a webcam rejects constraints.
 - It avoids desktop-hostile `facingMode` constraints and can retry camera startup from the error panel.
@@ -90,15 +90,15 @@ NEXUS now has a `vision_accelerator` probe that reports real backend GPU readine
 
 - Preferred native path for this machine: OpenVINO GPU/AUTO on Intel UHD Graphics.
 - Windows fallback path: ONNX Runtime DirectML for ONNX models on Intel/AMD/NVIDIA GPUs.
-- Current dashboard live path: MediaPipe Holistic web runtime, accelerated by browser WebGL when Chrome hardware acceleration is active.
+- Current gui live path: MediaPipe Holistic web runtime, accelerated by browser WebGL when Chrome hardware acceleration is active.
 - Current Python environment: OpenVINO 2026 and ONNX Runtime DirectML are installed; the accelerator probe selects OpenVINO GPU when Intel iGPU is visible.
 
-Important distinction: browser Holistic and backend native inference are different paths. The dashboard can use WebGL today, but true backend iGPU runners need OpenVINO or DirectML plus compatible models converted or exported for those runtimes.
+Important distinction: browser Holistic and backend native inference are different paths. The gui can use WebGL today, but true backend iGPU runners need OpenVINO or DirectML plus compatible models converted or exported for those runtimes.
 
-Use the NEXUS tool `vision_accelerator` or the dashboard API:
+Use the NEXUS tool `vision_accelerator` or the gui API:
 
 ```powershell
-python -c "from tools.nexus_tools.vision.vision_accelerator import VisionAccelerator; import json; print(json.dumps(VisionAccelerator().status(), indent=2))"
+python -c "from tools.nexus_tools.vision.vision_accelerator_tool import VisionAccelerator; import json; print(json.dumps(VisionAccelerator().status(), indent=2))"
 ```
 
 ```text
@@ -123,7 +123,7 @@ Example:
 python scripts\setup_mediapipe_suite.py
 ```
 
-This refreshes Holistic dashboard assets and downloads all known official task models.
+This refreshes Holistic gui assets and downloads all known official task models.
 
 ## Important Runtime Note
 

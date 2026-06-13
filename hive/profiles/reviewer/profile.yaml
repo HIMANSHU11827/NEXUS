@@ -1,0 +1,4 @@
+name: reviewer
+description: "NEXUS Evolution Council — Reviewer. Code review, quality gates, and security audit."
+inherits: base
+tags: [council, reviewer, quality]

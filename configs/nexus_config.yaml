@@ -1,3 +1,269 @@
+custom_skill_configs:
+  proactive_debugger:
+    active: true
+    description: '--- name: proactive_debugger description: Autonomous neural debugger for high-fidelity
+      system repair. version: 1.0.0 metadata:'
+  test_guardian:
+    active: true
+    description: '--- name: test_guardian description: Autonomous verification engine for NEXUS modifications.
+      version: 1.0.0 metadata:'
+  test_mission_nexus_analysis:
+    active: true
+    description: '--- name: test_mission_nexus_analysis description: "Execute the TEST_MISSION workflow:
+      locate nexus.py, preview its header, enumerate available skills'
+custom_skill_descriptions:
+  proactive_debugger: '--- name: proactive_debugger description: Autonomous neural debugger for high-fidelity
+    system repair. version: 1.0.0 metadata:'
+  test_guardian: '--- name: test_guardian description: Autonomous verification engine for NEXUS modifications.
+    version: 1.0.0 metadata:'
+  test_mission_nexus_analysis: '--- name: test_mission_nexus_analysis description: "Execute the TEST_MISSION
+    workflow: locate nexus.py, preview its header, enumerate available skills'
+custom_tool_configs:
+  agent_context:
+    active: true
+    description: Generate NEXUS.md from the live code graph for coding-agent structural awareness.
+  atlas_map:
+    active: true
+    description: 'Generates a logic map of a directory. Input: ''dir''. Use this to understand codebase
+      architecture.'
+  bash:
+    active: true
+    description: Execute shell commands. Supports persistent sessions, timeouts, and streaming.
+  benchmark:
+    active: true
+    description: Run and inspect local NEXUS regression benchmarks.
+  brain_trainer:
+    active: true
+    description: 'Handles the NEXUS model lifecycle. Modes: ''train'' (Fine-tune SafeTensors), ''export''
+      (Convert to GGUF), ''cycle'' (Train + Export).'
+  code_graph:
+    active: true
+    description: Build and query a persistent codebase knowledge graph of files, symbols, imports, and
+      calls.
+  cognition:
+    active: true
+    description: Read/write adaptive memory graph and zero-token context packets.
+  competitive_moat:
+    active: true
+    description: Audit NEXUS against competitor-style agent capability categories and produce an attack
+      plan.
+  diagnostics:
+    active: true
+    description: Run compile/parse diagnostics for Python, JSON, YAML, and optional gui build.
+  edit_plan:
+    active: true
+    description: Build a symbol-aware pre-edit plan with blast radius and recommended checks.
+  evidence_ledger:
+    active: true
+    description: Record and audit claims with supporting evidence, status, and confidence.
+  failure_vaccine:
+    active: true
+    description: Convert concrete failures into memory rules, fix strategies, and regression plans.
+  file_edit:
+    active: true
+    description: View, create, edit files with str_replace, insert, and undo support.
+  glob:
+    active: true
+    description: Find files matching glob patterns (e.g., '**/*.py', 'src/**/*.ts')
+  grep:
+    active: true
+    description: Search file contents using regex patterns.
+  hive_broadcast:
+    active: true
+    description: 'Broadcast a discovery or result to the collective Hive Mind. Params: ''message'' (str),
+      ''hive_id'' (opt).'
+  hive_intent:
+    active: true
+    description: 'Declare a collaborative intent (e.g., ''REFACTORING_AUTH'', ''DEBUGGING_OOM''). Other
+      agents will see this intent in their context. Params: ''intent'' (str), ''hive_id'' (opt).'
+  hive_merge_plan:
+    active: true
+    description: 'Inspect Hive artifacts for claimed changed files and report overlapping edits. Params:
+      ''hive_id'' (str).'
+  hive_pulse:
+    active: true
+    description: 'Retrieves recent signals from the hive. Params: ''hive_id'' (opt).'
+  hive_resume:
+    active: true
+    description: 'Resume pending tasks for a Hive mission. Params: ''hive_id'' (str), ''workers'' (int,
+      optional).'
+  hive_spawn:
+    active: true
+    description: 'Delegate a task to a specialized Hive worker. Params: ''objective'' (str), ''persona''
+      (str - e.g. ENGINEER, AUDITOR, or a custom specialist), ''persona_description'' (opt), ''hive_id''
+      (opt).'
+  hive_team:
+    active: true
+    description: 'Manage the shared Team Mission Board. Params: ''action'' (write/read), ''content'' (str),
+      ''hive_id'' (opt).'
+  holistic:
+    active: true
+    description: Detects face, pose, and hand landmarks from an image using MediaPipe Holistic.
+  hyper_plan:
+    active: true
+    description: Create an explicit planner/critic/verifier plan with uncertainty scoring.
+  librarian_harvest:
+    active: true
+    description: 'Harvests documentation from a URL and stores it locally for RAG. Params: ''url'' (str),
+      ''category'' (str - e.g. ''react'', ''python'').'
+  mediapipe_suite:
+    active: true
+    description: Connects MediaPipe vision, text, audio, Holistic, and edge GenAI task capabilities to
+      NEXUS.
+  memory_ops:
+    active: true
+    description: Manage working memory (Mental Notes) and episodic recall (Mental Time Travel).
+  mission_replay:
+    active: true
+    description: Inspect the append-only mission replay event log.
+  nexus_comms:
+    active: true
+    description: 'Sends messages to external platforms (discord, whatsapp, telegram). Params: platform,
+      message, recipient.'
+  nexus_evolve:
+    active: true
+    description: 'Analyzes telemetry and applies self-improvements. Params: ''mode'' (analyze|apply),
+      ''patch'' (if apply). Use this to solve recurring tool failures by editing task logic.'
+  nexus_omni:
+    active: true
+    description: NEXUS Omni-UI Control - Unified Browser automation and OS-level GUI control (mouse/keyboard).
+  nexus_switch_brain:
+    active: true
+    description: Switches the primary cognition engine. Use 'nexus' for local brain or 'big' for cloud/teacher
+      brain.
+  patch_ledger:
+    active: true
+    description: Create baselines and record inspectable patch diffs independent of Git.
+  process:
+    active: true
+    description: 'Manage background processes: start, poll, and kill.'
+  rag:
+    active: true
+    description: 'Performs next-gen RAG. Input: ''query''. Finds definitive code symbols and high-precision
+      snippets.'
+  roadmap:
+    active: true
+    description: Audit roadmap completion from real project files and write docs/ROADMAP_STATUS.md.
+  rollback:
+    active: true
+    description: Create and restore project-local rollback snapshots for files.
+  side_effects:
+    active: true
+    description: Predict cross-file blast radius before editing a source file.
+  skill_forge:
+    active: true
+    description: Create and search reusable workflow/macro definitions.
+  skill_synthesizer:
+    active: true
+    description: Synthesizes a new tool/skill for NEXUS. Provide name, description, and Python code (BaseTool
+      subclass).
+  system_audit:
+    active: true
+    description: Scans the workspace for security flaws, credentials, and poor patterns.
+  system_monitor:
+    active: true
+    description: Provides real-time hardware telemetry (CPU, RAM, Disk, OS) and system health metrics.
+  system_snapshot:
+    active: true
+    description: 'Creates a full system backup for emergency recovery. Params: ''label'' (str).'
+  test_select:
+    active: true
+    description: Select targeted tests and diagnostics for changed files.
+  todo:
+    active: true
+    description: Create and manage task lists for complex workflows.
+  tool_economy:
+    active: true
+    description: Inspect persistent tool success, latency, and reputation metrics.
+  unified_graph:
+    active: true
+    description: Build and query one NEXUS graph over code, memory, evidence, sessions, tools, and benchmarks.
+  vision_accelerator:
+    active: true
+    description: Reports native iGPU/GPU acceleration readiness for NEXUS vision runners.
+  web_fetch:
+    active: true
+    description: Fetch a URL and return readable text content.
+  web_search:
+    active: true
+    description: Search the web using DuckDuckGo (no API key needed).
+custom_tool_descriptions:
+  agent_context: Generate NEXUS.md from the live code graph for coding-agent structural awareness.
+  atlas_map: 'Generates a logic map of a directory. Input: ''dir''. Use this to understand codebase architecture.'
+  bash: Execute shell commands. Supports persistent sessions, timeouts, and streaming.
+  benchmark: Run and inspect local NEXUS regression benchmarks.
+  brain_trainer: 'Handles the NEXUS model lifecycle. Modes: ''train'' (Fine-tune SafeTensors), ''export''
+    (Convert to GGUF), ''cycle'' (Train + Export).'
+  code_graph: Build and query a persistent codebase knowledge graph of files, symbols, imports, and calls.
+  cognition: Read/write adaptive memory graph and zero-token context packets.
+  competitive_moat: Audit NEXUS against competitor-style agent capability categories and produce an attack
+    plan.
+  diagnostics: Run compile/parse diagnostics for Python, JSON, YAML, and optional gui build.
+  edit_plan: Build a symbol-aware pre-edit plan with blast radius and recommended checks.
+  evidence_ledger: Record and audit claims with supporting evidence, status, and confidence.
+  failure_vaccine: Convert concrete failures into memory rules, fix strategies, and regression plans.
+  file_edit: View, create, edit files with str_replace, insert, and undo support.
+  glob: Find files matching glob patterns (e.g., '**/*.py', 'src/**/*.ts')
+  grep: Search file contents using regex patterns.
+  hive_broadcast: 'Broadcast a discovery or result to the collective Hive Mind. Params: ''message'' (str),
+    ''hive_id'' (opt).'
+  hive_intent: 'Declare a collaborative intent (e.g., ''REFACTORING_AUTH'', ''DEBUGGING_OOM''). Other
+    agents will see this intent in their context. Params: ''intent'' (str), ''hive_id'' (opt).'
+  hive_merge_plan: 'Inspect Hive artifacts for claimed changed files and report overlapping edits. Params:
+    ''hive_id'' (str).'
+  hive_pulse: 'Retrieves recent signals from the hive. Params: ''hive_id'' (opt).'
+  hive_resume: 'Resume pending tasks for a Hive mission. Params: ''hive_id'' (str), ''workers'' (int,
+    optional).'
+  hive_spawn: 'Delegate a task to a specialized Hive worker. Params: ''objective'' (str), ''persona''
+    (str - e.g. ENGINEER, AUDITOR, or a custom specialist), ''persona_description'' (opt), ''hive_id''
+    (opt).'
+  hive_team: 'Manage the shared Team Mission Board. Params: ''action'' (write/read), ''content'' (str),
+    ''hive_id'' (opt).'
+  holistic: Detects face, pose, and hand landmarks from an image using MediaPipe Holistic.
+  hyper_plan: Create an explicit planner/critic/verifier plan with uncertainty scoring.
+  librarian_harvest: 'Harvests documentation from a URL and stores it locally for RAG. Params: ''url''
+    (str), ''category'' (str - e.g. ''react'', ''python'').'
+  mediapipe_suite: Connects MediaPipe vision, text, audio, Holistic, and edge GenAI task capabilities
+    to NEXUS.
+  memory_ops: Manage working memory (Mental Notes) and episodic recall (Mental Time Travel).
+  mission_replay: Inspect the append-only mission replay event log.
+  nexus_comms: 'Sends messages to external platforms (discord, whatsapp, telegram). Params: platform,
+    message, recipient.'
+  nexus_evolve: 'Analyzes telemetry and applies self-improvements. Params: ''mode'' (analyze|apply), ''patch''
+    (if apply). Use this to solve recurring tool failures by editing task logic.'
+  nexus_omni: NEXUS Omni-UI Control - Unified Browser automation and OS-level GUI control (mouse/keyboard).
+  nexus_switch_brain: Switches the primary cognition engine. Use 'nexus' for local brain or 'big' for
+    cloud/teacher brain.
+  patch_ledger: Create baselines and record inspectable patch diffs independent of Git.
+  process: 'Manage background processes: start, poll, and kill.'
+  rag: 'Performs next-gen RAG. Input: ''query''. Finds definitive code symbols and high-precision snippets.'
+  roadmap: Audit roadmap completion from real project files and write docs/ROADMAP_STATUS.md.
+  rollback: Create and restore project-local rollback snapshots for files.
+  side_effects: Predict cross-file blast radius before editing a source file.
+  skill_forge: Create and search reusable workflow/macro definitions.
+  skill_synthesizer: Synthesizes a new tool/skill for NEXUS. Provide name, description, and Python code
+    (BaseTool subclass).
+  system_audit: Scans the workspace for security flaws, credentials, and poor patterns.
+  system_monitor: Provides real-time hardware telemetry (CPU, RAM, Disk, OS) and system health metrics.
+  system_snapshot: 'Creates a full system backup for emergency recovery. Params: ''label'' (str).'
+  test_select: Select targeted tests and diagnostics for changed files.
+  todo: Create and manage task lists for complex workflows.
+  tool_economy: Inspect persistent tool success, latency, and reputation metrics.
+  unified_graph: Build and query one NEXUS graph over code, memory, evidence, sessions, tools, and benchmarks.
+  vision_accelerator: Reports native iGPU/GPU acceleration readiness for NEXUS vision runners.
+  web_fetch: Fetch a URL and return readable text content.
+  web_search: Search the web using DuckDuckGo (no API key needed).
+disabled_skills: []
+disabled_tools: []
+mcp_servers:
+  nexus-browser:
+    active: false
+    args:
+    - integrations/nexus-browser-bridge/build/src/bin/nexus-omni.js
+    - --no-usage-statistics
+    command: node
+    description: NEXUS high-fidelity browser automation node. Provides Playwright-backed headless scraping,
+      UI interaction, and web action execution.
 memory:
   persistence: atomic_checkpoints
   vault_mode: gravity_rag
@@ -12,10 +278,16 @@ providers:
       active: false
       api_key: YOUR_COHERE_KEY_HERE
       model: command-r-plus
-    deepseek:
+    commandcode:
       active: false
-      api_key: YOUR_DEEPSEEK_KEY_HERE
-      model: deepseek-coder
+      api_key: ${COMMANDCODE_API_KEY}
+      endpoint: https://api.commandcode.ai/provider/v1/chat/completions
+      model: deepseek/deepseek-v4-flash
+      parent_provider: commandcode
+    deepseek:
+      active: true
+      api_key: ${DEEPSEEK_API_KEY}
+      model: deepseek-chat
     fireworks:
       active: false
       api_key: YOUR_FIREWORKS_KEY_HERE
@@ -38,15 +310,19 @@ providers:
       model: gpt-4o
     openrouter:
       active: true
-      api_key: YOUR_OPENROUTER_KEY_HERE
-      model: nvidia/nemotron-3-super-120b-a12b:free
+      api_key: ${OPENROUTER_API_KEY}
+      model: openrouter/free
+    nvidia:
+      active: false
+      api_key: ${NVIDIA_API_KEY}
+      model: z-ai/glm-5.1
     perplexity:
       active: false
       api_key: YOUR_PERPLEXITY_KEY_HERE
       model: llama-3.1-sonar-large-128k-online
     qwen:
       active: false
-      api_key: ${QWEN_API_KEY}
+      api_key: ''
       model: qwen-turbo
     replicate:
       active: false
@@ -60,6 +336,11 @@ providers:
       active: false
       api_key: YOUR_TOGETHER_KEY_HERE
       model: meta-llama/Llama-3-70b-chat-hf
+    universal:
+      active: false
+      api_key: YOUR_KEY_HERE
+      endpoint: http://localhost:8000/v1/chat/completions
+      model: your-model-name
     vlm:
       active: false
       api_key: YOUR_VLM_KEY_HERE
@@ -68,73 +349,87 @@ providers:
       active: false
       api_key: YOUR_XAI_KEY_HERE
       model: grok-beta
-    universal:
-      active: false
-      api_key: YOUR_KEY_HERE
-      model: your-model-name
-      endpoint: http://localhost:8000/v1/chat/completions
   local:
     SOVEREIGN_BRAIN:
       active: true
-      parent_provider: openrouter
-      model: nvidia/nemotron-3-super-120b-a12b:free
       endpoint: https://openrouter.ai/api/v1/chat/completions
+      model: openrouter/free
+      parent_provider: openrouter
+    llama_cpp:
+      active: false
+      ctx_size: 4096
+      gpu_layers: -1
+      main_gpu: 0
+      model_path: models/local/your-model.gguf
     lm_studio:
       active: true
-      model: lmstudio-community/gemma-3-270m-it-qat
       endpoint: http://127.0.0.1:1234/v1/chat/completions
+      model: lmstudio-community/gemma-3-270m-it-qat
     ollama:
       active: false
       default_model: llama3
       endpoint: http://localhost:11434
-    llama_cpp:
-      active: false
-      model_path: models/local/your-model.gguf
-      gpu_layers: -1 # -1 = all layers to GPU
-      ctx_size: 4096
-      main_gpu: 0    # Usually dGPU
-      # tensor_split: [0.3, 0.7] # Example: 30% iGPU, 70% dGPU
 security:
   prover_gate_active: false
   safety_strictness: 0.8
   sandbox_mode: firecracker_ev
 system:
-  branding: "🧬"
-  default_provider: local
-  kernel_mode: recursive_frontier
   brain_mode: AUTO
+  branding: 🧬
+  default_provider: deepseek
+  kernel_mode: recursive_frontier
   log_level: INFO
-  provider_name: SOVEREIGN_BRAIN
+  provider_name: deepseek
   shell: ghost_v1
   workspace_root: ./workspace
-voice:
+vision:
+  auto_release_camera: true
+  backend_detection: true
+  browser_holistic: true
+  camera_enabled: true
+  camera_index: 0
+  capture_height: 720
+  capture_width: 1280
+  default_modes:
+  - objects
   enabled: true
+  model_dir: models/local/vision
+  native_acceleration: auto
+  status_endpoint: /api/vision/status
+  stream_endpoint: /api/vision/stream
+  stream_fps_limit: 24
+  webgl_acceleration: true
+  yolo_detect_model: models/local/vision/yolo11n.pt
+  yolo_openvino_dir: models/local/vision/yolo11n_openvino_model
+voice:
+  allow_text_fallback: true
+  assistant_timeout_seconds: 45.0
   auto_speak: true
+  enabled: true
+  keep_models_loaded: true
+  kitten_model: KittenML/kitten-tts-micro-0.8
   microphone_device: 1
-  speaker_device: null
-  sample_rate: 16000
-  record_seconds: 60.0
-  silence_threshold: 0.008
   min_speech_seconds: 0.25
+  push_to_talk_key: none
+  record_seconds: 60.0
+  require_wake_word: false
+  sample_rate: 16000
+  silence_threshold: 0.008
   silence_timeout_seconds: 2.0
-  whisper_model: openai/whisper-tiny
+  speaker_device: null
+  speech_speed: 1.2
+  voice_name: Jasper
+  volume: 1.0
+  wake_word: nexus
+  wake_word_enabled: false
+  whisper_batch_size: 1
+  whisper_chunk_length_s: 15
   whisper_device: auto
   whisper_language: auto
-  whisper_chunk_length_s: 15
-  whisper_batch_size: 1
-  kitten_model: KittenML/kitten-tts-micro-0.8
-  voice_name: Jasper
-  speech_speed: 1.20
-  volume: 1.0
-  push_to_talk_key: none
-  wake_word_enabled: false
-  wake_word: nexus
-  require_wake_word: false
-  allow_text_fallback: true
-  keep_models_loaded: true
-  assistant_timeout_seconds: 45.0
-mcp_servers:
-  nexus-browser:
-    command: node
-    args: ["integrations/nexus-browser-bridge/build/src/bin/nexus-omni.js", "--no-usage-statistics"]
-    active: false
+  whisper_model: openai/whisper-tiny
+runtime_features:
+  hive: true
+  evolution: true
+  scheduler: true
+  reminders: true
+  health: true

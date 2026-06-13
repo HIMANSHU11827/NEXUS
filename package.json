@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "start": "cd cli && npm start",
-    "api": "cd dashboard && python api.py",
-    "ui": "npm start"
+    "api": "python -m server",
+    "ui": "npm --prefix gui run dev"
+  },
+  "devDependencies": {
+    "jest": "^30.4.2"
   }
 }

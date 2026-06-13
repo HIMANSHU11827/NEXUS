@@ -5,10 +5,16 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .pyre/
+.venv/
+venv/
 
 node_modules/
 dist/
 build/
+*.log
+*.err.log
+hs_err_pid*.log
+replay_pid*.log
 
 .env
 .nexus/
@@ -25,6 +31,9 @@ dashboard/node_modules/
 dashboard/scratch/
 dashboard/src/*.patch_ui.py
 dashboard/**/__pycache__/
+gui/src/App.tsx.found_*.txt
+gui/src/App.tsx.original_log_*.txt
+gui/src/*.patch_ui.py
 cli/node_modules/
 
 knowledge/*.db

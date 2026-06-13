@@ -1,0 +1,4 @@
+name: coder
+description: "NEXUS Evolution Council — Coder. Implementation, refactoring, and feature delivery."
+inherits: base
+tags: [council, coder, implementation]

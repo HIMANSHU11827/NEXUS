@@ -83,7 +83,7 @@ class EnsembleManager:
         """
         Evolve a solution by prompting the LLM to improve it.
         """
-        from core.providers.router import ModelRouter
+        from providers.router import ModelRouter
 
         router = ModelRouter()
         prompt = f"""Given this task: {task}

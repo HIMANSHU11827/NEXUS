@@ -1,9 +1,8 @@
 # Agent Context Files
 
-NEXUS can generate compact repository instruction files for coding agents:
+NEXUS generates a compact repository instruction file for coding agents:
 
-- `AGENTS.md` for agents that support the shared agent-instructions convention.
-- `CLAUDE.md` for Claude Code-style project memory.
+- `NEXUS.md` — project memory and structural briefing for agents and humans.
 
 The generator uses the local code graph at `workspace/code_graph.json` and falls back to building the graph when no graph exists. This keeps the context grounded in real repository structure instead of hand-written guesses.
 
@@ -12,10 +11,10 @@ The generator uses the local code graph at `workspace/code_graph.json` and falls
 Preview:
 
 ```powershell
-python -c "from core.code_intelligence.agent_context import AgentContextGenerator; print(AgentContextGenerator('.').generate('AGENTS.md'))"
+python -c "from core.code_intelligence.agent_context import AgentContextGenerator; print(AgentContextGenerator('.').generate('NEXUS.md'))"
 ```
 
-Write both files:
+Write:
 
 ```powershell
 python -c "from core.code_intelligence.agent_context import AgentContextGenerator; print([r.to_dict() for r in AgentContextGenerator('.').write(force=True)])"
@@ -24,8 +23,8 @@ python -c "from core.code_intelligence.agent_context import AgentContextGenerato
 Through the NEXUS tool registry:
 
 ```python
-registry.execute("agent_context", command="preview", target="AGENTS.md")
-registry.execute("agent_context", command="write", targets=["AGENTS.md", "CLAUDE.md"], force=True)
+registry.execute("agent_context", command="preview", target="NEXUS.md")
+registry.execute("agent_context", command="write", targets=["NEXUS.md"], force=True)
 ```
 
 ## Why It Exists

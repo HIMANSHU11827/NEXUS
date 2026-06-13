@@ -1,5 +1,5 @@
 from tools.nexus_tools.registry import ToolRegistry
-from tools.nexus_tools.vision.vision_accelerator import VisionAccelerator, VisionAcceleratorTool
+from tools.nexus_tools.vision.vision_accelerator_tool import VisionAccelerator, VisionAcceleratorTool
 
 
 def test_vision_accelerator_status_has_stable_shape():

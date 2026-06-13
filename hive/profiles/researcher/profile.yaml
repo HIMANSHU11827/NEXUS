@@ -1,0 +1,4 @@
+name: researcher
+description: "NEXUS Evolution Council — Researcher. Deep web research and data synthesis."
+inherits: base
+tags: [council, researcher, web]

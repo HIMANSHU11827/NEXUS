@@ -1,0 +1,4 @@
+name: base
+description: "Base profile — ground truth defaults for all NEXUS profiles. Do not modify."
+inherits: ""
+tags: [system, base]

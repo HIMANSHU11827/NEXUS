@@ -4,21 +4,21 @@ import unittest
 
 class TestAdaptiveMemoryGraph(unittest.TestCase):
     def test_memory_recall_and_contradiction_repair(self):
-        from core.cognition.memory_graph import AdaptiveMemoryGraph
+        from cognition.memory_graph import AdaptiveMemoryGraph
 
         with tempfile.TemporaryDirectory() as tmp:
             graph = AdaptiveMemoryGraph(tmp)
-            graph.add("Dashboard upload validation is unsafe", layer="project", confidence=0.4)
-            graph.add("Dashboard upload validation is safe after extension checks passed", layer="project", confidence=0.9)
-            recalled = graph.recall("dashboard upload validation")
+            graph.add("gui upload validation is unsafe", layer="project", confidence=0.4)
+            graph.add("gui upload validation is safe after extension checks passed", layer="project", confidence=0.9)
+            recalled = graph.recall("gui upload validation")
             self.assertTrue(recalled)
-            packet = graph.compressed_packet("dashboard upload")
+            packet = graph.compressed_packet("gui upload")
             self.assertTrue(packet["pointers"])
 
 
 class TestZeroTokenContextEngine(unittest.TestCase):
     def test_context_packets_route_and_dedupe(self):
-        from core.cognition.context_engine import ZeroTokenContextEngine
+        from cognition.context_engine import ZeroTokenContextEngine
 
         with tempfile.TemporaryDirectory() as tmp:
             engine = ZeroTokenContextEngine(tmp)
@@ -30,7 +30,7 @@ class TestZeroTokenContextEngine(unittest.TestCase):
 
 class TestSelfImprovementEngine(unittest.TestCase):
     def test_failure_strategy_recommendation(self):
-        from core.cognition.self_improvement import SelfImprovementEngine
+        from cognition.self_improvement import SelfImprovementEngine
 
         with tempfile.TemporaryDirectory() as tmp:
             engine = SelfImprovementEngine(tmp)
@@ -42,7 +42,7 @@ class TestSelfImprovementEngine(unittest.TestCase):
 
 class TestIntentForecaster(unittest.TestCase):
     def test_forecasts_verification_after_code_change(self):
-        from core.cognition.intent_forecaster import IntentForecaster
+        from cognition.intent_forecaster import IntentForecaster
 
         with tempfile.TemporaryDirectory() as tmp:
             forecasts = IntentForecaster(tmp).forecast(["fix code bug"], {"python_files": 30})
@@ -52,7 +52,7 @@ class TestIntentForecaster(unittest.TestCase):
 
 class TestSkillForge(unittest.TestCase):
     def test_skill_forge_stores_workflow(self):
-        from core.cognition.skill_forge import SkillForge
+        from cognition.skill_forge import SkillForge
 
         with tempfile.TemporaryDirectory() as tmp:
             forge = SkillForge(tmp)

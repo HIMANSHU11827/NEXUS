@@ -18,6 +18,24 @@ class NexusLSPTool:
 
     def _init_db(self):
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
+        # If DB exists, verify it's readable SQLite before reusing
+        if os.path.exists(self._db_path):
+            try:
+                conn = sqlite3.connect(self._db_path)
+                conn.execute("SELECT COUNT(*) FROM symbols LIMIT 1")
+                conn.execute("PRAGMA integrity_check").fetchall()
+                conn.close()
+                # DB is valid — nothing more to do
+                return
+            except sqlite3.DatabaseError:
+                pass
+            # If we get here, the DB is corrupt — delete so it regenerates
+            try:
+                conn.close()
+            except Exception:
+                pass
+            os.remove(self._db_path)
+        # Create fresh DB
         conn = sqlite3.connect(self._db_path)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS symbols (name TEXT, type TEXT, file TEXT, line INTEGER, docstring TEXT)"
@@ -109,9 +127,61 @@ class NexusLSPTool:
         except (OSError, IOError):
             return f"❌ FILE_NOT_FOUND: {file_path}"
 
-    def check_file(self, file_path: str) -> str:
-        """Alias for check_syntax for coordinator compatibility."""
-        return self.check_syntax(file_path)
+    def deep_dependency_scan(self, target_file: str) -> str:
+        """
+        [ARCHITECTURAL_ANALYSIS]: Maps cross-file dependencies for a target.
+        Finds all files that import symbols from the target_file.
+        """
+        target_rel = os.path.relpath(os.path.abspath(target_file), self.root).replace("\\", "/")
+        
+        # 1. Find all symbols defined in target_file
+        conn = sqlite3.connect(self._db_path)
+        symbols = [r[0] for r in conn.execute("SELECT name FROM symbols WHERE file = ?", (target_rel,)).fetchall()]
+        
+        if not symbols:
+            return f"No symbols found in {target_rel} to track."
+
+        # 2. Scan other files for imports of these symbols
+        impacted_files = {}
+        for root, _, files in os.walk(self.root):
+            for f in files:
+                if f.endswith(".py") and f != os.path.basename(target_file):
+                    path = os.path.join(root, f)
+                    rel = os.path.relpath(path, self.root).replace("\\", "/")
+                    try:
+                        with open(path, "r", encoding="utf-8") as f_obj:
+                            content = f_obj.read()
+                            # Check for 'from [module] import [symbol]' or 'import [module]'
+                            for sym in symbols:
+                                if f"import {sym}" in content or sym in content: # Heuristic for now
+                                    impacted_files.setdefault(rel, []).append(sym)
+                    except Exception:
+                        continue
+        
+        if not impacted_files:
+            return f"No direct external dependencies found for {target_rel}."
+            
+        report = [f"[IMPACT_ANALYSIS] for {target_rel}:"]
+        for f, syms in impacted_files.items():
+            report.append(f"- {f} (uses: {', '.join(syms)})")
+            
+        return "\n".join(report)
+
+    def find_all_calls(self, symbol_name: str) -> List[Tuple[str, int]]:
+        """Finds all locations where a symbol is called in the workspace."""
+        # This would use ripgrep/grep for speed in a production system.
+        # For now, we provide a functional implementation for the agent.
+        results = []
+        for root, _, files in os.walk(self.root):
+            for f in files:
+                if f.endswith(".py"):
+                    path = os.path.join(root, f)
+                    with open(path, "r", encoding="utf-8") as f_obj:
+                        for i, line in enumerate(f_obj, 1):
+                            if f"{symbol_name}(" in line:
+                                rel = os.path.relpath(path, self.root).replace("\\", "/")
+                                results.append((rel, i))
+        return results
 
 
 if __name__ == "__main__":

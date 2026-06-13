@@ -12,8 +12,8 @@ NEXUS has several specialized stores:
 - `workspace/self_improvement.json`
 - `workspace/todos.json`
 - `logs/sessions/*.json`
-- `logs/swarm/*`, including swarm contracts, handoffs, and checkpoints
-- `AGENTS.md` and `CLAUDE.md`
+- `logs/hive/*`, including Hive contracts, handoffs, and checkpoints
+- `NEXUS.md`
 
 The unified graph keeps those source stores intact and builds one queryable index at:
 

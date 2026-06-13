@@ -8,8 +8,8 @@ from typing import Any
 
 import os
 import shutil
-from core.kernel import NexusKernel  # type: ignore
-from core.tool_adapters import RegistryFileTools as NexusFileTools  # type: ignore
+from kernel import NexusKernel  # type: ignore
+from tool_adapters import RegistryFileTools as NexusFileTools  # type: ignore
 
 
 class TestNexusGenesis(unittest.TestCase):

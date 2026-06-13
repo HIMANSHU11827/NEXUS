@@ -4,6 +4,20 @@ Auto-refreshes search chunks if files change on disk.
 """
 
 import os
+import sys
+
+# ── Fix PYTHONHOME contamination ───────────────────────────────────────
+# PYTHONHOME (set by uv to cpython-3.11) breaks C extension loading in
+# Python 3.14. Must fix here for standalone operation; nexus.py also does
+# this at boot.
+os.environ.pop("PYTHONHOME", None)
+sys.path = [p for p in sys.path if 'cpython-3.11' not in p.lower()]
+if sys.version_info[:2] == (3, 14):
+    _PY314 = r"C:\Python314"
+    for _p in [os.path.join(_PY314, "Lib"), os.path.join(_PY314, "DLLs")]:
+        if os.path.isdir(_p) and _p not in sys.path:
+            sys.path.insert(1, _p)
+
 import json
 import math
 import re
@@ -50,7 +64,7 @@ class NexusAtlasRAG(ThreadSafeSingleton):
         self.root = os.path.dirname(os.path.abspath(vault_path))
         self.vault = os.path.abspath(vault_path)
         os.makedirs(self.vault, exist_ok=True)
-        self._index_path = os.path.join(self.vault, "_rag_index_3_3.json") # Updated to 3.3
+        self._index_path = os.path.join(self.vault, "_rag_index.json") # Fixed path — matches actual file on disk
         
         try:
             self._doc_store: Dict[str, Any] = self._load_index()
@@ -334,6 +348,7 @@ class NexusAtlasRAG(ThreadSafeSingleton):
                     )
                     entry["vector_score"] = max(entry.get("vector_score", 0.0), float(vector_score))
             except Exception:
+                print("[RAG_WARN]: hybrid_search turbo engine failed — BM25 only")
                 pass
 
         results = list(bm25_results.values())
@@ -361,11 +376,18 @@ class NexusAtlasRAG(ThreadSafeSingleton):
         """
         Retrieves relevant documents using Turbo Quant Technology (Vector Search).
         Provides semantic awareness beyond keyword matching.
+
+        Raises RuntimeError if the Turbo Quant Engine is unavailable or search fails,
+        allowing callers to fall back to BM25 retrieval.
         """
+        if self.turbo_engine is None:
+            print("[RAG_WARN]: turbo_engine not available — will fall back to BM25")
+            raise RuntimeError("Turbo Quant Engine not initialized")
         try:
             results = self.turbo_engine.search(query, top_k=top_k)
         except Exception as e:
-            return f"Turbo Quant Search failed: {e}"
+            print(f"[RAG_ERROR]: turbo_search failed: {e}")
+            raise RuntimeError(f"Turbo Quant Search failed: {e}") from e
         if not results:
             return "Turbo Quant Search: No matches found."
 

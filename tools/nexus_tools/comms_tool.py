@@ -43,7 +43,7 @@ class CommsTool(BaseTool):
             history.append(entry)
             with open(log_path, "w") as f:
                 json.dump(history, f, indent=4)
-        except:
+        except Exception: 
             pass
 
         return ToolResult(success=True, message=msg)

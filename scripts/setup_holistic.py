@@ -5,7 +5,7 @@ import shutil
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DASHBOARD_DIR = os.path.join(ROOT, "dashboard")
+DASHBOARD_DIR = os.path.join(ROOT, "gui")
 LOCAL_MODEL_DIR = os.path.join(ROOT, "models", "local", "mediapipe", "holistic")
 DASHBOARD_ASSET_DIR = os.path.join(DASHBOARD_DIR, "public", "mediapipe", "holistic")
 
@@ -34,7 +34,7 @@ def _copy_tree_files(src, dst, suffixes=None):
 
 
 def vendor_dashboard_assets():
-    """Copy official @mediapipe/holistic runtime files into local dashboard/public."""
+    """Copy official @mediapipe/holistic runtime files into local gui/public."""
     package_dir = os.path.join(DASHBOARD_DIR, "node_modules", "@mediapipe", "holistic")
     suffixes = (".js", ".wasm", ".binarypb", ".tflite", ".data")
     copied_public = _copy_tree_files(package_dir, DASHBOARD_ASSET_DIR, suffixes)
@@ -59,7 +59,7 @@ def setup():
         print("[+] Python vision dependencies installed.")
     except Exception as e:
         print(f"[!] Error installing MediaPipe: {e}")
-        print("[!] Continuing with dashboard asset setup.")
+        print("[!] Continuing with gui asset setup.")
 
     # Install official MediaPipe web packages and save them into package.json.
     try:
@@ -72,10 +72,10 @@ def setup():
             "--save",
         ], cwd=DASHBOARD_DIR)
         copied_public, copied_model = vendor_dashboard_assets()
-        print(f"[+] Vendored {copied_public} dashboard files to {DASHBOARD_ASSET_DIR}.")
+        print(f"[+] Vendored {copied_public} gui files to {DASHBOARD_ASSET_DIR}.")
         print(f"[+] Saved {copied_model} local model/runtime files to {LOCAL_MODEL_DIR}.")
     except Exception as e:
-        print(f"[!] Dashboard MediaPipe asset setup failed: {e}")
+        print(f"[!] gui MediaPipe asset setup failed: {e}")
 
     # Warm up: download models
     print("[*] Warming up Holistic models...")
@@ -87,7 +87,7 @@ def setup():
         if not hasattr(mp, "solutions"):
             raise RuntimeError(
                 "Installed mediapipe package does not expose mp.solutions. "
-                "The dashboard integration is still usable with vendored web assets."
+                "The gui integration is still usable with vendored web assets."
             )
         mp_holistic = mp.solutions.holistic
         with mp_holistic.Holistic(static_image_mode=True) as holistic:

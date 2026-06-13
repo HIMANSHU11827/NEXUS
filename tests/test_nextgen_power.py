@@ -6,16 +6,16 @@ import unittest
 
 class TestHyperReasoningEngine(unittest.TestCase):
     def test_plan_contains_verification_and_uncertainty(self):
-        from core.reasoning.hyper_engine import HyperReasoningEngine
+        from reasoning.hyper_engine import HyperReasoningEngine
 
-        plan = HyperReasoningEngine().plan("fix dashboard api upload bug and add tests")
+        plan = HyperReasoningEngine().plan("fix gui api upload bug and add tests")
         tools = [step.suggested_tool for step in plan.steps]
         self.assertIn("bash", tools)
         self.assertGreater(plan.uncertainty, 0)
         self.assertFalse(plan.should_replan if hasattr(plan, "should_replan") else False)
 
     def test_replan_on_failure_observation(self):
-        from core.reasoning.hyper_engine import HyperReasoningEngine
+        from reasoning.hyper_engine import HyperReasoningEngine
 
         engine = HyperReasoningEngine()
         plan = engine.plan("fix test failure")
@@ -24,7 +24,7 @@ class TestHyperReasoningEngine(unittest.TestCase):
 
 class TestRollbackManager(unittest.TestCase):
     def test_snapshot_and_restore_file(self):
-        from core.os_power.rollback import RollbackManager
+        from os_power.rollback import RollbackManager
 
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "a.txt")
@@ -41,7 +41,7 @@ class TestRollbackManager(unittest.TestCase):
 
 class TestProcessManager(unittest.TestCase):
     def test_start_poll_process(self):
-        from core.os_power.process_manager import ProcessManager
+        from os_power.process_manager import ProcessManager
 
         with tempfile.TemporaryDirectory() as tmp:
             manager = ProcessManager(tmp)
@@ -59,7 +59,7 @@ class TestProcessManager(unittest.TestCase):
 
 class TestSideEffectAnalyzer(unittest.TestCase):
     def test_import_blast_radius(self):
-        from core.code_intelligence.side_effects import SideEffectAnalyzer
+        from code_intel.side_effects import SideEffectAnalyzer
 
         with tempfile.TemporaryDirectory() as tmp:
             os.makedirs(os.path.join(tmp, "pkg"), exist_ok=True)
@@ -73,7 +73,7 @@ class TestSideEffectAnalyzer(unittest.TestCase):
 
 class TestDiagnosticsRunner(unittest.TestCase):
     def test_diagnostics_reports_python_syntax_failure(self):
-        from core.code_intelligence.diagnostics import DiagnosticRunner
+        from code_intel.diagnostics import DiagnosticRunner
 
         with tempfile.TemporaryDirectory() as tmp:
             bad = os.path.join(tmp, "bad.py")
@@ -95,7 +95,7 @@ class TestDiagnosticsRunner(unittest.TestCase):
 
 class TestEditPlanner(unittest.TestCase):
     def test_edit_plan_includes_symbols_and_impacted_files(self):
-        from core.code_intelligence.edit_plan import EditPlanner
+        from code_intel.edit_plan import EditPlanner
 
         with tempfile.TemporaryDirectory() as tmp:
             os.makedirs(os.path.join(tmp, "pkg"), exist_ok=True)
@@ -119,7 +119,7 @@ class TestEditPlanner(unittest.TestCase):
 
 class TestTestSelector(unittest.TestCase):
     def test_selects_related_tests_for_changed_file(self):
-        from core.aurora.test_selection import TestSelector
+        from optimization.test_selection import TestSelector
 
         with tempfile.TemporaryDirectory() as tmp:
             os.makedirs(os.path.join(tmp, "core", "foo"), exist_ok=True)
@@ -127,7 +127,7 @@ class TestTestSelector(unittest.TestCase):
             with open(os.path.join(tmp, "core", "foo", "engine.py"), "w", encoding="utf-8") as f:
                 f.write("class FooEngine: pass\n")
             with open(os.path.join(tmp, "tests", "test_foo.py"), "w", encoding="utf-8") as f:
-                f.write("from core.foo.engine import FooEngine\n")
+                f.write("from foo.engine import FooEngine\n")
             selection = TestSelector(tmp).select(["core/foo/engine.py"])
             self.assertIn("tests/test_foo.py", selection.tests)
             self.assertIn("python tests/test_foo.py", selection.commands)
@@ -143,22 +143,22 @@ class TestTestSelector(unittest.TestCase):
 
 class TestFailureVaccineEngine(unittest.TestCase):
     def test_failure_vaccine_creates_memory_strategy_and_regression_plan(self):
-        from core.aurora.failure_vaccine import FailureVaccineEngine
+        from optimization.failure_vaccine import FailureVaccineEngine
 
         with tempfile.TemporaryDirectory() as tmp:
-            os.makedirs(os.path.join(tmp, "core", "aurora"), exist_ok=True)
+            os.makedirs(os.path.join(tmp, "core", "optimization"), exist_ok=True)
             os.makedirs(os.path.join(tmp, "tests"), exist_ok=True)
-            with open(os.path.join(tmp, "core", "aurora", "engine.py"), "w", encoding="utf-8") as f:
+            with open(os.path.join(tmp, "core", "optimization", "engine.py"), "w", encoding="utf-8") as f:
                 f.write("class AuroraEngine: pass\n")
             with open(os.path.join(tmp, "tests", "test_aurora.py"), "w", encoding="utf-8") as f:
-                f.write("from core.aurora.engine import AuroraEngine\n")
+                f.write("from optimization.engine import AuroraEngine\n")
 
             vaccine = FailureVaccineEngine(tmp).create(
                 task="fix aurora syntax failure",
                 tool="diagnostics",
                 error="SyntaxError failed while compiling engine",
                 fix_strategy="run diagnostics, patch the syntax, then run targeted aurora tests",
-                affected_files=["core/aurora/engine.py"],
+                affected_files=["optimization/engine.py"],
             )
 
             self.assertEqual(vaccine.severity, "high")
@@ -178,7 +178,7 @@ class TestFailureVaccineEngine(unittest.TestCase):
 
 class TestEvidenceLedger(unittest.TestCase):
     def test_evidence_ledger_records_verifies_and_summarizes_claims(self):
-        from core.aurora.evidence_ledger import EvidenceLedger
+        from optimization.evidence_ledger import EvidenceLedger
 
         with tempfile.TemporaryDirectory() as tmp:
             ledger = EvidenceLedger(tmp)
@@ -226,7 +226,7 @@ class TestEvidenceLedger(unittest.TestCase):
 
 class TestCodebaseKnowledgeGraph(unittest.TestCase):
     def test_code_graph_builds_import_call_and_dependent_edges(self):
-        from core.code_intelligence.knowledge_graph import CodebaseKnowledgeGraph
+        from code_intel.knowledge_graph import CodebaseKnowledgeGraph
 
         with tempfile.TemporaryDirectory() as tmp:
             os.makedirs(os.path.join(tmp, "pkg"), exist_ok=True)
@@ -260,8 +260,8 @@ class TestCodebaseKnowledgeGraph(unittest.TestCase):
 
 class TestAgentContextGenerator(unittest.TestCase):
     def test_agent_context_preview_uses_code_graph_and_commands(self):
-        from core.code_intelligence.agent_context import AgentContextGenerator
-        from core.code_intelligence.knowledge_graph import CodebaseKnowledgeGraph
+        from code_intel.agent_context import AgentContextGenerator
+        from code_intel.knowledge_graph import CodebaseKnowledgeGraph
 
         with tempfile.TemporaryDirectory() as tmp:
             with open(os.path.join(tmp, "nexus.py"), "w", encoding="utf-8") as f:
@@ -275,20 +275,19 @@ class TestAgentContextGenerator(unittest.TestCase):
             self.assertIn("MCP", content)
 
     def test_agent_context_write_creates_expected_files_without_overwrite(self):
-        from core.code_intelligence.agent_context import AgentContextGenerator
+        from code_intel.agent_context import AgentContextGenerator
 
         with tempfile.TemporaryDirectory() as tmp:
             generator = AgentContextGenerator(tmp)
-            results = generator.write(["AGENTS.md", "CLAUDE.md"])
-            self.assertEqual([item.status for item in results], ["written", "written"])
-            self.assertTrue(os.path.exists(os.path.join(tmp, "AGENTS.md")))
-            self.assertTrue(os.path.exists(os.path.join(tmp, "CLAUDE.md")))
+            results = generator.write(["NEXUS.md"])
+            self.assertEqual([item.status for item in results], ["written"])
+            self.assertTrue(os.path.exists(os.path.join(tmp, "NEXUS.md")))
 
-            with open(os.path.join(tmp, "AGENTS.md"), "w", encoding="utf-8") as f:
+            with open(os.path.join(tmp, "NEXUS.md"), "w", encoding="utf-8") as f:
                 f.write("custom")
-            skipped = generator.write(["AGENTS.md"], force=False)
+            skipped = generator.write(["NEXUS.md"], force=False)
             self.assertEqual(skipped[0].status, "skipped_exists")
-            with open(os.path.join(tmp, "AGENTS.md"), "r", encoding="utf-8") as f:
+            with open(os.path.join(tmp, "NEXUS.md"), "r", encoding="utf-8") as f:
                 self.assertEqual(f.read(), "custom")
 
     def test_agent_context_tool_is_registered_and_callable(self):
@@ -299,17 +298,17 @@ class TestAgentContextGenerator(unittest.TestCase):
         registry = ToolRegistry()
         self.assertIn("agent_context", registry.list_tools())
 
-        out = registry.execute("agent_context", command="preview", target="AGENTS.md", compress=False)
+        out = registry.execute("agent_context", command="preview", target="NEXUS.md", compress=False)
         self.assertIn("NEXUS AI Agent Context", out)
 
 
 class TestUnifiedNexusGraph(unittest.TestCase):
     def test_unified_graph_combines_code_memory_evidence_and_sessions(self):
-        from core.aurora.evidence_ledger import EvidenceLedger
-        from core.aurora.mission_replay import MissionReplay
-        from core.aurora.unified_graph import UnifiedNexusGraph
-        from core.code_intelligence.knowledge_graph import CodebaseKnowledgeGraph
-        from core.cognition.memory_graph import AdaptiveMemoryGraph
+        from optimization.evidence_ledger import EvidenceLedger
+        from optimization.mission_replay import MissionReplay
+        from optimization.unified_graph import UnifiedNexusGraph
+        from code_intel.knowledge_graph import CodebaseKnowledgeGraph
+        from cognition.memory_graph import AdaptiveMemoryGraph
 
         with tempfile.TemporaryDirectory() as tmp:
             with open(os.path.join(tmp, "app.py"), "w", encoding="utf-8") as f:
@@ -353,7 +352,7 @@ class TestUnifiedNexusGraph(unittest.TestCase):
         self.assertIn("session_closed", search)
 
     def test_unified_graph_includes_session_strategy_todo_and_context_files(self):
-        from core.aurora.unified_graph import UnifiedNexusGraph
+        from optimization.unified_graph import UnifiedNexusGraph
 
         with tempfile.TemporaryDirectory() as tmp:
             os.makedirs(os.path.join(tmp, "logs", "sessions"), exist_ok=True)
@@ -374,7 +373,7 @@ class TestUnifiedNexusGraph(unittest.TestCase):
                 f.write('{"strategy:1":{"strategy":"prefer unified graph search","trigger":"missing context","updated_at":2}}')
             with open(os.path.join(tmp, "workspace", "todos.json"), "w", encoding="utf-8") as f:
                 f.write('[{"id":7,"content":"finish graph coverage","status":"pending","created":3}]')
-            with open(os.path.join(tmp, "AGENTS.md"), "w", encoding="utf-8") as f:
+            with open(os.path.join(tmp, "NEXUS.md"), "w", encoding="utf-8") as f:
                 f.write("# Agent Context\nUse unified graph.")
 
             graph = UnifiedNexusGraph(tmp)
@@ -391,16 +390,16 @@ class TestUnifiedNexusGraph(unittest.TestCase):
 
 class TestRoadmapAuditor(unittest.TestCase):
     def test_roadmap_auditor_reports_real_completion_and_markdown(self):
-        from core.aurora.roadmap import RoadmapAuditor
+        from optimization.roadmap import RoadmapAuditor
 
         with tempfile.TemporaryDirectory() as tmp:
-            os.makedirs(os.path.join(tmp, "core", "aurora"), exist_ok=True)
-            os.makedirs(os.path.join(tmp, "core", "code_intelligence"), exist_ok=True)
+            os.makedirs(os.path.join(tmp, "optimization"), exist_ok=True)
+            os.makedirs(os.path.join(tmp, "code_intel"), exist_ok=True)
             os.makedirs(os.path.join(tmp, "tools", "nexus_tools"), exist_ok=True)
             os.makedirs(os.path.join(tmp, "workspace"), exist_ok=True)
             for path in [
-                "core/aurora/failure_vaccine.py",
-                "core/code_intelligence/knowledge_graph.py",
+                "optimization/failure_vaccine.py",
+                "code_intel/knowledge_graph.py",
                 "tools/nexus_tools/base_tool.py",
                 "workspace/code_graph.json",
             ]:
@@ -426,5 +425,46 @@ class TestRoadmapAuditor(unittest.TestCase):
         self.assertIn("completion_ratio", out)
 
 
+class TestCompetitiveMoatAuditor(unittest.TestCase):
+    def test_competitive_moat_reports_archetypes_and_gaps(self):
+        from optimization.competitive import CompetitiveMoatAuditor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for path in [
+                "orchestrators/loop.py",
+                "tools/nexus_tools/bash_tool.py",
+                "tools/nexus_tools/file_edit_tool.py",
+                "hive/engine.py",
+                "rag/engine.py",
+                "core/cognition/memory_graph.py",
+            ]:
+                full = os.path.join(tmp, path)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w", encoding="utf-8") as f:
+                    f.write("# evidence")
+
+            auditor = CompetitiveMoatAuditor(tmp)
+            audit = auditor.audit()
+            self.assertGreaterEqual(audit["total"], 10)
+            self.assertIn("Claude Code style terminal coding agent", audit["competitor_archetypes"])
+            self.assertTrue(audit["top_gaps"])
+            self.assertTrue(audit["next_attack_plan"])
+            markdown = auditor.to_markdown()
+            self.assertIn("NEXUS Competitive Moat Audit", markdown)
+            self.assertIn("Capability Map", markdown)
+
+    def test_competitive_moat_tool_is_registered(self):
+        from tools.nexus_tools.registry import ToolRegistry
+
+        ToolRegistry._reset_instance()
+        ToolRegistry._initialized = False
+        registry = ToolRegistry()
+        self.assertIn("competitive_moat", registry.list_tools())
+        out = registry.execute("competitive_moat", command="summary", compress=False)
+        self.assertIn("moat_score", out)
+        self.assertIn("next_attack_plan", out)
+
+
 if __name__ == "__main__":
     unittest.main()
+

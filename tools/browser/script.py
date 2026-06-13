@@ -6,7 +6,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from typing import Any
-from core.nexus_compat import import_requests, import_bs4, s, sx  # type: ignore
+from nexus_compat import import_requests, import_bs4, s, sx  # type: ignore
 import urllib.parse
 
 _requests = import_requests()

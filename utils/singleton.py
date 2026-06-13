@@ -22,7 +22,7 @@ class ThreadSafeSingleton:
     """
 
     _instances: Dict[type, Any] = {}
-    _lock: threading.Lock = threading.Lock()
+    _lock: threading.RLock = threading.RLock()
 
     def __new__(cls, *args, **kwargs):
         if cls not in cls._instances:
@@ -60,7 +60,7 @@ def singleton(cls):
                 pass
     """
     instances = {}
-    lock = threading.Lock()
+    lock = threading.RLock()
 
     def get_instance(*args, **kwargs):
         if cls not in instances:

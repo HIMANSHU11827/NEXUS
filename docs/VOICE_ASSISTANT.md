@@ -79,13 +79,13 @@ KittenTTS works best for English text and usually handles Hinglish written in Ro
 Warm up both models, then start auto-listen voice mode:
 
 ```powershell
-python voice_chat.py --warmup
+python -m voice_chat --warmup
 ```
 
 Windows/Python 3.12 launcher:
 
 ```powershell
-py -3.12 voice_chat.py --warmup
+py -3.12 -m voice_chat --warmup
 ```
 
 Windows launcher:
@@ -97,13 +97,13 @@ powershell -ExecutionPolicy Bypass -File scripts\run_voice_chat.ps1 -Warmup
 Typed fallback/text-only test:
 
 ```powershell
-python voice_chat.py --text
+python -m voice_chat --text
 ```
 
 One-turn smoke test:
 
 ```powershell
-python voice_chat.py --text --once --no-speak
+python -m voice_chat --text --once --no-speak
 ```
 
 Controls:
@@ -111,20 +111,20 @@ Controls:
 - Default mode auto-records after each `[voice] listening...` prompt.
 - In auto mode NEXUS records for `record_seconds`, then transcribes, then sends the text to the main NEXUS loop.
 - Press `Ctrl+C` to stop auto-listen mode.
-- Use `python voice_chat.py --manual` for the old Enter/push-to-talk behavior.
-- Use `python voice_chat.py --text` to skip STT and type messages.
+- Use `python -m voice_chat --manual` for the old Enter/push-to-talk behavior.
+- Use `python -m voice_chat --text` to skip STT and type messages.
 - In text/manual mode, type `/stop` to stop current speech playback and `/exit` to quit.
 
 ## Folder Structure
 
 ```text
-core/voice/
+voice/
   audio_io.py      microphone recording, speaker playback, stop support
   config.py        VoiceSettings dataclass loaded from nexus_config.yaml
   pipeline.py      microphone -> STT -> NEXUS -> TTS orchestration
   stt.py           Whisper loader/transcriber
   tts.py           KittenTTS loader, sentence chunking, speech playback
-voice_chat.py      runnable CLI
+voice_chat/        package containing the runnable CLI logic
 docs/VOICE_ASSISTANT.md
 ```
 

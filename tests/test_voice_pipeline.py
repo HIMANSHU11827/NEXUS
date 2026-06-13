@@ -1,7 +1,7 @@
 import unittest
 
-from core.voice.config import VoiceSettings
-from core.voice.tts import sentence_chunks
+from voice.config import VoiceSettings
+from voice.tts import sentence_chunks
 
 
 class TestVoicePipeline(unittest.TestCase):

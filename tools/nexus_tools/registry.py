@@ -9,9 +9,9 @@ import time
 from typing import Dict, Any, List, Optional
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
 from utils.singleton import ThreadSafeSingleton
-from core.config_loader import NexusConfigLoader
-from core.browser_automation.mcp_client import MCPClient
-from tools.nexus_tools.mcp_tool import MCPTool
+from config_loader import NexusConfigLoader
+from mcp.client import MCPClient
+from mcp.tool import MCPTool
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +21,11 @@ class ToolRegistry(ThreadSafeSingleton):
     _initialized = False
 
     def __init__(self):
-        if self._initialized:
+        if getattr(self, "_registry_initialized", False):
             return
-        self._initialized = True
+        self._registry_initialized = True
         self._tools: Dict[str, BaseTool] = {}
+        self._mcp_configs: Dict[str, Any] = {}
         self._mcp_clients: Dict[str, MCPClient] = {}
         self._register_defaults()
         self._register_mcp_tools()
@@ -37,23 +38,23 @@ class ToolRegistry(ThreadSafeSingleton):
         from tools.nexus_tools.web_tool import WebSearchTool, WebFetchTool
         from tools.nexus_tools.todo_tool import TodoTool
         from tools.nexus_tools.atlas_tool import AtlasTool, AtlasMapTool
-        from tools.nexus_tools.nexus_evolve import NexusEvolveTool
-        from tools.nexus_tools.hive_tool import HiveTool, HivePulseTool, HiveSpawnTool, HiveIntentTool, HiveTeamTool
+        from tools.nexus_tools.nexus_evolve_tool import NexusEvolveTool
+        from tools.nexus_tools.hive_tool import HiveTool, HivePulseTool, HiveSpawnTool, HiveIntentTool, HiveTeamTool, HiveMergePlanTool, HiveResumeTool
         from tools.nexus_tools.librarian_tool import LibrarianTool
         from tools.nexus_tools.backup_tool import BackupTool
         from tools.nexus_tools.brain_switch_tool import BrainSwitchTool
         from tools.nexus_tools.comms_tool import CommsTool
-        from tools.nexus_tools.system_audit import SystemAuditorTool
-        from tools.nexus_tools.skill_synthesizer import SkillSynthesizer
+        from tools.nexus_tools.system_audit_tool import SystemAuditorTool
+        from tools.nexus_tools.skill_synthesizer_tool import SkillSynthesizer
         from tools.nexus_tools.memory_tool import MemoryTool
         from tools.nexus_tools.system_monitor_tool import SystemMonitorTool
         from tools.nexus_tools.brain_trainer_tool import BrainTrainerTool
         from tools.nexus_tools.advanced_power_tool import (
             AgentContextTool,
             BenchmarkTool,
-            BrowserAutomationTool,
             CognitionTool,
             CodeGraphTool,
+            CompetitiveMoatTool,
             DiagnosticsTool,
             EditPlanTool,
             EvidenceLedgerTool,
@@ -72,7 +73,7 @@ class ToolRegistry(ThreadSafeSingleton):
         )
         from tools.nexus_tools.vision.holistic_tool import HolisticTool
         from tools.nexus_tools.vision.mediapipe_suite_tool import MediaPipeSuiteTool
-        from tools.nexus_tools.vision.vision_accelerator import VisionAcceleratorTool
+        from tools.nexus_tools.vision.vision_accelerator_tool import VisionAcceleratorTool
 
         _root = os.path.dirname(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -95,6 +96,8 @@ class ToolRegistry(ThreadSafeSingleton):
             HiveSpawnTool(_root),
             HiveIntentTool(_root),
             HiveTeamTool(_root),
+            HiveMergePlanTool(_root),
+            HiveResumeTool(_root),
             LibrarianTool(_root),
             BackupTool(_root),
             BrainSwitchTool(_root),
@@ -114,6 +117,7 @@ class ToolRegistry(ThreadSafeSingleton):
             CognitionTool(_root),
             SkillForgeTool(_root),
             BenchmarkTool(_root),
+            CompetitiveMoatTool(_root),
             MissionReplayTool(_root),
             ToolEconomyTool(_root),
             TestSelectionTool(_root),
@@ -123,7 +127,6 @@ class ToolRegistry(ThreadSafeSingleton):
             AgentContextTool(_root),
             UnifiedGraphTool(_root),
             RoadmapTool(_root),
-            BrowserAutomationTool(_root),
             HolisticTool(),
             MediaPipeSuiteTool(),
             VisionAcceleratorTool(),
@@ -131,6 +134,7 @@ class ToolRegistry(ThreadSafeSingleton):
         
         # Load any existing custom tools
         self.reload_custom_tools()
+        self.reload_custom_tools()  # Custom tools from tools/custom_tools/
 
         for tool in tools:
             self.register(tool)
@@ -220,11 +224,19 @@ class ToolRegistry(ThreadSafeSingleton):
         """
         Execute a tool with caching, permission checking, and output compression.
         """
-        from tools.nexus_tools.output_optimizer import OutputOptimizer, ToolCache
+        from tools.nexus_tools.output_optimizer_tool import OutputOptimizer, ToolCache
 
         tool = self.get(tool_name)
         if not tool:
             return f"[ERR] Tool '{tool_name}' not found. Avail: {self.list_tools()}"
+        if not self._tool_enabled(tool_name, tool.name):
+            return f"[ERR] Tool '{tool.name}' is disabled in NEXUS configuration."
+        valid, normalized_kwargs, validation_errors = self._validate_tool_input(tool, kwargs)
+        if not valid:
+            output = f"[ERR] Invalid tool call for '{tool.name}': " + "; ".join(validation_errors)
+            self._record_execution(tool_name, kwargs, output, False, 0.0, tool.is_read_only(kwargs))
+            return output
+        kwargs = normalized_kwargs
 
         # Check cache for read-only operations
         if use_cache and tool.is_read_only(kwargs):
@@ -251,10 +263,33 @@ class ToolRegistry(ThreadSafeSingleton):
 
         return output
 
+    def _tool_enabled(self, requested_name: str, canonical_name: str) -> bool:
+        """Respect gui/config tool toggles at execution time."""
+        try:
+            config = NexusConfigLoader()
+            disabled = config.data.get("disabled_tools", [])
+            deleted = config.data.get("deleted_tools", [])
+            if not isinstance(disabled, list):
+                disabled = []
+            if not isinstance(deleted, list):
+                deleted = []
+            names = {requested_name, canonical_name}
+            return not any(name in disabled or name in deleted for name in names)
+        except Exception:
+            return True
+
+    def _validate_tool_input(self, tool: BaseTool, kwargs: Dict[str, Any]) -> tuple[bool, Dict[str, Any], List[str]]:
+        try:
+            from tools.nexus_tools.schema_validator import ToolSchemaValidator
+
+            return ToolSchemaValidator.validate(tool.get_schema(), kwargs)
+        except Exception as exc:
+            return False, kwargs, [f"schema validation failed: {exc}"]
+
     def _record_execution(self, tool_name: str, kwargs: Dict[str, Any], output: str, success: bool, duration_ms: float, read_only: bool, cache_hit: bool = False) -> None:
         root = getattr(self, "root", os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
         try:
-            from core.aurora.mission_replay import MissionReplay
+            from optimization.mission_replay import MissionReplay
             MissionReplay(root).record(
                 "tool_call",
                 {
@@ -269,7 +304,7 @@ class ToolRegistry(ThreadSafeSingleton):
         except Exception:
             pass
         try:
-            from core.aurora.tool_economy import ToolEconomy
+            from optimization.tool_economy import ToolEconomy
             ToolEconomy(root).record(tool_name, success, duration_ms, read_only=read_only, error="" if success else output)
         except Exception:
             pass
@@ -347,10 +382,11 @@ class ToolRegistry(ThreadSafeSingleton):
                     logger.warning("Error loading custom module %s: %s", filename, e)
 
     def stats(self) -> Dict[str, Any]:
-        from tools.nexus_tools.output_optimizer import ToolCache
+        from tools.nexus_tools.output_optimizer_tool import ToolCache
 
         return {
             "tools": len(self.list_tools()),
             "names": self.list_tools(),
             "cache": ToolCache.stats(),
         }
+

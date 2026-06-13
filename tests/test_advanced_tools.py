@@ -1,8 +1,10 @@
 import json
 import os
+import threading
 import tempfile
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 class TestAdvancedToolsViaRegistry(unittest.TestCase):
@@ -18,7 +20,6 @@ class TestAdvancedToolsViaRegistry(unittest.TestCase):
         self.registry._initialized = True
         from tools.nexus_tools.advanced_power_tool import (
             BenchmarkTool,
-            BrowserAutomationTool,
             CognitionTool,
             HyperPlanTool,
             MissionReplayTool,
@@ -41,7 +42,6 @@ class TestAdvancedToolsViaRegistry(unittest.TestCase):
             BenchmarkTool(self.tmp.name),
             MissionReplayTool(self.tmp.name),
             ToolEconomyTool(self.tmp.name),
-            BrowserAutomationTool(self.tmp.name),
         ]:
             self.registry.register(tool)
         self.registry.root = self.tmp.name
@@ -67,6 +67,31 @@ class TestAdvancedToolsViaRegistry(unittest.TestCase):
         self.assertIn("Restored 1", restored)
         with open(path, "r", encoding="utf-8") as f:
             self.assertEqual(f.read(), "before")
+
+    def test_tool_schema_validation_blocks_bad_enum(self):
+        out = self.registry.execute("rollback", command="explode", compress=False)
+        self.assertIn("Invalid tool call", out)
+        self.assertIn("command", out)
+
+    def test_tool_schema_validator_coerces_basic_types(self):
+        from tools.nexus_tools.schema_validator import ToolSchemaValidator
+
+        ok, normalized, errors = ToolSchemaValidator.validate(
+            {
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer"},
+                        "active": {"type": "boolean"},
+                    },
+                    "required": ["limit"],
+                }
+            },
+            {"limit": "7", "active": "true"},
+        )
+        self.assertTrue(ok, errors)
+        self.assertEqual(normalized["limit"], 7)
+        self.assertEqual(normalized["active"], True)
 
     def test_cognition_and_skill_forge_tools(self):
         remembered = self.registry.execute("cognition", command="remember", text="Rollback should snapshot before risky edits")
@@ -123,7 +148,7 @@ class TestAdvancedToolsViaRegistry(unittest.TestCase):
         self.assertEqual(json.loads(out), [])
 
     def test_benchmark_runner_records_suite_version(self):
-        from core.evaluation.benchmark import BenchmarkRunner
+        from evaluation.benchmark import BenchmarkRunner
 
         result = BenchmarkRunner(self.tmp.name).run(cases=[])
         self.assertIn("suite_version", result)
@@ -135,26 +160,6 @@ class TestAdvancedToolsViaRegistry(unittest.TestCase):
         self.assertTrue(any(event["data"].get("tool") == "hyper_plan" for event in replay))
         market = json.loads(self.registry.execute("tool_economy", command="rank", compress=False))
         self.assertTrue(any(item["tool"] == "hyper_plan" and item["success_rate"] == 1.0 for item in market))
-
-    def test_browser_tool_reports_status_and_fetches_static_pages(self):
-        status = json.loads(self.registry.execute("browser", command="status", compress=False))
-        self.assertIn("playwright_available", status)
-        fetched = json.loads(
-            self.registry.execute(
-                "browser",
-                command="fetch",
-                url="https://example.com",
-                max_chars=100,
-                compress=False,
-            )
-        )
-        self.assertEqual(fetched["status_code"], 200)
-        self.assertIn("Example Domain", fetched["text"])
-
-    def test_browser_tool_is_honest_when_playwright_missing(self):
-        out = json.loads(self.registry.execute("browser", command="run_sequence", url="https://example.com", compress=False))
-        if not out.get("ok"):
-            self.assertIn("Playwright not installed", out["error"])
 
 
 class TestFileEditAutoRollback(unittest.TestCase):

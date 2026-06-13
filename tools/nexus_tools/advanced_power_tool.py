@@ -18,7 +18,7 @@ class RollbackTool(BaseTool):
         self.root = os.path.abspath(root_dir)
 
     def call(self, command: str = "snapshot", paths: List[str] | None = None, snapshot_id: str = "", reason: str = "", **kwargs) -> ToolResult:
-        from core.os_power.rollback import RollbackManager
+        from os_power.rollback import RollbackManager
 
         manager = RollbackManager(self.root)
         if command == "snapshot":
@@ -69,7 +69,7 @@ class PatchLedgerTool(BaseTool):
         limit: int = 20,
         **kwargs,
     ) -> ToolResult:
-        from core.os_power.patch_ledger import PatchLedger
+        from os_power.patch_ledger import PatchLedger
 
         ledger = PatchLedger(self.root)
         if command == "baseline":
@@ -94,7 +94,7 @@ class ProcessTool(BaseTool):
 
     def __init__(self, root_dir: str = "."):
         self.root = os.path.abspath(root_dir)
-        from core.os_power.process_manager import ProcessManager
+        from os_power.process_manager import ProcessManager
 
         self.manager = ProcessManager(self.root)
 
@@ -132,7 +132,7 @@ class SideEffectTool(BaseTool):
     def call(self, path: str = "", **kwargs) -> ToolResult:
         if not path:
             return ToolResult(error="path is required")
-        from core.code_intelligence.side_effects import SideEffectAnalyzer
+        from code_intel.side_effects import SideEffectAnalyzer
 
         report = SideEffectAnalyzer(self.root).analyze(path)
         return ToolResult(data=json.dumps(report.__dict__, indent=2))
@@ -143,16 +143,20 @@ class SideEffectTool(BaseTool):
 
 class DiagnosticsTool(BaseTool):
     name = "diagnostics"
-    description = "Run compile/parse diagnostics for Python, JSON, YAML, and optional dashboard build."
+    description = "Run compile/parse diagnostics for Python, JSON, YAML, and optional gui build."
     aliases = ["diag", "check_project"]
 
     def __init__(self, root_dir: str = "."):
         self.root = os.path.abspath(root_dir)
 
-    def call(self, paths: List[str] | None = None, include_dashboard: bool = False, **kwargs) -> ToolResult:
-        from core.code_intelligence.diagnostics import DiagnosticRunner
+    def call(self, paths: List[str] | None = None, include_gui: bool = False, **kwargs) -> ToolResult:
+        from code_intel.diagnostics import DiagnosticRunner
 
-        report = DiagnosticRunner(self.root).run(paths=paths or ["."], include_dashboard=include_dashboard)
+        include_dashboard = bool(kwargs.get("include_dashboard", False))
+        report = DiagnosticRunner(self.root).run(
+            paths=paths or ["."],
+            include_gui=include_gui or include_dashboard,
+        )
         return ToolResult(data=json.dumps(report, indent=2))
 
     def is_read_only(self, input_data=None):
@@ -170,7 +174,7 @@ class EditPlanTool(BaseTool):
     def call(self, path: str = "", **kwargs) -> ToolResult:
         if not path:
             return ToolResult(error="path is required")
-        from core.code_intelligence.edit_plan import EditPlanner
+        from code_intel.edit_plan import EditPlanner
 
         plan = EditPlanner(self.root).plan(path)
         return ToolResult(data=json.dumps(plan.to_dict(), indent=2))
@@ -187,7 +191,7 @@ class HyperPlanTool(BaseTool):
     def call(self, task: str = "", observations: List[str] | None = None, **kwargs) -> ToolResult:
         if not task:
             return ToolResult(error="task is required")
-        from core.reasoning.hyper_engine import HyperReasoningEngine
+        from reasoning.hyper_engine import HyperReasoningEngine
 
         engine = HyperReasoningEngine()
         plan = engine.plan(task)
@@ -209,8 +213,8 @@ class CognitionTool(BaseTool):
         self.root = os.path.abspath(root_dir)
 
     def call(self, command: str = "recall", text: str = "", layer: str = "project", query: str = "", **kwargs) -> ToolResult:
-        from core.cognition.memory_graph import AdaptiveMemoryGraph
-        from core.cognition.context_engine import ZeroTokenContextEngine
+        from cognition.memory_graph import AdaptiveMemoryGraph
+        from cognition.context_engine import ZeroTokenContextEngine
 
         graph = AdaptiveMemoryGraph(self.root)
         context = ZeroTokenContextEngine(self.root)
@@ -243,7 +247,7 @@ class SkillForgeTool(BaseTool):
         self.root = os.path.abspath(root_dir)
 
     def call(self, command: str = "search", name: str = "", description: str = "", steps: List[str] | None = None, query: str = "", **kwargs) -> ToolResult:
-        from core.cognition.skill_forge import SkillForge
+        from cognition.skill_forge import SkillForge
 
         forge = SkillForge(self.root)
         if command == "forge":
@@ -269,7 +273,7 @@ class BenchmarkTool(BaseTool):
         self.root = os.path.abspath(root_dir)
 
     def call(self, command: str = "run", limit: int = 20, **kwargs) -> ToolResult:
-        from core.evaluation.benchmark import BenchmarkRunner
+        from evaluation.benchmark import BenchmarkRunner
 
         runner = BenchmarkRunner(self.root)
         if command == "run":
@@ -282,6 +286,31 @@ class BenchmarkTool(BaseTool):
         return bool(input_data and input_data.get("command") == "history")
 
 
+class CompetitiveMoatTool(BaseTool):
+    name = "competitive_moat"
+    description = "Audit NEXUS against competitor-style agent capability categories and produce an attack plan."
+    aliases = ["moat", "competitor_audit", "market_moat"]
+
+    def __init__(self, root_dir: str = "."):
+        self.root = os.path.abspath(root_dir)
+
+    def call(self, command: str = "summary", target: str = "docs/COMPETITIVE_MOAT.md", **kwargs) -> ToolResult:
+        from optimization.competitive import CompetitiveMoatAuditor
+
+        auditor = CompetitiveMoatAuditor(self.root)
+        if command == "summary":
+            return ToolResult(data=json.dumps(auditor.audit(), indent=2))
+        if command == "markdown":
+            return ToolResult(data=auditor.to_markdown())
+        if command == "write":
+            path = auditor.write_status(target=target)
+            return ToolResult(data=json.dumps({"written": path, "moat_score": auditor.audit()["moat_score"]}, indent=2))
+        return ToolResult(error=f"Unknown competitive_moat command: {command}")
+
+    def is_read_only(self, input_data=None):
+        return bool(input_data and input_data.get("command") in {"summary", "markdown"})
+
+
 class MissionReplayTool(BaseTool):
     name = "mission_replay"
     description = "Inspect the append-only mission replay event log."
@@ -291,7 +320,7 @@ class MissionReplayTool(BaseTool):
         self.root = os.path.abspath(root_dir)
 
     def call(self, command: str = "recent", limit: int = 50, mission_id: str = "", **kwargs) -> ToolResult:
-        from core.aurora.mission_replay import MissionReplay
+        from optimization.mission_replay import MissionReplay
 
         replay = MissionReplay(self.root)
         if command == "recent":
@@ -311,7 +340,7 @@ class ToolEconomyTool(BaseTool):
         self.root = os.path.abspath(root_dir)
 
     def call(self, command: str = "rank", tool: str = "", **kwargs) -> ToolResult:
-        from core.aurora.tool_economy import ToolEconomy
+        from optimization.tool_economy import ToolEconomy
 
         economy = ToolEconomy(self.root)
         if command == "rank":
@@ -333,7 +362,7 @@ class TestSelectionTool(BaseTool):
         self.root = os.path.abspath(root_dir)
 
     def call(self, changed_files: List[str] | None = None, path: str = "", **kwargs) -> ToolResult:
-        from core.aurora.test_selection import TestSelector
+        from optimization.test_selection import TestSelector
 
         files = changed_files or ([path] if path else [])
         if not files:
@@ -365,7 +394,7 @@ class FailureVaccineTool(BaseTool):
         limit: int = 20,
         **kwargs,
     ) -> ToolResult:
-        from core.aurora.failure_vaccine import FailureVaccineEngine
+        from optimization.failure_vaccine import FailureVaccineEngine
 
         engine = FailureVaccineEngine(self.root)
         try:
@@ -411,7 +440,7 @@ class EvidenceLedgerTool(BaseTool):
         limit: int = 50,
         **kwargs,
     ) -> ToolResult:
-        from core.aurora.evidence_ledger import EvidenceLedger
+        from optimization.evidence_ledger import EvidenceLedger
 
         ledger = EvidenceLedger(self.root)
         try:
@@ -459,7 +488,7 @@ class CodeGraphTool(BaseTool):
         limit: int = 20,
         **kwargs,
     ) -> ToolResult:
-        from core.code_intelligence.knowledge_graph import CodebaseKnowledgeGraph
+        from code_intel.knowledge_graph import CodebaseKnowledgeGraph
 
         graph = CodebaseKnowledgeGraph(self.root)
         if command == "build":
@@ -491,8 +520,8 @@ class CodeGraphTool(BaseTool):
 
 class AgentContextTool(BaseTool):
     name = "agent_context"
-    description = "Generate AGENTS.md and CLAUDE.md from the live code graph for coding-agent structural awareness."
-    aliases = ["agents_md", "claude_md", "context_file"]
+    description = "Generate NEXUS.md from the live code graph for coding-agent structural awareness."
+    aliases = ["agents_md", "nexus_md", "claude_md", "context_file"]
 
     def __init__(self, root_dir: str = "."):
         self.root = os.path.abspath(root_dir)
@@ -500,12 +529,12 @@ class AgentContextTool(BaseTool):
     def call(
         self,
         command: str = "preview",
-        target: str = "AGENTS.md",
+        target: str = "NEXUS.md",
         targets: List[str] | None = None,
         force: bool = False,
         **kwargs,
     ) -> ToolResult:
-        from core.code_intelligence.agent_context import AgentContextGenerator
+        from code_intel.agent_context import AgentContextGenerator
 
         generator = AgentContextGenerator(self.root)
         try:
@@ -545,7 +574,7 @@ class UnifiedGraphTool(BaseTool):
         kinds: List[str] | None = None,
         **kwargs,
     ) -> ToolResult:
-        from core.aurora.unified_graph import UnifiedNexusGraph
+        from optimization.unified_graph import UnifiedNexusGraph
 
         graph = UnifiedNexusGraph(self.root)
         if command == "build":
@@ -579,7 +608,7 @@ class RoadmapTool(BaseTool):
         self.root = os.path.abspath(root_dir)
 
     def call(self, command: str = "summary", target: str = "docs/ROADMAP_STATUS.md", **kwargs) -> ToolResult:
-        from core.aurora.roadmap import RoadmapAuditor
+        from optimization.roadmap import RoadmapAuditor
 
         auditor = RoadmapAuditor(self.root)
         if command == "summary":
@@ -595,51 +624,3 @@ class RoadmapTool(BaseTool):
         return bool(input_data and input_data.get("command") in {"summary", "markdown"})
 
 
-class BrowserAutomationTool(BaseTool):
-    name = "nexus_omni"
-    description = "NEXUS Omni-UI Control - Unified Browser automation and OS-level GUI control (mouse/keyboard)."
-    aliases = ["browser", "web_ui", "os_gui", "computer_use"]
-
-    def __init__(self, root_dir: str = "."):
-        self.root = os.path.abspath(root_dir)
-
-    def call(
-        self,
-        command: str = "status",
-        url: str = "",
-        actions: List[Dict[str, Any]] | None = None,
-        max_chars: int = 4000,
-        headless: bool = True,
-        screenshot: bool = True,
-        timeout_ms: int = 15000,
-        **kwargs,
-    ) -> ToolResult:
-        from core.browser_automation import BrowserAutomation
-
-        browser = BrowserAutomation(self.root)
-        try:
-            if command == "status":
-                return ToolResult(data=json.dumps(browser.status(), indent=2))
-            if command == "fetch":
-                if not url:
-                    return ToolResult(error="url is required")
-                return ToolResult(data=json.dumps(browser.fetch(url, max_chars=max_chars), indent=2))
-            if command == "run_sequence":
-                return ToolResult(
-                    data=json.dumps(
-                        browser.run_sequence(
-                            url=url,
-                            actions=actions or [],
-                            headless=headless,
-                            screenshot=screenshot,
-                            timeout_ms=timeout_ms,
-                        ),
-                        indent=2,
-                    )
-                )
-        except Exception as exc:
-            return ToolResult(error=str(exc))
-        return ToolResult(error=f"Unknown browser command: {command}")
-
-    def is_read_only(self, input_data=None):
-        return True

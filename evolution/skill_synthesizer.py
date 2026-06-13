@@ -5,7 +5,7 @@ import re
 import time
 import asyncio
 from typing import List, Dict, Any, Optional
-from core.providers.router import ModelRouter
+from providers.router import ModelRouter
 
 logger = logging.getLogger(__name__)
 

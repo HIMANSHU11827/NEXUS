@@ -30,7 +30,7 @@ class HolisticTool(BaseTool):
     )
     DASHBOARD_ASSET_PATH = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
-        "dashboard",
+        "gui",
         "public",
         "mediapipe",
         "holistic",
@@ -56,7 +56,7 @@ class HolisticTool(BaseTool):
                 if not hasattr(mp, "solutions"):
                     raise ImportError(
                         "Installed mediapipe package does not expose the legacy mp.solutions API "
-                        "required by official Holistic. Use the dashboard Holistic module or install "
+                        "required by official Holistic. Use the gui Holistic module or install "
                         "a MediaPipe build that includes mediapipe.solutions."
                     )
                 self._mp_holistic = mp.solutions.holistic

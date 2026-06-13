@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 class TestConfigSecretPlaceholders(unittest.TestCase):
     def test_env_placeholders_are_expanded_without_committed_secrets(self):
-        from core.config_loader import NexusConfigLoader
+        from config_loader import NexusConfigLoader
 
         NexusConfigLoader._reset_instance()
         with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", suffix=".yaml") as f:
@@ -32,7 +32,7 @@ class TestConfigSecretPlaceholders(unittest.TestCase):
             os.remove(path)
 
     def test_provider_env_override_preserves_api_key_setting_name(self):
-        from core.config_loader import NexusConfigLoader
+        from config_loader import NexusConfigLoader
 
         NexusConfigLoader._reset_instance()
         with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", suffix=".yaml") as f:
@@ -60,7 +60,7 @@ class TestConfigSecretPlaceholders(unittest.TestCase):
             os.remove(path)
 
     def test_active_providers_exclude_missing_cloud_credentials(self):
-        from core.config_loader import NexusConfigLoader
+        from config_loader import NexusConfigLoader
 
         NexusConfigLoader._reset_instance()
         with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", suffix=".yaml") as f:
@@ -89,7 +89,7 @@ class TestConfigSecretPlaceholders(unittest.TestCase):
             os.remove(path)
 
     def test_config_save_creates_parent_directory(self):
-        from core.config_loader import NexusConfigLoader
+        from config_loader import NexusConfigLoader
 
         NexusConfigLoader._reset_instance()
         with tempfile.TemporaryDirectory() as tmp:
@@ -103,7 +103,7 @@ class TestConfigSecretPlaceholders(unittest.TestCase):
 
 class TestProviderCapabilityRouting(unittest.TestCase):
     def test_choose_skips_degraded_and_prefers_context_strength(self):
-        from core.providers.health import ProviderCapabilityRegistry, ProviderHealthRegistry
+        from providers.health import ProviderCapabilityRegistry, ProviderHealthRegistry
 
         health = ProviderHealthRegistry()
         health.mark_failure("gemini", "timeout")
@@ -112,14 +112,14 @@ class TestProviderCapabilityRouting(unittest.TestCase):
         self.assertNotIn("gemini", selected)
 
     def test_vision_requests_filter_to_vision_capable_providers(self):
-        from core.providers.health import ProviderCapabilityRegistry, ProviderHealthRegistry
+        from providers.health import ProviderCapabilityRegistry, ProviderHealthRegistry
 
         selected = ProviderCapabilityRegistry().choose(["ollama", "groq", "gemini"], ProviderHealthRegistry(), vision=True)
         self.assertEqual(selected, ["gemini"])
 
     def test_router_fallback_treats_error_strings_as_failures(self):
-        from core.providers.health import ProviderHealthRegistry
-        from core.providers.router import ModelRouter
+        from providers.health import ProviderHealthRegistry
+        from providers.router import ModelRouter
 
         class FakeProvider:
             def __init__(self, value):

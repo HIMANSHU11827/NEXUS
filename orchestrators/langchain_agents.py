@@ -8,8 +8,8 @@ from langchain.memory import ConversationBufferMemory
 from langchain_core.messages import SystemMessage
 from langchain_core.prompts import PromptTemplate
 
-from core.providers.langchain_provider import get_nexus_llm
-from core.providers.langchain_tools import NEXUS_TOOLS
+from providers.langchain_provider import get_nexus_llm
+from providers.langchain_tools import NEXUS_TOOLS
 
 
 # ─────────────────────────────────────────────

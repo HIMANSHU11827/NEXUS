@@ -2,7 +2,7 @@ import threading
 import time
 import uuid
 from typing import List, Dict, Any, Optional
-from core.nexus_compat import s # type: ignore
+from nexus_compat import s # type: ignore
 
 class MissionMission:
     """
@@ -57,5 +57,5 @@ class MissionOrchestrator:
 
 if __name__ == "__main__":
     orch = MissionOrchestrator()
-    m_id = orch.deploy_mission("Project Alpha", "Build a high-end trading dashboard.")
+    m_id = orch.deploy_mission("Project Alpha", "Build a high-end trading gui.")
     print(f"Tracking Mission ID: {m_id}")

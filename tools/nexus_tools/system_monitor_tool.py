@@ -49,9 +49,9 @@ class SystemMonitorTool(BaseTool):
                 report.append(f"NEXUS_PID: {os.getpid()}")
                 report.append(f"NEXUS_MEM: {proc_mem:.2f}MB")
                 
-            return ToolResult(success=True, data="\n".join(report))
+            return ToolResult(data="\n".join(report))
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(error=str(e))
 
     def get_schema(self) -> Dict[str, Any]:
         return {

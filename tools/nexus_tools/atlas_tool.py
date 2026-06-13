@@ -20,13 +20,15 @@ class AtlasTool(BaseTool):
         
         from rag.engine import NexusAtlasRAG
         rag = NexusAtlasRAG()
-        # Prefer Turbo Search if possible
+        # Prefer Turbo Search if possible, fall back to BM25
         try:
             res = rag.turbo_search(query)
+        except Exception as e:
+            print(f"[ATLAS_TOOL]: turbo_search failed ({e}) — falling back to BM25")
+            res = rag.retrieve_as_text(query)
+        else:
             if "No matches found" in res:
                 res = rag.retrieve_as_text(query)
-        except:
-            res = rag.retrieve_as_text(query)
             
         return ToolResult(data=f"### [NEXUS ATLAS RAG ACTIVE]\n{res}")
 

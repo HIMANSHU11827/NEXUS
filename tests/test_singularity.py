@@ -5,7 +5,7 @@ import sys
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(root)
 
-from core.neural.symbolism import NeuralSymbolicProtocol
+from neural.symbolism import NeuralSymbolicProtocol
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")

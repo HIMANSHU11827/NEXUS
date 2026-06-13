@@ -1,23 +1,47 @@
 # NEXUS Architecture
 
-NEXUS is a local-first autonomous agent platform organized around a small set of durable cores:
+For the next target architecture that unifies terminal, CLI, GUI, gateway,
+voice, browser, memory, tools, mission timelines, and visual
+workflows, see
+[`docs/NEXUS_UNIFIED_AGENT_ARCHITECTURE.md`](NEXUS_UNIFIED_AGENT_ARCHITECTURE.md)
+and [`docs/NEXUS_WORKFLOW_MODEL.md`](NEXUS_WORKFLOW_MODEL.md).
 
-- `core/kernel.py`: singleton runtime, workspace ownership, shared module cache, stats, and boot health.
+NEXUS is a local-first autonomous agent platform organized around a small set of package directories directly under the root:
+
+- `kernel/`: singleton runtime, workspace ownership, shared module cache, stats, and boot health.
 - `orchestrators/loop.py`: primary reasoning loop, tool extraction, tool execution, prompt assembly, memory sync, and self-correction hooks.
 - `tools/nexus_tools/`: executable capability layer for shell, files, search, memory, providers, audits, and automation.
 - `rag/`: retrieval layer for project memory and source recall.
-- `core/code_intelligence/`: static repo map, diagnostics, edit planning, side-effect analysis, and symbol graph primitives.
-- `core/autonomy/`: direct-execution safety, risk scoring, and failure memory.
-- `core/cognition/`: adaptive memory graph, zero-token context packets, self-improvement strategies, intent forecasting, and skill forge.
-- `core/reasoning/`: explicit planner/critic/verifier primitives with uncertainty and replan triggers.
-- `core/os_power/`: rollback snapshots and managed background processes.
-- `core/aurora/`: mission replay, tool economy, targeted test selection, and failure vaccines for the next-generation runtime.
-- `core/providers/`: provider factory, health telemetry, capability registry, and fallback routing.
-- `core/security/`: lightweight release hygiene checks such as secret scanning.
-- `core/world_model.py`: deterministic action impact simulation for risk, reversibility, and safeguards.
-- `core/swarm.py`: local multi-agent orchestration with planning, queues, retries, cancellation, artifacts, and result consolidation.
-- `dashboard/`: FastAPI backend and React operator surface.
-- `cli/`: TypeScript Ink interface.
+- `code_intel/`: static repo map, diagnostics, edit planning, side-effect analysis, and symbol graph primitives.
+- `sandbox/`: direct-execution safety, risk scoring, and failure memory.
+- `cognition/`: adaptive memory graph, zero-token context packets, self-improvement strategies, intent forecasting, and skill forge.
+- `reasoning/`: explicit planner/critic/verifier primitives with uncertainty and replan triggers.
+- `os_power/`: rollback snapshots and managed background processes.
+- `optimization/`: mission replay, tool economy, targeted test selection, and failure vaccines for the next-generation runtime.
+- `providers/`: provider factory, health telemetry, capability registry, and fallback routing.
+- `security/`: lightweight release hygiene checks such as secret scanning.
+- `world_model/`: deterministic action impact simulation for risk, reversibility, and safeguards.
+- `hive/engine.py`: local Hive orchestration with planning, queues, retries, cancellation, artifacts, and result consolidation.
+- `nexus/` and `shell/`: **Terminal** — live operator shell package with direct `NexusLoop` access.
+- `cli/`: **CLI** — TypeScript Ink UI (API thin client; not the live terminal).
+- `gui/`: **GUI** — FastAPI backend and React operator surface.
+- `gateway/`: **Gateway** — Telegram, Discord, WhatsApp, and other external channels.
+
+## Four User Surfaces
+
+Users can send missions from **any** of the four surfaces above. All normalize into the
+same agent runtime (`orchestrators/loop.py`). Terminal is the only surface that runs the
+loop in-process; CLI and GUI call `gui` API; gateway routes through `gateway`.
+
+### Internally connected
+
+All four surfaces share one linked session via `session_bus/`:
+
+- `workspace/active_session.json` — which session is live right now
+- `logs/sessions/{session_id}.json` — conversation memory
+- `workspace/work_events/{session_id}.jsonl` — mission timeline
+
+Chat in GUI → terminal auto-joins on start; CLI/GUI poll `/api/sessions/active` every 5s. Use `/session <id>` or `/events` to switch or inspect manually.
 
 ## Operating Model
 
@@ -28,7 +52,7 @@ NEXUS is designed for fast direct execution. It avoids approval spam by default 
 3. Keep path writes inside the project root.
 4. Store failures for later self-correction.
 5. Build a repo map before reasoning so the agent starts with project structure.
-6. Verify work through tests, compile checks, and dashboard builds.
+6. Verify work through tests, compile checks, and gui builds.
 7. Store durable memory as ranked graph nodes and inject compact context packets instead of raw history.
 8. Convert failures into reusable strategies and future regression candidates.
 9. Predict edit blast radius before multi-file changes.
@@ -47,8 +71,8 @@ NEXUS is designed for fast direct execution. It avoids approval spam by default 
 - Provider health tracks latency/errors, validates keys, routes by capability, and falls back on provider failures. Deep network probes are intentionally bounded to avoid slow startup.
 - RAG supports persistent BM25 and hybrid result blending, including cleanup of stale keyword/vector entries. Production vector storage and graph retrieval remain roadmap items.
 - Cognition primitives are local deterministic foundations; they are not yet a learned memory optimizer.
-- Dashboard state is config-derived and local-first, not a multi-tenant admin service.
+- gui state is config-derived and local-first, not a multi-tenant admin service.
 
 ## Current Reliability Boundary
 
-The current system is powerful but still experimental. It should be treated as a local development agent, not a hosted multi-tenant service. Stronger dashboard authentication UX, sandboxed process isolation, role-specific LLM swarm workers, and benchmark-driven improvement are the next production gates.
+The current system is powerful but still experimental. It should be treated as a local development agent, not a hosted multi-tenant service. Stronger gui authentication UX, sandboxed process isolation, role-specific LLM swarm workers, and benchmark-driven improvement are the next production gates.

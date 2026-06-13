@@ -154,7 +154,7 @@ TASKS: Dict[str, MediaPipeTaskSpec] = {
         module="tools.nexus_tools.vision.holistic_tool",
         class_name="HolisticTool",
         method="dashboard_webcam",
-        input_kind="webcam/dashboard",
+        input_kind="webcam/gui",
         model_filename="",
         notes="NEXUS uses the official vendored MediaPipe Holistic web runtime for real-time 543-landmark webcam tracking.",
     ),
@@ -311,8 +311,8 @@ class MediaPipeSuiteTool(BaseTool):
         if spec.key == "holistic":
             return {
                 "task": spec.key,
-                "ready_for_dashboard": os.path.exists(os.path.join(HOLISTIC_WEB_ASSETS, "holistic.js")),
-                "message": "Use dashboard Holistic webcam for real-time full body + face + hands landmarks.",
+                "ready_for_gui": os.path.exists(os.path.join(HOLISTIC_WEB_ASSETS, "holistic.js")),
+                "message": "Use gui Holistic webcam for real-time full body + face + hands landmarks.",
             }
         if not model_path or not os.path.exists(model_path):
             return {

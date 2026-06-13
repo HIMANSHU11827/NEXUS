@@ -70,7 +70,7 @@ class NexusAtlasStore:
                 SELECT f.*, rank 
                 FROM facts f
                 JOIN facts_fts fts ON f.id = fts.rowid
-                WHERE facts_fts MATCH ?
+                WHERE fts MATCH ?
                 ORDER BY rank
                 LIMIT ?
             """

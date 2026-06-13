@@ -57,10 +57,10 @@ class LibrarianTool(BaseTool):
             
             # Refresh Atlas (RAG) Index
             try:
-                from core.kernel import get_nexus_kernel
+                from kernel import get_nexus_kernel
                 kernel = get_nexus_kernel()
                 kernel.rag.index_workspace() # Re-index everyone
-            except:
+            except Exception: 
                 pass
 
             return ToolResult(data=f"[LIBRARIAN_SUCCESS]: Harvested '{title}' to knowledge/library/{category}/")

@@ -2,16 +2,16 @@
 
 Fix all fake, weak, shallow, or broken systems from the previous audit.
 
-## 1. Swarm Agents
+## 1. Hive Workers
 
-The swarm system must be a real multi-agent orchestration system, not a subprocess/logging illusion.
+The Hive system must be real local worker orchestration, not a subprocess/logging illusion.
 
 Required capabilities:
 - task planner
-- role-based agents
+- role-based Hive workers
 - shared state
 - task queue
-- agent communication
+- Hive worker communication
 - progress tracking
 - cancellation
 - retries
@@ -87,7 +87,7 @@ Required capabilities:
 - remove stale tests
 - add real unit tests
 - add integration tests
-- add CLI/backend/dashboard tests
+- add CLI/backend/gui tests
 - add regression tests
 - make pytest reliable
 - create CI test pipeline
@@ -97,16 +97,16 @@ Required capabilities:
 Packaging must include only real source and necessary runtime files.
 
 Required capabilities:
-- exclude models, caches, temp repos, logs, dashboard build files, and tests when not needed
+- exclude models, caches, temp repos, logs, gui build files, and tests when not needed
 - include only real source files
 - clean pyproject
 - add .gitignore
 - add release structure
 - reduce package size
 
-## 8. Dashboard Security
+## 8. gui Security
 
-Dashboard security must be treated as real application security.
+gui security must be treated as real application security.
 
 Required capabilities:
 - remove wildcard CORS

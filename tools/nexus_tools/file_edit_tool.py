@@ -44,7 +44,7 @@ class FileEditTool(BaseTool):
         if not os.path.isfile(path):
             return "", ""
         try:
-            from core.os_power.rollback import RollbackManager
+            from os_power.rollback import RollbackManager
             snapshot = RollbackManager(self.root).snapshot_files([path], reason=reason)
             return f" [ROLLBACK_SNAPSHOT: {snapshot.id}]", snapshot.id
         except Exception:
@@ -54,7 +54,7 @@ class FileEditTool(BaseTool):
         if not os.path.isfile(path):
             return ""
         try:
-            from core.os_power.patch_ledger import PatchLedger
+            from os_power.patch_ledger import PatchLedger
             return PatchLedger(self.root).baseline([path], label=reason)["id"]
         except Exception:
             return ""
@@ -63,7 +63,7 @@ class FileEditTool(BaseTool):
         if not baseline_id:
             return " [PATCH_LEDGER_SKIPPED]"
         try:
-            from core.os_power.patch_ledger import PatchLedger
+            from os_power.patch_ledger import PatchLedger
             record = PatchLedger(self.root).record(baseline_id, [path], reason=reason, rollback_id=rollback_id)
             return f" [PATCH_LEDGER: {record.id}]"
         except Exception:

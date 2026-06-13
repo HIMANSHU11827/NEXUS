@@ -1,0 +1,4 @@
+name: default
+description: "Default NEXUS profile — current production settings. Inherits from base."
+inherits: base
+tags: [default, production]

@@ -30,9 +30,16 @@ class BrainTrainerTool(BaseTool):
                 if not os.path.exists(trainer_script):
                     return ToolResult(success=False, error=f"Trainer script not found: {trainer_script}")
                 
-                results.append("[*] PHASE_1: Initiating SafeTensors Training...")
+                # 🧬 [NEURAL_SELF_DISTILLATION]: Target live mission data if available
+                gold_file = os.path.join(self.root, "training_data", "gold_standard_agent.json")
+                dataset_arg = f"--dataset {gold_file}" if os.path.exists(gold_file) else ""
+                
+                results.append(f"[*] PHASE_1: Initiating Neural Self-Distillation (Data: {os.path.basename(gold_file) if dataset_arg else 'Default'})...")
                 # We call the trainer as a subprocess to avoid memory pollution in the main loop
                 cmd = [sys.executable, trainer_script]
+                if dataset_arg:
+                    cmd.extend(["--dataset", gold_file])
+                
                 process = subprocess.run(cmd, capture_output=True, text=True)
                 if process.returncode != 0:
                     return ToolResult(success=False, error=f"Training failed: {process.stderr}")

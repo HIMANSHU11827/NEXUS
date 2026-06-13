@@ -8,7 +8,7 @@ import os
 import time
 from typing import Any, Dict, Optional, List
 
-from core.autonomy.risk import CommandRiskScorer
+from sandbox.risk import CommandRiskScorer
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
 
 
@@ -137,6 +137,8 @@ class BashTool(BaseTool):
     def is_read_only(self, input_data=None):
         if input_data:
             cmd = (input_data.get("command") or input_data.get("cmd") or "").lower().strip()
+            # Remove any leading spaces or sub-shell wrappers if present
+            cmd = cmd.lstrip("`\"' ")
             safe_prefixes = [
                 "ls",
                 "cat",
@@ -148,6 +150,17 @@ class BashTool(BaseTool):
                 "echo",
                 "pwd",
                 "date",
+                "pytest",
+                "python -m pytest",
+                "python -m compileall",
+                "npm test",
+                "git diff",
+                "git status",
+                "git log",
+                "node -v",
+                "npm -v",
+                "python --version",
+                "pip --version",
             ]
             return any(cmd.startswith(p) for p in safe_prefixes)
         return False

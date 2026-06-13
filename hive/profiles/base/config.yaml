@@ -1,0 +1,303 @@
+# NEXUS Base Profile — Default Configuration
+# All profiles inherit from this. Override only what differs.
+
+system:
+  kernel_mode: recursive_frontier
+  default_provider: cloud
+  provider_name: commandcode
+  brain_mode: AUTO
+  shell: ghost_v1
+  branding: "🦀"
+  workspace_root: ./workspace
+  log_level: INFO
+
+security:
+  safety_strictness: 0.8
+  prover_gate_active: false
+  sandbox_mode: firecracker_ev
+
+memory:
+  persistence: atomic_checkpoints
+  vault_mode: gravity_rag
+
+voice:
+  enabled: false
+  auto_speak: true
+  microphone_device: null
+  speaker_device: null
+  sample_rate: 16000
+  record_seconds: 60.0
+  silence_threshold: 0.008
+  min_speech_seconds: 0.25
+  silence_timeout_seconds: 2.0
+  whisper_model: models/local/voice/distil-whisper-large-v3
+  whisper_device: auto
+  whisper_language: auto
+  whisper_chunk_length_s: 15
+  whisper_batch_size: 1
+  kitten_model: KittenML/kitten-tts-micro-0.8
+  voice_name: Jasper
+  speech_speed: 1.2
+  volume: 1.0
+  push_to_talk_key: none
+  wake_word_enabled: false
+  wake_word: nexus
+  allow_text_fallback: true
+  keep_models_loaded: true
+  assistant_timeout_seconds: 45.0
+  require_wake_word: false
+
+providers:
+  cloud:
+    commandcode:
+      active: true
+      api_key: ${COMMANDCODE_API_KEY}
+      model: deepseek/deepseek-v4-flash
+      endpoint: https://api.commandcode.ai/provider/v1/chat/completions
+    openrouter:
+      active: false
+      model: ""
+      endpoint: ""
+    openai:
+      active: false
+      model: gpt-4o
+    deepseek:
+      active: false
+      model: deepseek-coder
+    gemini:
+      active: false
+      model: gemini-1.5-pro
+    anthropic:
+      active: false
+      model: claude-sonnet-4-20250514
+    groq:
+      active: false
+      model: llama-3.1-70b-versatile
+    together:
+      active: false
+      model: meta-llama/Llama-3-70b-chat-hf
+    fireworks:
+      active: false
+      model: accounts/fireworks/models/llama-v3p1-70b-instruct
+    mistral:
+      active: false
+      model: mistral-large-latest
+    perplexity:
+      active: false
+      model: llama-3.1-sonar-large-128k-online
+    cohere:
+      active: false
+      model: command-r-plus
+    replicate:
+      active: false
+      model: meta/meta-llama-3.1-405b-instruct
+    xai:
+      active: false
+      model: grok-beta
+    qwen:
+      active: false
+      model: qwen-turbo
+    sambanova:
+      active: false
+      model: Meta-Llama-3.1-70B-Instruct
+    azure_openai:
+      active: false
+      deployment: gpt-4o
+    vlm:
+      active: false
+      model: gpt-4o
+    universal:
+      active: false
+      endpoint: http://localhost:8000/v1/chat/completions
+      model: your-model-name
+  local:
+    SOVEREIGN_BRAIN:
+      active: false
+      parent_provider: ""
+      model: ""
+    lm_studio:
+      active: false
+      endpoint: http://127.0.0.1:1234/v1/chat/completions
+      model: ""
+    ollama:
+      active: false
+      endpoint: http://localhost:11434
+      default_model: llama3
+    llama_cpp:
+      active: false
+      ctx_size: 4096
+      gpu_layers: -1
+      main_gpu: 0
+      model_path: models/local/your-model.gguf
+
+custom_tool_configs:
+  agent_context:
+    active: true
+    description: Generate NEXUS.md from the live code graph.
+  atlas_map:
+    active: true
+    description: Generates a logic map of a directory.
+  bash:
+    active: true
+    description: Execute shell commands.
+  benchmark:
+    active: true
+    description: Run local NEXUS regression benchmarks.
+  brain_trainer:
+    active: true
+    description: NEXUS model lifecycle management.
+  code_graph:
+    active: true
+    description: Codebase knowledge graph.
+  cognition:
+    active: true
+    description: Adaptive memory graph.
+  competitive_moat:
+    active: true
+    description: Competitive analysis.
+  diagnostics:
+    active: true
+    description: Compile/parse diagnostics.
+  edit_plan:
+    active: true
+    description: Symbol-aware pre-edit planning.
+  evidence_ledger:
+    active: true
+    description: Claim recording and auditing.
+  failure_vaccine:
+    active: true
+    description: Failure-to-memory conversion.
+  file_edit:
+    active: true
+    description: View, create, edit files.
+  glob:
+    active: true
+    description: File glob search.
+  grep:
+    active: true
+    description: Regex file search.
+  hive_broadcast:
+    active: true
+    description: Broadcast to Hive Mind.
+  hive_intent:
+    active: true
+    description: Collaborative intent declaration.
+  hive_merge_plan:
+    active: true
+    description: Inspect Hive artifacts for overlapping edits.
+  hive_pulse:
+    active: true
+    description: Recent Hive signals.
+  hive_resume:
+    active: true
+    description: Resume pending Hive tasks.
+  hive_spawn:
+    active: true
+    description: Delegate to Hive worker.
+  hive_team:
+    active: true
+    description: Hive Team Mission Board.
+  holistic:
+    active: true
+    description: MediaPipe Holistic detection.
+  hyper_plan:
+    active: true
+    description: Planner/critic/verifier plan.
+  librarian_harvest:
+    active: true
+    description: Documentation harvesting for RAG.
+  mediapipe_suite:
+    active: true
+    description: MediaPipe vision/text/audio suite.
+  memory_ops:
+    active: true
+    description: Working memory and episodic recall.
+  mission_replay:
+    active: true
+    description: Mission replay event log.
+  nexus_comms:
+    active: true
+    description: External platform messaging.
+  nexus_evolve:
+    active: true
+    description: Self-improvement via telemetry.
+  nexus_omni:
+    active: true
+    description: Unified Browser + OS control.
+  nexus_switch_brain:
+    active: true
+    description: Primary cognition engine switch.
+  patch_ledger:
+    active: true
+    description: Patch diff recording.
+  process:
+    active: true
+    description: Background process management.
+  rag:
+    active: true
+    description: Next-gen RAG.
+  roadmap:
+    active: true
+    description: Roadmap audit.
+  rollback:
+    active: true
+    description: Project-local rollback snapshots.
+  side_effects:
+    active: true
+    description: Cross-file blast radius prediction.
+  skill_forge:
+    active: true
+    description: Reusable workflow definitions.
+  skill_synthesizer:
+    active: true
+    description: Tool/skill code generation.
+  system_audit:
+    active: true
+    description: Security flaw scanning.
+  system_monitor:
+    active: true
+    description: Hardware telemetry.
+  system_snapshot:
+    active: true
+    description: Full system backup.
+  test_select:
+    active: true
+    description: Targeted test selection.
+  todo:
+    active: true
+    description: Task list management.
+  tool_economy:
+    active: true
+    description: Tool metrics inspection.
+  unified_graph:
+    active: true
+    description: Unified NEXUS graph.
+  vision_accelerator:
+    active: true
+    description: GPU acceleration readiness.
+  web_fetch:
+    active: true
+    description: URL content fetch.
+  web_search:
+    active: true
+    description: DuckDuckGo web search.
+
+custom_skill_configs:
+  proactive_debugger:
+    active: true
+    description: Autonomous neural debugger.
+  test_guardian:
+    active: true
+    description: Autonomous verification engine.
+
+mcp_servers:
+  nexus-browser:
+    active: false
+    command: node
+    args:
+      - integrations/nexus-browser-bridge/build/src/bin/nexus-omni.js
+      - --no-usage-statistics
+    description: NEXUS browser automation node.
+
+disabled_skills: []
+disabled_tools: []

@@ -19,39 +19,39 @@ import logging
 import threading
 import asyncio
 from typing import List, Dict, Any, Optional, Iterator, Tuple, Generator, Union
-from core.permissions import PermissionMode
+from permissions import PermissionMode
 from enum import Enum
 import concurrent.futures
 from typing import TYPE_CHECKING
-from core.router import IntentRouter
+from router import IntentRouter
 
 if TYPE_CHECKING:
-    from core.discovery import NexusAutoDiscover
-    from core.prompts import NexusPromptEngine
-    from core.observer import NexusObserver
-    from core.skills import NexusSkillMaster
-    from core.providers.router import ModelRouter
-    from core.tool_adapters import RegistryTerminalTool
-    from core.tool_adapters import RegistryFileTools
-    from core.safety.prover import LogicProver
+    from discovery import NexusAutoDiscover
+    from prompts import NexusPromptEngine
+    from observer import NexusObserver
+    from skills import NexusSkillMaster
+    from providers.router import ModelRouter
+    from tool_adapters import RegistryTerminalTool
+    from tool_adapters import RegistryFileTools
+    from safety.prover import LogicProver
     from rag.engine import NexusAtlasRAG
-    from core.tool_adapters import RegistryGitTools
-    from core.hive import NexusHiveEngine
+    from tool_adapters import RegistryGitTools
+    from hive import NexusHiveEngine
     from tools.reporter.script import NexusLSPTool
-    from core.tool_adapters import RegistryTestTool
+    from tool_adapters import RegistryTestTool
     from tools.nexus_tools.registry import ToolRegistry
-    from core.tasks import TaskManager
-    from core.permissions import PermissionSystem
+    from tasks import TaskManager
+    from permissions import PermissionSystem
     from evolution.ensemble import EnsembleManager
     from knowledge.vault import KnowledgeVault
-    from tools.nexus_tools.nexus_operator import NexusGUIOperator
+    from tools.nexus_tools.nexus_operator_tool import NexusGUIOperator
     from evolution.skill_synthesizer import SkillSynthesizer
-    from core.intelligence.moa import MixtureOfArchitects
-    from core.telemetry.database import NexusTelemetryDB
-    from core.safety.laws import NexusLawKernel
-    from core.tasks.scheduler import NexusTaskScheduler
+    from intelligence.moa import MixtureOfArchitects
+    from telemetry.database import NexusTelemetryDB
+    from safety.laws import NexusLawKernel
+    from tasks.scheduler import NexusTaskScheduler
 
-from core.nexus_compat import s, itail
+from nexus_compat import s, itail
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -98,10 +98,16 @@ class NexusLoop:
     COMPACT_KEEP = 4
 
     def __init__(self, root_dir: Optional[str] = None):
-        from core.kernel import get_nexus_kernel
+        from kernel import get_nexus_kernel
         self.kernel = get_nexus_kernel(root_dir=root_dir)
         self.root = self.kernel.root
         self.session_id = "default"
+        self.model = ""
+        self.provider_override = ""
+        self.permission_mode = "auto"
+        self.active_agent = ""
+        self.active_goal = ""
+        self.additional_dirs: List[str] = []
         
         self.memory: List[Dict[str, str]] = []
         self._abort_flag = threading.Event()
@@ -142,7 +148,7 @@ class NexusLoop:
     
     @property
     def hive(self):
-        from core.hive import NexusHiveEngine
+        from hive import NexusHiveEngine
         return self.kernel._get_or_init("hive", lambda: NexusHiveEngine(self.root))
     
     @property
@@ -156,12 +162,12 @@ class NexusLoop:
     
     @property
     def task_manager(self):
-        from core.tasks import TaskManager
+        from tasks import TaskManager
         return self.kernel._get_or_init("task_manager", TaskManager)
     
     @property
     def permissions(self):
-        from core.permissions import PermissionSystem
+        from permissions import PermissionSystem
         return self.kernel._get_or_init("permissions", PermissionSystem)
     
     @property
@@ -175,12 +181,12 @@ class NexusLoop:
     
     @property
     def skill_manager(self):
-        from core.skills import NexusSkillMaster
+        from skills import NexusSkillMaster
         return self.kernel._get_or_init("skill_manager", lambda: NexusSkillMaster(self.root))
     
     @property
     def observer(self):
-        from core.observer import NexusObserver
+        from observer import NexusObserver
         return self.kernel._get_or_init("observer", lambda: NexusObserver(self.root))
     
     @property
@@ -207,7 +213,7 @@ class NexusLoop:
     
     @property
     def laws(self):
-        from core.safety.laws import NexusLawKernel
+        from safety.laws import NexusLawKernel
         return self.kernel._get_or_init("laws", NexusLawKernel)
     
     @property
@@ -217,37 +223,37 @@ class NexusLoop:
     
     @property
     def scheduler(self):
-        from core.tasks.scheduler import NexusTaskScheduler
+        from tasks.scheduler import NexusTaskScheduler
         return self.kernel._get_or_init("scheduler", lambda: NexusTaskScheduler(self.run))
 
     @property
     def memory_kernel(self):
-        from core.neural.memory_kernel import MemoryKernel
+        from neural.memory_kernel import MemoryKernel
         return self.kernel._get_or_init("memory_kernel", lambda: MemoryKernel(self.root))
 
     @property
     def failure_memory(self):
-        from core.autonomy.failure_memory import FailureMemory
+        from sandbox.failure_memory import FailureMemory
         return self.kernel._get_or_init("failure_memory", lambda: FailureMemory(self.root))
 
     @property
     def repo_map_builder(self):
-        from core.code_intelligence.repo_map import RepoMapBuilder
+        from code_intel.repo_map import RepoMapBuilder
         return self.kernel._get_or_init("repo_map_builder", lambda: RepoMapBuilder(self.root))
 
     @property
     def memory_graph(self):
-        from core.cognition.memory_graph import AdaptiveMemoryGraph
+        from cognition.memory_graph import AdaptiveMemoryGraph
         return self.kernel._get_or_init("adaptive_memory_graph", lambda: AdaptiveMemoryGraph(self.root))
 
     @property
     def context_engine(self):
-        from core.cognition.context_engine import ZeroTokenContextEngine
+        from cognition.context_engine import ZeroTokenContextEngine
         return self.kernel._get_or_init("zero_token_context", lambda: ZeroTokenContextEngine(self.root))
 
     @property
     def self_improvement(self):
-        from core.cognition.self_improvement import SelfImprovementEngine
+        from cognition.self_improvement import SelfImprovementEngine
         return self.kernel._get_or_init("self_improvement", lambda: SelfImprovementEngine(self.root))
 
 
@@ -302,14 +308,38 @@ class NexusLoop:
         except Exception:
             return "[WORKSPACE]: Sensing offline."
 
-    def _build_system_prompt(self) -> str:
-        from core.prompts import NexusPromptEngine
+    def _build_system_prompt(self, task_hint: str = "") -> str:
+        from prompts import NexusPromptEngine
         active_provider = getattr(getattr(self.kernel.moe.base_router, "provider", None), "provider_name", "")
         if active_provider in {"lm_studio", "ollama", "llama_cpp"}:
             return NexusPromptEngine.build_local_prompt()
 
+        # Route intent dynamically if task_hint is provided
+        intent_hints = None
+        intent = "chat"
+        complexity = "simple"
+        needs_tools = False
+        if task_hint:
+            try:
+                from cognition.routing import IntentRouter
+                intent_res = IntentRouter(self.brain.base_router).classify(task_hint)
+                if intent_res:
+                    intent_hints = intent_res.tool_hints
+                    intent = intent_res.intent
+                    complexity = intent_res.complexity
+                    needs_tools = intent_res.needs_tools
+            except Exception:
+                pass
+
         context_map = self.discoverer.get_context_map()
-        system = NexusPromptEngine.build_super_prompt(self.root, context_map)
+        system = NexusPromptEngine.build_super_prompt(
+            self.root,
+            context_map,
+            intent_hints=intent_hints,
+            intent=intent,
+            complexity=complexity,
+            needs_tools=needs_tools
+        )
         if "NEXUS" not in system:
             system = f"# NEXUS IDENTITY: Local-first autonomous assistant.\n{system}"
         try:
@@ -487,6 +517,21 @@ class NexusLoop:
         """
         Executes a batch of tool calls with optimized parallel/serial split.
         """
+        if getattr(self, "in_planning_phase", False):
+            # Block any non-read-only tool calls during planning phase
+            write_calls = [
+                tc for tc in tool_calls
+                if not (self.tool_registry.get(tc.name) and self.tool_registry.get(tc.name).is_read_only(tc.params))
+            ]
+            if write_calls:
+                blocked_names = ", ".join(tc.name for tc in write_calls)
+                self.logger.info(f"🛡️ [PLAN_ACT_SEPARATION]: Blocked write tool calls: {blocked_names} during planning phase.")
+                return [
+                    f"[PLANNING_PHASE_RESTRICTION]: Write/edit tool calls ({blocked_names}) are blocked during the planning phase. "
+                    "First, outline your detailed implementation plan. You may use read-only tools (like glob, grep, view_file) to research. "
+                    "The writing phase will activate in the next turn."
+                ]
+
         for tc in tool_calls:
             # Yield structured marker for the Shell UI
             # Using a custom generator-friendly way to pass this back to stream_run
@@ -499,6 +544,44 @@ class NexusLoop:
             if self.tool_registry.get(tc.name) and self.tool_registry.get(tc.name).is_read_only(tc.params)
         ]
         write_tools = [tc for tc in tool_calls if tc not in read_tools]
+
+        # Partition write tools into parallel-safe writes and sequential writes.
+        # A write tool is parallel-safe if the tool is concurrency-safe and does not target overlapping paths.
+        parallel_writes = []
+        sequential_writes = []
+        
+        write_paths = {}
+        for tc in write_tools:
+            tool = self.tool_registry.get(tc.name)
+            if not tool:
+                sequential_writes.append(tc)
+                continue
+                
+            if not tool.is_concurrency_safe(tc.params):
+                sequential_writes.append(tc)
+                continue
+                
+            # Check for path parameter to detect conflicts
+            path_param = tc.params.get("path") or tc.params.get("file") or tc.params.get("filepath") or tc.params.get("uri")
+            if path_param and isinstance(path_param, str):
+                try:
+                    if hasattr(tool, "_resolve_path"):
+                        full_path = os.path.abspath(tool._resolve_path(path_param))
+                    else:
+                        full_path = os.path.abspath(path_param)
+                    write_paths.setdefault(full_path, []).append(tc)
+                except Exception:
+                    write_paths.setdefault(path_param, []).append(tc)
+            else:
+                # No path parameter and is concurrency-safe -> can be run in parallel!
+                parallel_writes.append(tc)
+                
+        for path, calls in write_paths.items():
+            if len(calls) == 1:
+                parallel_writes.append(calls[0])
+            else:
+                # Multiple calls to the same path must run sequentially
+                sequential_writes.extend(calls)
 
         observations = []
 
@@ -515,9 +598,22 @@ class NexusLoop:
                         obs = self._handle_tool_failure(tc, str(e))
                         observations.append(obs)
 
-        # 2. Sequential Write Execution
-        if write_tools:
-            for tc in write_tools:
+        # 2. Parallel Safe Write Execution
+        if parallel_writes:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(parallel_writes), 8)) as executor:
+                futures = {executor.submit(self._run_tool, tc): tc for tc in parallel_writes}
+                for future in concurrent.futures.as_completed(futures):
+                    tc = futures[future]
+                    try:
+                        result = future.result()
+                        observations.append(f"[{tc.name}]: {result}")
+                    except Exception as e:
+                        obs = self._handle_tool_failure(tc, str(e))
+                        observations.append(obs)
+
+        # 3. Sequential Write Execution
+        if sequential_writes:
+            for tc in sequential_writes:
                 try:
                     result = self._run_tool(tc)
                     observations.append(f"[{tc.name}]: {result}")
@@ -561,6 +657,9 @@ class NexusLoop:
         action = call.name
         p = call.params
         
+        # Log starting status
+        evt_id = self._log_work_event(action, p, "running")
+        
         try:
             # phase 0: World Simulation (Imagination Layer)
             if action in ("file_edit", "bash", "git", "nexus_evolve"):
@@ -573,41 +672,359 @@ class NexusLoop:
             if not self.operator_bypass_mode:
                 audit_res = self.laws.audit(action, p)
                 if not audit_res["granted"]:
+                    self._log_work_event(action, p, "error", evt_id, output=f"[LAW_BLOCKED]: {audit_res['reason']}")
                     return f"[LAW_BLOCKED]: {audit_res['reason']} (Law: {audit_res['law_name']})"
                 
                 perm_result = self.permissions.check(action, str(p))
                 if not perm_result.granted:
+                    self._log_work_event(action, p, "error", evt_id, output=f"[PERMISSION_DENIED]: {perm_result.reason}")
                     return f"[PERMISSION_DENIED]: {perm_result.reason}"
             
             # Delegate to ToolRegistry
-            return self.tool_registry.execute(action, use_cache=True, compress=True, **p)
+            res = self.tool_registry.execute(action, use_cache=True, compress=True, **p)
+            
+            # Log success status
+            self._log_work_event(action, p, "done", evt_id, output=str(res))
+            return res
 
         except Exception as e:
+            # Log failure status
+            self._log_work_event(action, p, "error", evt_id, output=str(e))
             return f"[ERROR]: {str(e)}"
 
     def _compact_memory(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
         if len(messages) <= self.COMPACT_THRESHOLD:
             return messages
             
-        system_msgs = [m for m in messages if m.get("role") == "system"]
-        non_system = [m for m in messages if m.get("role") != "system"]
+        # Let's identify the system prompt (first system message)
+        system_prompt = None
+        start_idx = 0
+        if messages and messages[0].get("role") == "system":
+            system_prompt = messages[0]
+            start_idx = 1
 
-        # Keep the last 8 interactions instead of 4 for better context continuity
-        kept = non_system[-8:]
+        # The rest is history
+        history = messages[start_idx:]
+        keep_count = getattr(self, "COMPACT_KEEP", 4)
+
+        # We scan history from the end to find the index where the number of non-system messages is `keep_count`.
+        non_sys_seen = 0
+        cutoff_idx = 0
+        for i in range(len(history) - 1, -1, -1):
+            if history[i].get("role") != "system":
+                non_sys_seen += 1
+                if non_sys_seen == keep_count:
+                    cutoff_idx = i
+                    break
         
-        # 🌌 [SOVEREIGN_CONTEXT]: Keep the main system prompt AND the latest RAG/Observation if present
-        essential_system = system_msgs[:1] # Main prompt
-        # Find the most recent grounding/observation
-        for m in reversed(system_msgs):
-            if "[AUTO-RECALL]" in m.get("content", "") or "[AUTO_OBSERVATION]" in m.get("content", ""):
-                essential_system.append(m)
-                break # Only need the most recent one
-        
+        # So the kept history is history[cutoff_idx:]
+        # The history to compact is history[:cutoff_idx]
+        to_compact = history[:cutoff_idx]
+        kept = history[cutoff_idx:]
+
+        # Create the summary from to_compact
+        summary_content = self._summarize_compacted_messages(to_compact, kept_count=len(kept))
         summary_msg = {
             "role": "system",
-            "content": f"[CONTEXT_COMPACTED]: Previous {len(non_system) - 8} interactions summarized to preserve context window."
+            "content": summary_content
         }
-        return essential_system + [summary_msg] + kept
+
+        # Keep the main system prompt
+        result = [system_prompt] if system_prompt else []
+        
+        # Also, check if there's any active AUTO-RECALL or AUTO_OBSERVATION in the compacted messages that we might want to keep at the root level
+        for m in reversed(to_compact):
+            if m.get("role") == "system" and ("[AUTO-RECALL]" in m.get("content", "") or "[AUTO_OBSERVATION]" in m.get("content", "")):
+                result.append(m)
+                break
+                
+        result.append(summary_msg)
+        result.extend(kept)
+        return result
+
+    def _summarize_compacted_messages(self, messages: List[Dict[str, str]], kept_count: int = 8) -> str:
+        """Summarize history into a compact context block for the model."""
+        goals = []
+        progress = []
+        observations = []
+        
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            if role == "user":
+                goals.append(content)
+            elif role == "assistant":
+                progress.append(content)
+            elif role in ("system", "tool"):
+                observations.append(content)
+                
+        lines = [
+            f"[CONTEXT_COMPACTED]: Previous {len(messages)} interactions summarized to preserve context window.",
+            "User goals:",
+        ]
+        for g in goals:
+            lines.append(f"- {g}")
+        lines.append("Assistant progress/actions:")
+        for p in progress:
+            lines.append(f"- {p}")
+        if observations:
+            lines.append("System/Tool observations:")
+            for o in observations:
+                lines.append(f"- {o}")
+                
+        return "\n".join(lines)
+
+    @property
+    def persistence(self):
+        from context.persistence import NexusFilePersistence
+        return NexusFilePersistence(self.root)
+
+    def _checkpoint_loop_session(self, task: str, messages: list, turn: int, status: str, last_response: str) -> None:
+        """Saves session checkpoint to disk with relevant metadata."""
+        metadata = {
+            "turn": turn,
+            "status": status,
+            "task": task,
+            "last_response": last_response
+        }
+        self.persistence.checkpoint_session(self.session_id, messages, metadata)
+
+    def _should_delegate_to_hive(self, task: str, intent: Any) -> bool:
+        """Determines if a task should be delegated to the Hive based on complexity/intent."""
+        if getattr(intent, "intent", "") == "chat" and getattr(intent, "complexity", "") == "simple":
+            return False
+        if len(task.split()) > 15 or getattr(intent, "complexity", "") in ("medium", "high", "complex"):
+            return True
+        return False
+
+    def _hive_roles_for_task(self, task: str, hint_roles: str = "") -> List[str]:
+        """Returns the list of Hive roles required for the task."""
+        roles = ["ARCHITECT"]
+        
+        task_lower = task.lower()
+        if "gui" in task_lower or "ux" in task_lower:
+            roles.append("GUI_UX_SPECIALIST")
+        if "provider" in task_lower or "routing" in task_lower:
+            roles.append("PROVIDER_ROUTING_SPECIALIST")
+        if "compaction" in task_lower or "context" in task_lower:
+            roles.append("MEMORY_CONTEXT_ARCHITECT")
+        if "benchmark" in task_lower or "performance" in task_lower:
+            roles.append("PERFORMANCE_ENGINEER")
+        if "roadmap" in task_lower or "strategy" in task_lower:
+            roles.append("PRODUCT_STRATEGIST")
+            
+        if hint_roles:
+            for word in hint_roles.split():
+                if word == "ENGINEER" and "ENGINEER" not in roles:
+                    roles.append("ENGINEER")
+                elif word == "AUDITOR" and "AUDITOR" not in roles:
+                    roles.append("AUDITOR")
+                elif word == "RESEARCHER" and "RESEARCHER" not in roles:
+                    roles.append("RESEARCHER")
+                    
+        if "fix" in task_lower or "code" in task_lower:
+            if "ENGINEER" not in roles:
+                roles.append("ENGINEER")
+        if "test" in task_lower or "verify" in task_lower:
+            if "QA_EXPERT" not in roles:
+                roles.append("QA_EXPERT")
+        if "audit" in task_lower:
+            if "AUDITOR" not in roles:
+                roles.append("AUDITOR")
+        if "research" in task_lower:
+            if "RESEARCHER" not in roles:
+                roles.append("RESEARCHER")
+                
+        roles.append("LIBRARIAN")
+        return roles
+
+    def _log_work_event(self, action_name: str, params: dict, status: str = "running", event_id: str = None, output: str = None) -> str:
+        """Logs a real work event to workspace/work_events/{session_id}.jsonl."""
+        try:
+            import json
+            import uuid
+            import time
+            
+            session_id = self.session_id or "default"
+            events_dir = os.path.join(self.root, "workspace", "work_events")
+            os.makedirs(events_dir, exist_ok=True)
+            events_file = os.path.join(events_dir, f"{session_id}.jsonl")
+            
+            # 1. Determine tool kind/type
+            kind = "tool"
+            action = action_name
+            target = ""
+            
+            lowered_action = action_name.lower()
+            if any(token in lowered_action for token in ("search", "ddg", "duck", "web", "grep", "glob", "find")):
+                kind = "search"
+                action = "Searching"
+                target = params.get("query") or params.get("q") or params.get("pattern") or params.get("path") or ""
+            elif lowered_action in ("file_edit", "write_to_file", "replace_file_content", "multi_replace_file_content", "view_file", "read_file", "create_file", "delete_file", "file_ops"):
+                kind = "file"
+                target = params.get("TargetFile") or params.get("AbsolutePath") or params.get("path") or ""
+                if lowered_action in ("view_file", "read_file"):
+                    action = "Read file"
+                elif lowered_action in ("write_to_file", "create_file"):
+                    action = "Create file"
+                elif lowered_action == "delete_file":
+                    action = "Delete file"
+                else:
+                    action = "Edit file"
+            elif lowered_action in ("bash", "run_command", "process", "shell", "terminal", "exec"):
+                kind = "command"
+                action = "Run command"
+                target = params.get("CommandLine") or params.get("cmd") or params.get("command") or ""
+            elif "rag" in lowered_action or "atlas" in lowered_action or "context" in lowered_action:
+                kind = "rag"
+                action = "Read context"
+                target = params.get("query") or ""
+            elif "mcp" in lowered_action:
+                kind = "mcp"
+                action = "Use MCP"
+                target = params.get("tool") or params.get("name") or params.get("server") or lowered_action
+            elif "browser" in lowered_action:
+                kind = "browser"
+                action = "Browse"
+                target = params.get("url") or params.get("query") or params.get("target") or lowered_action
+            elif "plugin" in lowered_action:
+                kind = "plugin"
+                action = "Use plugin"
+                target = params.get("name") or params.get("plugin") or lowered_action
+            elif "skill" in lowered_action:
+                kind = "skill"
+                action = "Use skill"
+                target = params.get("name") or params.get("skill") or lowered_action
+            elif "provider" in lowered_action or "model" in lowered_action:
+                kind = "provider"
+                action = "Check provider"
+                target = params.get("provider") or params.get("model") or lowered_action
+            else:
+                if params and isinstance(params, dict):
+                    target = str(list(params.values())[0]) if params.values() else ""
+                elif params:
+                    target = str(params)
+                else:
+                    target = ""
+                
+            # 2. Determine active phase by reading existing todo events from the file
+            todo_events = []
+            if os.path.exists(events_file):
+                with open(events_file, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        try:
+                            evt = json.loads(line)
+                            if evt.get("kind") == "todo" and evt.get("phase_index") is not None:
+                                todo_events.append(evt)
+                        except:
+                            continue
+            
+            # Sort todo events by phase_index
+            todo_events.sort(key=lambda x: int(x.get("phase_index") or 0))
+            
+            phase_index = None
+            phase_title = ""
+            if todo_events:
+                research_idx = 1
+                impl_idx = 2
+                verify_idx = len(todo_events)
+                
+                for i, e in enumerate(todo_events, 1):
+                    title_lower = str(e.get("title") or "").lower()
+                    if any(w in title_lower for w in ["research", "spec", "analyze", "design", "plan"]):
+                        research_idx = i
+                    if any(w in title_lower for w in ["implement", "code", "write", "create", "build", "develop", "patch"]):
+                        impl_idx = i
+                    if any(w in title_lower for w in ["verify", "test", "check", "run", "compile"]):
+                        verify_idx = i
+                        
+                is_explicit = False
+                target_lower = str(target).lower()
+                basename = os.path.basename(target_lower)
+                for e in todo_events:
+                    for item in (e.get("items") or []):
+                        item_lower = str(item).lower()
+                        if target_lower in item_lower or (basename and basename in item_lower):
+                            is_explicit = True
+                            break
+                    if is_explicit:
+                        break
+
+                if target_lower.endswith("todo.md") or action_name == "todo" or kind == "todo":
+                    is_explicit = True
+
+                if is_explicit:
+                    if kind in ["search", "rag"]:
+                        phase_index = research_idx
+                    elif kind == "file":
+                        phase_index = impl_idx
+                    elif kind == "command":
+                        phase_index = verify_idx
+                    else:
+                        phase_index = research_idx
+                else:
+                    phase_index = None
+                    
+                if phase_index is not None:
+                    if phase_index <= len(todo_events):
+                        phase_title = f"Phase {phase_index}: {todo_events[phase_index-1].get('title')}"
+                    else:
+                        phase_title = f"Phase {phase_index}: Work"
+            
+            # 3. Construct event
+            if not event_id:
+                event_id = f"evt_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+                
+            payload = {
+                "id": event_id,
+                "session_id": session_id,
+                "created_at": time.time(),
+                "kind": kind,
+                "type": kind,
+                "action": action,
+                "title": action,
+                "target": target,
+                "status": status,
+            }
+            if phase_index is not None:
+                payload["phase_index"] = phase_index
+                payload["phase"] = phase_title
+                
+            if output is not None:
+                payload["output"] = output
+                payload["result"] = output
+                if kind == "command":
+                    if status == "error":
+                        payload["stderr"] = output
+                    else:
+                        payload["stdout"] = output
+                
+            # If it is a file event, read the content preview
+            if kind == "file" and target:
+                try:
+                    abs_path = os.path.abspath(os.path.join(self.root, target))
+                    if os.path.exists(abs_path) and os.path.isfile(abs_path):
+                        payload["path"] = os.path.relpath(abs_path, self.root)
+                        with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
+                            payload["preview"] = f.read(20000)
+                except:
+                    pass
+                    
+            with open(events_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                
+            # Also update todo checkmarks if status is done
+            if status == "done" and phase_index is not None and kind not in ("todo", "planning_artifact") and payload.get("role") != "planning_artifact":
+                try:
+                    from gui.api import update_todo_file_and_states
+                    update_todo_file_and_states(session_id, payload, "")
+                except Exception as e:
+                    self.logger.warning(f"Could not update todo file from loop: {e}")
+                
+            return event_id
+        except Exception as e:
+            self.logger.error(f"Failed to log work event: {e}")
+            return None
 
     def _recent_memory_for_prompt(self) -> List[Dict[str, str]]:
         """Return a small, clean chat tail so stale smoke tests do not steer local models."""
@@ -693,30 +1110,29 @@ class NexusLoop:
             return False
         return False
 
-    def stream_run(self, task_desc: str, provider: Optional[str] = None, voice_mode: bool = False) -> Generator[str, None, None]:
+    def stream_run(self, task_desc: str, provider: Optional[str] = None, model: Optional[str] = None, voice_mode: bool = False) -> Generator[str, None, None]:
         self._voice_mode = voice_mode
-        # 🛡️ [v19.8 INSTANT_GREETING]: Bypass for simple greetings
-        clean_task = task_desc.lower().strip().replace(".", "").replace("!", "")
-        greetings = {
-            "hello": "Hello. NEXUS is ready.",
-            "hi": "Hi. NEXUS is ready.",
-            "who are you": "I am NEXUS, a local-first autonomous engineering agent platform with direct tool execution, memory, retrieval, and verification.",
-            "thanks": "You're welcome.",
-            "thank you": "You're welcome."
-        }
-        if clean_task in greetings:
-            yield greetings[clean_task]
-            return
-
-        yield "[NEXUS_BOOT]: Accessing Long-Term Memory (RAG)..."
+        self.in_planning_phase = False
+        if provider:
+            try:
+                self.brain.set_override(provider)
+                self.provider_override = provider
+            except Exception as e:
+                self.logger.warning(f"Failed to override brain provider to {provider}: {e}")
+        if model:
+            self.model = model
+            try:
+                active_provider = getattr(self.brain.base_router, "provider", None)
+                if active_provider is not None and hasattr(active_provider, "model"):
+                    active_provider.model = model
+            except Exception:
+                pass
         try:
             pre_grounding = self.rag.retrieve_as_text(task_desc, top_k=2)
         except Exception as e:
             self.logger.warning(f"RAG retrieval failed: {e}")
             pre_grounding = "No relevant matches found (System Constraint)."
-
-        yield "[NEXUS_BOOT]: Assembling Super-Prompt..."
-        system = self._build_system_prompt()
+        system = self._build_system_prompt(task_desc)
 
         messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
 
@@ -735,6 +1151,21 @@ class NexusLoop:
             "role": "system",
             "content": "The next user message is the current task. Answer it directly; do not continue or repeat older turns.",
         })
+        if self.active_agent:
+            messages.append({
+                "role": "system",
+                "content": f"[ACTIVE_AGENT]: {self.active_agent}. Use this configured agent/persona when interpreting and executing the current task.",
+            })
+        if self.active_goal:
+            messages.append({
+                "role": "system",
+                "content": f"[ACTIVE_GOAL]: {self.active_goal}. Keep this goal in mind across turns. If the user's latest request conflicts with it, follow the latest request and explain the conflict.",
+            })
+        if self.additional_dirs:
+            messages.append({
+                "role": "system",
+                "content": "[ADDITIONAL_WORKING_DIRECTORIES]:\n" + "\n".join(f"- {directory}" for directory in self.additional_dirs),
+            })
         messages.append({"role": "user", "content": task_desc})
 
         last_response = ""
@@ -747,21 +1178,15 @@ class NexusLoop:
                 return
 
             turn += 1
-            yield f"\n[THINKING: TURN {turn}]"
 
             # 👁️ [WORKSPACE_SENSING_DELTA]
             if turn > 1:
                 delta = self._get_workspace_delta()
                 if "Stable" not in delta:
                     messages.append({"role": "system", "content": f"[AUTO_OBSERVATION]: {delta}"})
-                    yield f"\n\033[94m{delta[:100]}...\033[0m"
 
-            # 🌐 [HIVE_TELEMETRY_SYNC]
-            new_hive_signals = self._observe_hive()
-            for signal in new_hive_signals:
-                yield f"\n\033[90m{signal}\033[0m"
-            
-            # Periodically flush old signals from buffer to keep it fresh
+            # Hive blackboard stays internal — do not leak ENGINEER/AUDITOR RESULT lines into chat.
+            self._observe_hive()
             if len(self.hive_buffer) > 50:
                 self.hive_buffer = self.hive_buffer[-20:]
 
@@ -772,8 +1197,26 @@ class NexusLoop:
                 intent_res = intent_router.classify(task_desc)
                 
                 # Apply strategy from neural engine if possible
-                from core.cognition.intent_engine import NexusIntent
-                strategy = intent_router.neural_engine.get_strategy(NexusIntent(intent_res.intent) if intent_res.intent in [i.value for i in NexusIntent] else NexusIntent.MISSION)
+                from cognition.intent_engine import NexusIntent
+                intent_val = intent_res.intent
+                legacy_to_nexus = {
+                    "code": NexusIntent.MISSION,
+                    "file_ops": NexusIntent.UTILITY,
+                    "research": NexusIntent.UTILITY,
+                    "debug": NexusIntent.DIAGNOSTIC,
+                    "git": NexusIntent.MISSION,
+                    "test": NexusIntent.MISSION,
+                    "hive": NexusIntent.MISSION,
+                    "strategy": NexusIntent.COGNITION,
+                    "chat": NexusIntent.SOCIAL,
+                }
+                if intent_val in [i.value for i in NexusIntent]:
+                    nexus_intent = NexusIntent(intent_val)
+                elif intent_val in legacy_to_nexus:
+                    nexus_intent = legacy_to_nexus[intent_val]
+                else:
+                    nexus_intent = intent_router.neural_engine.classify(task_desc)
+                strategy = intent_router.neural_engine.get_strategy(nexus_intent)
                 
                 self.MAX_TURNS = strategy.get("max_turns", 20)
                 self.force_reasoning = strategy.get("force_reasoning", False)
@@ -782,9 +1225,29 @@ class NexusLoop:
                 # Only pay the legacy architect/hive startup cost when the
                 # request actually needs complex tool orchestration.
                 should_plan = not voice_mode and (self.force_reasoning or (intent_res.needs_tools and self.task_complexity == "complex"))
+                if nexus_intent in {NexusIntent.SOCIAL, NexusIntent.COGNITION} and not intent_res.needs_tools:
+                    should_plan = False
                 if should_plan:
+                    self.in_planning_phase = True
                     plan = self.architect.plan(task_desc)
                     self.task_complexity = "complex" if len(plan) > 1 else self.task_complexity
+                    
+                    # Create and save todo.md plan
+                    todo_lines = ["## TODO List", "", f"Task: {task_desc}", ""]
+                    for idx, goal in enumerate(plan, 1):
+                        desc = goal.get("description") or goal.get("desc") or f"Sub-goal {idx}"
+                        todo_lines.append(f"- [ ] Phase {idx}: {desc}")
+                        todo_lines.append(f"  - [ ] Execute: {desc}")
+                        todo_lines.append(f"  - [ ] Verify execution")
+                    todo_content = "\n".join(todo_lines).strip() + "\n"
+                    todo_path = os.path.join(self.root, "workspace", "todo.md")
+                    os.makedirs(os.path.dirname(todo_path), exist_ok=True)
+                    try:
+                        with open(todo_path, "w", encoding="utf-8") as f:
+                            f.write(todo_content)
+                    except Exception as e:
+                        self.logger.warning(f"Could not create planning todo.md: {e}")
+
                     yield "\n[SYSTEM: COMPLEX MISSION DETECTED - ACTIVATING FULL-AUTO HIVE-CAST]"
                     yield "\n[THINKING: Designing optimal hive trajectory...]"
                     
@@ -800,8 +1263,13 @@ class NexusLoop:
                     # Reset triggers
                     self.force_reasoning = False 
                 else:
-                    # High-speed Zero-Thinking Mode
-                    pass
+                    # High-speed Zero-Thinking Mode: delete todo.md plan
+                    todo_path = os.path.join(self.root, "workspace", "todo.md")
+                    if os.path.exists(todo_path):
+                        try:
+                            os.remove(todo_path)
+                        except Exception:
+                            pass
 
             full_response = ""
 
@@ -827,7 +1295,34 @@ class NexusLoop:
                         break
                     messages.append({"role": "system", "content": "[SYSTEM]: Continue only if another concrete tool/action turn is required. Otherwise output TASK_COMPLETE."})
                 else:
+                    for tc in tool_calls:
+                        try:
+                            marker_params = json.dumps(tc.params, ensure_ascii=False)
+                        except Exception:
+                            marker_params = "{}"
+                        yield f"\n[TOOL_START:{tc.name}:{marker_params}]\n"
+
                     observations = self._execute_tools(tool_calls)
+
+                    for obs in observations:
+                        tool_name = "tool"
+                        result_text = obs
+                        match = re.match(r"^\[([^\]]+)\]:\s*(.*)$", obs, re.DOTALL)
+                        if match:
+                            tool_name = match.group(1)
+                            result_text = match.group(2)
+                        try:
+                            marker_result = json.dumps(
+                                {"output": result_text},
+                                ensure_ascii=False,
+                            )
+                        except Exception:
+                            marker_result = '{"output": ""}'
+                        yield f"\n[TOOL_RESULT:{tool_name}:{marker_result}]\n"
+
+                    for tc in tool_calls:
+                        yield f"\n[TOOL_END:{tc.name}]\n"
+
                     messages.append({"role": "assistant", "content": full_response})
                     messages.append({"role": "system", "content": "\n".join(observations)})
                     messages = self._compact_memory(messages)
@@ -845,19 +1340,18 @@ class NexusLoop:
                             ),
                         })
 
+                self.in_planning_phase = False
+
                 if "TASK_COMPLETE" in full_response:
                     break
 
             except Exception as e:
+                self.in_planning_phase = False
                 yield f"\n[ERROR]: {e}"
                 # [SELF_HEAL]: Attempt to recover from kernel panics
                 self.logger.critical(f"Loop failure: {e}")
                 break
             
-            # --- HIVE STATUS PULSE ---
-            if self.hive_buffer:
-                yield f"\n[HIVE: {len(self.hive_buffer)} nodes updated]"
-
         self.memory.append({"role": "user", "content": task_desc})
         self.memory.append({"role": "assistant", "content": last_response})
 

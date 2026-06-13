@@ -1,0 +1,4 @@
+name: architect
+description: "NEXUS Evolution Council — Architect. Designs scalable, modular architecture."
+inherits: base
+tags: [council, architect, design]

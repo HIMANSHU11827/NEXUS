@@ -34,7 +34,7 @@ class ToolResult:
 
     def compressed(self, tool_name: str = "default") -> str:
         """Return token-optimized compressed output."""
-        from tools.nexus_tools.output_optimizer import OutputOptimizer
+        from tools.nexus_tools.output_optimizer_tool import OutputOptimizer
 
         if self.error:
             return f"[ERR] {self.error[:200]}"

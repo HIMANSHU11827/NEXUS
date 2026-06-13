@@ -6,7 +6,7 @@ import unittest
 
 class TestNexusMCPServer(unittest.TestCase):
     def test_initialize_and_tool_list(self):
-        from integrations.mcp_server import handle_request
+        from mcp.server import handle_request
 
         init = handle_request({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
         self.assertEqual(init["result"]["serverInfo"]["name"], "nexus-code-graph")
@@ -17,7 +17,7 @@ class TestNexusMCPServer(unittest.TestCase):
         self.assertIn("nexus_code_graph_symbol_context", names)
 
     def test_code_graph_tool_call_over_mcp(self):
-        from integrations.mcp_server import handle_request
+        from mcp.server import handle_request
 
         with tempfile.TemporaryDirectory() as tmp:
             os.makedirs(os.path.join(tmp, "pkg"), exist_ok=True)
@@ -58,3 +58,4 @@ class TestNexusMCPServer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
