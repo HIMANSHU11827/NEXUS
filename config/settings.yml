@@ -1,20 +1,21 @@
 # NEXUS AI System Settings
-nexus:
-  version: 4.0.0
-  mode: development
-  log_level: INFO
-  max_turns: 20
-  workspace: ./workspace
-  memory:
-    type: hybrid
-    vector_store: chromadb
-    max_history: 1000
-  evolution:
-    auto_forge: true
-    auto_improve: true
-    gap_detection: true
-    max_retries: 3
-  safety:
-    prover_strictness: 0.8
-    sandbox_enabled: true
-    permission_mode: strict
+version: "1.0.0"
+mode: development
+log_level: INFO
+max_turns: 20
+workspace: ./workspace
+default_provider: cloud
+provider_name: openai
+memory:
+  type: hybrid
+  vector_store: chromadb
+  max_history: 1000
+evolution:
+  auto_forge: true
+  auto_improve: true
+  gap_detection: true
+  max_retries: 3
+safety:
+  prover_strictness: 0.8
+  sandbox_enabled: true
+  permission_mode: strict

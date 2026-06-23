@@ -22,14 +22,20 @@ class NexusMoERouter:
         provider_name = os.environ.get("NEXUS_PROVIDER", "openai")
         try:
             provider = self.factory.get_provider_by_name("cloud", provider_name)
-            if provider and hasattr(provider, "stream_chat"):
-                for chunk in provider.stream_chat(messages):
+            if provider:
+                if hasattr(provider, "stream_chat"):
+                    for chunk in provider.stream_chat(messages):
+                        yield chunk
+                    return
+                # Try stream_generate (the standard NEXUS provider method)
+                for chunk in provider.stream_generate(messages=messages):
                     yield chunk
-            else:
-                yield 'I am NEXUS AI, a local-first autonomous engineering agent. I can help with code, system tasks, research, and automation. What would you like to do?\n\nTASK_COMPLETE'
+                return
         except Exception as e:
             logger.error(f"Model call failed: {e}")
-            yield f"I'm running in minimal mode. The provider '{provider_name}' could not be loaded ({e}). Please configure a provider key in your environment."
+            yield f"[Provider '{provider_name}' unavailable: {e}]\n\nTASK_COMPLETE"
+            return
+        yield "I am NEXUS AI, a local-first autonomous engineering agent. I can help with code, system tasks, research, and automation. What would you like to do?\n\nTASK_COMPLETE"
 
     def chat(self, messages: List[Dict[str, str]], **kwargs) -> str:
         """Non-streaming chat."""

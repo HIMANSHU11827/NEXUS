@@ -1,7 +1,11 @@
 # NEXUS AI Provider Configuration
-version: "1.0.0"
-default_provider: openai
+version: "1.1.0"
+default_provider: deepseek
 providers:
+  deepseek:
+    model: deepseek-v4-flash
+    temperature: 0.7
+    max_tokens: 8192
   openai:
     model: gpt-4
     temperature: 0.7
@@ -15,6 +19,6 @@ providers:
     temperature: 0.7
     max_tokens: 4096
 fallback_chain:
+  - deepseek
   - openai
   - anthropic
-  - google

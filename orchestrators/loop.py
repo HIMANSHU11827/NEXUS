@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+import inspect
 from enum import Enum
 from typing import (
     Any,
@@ -78,7 +79,7 @@ class HookRegistry:
     async def trigger(self, event_name: str, *args, **kwargs):
         for cb in self._callbacks.get(event_name, []):
             try:
-                if asyncio.iscoroutinefunction(cb):
+                if inspect.iscoroutinefunction(cb):
                     await cb(*args, **kwargs)
                 else:
                     await asyncio.to_thread(cb, *args, **kwargs)

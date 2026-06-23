@@ -22,7 +22,7 @@ class DeepSeekProvider(NexusBaseProvider):
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs}
         try:
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=30)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=60)
             if response.status_code == 200:
                 data = response.json()
                 return data["choices"][0]["message"]["content"]
@@ -36,7 +36,7 @@ class DeepSeekProvider(NexusBaseProvider):
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs, "stream": True}
         try:
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=30)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=60)
             if response.status_code == 200:
                 for line in response.iter_lines():
                     if line:
@@ -49,7 +49,8 @@ class DeepSeekProvider(NexusBaseProvider):
                                 content = chunk["choices"][0].get("delta", {}).get("content", "")
                                 if content: yield content
                             except json.JSONDecodeError: continue
+                yield "\n\nTASK_COMPLETE"
             else:
-                yield f"Error: {response.status_code}. {response.text}"
+                yield f"Error: {response.status_code}. {response.text}\n\nTASK_COMPLETE"
         except Exception as e:
-            yield f"Error in DeepSeek stream: {str(e)}"
+            yield f"Error in DeepSeek stream: {str(e)}\n\nTASK_COMPLETE"
