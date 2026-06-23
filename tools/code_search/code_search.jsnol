@@ -1,0 +1,14 @@
+{
+  "name": "code_search",
+  "version": "1.0.0",
+  "description": "Search code with glob patterns and regex, analyze code structure",
+  "entry": "scripts/code_search.py",
+  "class": "CodeSearchTool",
+  "params": {
+    "pattern": {"type": "string", "description": "Search pattern (regex or glob)", "required": true},
+    "path": {"type": "string", "description": "Root path to search", "default": "."},
+    "include": {"type": "string", "description": "File pattern to include (e.g. *.py)"},
+    "mode": {"type": "string", "description": "glob|grep|struct", "default": "grep"}
+  },
+  "category": "development"
+}

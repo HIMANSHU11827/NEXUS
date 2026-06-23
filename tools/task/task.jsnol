@@ -1,0 +1,15 @@
+{
+  "name": "task",
+  "version": "1.0.0",
+  "description": "Create, track, manage, and complete tasks with dependencies",
+  "entry": "scripts/task.py",
+  "class": "TaskTool",
+  "params": {
+    "action": {"type": "string", "description": "create|list|update|delete|status", "required": true},
+    "id": {"type": "string", "description": "Task ID"},
+    "title": {"type": "string", "description": "Task title"},
+    "description": {"type": "string", "description": "Task description"},
+    "status": {"type": "string", "description": "pending|in_progress|completed|blocked"}
+  },
+  "category": "management"
+}

@@ -1,0 +1,1 @@
+{"name": "signal", "version": "1.0", "description": "Signal CLI platform adapter", "enabled": false, "required_env": ["SIGNAL_NUMBER"]}

@@ -1,0 +1,1 @@
+{"name": "memory", "version": "1.0", "description": "NEXUS AI memory storage system", "types": ["episodic", "working", "semantic", "procedural"]}

@@ -1,0 +1,1 @@
+{"name": "telegram", "version": "1.0", "description": "Telegram bot platform adapter", "enabled": false, "required_env": ["TELEGRAM_TOKEN"]}

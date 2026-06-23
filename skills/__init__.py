@@ -1,149 +1,122 @@
-"""Skill metadata and prompt management for reusable NEXUS workflows."""
-
 import os
-import re
 import json
-import yaml
+import re
 import logging
-import shutil
+from typing import List, Dict, Any, Optional
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("NEXUS_SKILLS")
 
-# Skill parsing constraints.
-MAX_NAME_LENGTH = 64
-MAX_DESC_LENGTH = 1024
-EXCLUDED_DIRS = {".git", "__pycache__", "workspace"}
 
 class NexusSkillMaster:
-    """
-    Skill manager. Handles metadata, categories, and safety.
-    """
+    _instance = None
+    _SINGLETON = None
 
-    def __init__(self, root_dir: str):
-        self.root = os.path.abspath(root_dir)
-        self.skill_dir = os.path.join(self.root, "skill")
-        os.makedirs(self.skill_dir, exist_ok=True)
-        self.active_skill_prompt: Optional[str] = None
+    def __new__(cls, root: Optional[str] = None):
+        if cls._SINGLETON is None:
+            cls._SINGLETON = super().__new__(cls)
+        return cls._SINGLETON
 
-    def _parse_skill(self, file_path: str) -> Dict[str, Any]:
-        """Parse SKILL.md with YAML frontmatter."""
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
+    def __init__(self, root: Optional[str] = None):
+        if hasattr(self, "_initialized"):
+            return
+        self._initialized = True
+        self._root = root or os.getcwd()
+        skills_dir = os.path.join(self._root, "skills")
+        os.makedirs(skills_dir, exist_ok=True)
+        self._skills_dir = skills_dir
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._load_all()
 
-            if content.startswith("---"):
-                parts = content.split("---", 2)
-                if len(parts) >= 3:
-                    metadata = yaml.safe_load(parts[1])
-                    body = parts[2].strip()
-                    return {
-                        "name": metadata.get("name", ""),
-                        "description": metadata.get("description", ""),
-                        "content": body,
-                        "metadata": metadata
-                    }
-            
-            # Fallback for simple markdown
-            lines = content.split("\n")
-            name = lines[0].strip("# ").strip()
-            desc = lines[1].strip() if len(lines) > 1 else ""
-            return {"name": name, "description": desc, "content": content, "metadata": {}}
-        except Exception as e:
-            logger.error(f"Failed to parse skill {file_path}: {e}")
-            return {}
+    @classmethod
+    def _reset_instance(cls):
+        cls._SINGLETON = None
 
-    def list_skills(self, category: Optional[str] = None) -> List[Dict[str, Any]]:
-        """List skills with metadata (Tier 1 disclosure)."""
-        skills = []
-        scan_path = self.skill_dir
-        if category:
-            scan_path = os.path.join(self.skill_dir, category)
+    def _load_all(self):
+        self._cache.clear()
+        skills_dir = Path(self._skills_dir)
+        if not skills_dir.exists():
+            return
+        for fpath in sorted(skills_dir.iterdir()):
+            if fpath.suffix == ".md":
+                try:
+                    content = fpath.read_text(encoding="utf-8")
+                    meta = self._parse_frontmatter(content)
+                    if meta:
+                        meta["filepath"] = str(fpath)
+                        self._cache[meta.get("id", fpath.stem)] = meta
+                except Exception:
+                    pass
 
-        if not os.path.exists(scan_path):
-            return []
+    def _parse_frontmatter(self, content: str) -> Optional[Dict[str, Any]]:
+        m = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", content, re.DOTALL)
+        if not m:
+            return None
+        front = m.group(1)
+        body = m.group(2).strip()
+        meta = {"prompt": body}
+        for line in front.split("\n"):
+            if ":" in line:
+                key, _, val = line.partition(":")
+                meta[key.strip()] = val.strip()
+        return meta
 
-        for root, dirs, files in os.walk(scan_path):
-            dirs[:] = [d for d in dirs if d not in EXCLUDED_DIRS]
-            for f in files:
-                if f == "SKILL.md" or (root == self.skill_dir and f.endswith(".md")):
-                    full_path = os.path.join(root, f)
-                    data = self._parse_skill(full_path)
-                    if data:
-                        rel_path = os.path.relpath(root, self.skill_dir)
-                        data["category"] = rel_path if rel_path != "." else None
-                        data["id"] = os.path.basename(root) if f == "SKILL.md" else f.replace(".md", "")
-                        skills.append(data)
-        return skills
+    def list_skills(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "id": v.get("id", k),
+                "name": v.get("name", k),
+                "description": v.get("description", ""),
+                "category": v.get("category", ""),
+                "prompt": v.get("prompt", ""),
+                "filepath": v.get("filepath", ""),
+            }
+            for k, v in self._cache.items()
+        ]
+
+    def get_active_prompt(self) -> str:
+        parts = []
+        for skill in self._cache.values():
+            prompt = skill.get("prompt", "")
+            if prompt:
+                parts.append(prompt)
+        return "\n\n".join(parts)
 
     def load_skill(self, name: str) -> bool:
-        """Loads a skill's instructions into the active brain state."""
-        # Try direct file, then try folder search
-        path = os.path.join(self.skill_dir, f"{name}.md")
-        if not os.path.exists(path):
-            # Try recursive search for SKILL.md in folder 'name'
-            for root, dirs, files in os.walk(self.skill_dir):
-                if os.path.basename(root) == name and "SKILL.md" in files:
-                    path = os.path.join(root, "SKILL.md")
-                    break
+        self._load_all()
+        return name in self._cache
 
-        if os.path.exists(path):
-            data = self._parse_skill(path)
-            self.active_skill_prompt = data.get("content", "")
-            logger.info(f"[SKILL_KERNEL]: Expert brain '{name}' activated.")
-            return True
+    def craft_skill(self, name: str, prompt: str) -> Dict[str, Any]:
+        safe_name = name.lower().replace(" ", "_").replace("-", "_")
+        fpath = Path(self._skills_dir) / f"{safe_name}.md"
+        content = f"""---
+id: {safe_name}
+name: {name}
+description: Auto-crafted skill
+category: tool
+---
+{prompt}
+"""
+        fpath.write_text(content, encoding="utf-8")
+        self._load_all()
+        return {"id": safe_name, "name": name, "filepath": str(fpath), "created": True}
+
+    def deep_scan(self) -> str:
+        self._load_all()
+        return json.dumps(self.list_skills(), indent=2)
+
+    def delete_skill(self, name: str) -> bool:
+        for skill_id, meta in list(self._cache.items()):
+            if skill_id == name or meta.get("name") == name:
+                fpath = meta.get("filepath")
+                if fpath and os.path.exists(fpath):
+                    os.remove(fpath)
+                    del self._cache[skill_id]
+                    return True
         return False
 
-    def craft_skill(self, name: str, prompt: str, category: Optional[str] = None) -> str:
-        """Writes a new procedural skill to the registry."""
-        target_dir = self.skill_dir
-        if category:
-            target_dir = os.path.join(self.skill_dir, category)
-        
-        skill_path = os.path.join(target_dir, name)
-        os.makedirs(skill_path, exist_ok=True)
-        
-        file_path = os.path.join(skill_path, "SKILL.md")
-        
-        frontmatter = {
-            "name": name,
-            "description": f"Autonomously synthesized skill for {name}",
-            "version": "1.0.0",
-            "metadata": {"source": "NEXUS_SYNTHESIZER"}
-        }
-        
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write("---\n")
-            f.write(yaml.dump(frontmatter))
-            f.write("---\n\n")
-            f.write(prompt)
-            
-        return f"[SKILL_CRAFTED]: Skill '{name}' stabilized at {file_path}"
-
-    def get_active_prompt(self) -> Optional[str]:
-        """Extract and reset active prompt."""
-        p = self.active_skill_prompt
-        self.active_skill_prompt = None
-        return p
-
-    def scan_environment(self) -> str:
-        """Safety check for active skills."""
-        # Ported from Hermes skills_guard logic
-        return "[GUARD]: Environment stable. No malicious procedural spikes detected."
-
-    def deep_scan(self) -> List[Dict[str, Any]]:
-        """Scans the ENTIRE workspace for SKILL.md files (Omniscient Discovery)."""
-        all_skills = []
-        for root, dirs, files in os.walk(self.root):
-            dirs[:] = [d for d in dirs if d not in EXCLUDED_DIRS]
-            if "SKILL.md" in files:
-                path = os.path.join(root, "SKILL.md")
-                data = self._parse_skill(path)
-                if data:
-                    data["location"] = os.path.relpath(path, self.root)
-                    all_skills.append(data)
-        return all_skills
-
-import time
-import re
+    def find_skill(self, name: str) -> Optional[Dict[str, Any]]:
+        for skill in self._cache.values():
+            if skill.get("id") == name or skill.get("name") == name:
+                return skill
+        return None

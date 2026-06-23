@@ -1,4 +1,0 @@
-name: planner
-description: "NEXUS Evolution Council — Planner. Task decomposition and implementation planning."
-inherits: base
-tags: [council, planner, planning]

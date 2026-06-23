@@ -1,0 +1,14 @@
+{
+  "name": "knowledge",
+  "version": "1.0.0",
+  "description": "Query the NEXUS knowledge base with semantic search",
+  "entry": "scripts/knowledge.py",
+  "class": "KnowledgeTool",
+  "params": {
+    "action": {"type": "string", "description": "query|store|list|delete", "required": true},
+    "query": {"type": "string", "description": "Search query"},
+    "title": {"type": "string", "description": "Entry title"},
+    "content": {"type": "string", "description": "Entry content"}
+  },
+  "category": "knowledge"
+}

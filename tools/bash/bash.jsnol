@@ -1,0 +1,13 @@
+{
+  "name": "bash",
+  "version": "1.0.0",
+  "description": "Execute shell commands in a sandboxed environment",
+  "entry": "scripts/bash.py",
+  "class": "BashTool",
+  "params": {
+    "command": {"type": "string", "description": "Command to execute", "required": true},
+    "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 30},
+    "workdir": {"type": "string", "description": "Working directory", "default": "."}
+  },
+  "category": "system"
+}

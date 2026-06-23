@@ -1,0 +1,8 @@
+{
+  "name": "tool",
+  "version": "1.0",
+  "description": "MCP Tool wrapper — exposes external MCP tools as NEXUS BaseTools",
+  "type": "mcp_component",
+  "main": "scripts/tool.py",
+  "exports": ["MCPTool"]
+}

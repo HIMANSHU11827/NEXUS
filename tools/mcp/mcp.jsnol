@@ -1,0 +1,12 @@
+{
+  "name": "mcp",
+  "version": "1.0.0",
+  "description": "Manage MCP (Model Context Protocol) servers and tools",
+  "entry": "scripts/mcp.py",
+  "class": "MCPTool",
+  "params": {
+    "action": {"type": "string", "description": "list|start|stop|status|add|remove", "required": true},
+    "server": {"type": "string", "description": "MCP server name"}
+  },
+  "category": "infrastructure"
+}

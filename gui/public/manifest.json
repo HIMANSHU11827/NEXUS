@@ -1,0 +1,26 @@
+{
+  "name": "NEXUS AI",
+  "short_name": "NEXUS",
+  "description": "Local-first autonomous engineering platform. Runs on any device.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#09090b",
+  "theme_color": "#09090b",
+  "orientation": "any",
+  "categories": ["productivity", "developer-tools", "artificial-intelligence"],
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "48x48", "type": "image/svg+xml" },
+    { "src": "/icons.svg", "sizes": "512x512", "type": "image/svg+xml" },
+    { "src": "/icons.svg", "sizes": "192x192", "type": "image/svg+xml", "purpose": "any maskable" }
+  ],
+  "screenshots": [],
+  "lang": "en",
+  "dir": "ltr",
+  "scope": "/",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "launch_handler": {
+    "client_mode": "focus-existing"
+  },
+  "related_applications": [],
+  "prefer_related_applications": false
+}

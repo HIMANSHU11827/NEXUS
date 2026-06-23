@@ -1,0 +1,18 @@
+# NEXUS AI System Configuration
+system:
+  name: NEXUS AI
+  description: Neural EXecution & Unified Synthesis - Autonomous AI Operating System
+  version: 4.0.0
+  boot:
+    auto_discover: true
+    load_skills: true
+    init_tools: true
+    start_server: true
+  features:
+    rag: true
+    moa: true
+    evolution: true
+    skills: true
+    plugins: true
+    sandbox: true
+    mcp: true

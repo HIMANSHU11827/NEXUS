@@ -1,0 +1,15 @@
+{
+  "name": "file_ops",
+  "version": "1.0.0",
+  "description": "Read, write, edit, and manage files on disk",
+  "entry": "scripts/file_ops.py",
+  "class": "FileOpsTool",
+  "params": {
+    "action": {"type": "string", "description": "read|write|edit|delete|list|mkdir", "required": true},
+    "path": {"type": "string", "description": "File path", "required": true},
+    "content": {"type": "string", "description": "Content for write/edit"},
+    "old_string": {"type": "string", "description": "String to replace (edit mode)"},
+    "new_string": {"type": "string", "description": "Replacement string (edit mode)"}
+  },
+  "category": "filesystem"
+}

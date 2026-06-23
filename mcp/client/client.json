@@ -1,0 +1,8 @@
+{
+  "name": "client",
+  "version": "1.0",
+  "description": "NEXUS MCP Client — connect to external MCP servers",
+  "type": "mcp_component",
+  "main": "scripts/client.py",
+  "exports": ["MCPClient"]
+}

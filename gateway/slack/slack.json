@@ -1,0 +1,1 @@
+{"name": "slack", "version": "1.0", "description": "Slack bot platform adapter", "enabled": false, "required_env": ["SLACK_TOKEN"]}

@@ -1,0 +1,13 @@
+{
+  "name": "reasoning",
+  "version": "1.0.0",
+  "description": "Deep chain-of-thought reasoning and problem decomposition",
+  "entry": "scripts/reasoning.py",
+  "class": "ReasoningTool",
+  "params": {
+    "problem": {"type": "string", "description": "Problem statement", "required": true},
+    "depth": {"type": "string", "description": "simple|detailed|deep", "default": "detailed"},
+    "steps": {"type": "integer", "description": "Max reasoning steps", "default": 5}
+  },
+  "category": "cognition"
+}

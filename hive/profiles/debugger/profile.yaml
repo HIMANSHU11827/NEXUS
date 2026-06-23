@@ -1,4 +1,0 @@
-name: debugger
-description: "NEXUS Evolution Council — Debugger. Root cause analysis and system repair."
-inherits: base
-tags: [council, debugger, testing]

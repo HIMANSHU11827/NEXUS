@@ -1,0 +1,1 @@
+{"name": "meta", "version": "1.0", "description": "Meta/Messenger platform adapter", "enabled": false, "required_env": ["META_PAGE_TOKEN"]}

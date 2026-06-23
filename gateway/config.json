@@ -1,0 +1,1 @@
+{"name": "gateway", "version": "1.0", "max_agent_cache": 128, "idle_ttl_seconds": 3600, "connect_timeout": 30}

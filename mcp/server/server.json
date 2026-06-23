@@ -1,0 +1,8 @@
+{
+  "name": "server",
+  "version": "2.0",
+  "description": "NEXUS MCP Server — serve all NEXUS tools to external MCP clients",
+  "type": "mcp_component",
+  "main": "scripts/server.py",
+  "exports": ["NEXUSMCPServer", "serve", "main"]
+}

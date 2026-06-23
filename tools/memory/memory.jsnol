@@ -1,0 +1,14 @@
+{
+  "name": "memory",
+  "version": "1.0.0",
+  "description": "Store, retrieve, search, and manage short and long-term memories",
+  "entry": "scripts/memory.py",
+  "class": "MemoryTool",
+  "params": {
+    "action": {"type": "string", "description": "store|retrieve|search|list|delete", "required": true},
+    "key": {"type": "string", "description": "Memory key"},
+    "content": {"type": "string", "description": "Memory content"},
+    "query": {"type": "string", "description": "Search query"}
+  },
+  "category": "cognition"
+}

@@ -1,0 +1,8 @@
+{
+  "name": "catalog",
+  "version": "1.0",
+  "description": "MCP Server Catalog — discover, register, manage MCP servers",
+  "type": "mcp_component",
+  "main": "scripts/catalog.py",
+  "exports": ["MCPServerCatalog", "MCPServerDef"]
+}

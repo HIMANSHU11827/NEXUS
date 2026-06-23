@@ -1,0 +1,12 @@
+{
+  "name": "system",
+  "version": "1.0.0",
+  "description": "Monitor system resources, audit configuration, and run diagnostics",
+  "entry": "scripts/system.py",
+  "class": "SystemTool",
+  "params": {
+    "action": {"type": "string", "description": "info|disk|process|env|audit", "required": true},
+    "target": {"type": "string", "description": "Target for the action"}
+  },
+  "category": "system"
+}

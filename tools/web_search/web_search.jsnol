@@ -1,0 +1,12 @@
+{
+  "name": "web_search",
+  "version": "1.0.0",
+  "description": "Search the web and fetch page content with caching",
+  "entry": "scripts/web_search.py",
+  "class": "WebSearchTool",
+  "params": {
+    "query": {"type": "string", "description": "Search query", "required": true},
+    "max_results": {"type": "integer", "description": "Max results to return", "default": 5}
+  },
+  "category": "web"
+}

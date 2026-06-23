@@ -1,0 +1,1 @@
+{"name": "discord", "version": "1.0", "description": "Discord bot platform adapter", "enabled": false, "required_env": ["DISCORD_TOKEN"]}
