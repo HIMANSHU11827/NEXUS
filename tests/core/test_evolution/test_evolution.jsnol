@@ -1,0 +1,7 @@
+{
+  "name": "test_evolution",
+  "description": "Core evolution import and basic functionality tests",
+  "category": "core",
+  "entry": "scripts/test_evolution.py",
+  "class": "TestEvolutionImports"
+}

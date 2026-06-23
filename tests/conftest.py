@@ -1,5 +1,13 @@
+"""Shared fixtures for NEXUS evolution tests."""
+import sys
 from pathlib import Path
 import pytest
+
+# Ensure script subdirectories are discoverable by pytest
+_tests_dir = Path(__file__).resolve().parent
+for subdir in _tests_dir.rglob("scripts"):
+    if subdir.is_dir() and str(subdir) not in sys.path:
+        sys.path.insert(0, str(subdir))
 
 
 @pytest.fixture

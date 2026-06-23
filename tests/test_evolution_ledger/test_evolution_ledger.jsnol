@@ -1,0 +1,7 @@
+{
+  "name": "test_evolution_ledger",
+  "description": "Tests for the EvolutionLedger evolution module",
+  "category": "evolution",
+  "entry": "scripts/test_evolution_ledger.py",
+  "class": "TestEvolutionLedger"
+}

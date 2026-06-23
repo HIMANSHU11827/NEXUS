@@ -1,0 +1,7 @@
+{
+  "name": "test_loop",
+  "description": "Tests for NexusLoop evolution hooks and core types",
+  "category": "core",
+  "entry": "scripts/test_loop.py",
+  "class": "TestNexusLoopInstantiation"
+}

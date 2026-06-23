@@ -1,0 +1,7 @@
+{
+  "name": "test_evolution_intent",
+  "description": "Tests for the NexusIntentEngine evolution module",
+  "category": "evolution",
+  "entry": "scripts/test_evolution_intent.py",
+  "class": "TestNexusIntent"
+}

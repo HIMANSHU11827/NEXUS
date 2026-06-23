@@ -1,0 +1,7 @@
+{
+  "name": "test_evolution_self_improvement",
+  "description": "Tests for the SelfImprovementEngine evolution module",
+  "category": "evolution",
+  "entry": "scripts/test_evolution_self_improvement.py",
+  "class": "TestSelfImprovement"
+}

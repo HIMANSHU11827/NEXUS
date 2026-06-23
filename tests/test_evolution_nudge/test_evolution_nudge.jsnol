@@ -1,0 +1,7 @@
+{
+  "name": "test_evolution_nudge",
+  "description": "Tests for the NudgeEngine evolution module",
+  "category": "evolution",
+  "entry": "scripts/test_evolution_nudge.py",
+  "class": "TestNudgeEngine"
+}

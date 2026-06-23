@@ -1,0 +1,7 @@
+{
+  "name": "test_evolution_skill_forge",
+  "description": "Tests for the SkillForge evolution module",
+  "category": "evolution",
+  "entry": "scripts/test_evolution_skill_forge.py",
+  "class": "TestSkillForge"
+}

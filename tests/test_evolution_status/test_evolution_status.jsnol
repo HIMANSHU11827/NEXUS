@@ -1,0 +1,7 @@
+{
+  "name": "test_evolution_status",
+  "description": "Tests for the EvolutionStatus evolution module",
+  "category": "evolution",
+  "entry": "scripts/test_evolution_status.py",
+  "class": "TestEvolutionStatus"
+}
