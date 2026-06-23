@@ -1,4 +1,5 @@
 # Task Management Tool
+**Version:** 1.0.0 — auto-bumped via `VersionManager` on refine.
 
 Create, list, update, delete, and track task status.
 

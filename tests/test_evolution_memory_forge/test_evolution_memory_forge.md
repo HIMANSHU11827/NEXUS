@@ -1,4 +1,5 @@
 # Test Evolution Memory Forge
+**Version:** 1.0.0 — auto-bumped via `VersionManager` on refine.
 
 Tests for the `MemoryForge` module (`evolution.memory_forge.forge`), covering:
 

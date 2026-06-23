@@ -1,4 +1,5 @@
 # Knowledge Tool
+**Version:** 1.0.0 — auto-bumped via `VersionManager` on refine.
 
 Query, store, and manage the NEXUS knowledge base.
 

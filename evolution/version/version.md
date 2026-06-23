@@ -1,4 +1,5 @@
 # Version Manager
+**Version:** 1.0.0 — auto-bumped via `VersionManager` on refine.
 
 Centralized version tracking, bumping, and compatibility checking for all NEXUS modules (tools, skills, plugins, forges, tests).
 

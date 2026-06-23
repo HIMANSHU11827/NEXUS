@@ -1,4 +1,5 @@
 # Test Evolution Self Improvement
+**Version:** 1.0.0 — auto-bumped via `VersionManager` on refine.
 
 Tests for the `SelfImprovementEngine` module (`evolution.self_improvement.engine`), covering:
 

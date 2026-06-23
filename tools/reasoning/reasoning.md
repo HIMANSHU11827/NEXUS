@@ -1,4 +1,5 @@
 # Reasoning Tool
+**Version:** 1.0.0 — auto-bumped via `VersionManager` on refine.
 
 Performs deep chain-of-thought reasoning with configurable depth.
 

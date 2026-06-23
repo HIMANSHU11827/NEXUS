@@ -1,4 +1,5 @@
 # Web Search Tool
+**Version:** 1.0.0 — auto-bumped via `VersionManager` on refine.
 
 Searches the web using configured search providers. Supports caching and result deduplication.
 

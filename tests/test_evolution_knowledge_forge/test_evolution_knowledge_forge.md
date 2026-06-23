@@ -1,4 +1,5 @@
 # Test Evolution Knowledge Forge
+**Version:** 1.0.0 — auto-bumped via `VersionManager` on refine.
 
 Tests for the `KnowledgeForge` module (`evolution.knowledge_forge.forge`), covering:
 

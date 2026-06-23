@@ -1,4 +1,5 @@
 # Test Evolution Plugin Forge
+**Version:** 1.0.0 — auto-bumped via `VersionManager` on refine.
 
 Tests for the `PluginForge` module (`evolution.plugin_forge.forge`), covering:
 

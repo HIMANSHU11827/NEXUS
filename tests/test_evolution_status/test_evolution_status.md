@@ -1,4 +1,5 @@
 # Test Evolution Status
+**Version:** 1.0.0 — auto-bumped via `VersionManager` on refine.
 
 Tests for the `EvolutionStatus` module (`evolution.status`), covering:
 

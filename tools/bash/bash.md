@@ -1,4 +1,5 @@
 # Bash Tool
+**Version:** 1.0.0 — auto-bumped via `VersionManager` on refine.
 
 Execute shell commands in a sandboxed environment with timeout control.
 

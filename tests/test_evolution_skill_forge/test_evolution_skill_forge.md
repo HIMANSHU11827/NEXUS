@@ -1,4 +1,5 @@
 # Test Evolution Skill Forge
+**Version:** 1.0.0 — auto-bumped via `VersionManager` on refine.
 
 Tests for the `SkillForge` module (`evolution.skill_forge.forge`), covering:
 

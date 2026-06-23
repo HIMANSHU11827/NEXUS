@@ -1,4 +1,5 @@
 # File Operations Tool
+**Version:** 1.0.0 — auto-bumped via `VersionManager` on refine.
 
 Read, write, edit, delete, and list files on the filesystem.
 
