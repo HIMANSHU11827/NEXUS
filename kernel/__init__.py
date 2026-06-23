@@ -121,7 +121,7 @@ class NexusKernel(ThreadSafeSingleton):
 
     @property
     def intent(self):
-        from evolution.intent_engine import NexusIntentEngine
+        from evolution.intent.scripts.engine import NexusIntentEngine
         return self._get_or_init("intent", NexusIntentEngine)
 
     @property

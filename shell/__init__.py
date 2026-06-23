@@ -6,6 +6,8 @@ readline history, task tracking, multi-agent mode.
 
 import os
 import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 import atexit
 from collections import deque
 from typing import Optional, List

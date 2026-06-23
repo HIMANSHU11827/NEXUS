@@ -87,6 +87,19 @@ class NexusConfigLoader:
     def get_root() -> Path:
         return _ROOT
 
+    def get_provider_config(self, provider_name: str, sub_provider: Optional[str] = None) -> Dict[str, Any]:
+        """Get configuration for a specific provider from provider.yml."""
+        provider_cfg = self.get("provider", {})
+        if isinstance(provider_cfg, dict):
+            providers = provider_cfg.get("providers", {})
+            if sub_provider:
+                sub = providers.get(provider_name, {})
+                if isinstance(sub, dict):
+                    return sub.get(sub_provider, {})
+                return {}
+            return providers.get(provider_name, {})
+        return {}
+
     @staticmethod
     def get_memory_dir() -> Path:
         return _ROOT / "memory"
