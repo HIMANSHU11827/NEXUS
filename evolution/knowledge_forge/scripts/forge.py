@@ -1,9 +1,11 @@
 """KnowledgeForge — creates structured knowledge artifacts from research."""
+__version__ = "1.0.0"
 import json
 import logging
 import os
 import time
 from typing import Any, Dict, List, Optional
+from evolution.version.scripts.version import VersionManager
 from providers.router import ModelRouter
 logger = logging.getLogger(__name__)
 _ROUTER: Optional[ModelRouter] = None
@@ -31,12 +33,12 @@ class KnowledgeForge:
             return {"created": False, "error": "topic is required"}
         topic_dir = os.path.join(self.lib_dir, safe_topic)
         os.makedirs(topic_dir, exist_ok=True)
-        entry = {"title": topic, "content": content, "key_concepts": key_concepts, "tags": tags, "version": "1.0", "created_at": time.time(), "updated_at": time.time()}
+        entry = {"title": topic, "content": content, "key_concepts": key_concepts, "tags": tags, "version": "1.0.0", "created_at": time.time(), "updated_at": time.time()}
         path = os.path.join(topic_dir, "knowledge.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(entry, f, indent=2)
         logger.info(f"[KNOWLEDGE_FORGE] Created knowledge '{safe_topic}'")
-        return {"created": True, "name": safe_topic, "version": "1.0", "path": path}
+        return {"created": True, "name": safe_topic, "version": "1.0.0", "path": path}
 
     def refine(self, name: str, updates: Dict[str, Any] = None) -> Dict[str, Any]:
         updates = updates or {}
@@ -46,10 +48,13 @@ class KnowledgeForge:
             return {"created": False, "error": f"knowledge '{name}' not found"}
         with open(path, "r", encoding="utf-8") as f:
             entry = json.load(f)
-        major = updates.get("major", False)
-        cur = entry.get("version", "1.0")
-        parts = cur.split(".")
-        new_ver = f"{int(parts[0]) + 1}.0" if major else f"{parts[0]}.{int(parts[1]) + 1}"
+        vm = VersionManager(self.root)
+        new_ver = vm.bump(name, "major" if updates.get("major", False) else "minor", self.root)
+        if not new_ver:
+            major = updates.get("major", False)
+            cur = entry.get("version", "1.0.0")
+            parts = cur.split(".")
+            new_ver = f"{int(parts[0]) + 1}.0.0" if major else f"{parts[0]}.{int(parts[1]) + 1}.0"
         entry["version"] = new_ver
         for k in ("title", "content", "key_concepts", "tags"):
             if k in updates:

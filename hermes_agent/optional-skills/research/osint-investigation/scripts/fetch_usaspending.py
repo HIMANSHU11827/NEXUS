@@ -4,6 +4,7 @@
 No auth required. POST to /api/v2/search/spending_by_award/ with filters.
 """
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import csv

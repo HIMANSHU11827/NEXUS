@@ -1,3 +1,4 @@
+__version__ = "1.0.0"
 #!/usr/bin/env python3
 """
 maps_client.py - CLI tool for maps, geocoding, routing, POI search, and more.

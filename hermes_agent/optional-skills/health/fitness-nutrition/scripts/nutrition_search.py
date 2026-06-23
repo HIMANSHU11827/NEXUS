@@ -1,3 +1,4 @@
+__version__ = "1.0.0"
 #!/usr/bin/env python3
 """
 nutrition_search.py — Search USDA FoodData Central for nutrition info.

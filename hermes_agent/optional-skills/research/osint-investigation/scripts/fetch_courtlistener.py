@@ -8,6 +8,7 @@ search; some endpoints require a token (free at courtlistener.com).
 Set COURTLISTENER_TOKEN to authenticate (raises rate limits).
 """
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import csv

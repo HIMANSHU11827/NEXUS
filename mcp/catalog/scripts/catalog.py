@@ -1,4 +1,5 @@
 """MCP Server Catalog — structured discovery and management of MCP servers."""
+__version__ = "1.0.0"
 
 import json
 import logging

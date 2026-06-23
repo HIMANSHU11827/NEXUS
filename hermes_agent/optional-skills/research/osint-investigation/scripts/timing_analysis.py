@@ -14,6 +14,7 @@ Adapted from ShinMegamiBoson/OpenPlanter (MIT). Differences:
   - Optional --seed for reproducibility
 """
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import csv

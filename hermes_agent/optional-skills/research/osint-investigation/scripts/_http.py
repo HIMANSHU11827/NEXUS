@@ -3,6 +3,7 @@
 Provides polite retry + JSON convenience + User-Agent enforcement.
 """
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import json
 import os

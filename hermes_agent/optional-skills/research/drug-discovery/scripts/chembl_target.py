@@ -1,3 +1,4 @@
+__version__ = "1.0.0"
 #!/usr/bin/env python3
 """
 chembl_target.py — Search ChEMBL for a target and retrieve top active compounds.

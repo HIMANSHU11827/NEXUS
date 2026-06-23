@@ -2,6 +2,7 @@
 """Copy a FastMCP starter template into a working file."""
 
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 from pathlib import Path

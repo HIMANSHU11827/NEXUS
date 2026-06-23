@@ -26,6 +26,7 @@ Output structure:
 Every finding traces to specific source rows. No naked claims.
 """
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import csv

@@ -1,3 +1,4 @@
+__version__ = "1.0.0"
 #!/usr/bin/env python3
 """Recalculate an .xlsx file's formulas using LibreOffice headless.
 

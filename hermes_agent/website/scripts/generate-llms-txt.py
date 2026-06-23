@@ -22,6 +22,7 @@ Called from `website/scripts/prebuild.mjs` on every `npm run start` /
 """
 
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import re
 from pathlib import Path

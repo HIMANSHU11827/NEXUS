@@ -1,10 +1,12 @@
 """SkillForge — creates procedural skill memories in skills/."""
+__version__ = "1.0.0"
 import json
 import logging
 import os
 import re
 import time
 from typing import Any, Dict, List, Optional
+from evolution.version.scripts.version import VersionManager
 from providers.router import ModelRouter
 
 logger = logging.getLogger(__name__)
@@ -63,14 +65,16 @@ created_at: {time.time()}
             return {"created": False, "error": f"SKILL.md not found for '{name}'"}
         with open(skill_md, "r", encoding="utf-8") as f:
             content = f.read()
-        import re as _re
-        m = _re.search(r"version:\s*([\d.]+)", content)
-        if m:
-            parts = m.group(1).split(".")
-            new_ver = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}" if len(parts) >= 3 else f"{parts[0]}.{parts[1]}.1"
-        else:
-            new_ver = "1.0.1"
-        content = _re.sub(r"version:\s*[\d.]+", f"version: {new_ver}", content)
+        vm = VersionManager(self.root)
+        new_ver = vm.bump(name, "minor", self.root)
+        if not new_ver:
+            m = re.search(r"version:\s*([\d.]+)", content)
+            if m:
+                parts = m.group(1).split(".")
+                new_ver = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}" if len(parts) >= 3 else f"{parts[0]}.{parts[1]}.1"
+            else:
+                new_ver = "1.0.1"
+        content = re.sub(r"version:\s*[\d.]+", f"version: {new_ver}", content)
         with open(skill_md, "w", encoding="utf-8") as f:
             f.write(content)
         logger.info(f"[SKILL_FORGE] Refined skill '{name}' to v{new_ver}")

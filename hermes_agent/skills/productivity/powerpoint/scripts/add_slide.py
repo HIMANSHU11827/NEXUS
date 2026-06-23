@@ -17,6 +17,7 @@ To see available layouts: ls unpacked/ppt/slideLayouts/
 
 Prints the <p:sldId> element to add to presentation.xml.
 """
+__version__ = "1.0.0"
 
 import re
 import shutil

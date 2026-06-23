@@ -22,6 +22,7 @@ https://github.com/giampaolo/psutil/pull/2762 and ships a release.
 """
 
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import shutil

@@ -9,6 +9,7 @@ all str fields. By default it shows `prompt_template` if present; pass --field t
 target a different attribute (e.g. `regex_pattern`, `sql_query`, `code_block`).
 """
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import pickle

@@ -1,4 +1,5 @@
 """Evolution Log — bridges evolution system with the logs/ directory."""
+__version__ = "1.0.0"
 import json
 import logging
 import os

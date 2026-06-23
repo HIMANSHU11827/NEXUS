@@ -36,6 +36,7 @@ Exit code: 0 if every file's pytest exited 0; 1 otherwise.
 """
 
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import json

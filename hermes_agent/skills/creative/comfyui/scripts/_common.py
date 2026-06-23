@@ -13,6 +13,7 @@ Stdlib-only by design (with optional `requests` upgrade if installed). Python 3.
 """
 
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import json
 import os

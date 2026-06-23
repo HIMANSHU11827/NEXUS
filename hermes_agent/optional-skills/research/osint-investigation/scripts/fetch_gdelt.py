@@ -8,6 +8,7 @@ Useful for surfacing news mentions of a person, company, or topic across
 international media — much wider net than Google News.
 """
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import csv

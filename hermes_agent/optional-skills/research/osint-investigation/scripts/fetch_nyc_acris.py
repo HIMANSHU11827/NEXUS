@@ -13,6 +13,7 @@ The Parties dataset has the names. We search by name and optionally join to
 Master to get the doc type and date.
 """
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import csv

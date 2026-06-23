@@ -14,6 +14,7 @@ This script removes:
 - Unreferenced notes slides
 - Content-Type overrides for deleted files
 """
+__version__ = "1.0.0"
 
 import sys
 from pathlib import Path

@@ -10,6 +10,7 @@ Run with:
 Reads `OPENROUTER_API_KEY` from the environment.
 """
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import os

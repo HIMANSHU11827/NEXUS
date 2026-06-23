@@ -17,6 +17,7 @@ use the /search/issues endpoint instead of /repos/:owner/:repo/:scope.
 """
 
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import json

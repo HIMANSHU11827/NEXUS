@@ -6,6 +6,7 @@ no auth required. Useful for finding deleted / changed pages by URL,
 domain, or substring match.
 """
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import csv

@@ -15,6 +15,7 @@ Usage (import):
 Usage (CLI):
     python pixel_art_video.py frame.png out.mp4 --scene night --duration 6 --gif
 """
+__version__ = "1.0.0"
 
 import math
 import os

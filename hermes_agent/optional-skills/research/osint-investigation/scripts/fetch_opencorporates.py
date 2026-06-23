@@ -9,6 +9,7 @@ Without a token, this script falls back to scraping the public HTML
 search page (limited fields, more brittle, no jurisdiction filter).
 """
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import csv

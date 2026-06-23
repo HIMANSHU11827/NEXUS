@@ -1,4 +1,5 @@
 """Telegram platform adapter — sends/receives messages via Telegram Bot API."""
+__version__ = "1.0.0"
 
 import logging
 import os

@@ -3,6 +3,7 @@
 Used by entity_resolution.py and timing_analysis.py.
 """
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import re
 

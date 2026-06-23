@@ -1,4 +1,5 @@
 """Tests for evolution module imports and basic functionality."""
+__version__ = "1.0.0"
 
 from evolution import (
     EvolutionLog, EvolutionLedger, EvolutionStatus, LogAnalyzer,

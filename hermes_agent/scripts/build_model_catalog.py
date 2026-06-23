@@ -21,6 +21,7 @@ Live URL (after ``deploy-site.yml`` runs on merge to main):
 """
 
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import json
 import os

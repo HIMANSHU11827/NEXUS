@@ -1,4 +1,5 @@
 """Standard Operating Procedures for evolution tasks."""
+__version__ = "1.0.0"
 import os
 from typing import Optional
 _SOP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

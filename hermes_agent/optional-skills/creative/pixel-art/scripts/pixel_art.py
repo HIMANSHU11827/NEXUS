@@ -12,6 +12,7 @@ Usage (import):
 Usage (CLI):
     python pixel_art.py in.png out.png --preset nes
 """
+__version__ = "1.0.0"
 
 from PIL import Image, ImageEnhance, ImageOps
 

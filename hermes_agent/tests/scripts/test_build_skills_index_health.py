@@ -13,6 +13,7 @@ These tests pin the two contracts that prevent a recurrence:
      (so extract-skills.py falls back instead of reading a broken index).
   2. A healthy crawl exits zero AND writes the file with every source present.
 """
+__version__ = "1.0.0"
 
 import os
 import sys

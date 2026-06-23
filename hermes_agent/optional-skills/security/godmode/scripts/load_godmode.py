@@ -13,6 +13,7 @@ Usage in execute_code:
     # - score_response(), is_refusal(), count_hedges()
     # - escalate_encoding()
 """
+__version__ = "1.0.0"
 
 import os, sys
 from pathlib import Path

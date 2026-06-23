@@ -1,3 +1,4 @@
+__version__ = "1.0.0"
 #!/usr/bin/env python3
 """
 Parseltongue v4 — Input Obfuscation Engine

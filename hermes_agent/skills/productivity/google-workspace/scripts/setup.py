@@ -22,6 +22,7 @@ Agent workflow:
 """
 
 from __future__ import annotations  # allow PEP 604 `X | None` on Python 3.9+
+__version__ = "1.0.0"
 
 import argparse
 import json

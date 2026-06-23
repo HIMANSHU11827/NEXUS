@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run Docker boot-time config migrations safely."""
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import shutil
 import sys

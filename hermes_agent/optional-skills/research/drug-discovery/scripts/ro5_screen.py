@@ -1,3 +1,4 @@
+__version__ = "1.0.0"
 #!/usr/bin/env python3
 """
 ro5_screen.py — Batch Lipinski Ro5 + Veber screening via PubChem API.

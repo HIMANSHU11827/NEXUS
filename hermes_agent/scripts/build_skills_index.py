@@ -1,3 +1,4 @@
+__version__ = "1.0.0"
 #!/usr/bin/env python3
 """Build the Hermes Skills Index — a centralized JSON catalog of all skills.
 

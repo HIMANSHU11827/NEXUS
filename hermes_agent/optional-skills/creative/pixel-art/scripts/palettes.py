@@ -3,6 +3,7 @@
 Palette RGB values sourced from pixel-art-studio (MIT License)
 https://github.com/Synero/pixel-art-studio — see ATTRIBUTION.md.
 """
+__version__ = "1.0.0"
 
 PALETTES = {
     # ── Hardware palettes ───────────────────────────────────────────────

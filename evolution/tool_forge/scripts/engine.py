@@ -5,6 +5,7 @@ Each tool gets its own folder under tools/<name>/ with:
   - scripts/<name>.py — Python implementation (BaseTool subclass)
   - read.md         — documentation
 """
+__version__ = "1.0.0"
 
 import json
 import logging
@@ -13,6 +14,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
+from evolution.version.scripts.version import VersionManager
 from providers.router import ModelRouter
 
 logger = logging.getLogger(__name__)
@@ -72,13 +74,17 @@ class ToolForge:
         with open(schema_path, "r", encoding="utf-8") as f:
             schema = json.load(f)
 
-        major = tool_def.get("major", False)
-        cur = schema.get("version", "0.1")
-        parts = cur.split(".")
-        if major:
-            new_ver = f"{int(parts[0]) + 1}.0"
-        else:
-            new_ver = f"{parts[0]}.{int(parts[1]) + 1}" if len(parts) > 1 else f"{cur}.1"
+        vm = VersionManager(self.root)
+        new_ver = vm.bump(name, "major" if tool_def.get("major", False) else "minor", self.root)
+        if not new_ver:
+            major = tool_def.get("major", False)
+            cur = schema.get("version", "1.0.0")
+            parts = cur.split(".")
+            if major:
+                new_ver = f"{int(parts[0]) + 1}.0.0"
+            else:
+                patch = int(parts[2]) + 1 if len(parts) > 2 else 1
+                new_ver = f"{parts[0]}.{parts[1] if len(parts) > 1 else 0}.{patch}"
 
         schema["version"] = new_ver
         if "description" in tool_def:
@@ -95,7 +101,7 @@ class ToolForge:
     def _get_schema(self, tool_def: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "name": tool_def.get("name", "unnamed"),
-            "version": tool_def.get("version", "1.0"),
+            "version": tool_def.get("version", "1.0.0"),
             "description": tool_def.get("description", ""),
             "defaults": tool_def.get("defaults", {}),
             "permissions": tool_def.get("permissions", {"auto_approve": False}),

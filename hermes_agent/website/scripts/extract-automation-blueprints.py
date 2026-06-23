@@ -12,6 +12,7 @@ Output: ``website/static/api/automation-blueprints-index.json`` (served at
 """
 
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import json
 import sys

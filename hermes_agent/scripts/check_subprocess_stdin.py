@@ -23,6 +23,7 @@ violation (does not modify files).
 """
 
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import os
 import re

@@ -1,3 +1,4 @@
+__version__ = "1.0.0"
 #!/usr/bin/env python3
 """
 Fetch a YouTube video transcript and output it as structured JSON.

@@ -15,6 +15,7 @@ locally so the agent doesn't re-download for every query.
 Output CSV columns match the original `fetch_icij_offshore.py` contract.
 """
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import csv

@@ -20,6 +20,7 @@ Import and use from any custom watcher script:
 """
 
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import json
 import os

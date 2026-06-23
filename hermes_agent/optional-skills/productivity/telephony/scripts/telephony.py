@@ -15,6 +15,7 @@ minimal environment with no extra pip installs.
 """
 
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import base64

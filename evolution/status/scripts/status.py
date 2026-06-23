@@ -1,4 +1,5 @@
 """Evolution Status — unified dashboard across all evolution forges."""
+__version__ = "1.0.0"
 import json
 import logging
 import os

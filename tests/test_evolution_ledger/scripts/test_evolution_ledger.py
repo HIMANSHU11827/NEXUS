@@ -1,3 +1,4 @@
+__version__ = "1.0.0"
 import pytest
 from evolution.ledger.scripts.ledger import EvolutionLedger
 

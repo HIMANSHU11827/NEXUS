@@ -1,4 +1,5 @@
 """Tests for NexusLoop evolution hooks."""
+__version__ = "1.0.0"
 
 from orchestrators.loop import NexusLoop, SCAState, PermissionPolicy, ToolCall, HookRegistry
 

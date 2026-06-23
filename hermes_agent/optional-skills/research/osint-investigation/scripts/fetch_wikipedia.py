@@ -9,6 +9,7 @@ Both are anonymous-access. Useful for resolving who-is-this-entity questions
 and surfacing cross-references that other sources can join against.
 """
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import csv

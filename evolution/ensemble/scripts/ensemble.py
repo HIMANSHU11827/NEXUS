@@ -1,6 +1,7 @@
 """Ensemble Manager — orchestrates multiple reasoning strategies."""
 
 from __future__ import annotations
+__version__ = "1.0.0"
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 

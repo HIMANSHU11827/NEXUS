@@ -10,6 +10,7 @@ The SDN CSV uses a specific 12-column format with no header row:
 Address and AKA records live in separate files. We fetch all three and join.
 """
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import csv

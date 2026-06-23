@@ -1,4 +1,5 @@
 # NEXUS AI Provider Configuration
+version: "1.0.0"
 default_provider: openai
 providers:
   openai:

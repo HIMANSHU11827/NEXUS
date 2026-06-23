@@ -1,4 +1,5 @@
 """Meta/Messenger platform adapter — sends messages via Meta Graph API."""
+__version__ = "1.0.0"
 
 import logging
 import os

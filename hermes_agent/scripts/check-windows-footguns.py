@@ -27,6 +27,7 @@ Suppress an intentional use (e.g. tests or platform-gated code) with:
 """
 
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import os

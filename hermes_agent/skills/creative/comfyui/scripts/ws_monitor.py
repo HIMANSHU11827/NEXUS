@@ -26,6 +26,7 @@ Falls back to a clear error message when not installed.
 """
 
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import json

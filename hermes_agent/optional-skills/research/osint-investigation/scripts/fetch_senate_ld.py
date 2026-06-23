@@ -4,6 +4,7 @@
 Anonymous: 120 req/hour. Token (SENATE_LDA_TOKEN): 1200 req/hour.
 """
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import argparse
 import csv

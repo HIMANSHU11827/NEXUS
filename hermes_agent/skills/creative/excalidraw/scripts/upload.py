@@ -1,3 +1,4 @@
+__version__ = "1.0.0"
 #!/usr/bin/env python3
 """
 Upload an .excalidraw file to excalidraw.com and print a shareable URL.

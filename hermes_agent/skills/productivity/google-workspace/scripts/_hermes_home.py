@@ -15,6 +15,7 @@ instead of duplicating the ``HERMES_HOME = Path(os.getenv(...))`` pattern.
 """
 
 from __future__ import annotations
+__version__ = "1.0.0"
 
 import os
 from pathlib import Path

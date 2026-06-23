@@ -1,3 +1,4 @@
+__version__ = "1.0.0"
 #!/usr/bin/env python3
 """Extract text from documents using marker-pdf. High-quality OCR + layout analysis.
 

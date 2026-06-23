@@ -1,4 +1,5 @@
 """Slack platform adapter — sends/receives messages via Slack Bot."""
+__version__ = "1.0.0"
 
 import logging
 import os

@@ -1,3 +1,4 @@
+__version__ = "1.0.0"
 #!/usr/bin/env python3
 """Diagnose how prompt_toolkit identifies keystrokes in the current terminal.
 

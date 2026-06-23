@@ -1,4 +1,5 @@
 """Log Analyzer — reads ALL logs/, finds patterns, drives evolution."""
+__version__ = "1.0.0"
 import json
 import logging
 import os
@@ -6,6 +7,7 @@ import re
 import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
+from evolution.version.scripts.version import VersionManager
 logger = logging.getLogger(__name__)
 
 class LogAnalyzer:
@@ -13,6 +15,7 @@ class LogAnalyzer:
         self.root = os.path.abspath(root_dir)
         self.logs_dir = os.path.join(self.root, "logs")
         self._router = None
+        self.version = "1.0.0"
 
     def _get_router(self):
         if self._router is None:
@@ -22,6 +25,21 @@ class LogAnalyzer:
             except Exception:
                 return None
         return self._router
+
+    def bump_version(self, part: str = "minor") -> str:
+        vm = VersionManager(self.root)
+        new_ver = vm.bump("log_analyzer", part, self.root)
+        if new_ver:
+            self.version = new_ver
+        else:
+            parts = self.version.split(".")
+            if part == "major":
+                self.version = f"{int(parts[0]) + 1}.0.0"
+            elif part == "minor":
+                self.version = f"{parts[0]}.{int(parts[1]) + 1}.0"
+            else:
+                self.version = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}"
+        return self.version
 
     def scan_logs(self) -> Dict[str, Any]:
         result = {}
@@ -50,7 +68,7 @@ class LogAnalyzer:
 
     def analyze(self) -> Dict[str, Any]:
         logs = self.scan_logs()
-        patterns = {"failure_patterns": [], "skill_gaps": [], "tool_opportunities": [], "memory_candidates": [], "knowledge_gaps": []}
+        patterns = {"version": self.version, "failure_patterns": [], "skill_gaps": [], "tool_opportunities": [], "memory_candidates": [], "knowledge_gaps": []}
         failures = logs.get("failures", []) + logs.get("errors", []) + logs.get("lose", [])
         if failures:
             error_msgs = [f.get("message", "") or f.get("summary", "")[:100] for f in failures[:10]]

@@ -1,4 +1,5 @@
 """NEXUS INTENT & PROACTIVE ENGINE (v17.0)"""
+__version__ = "1.0.0"
 import asyncio
 import logging
 import re
