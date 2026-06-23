@@ -1,0 +1,1 @@
+Manages the lifecycle of agents, sessions, and system components — startup, teardown, and state transitions.

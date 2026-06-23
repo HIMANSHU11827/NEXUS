@@ -1,0 +1,1 @@
+Access control and permission management — defines roles, policies, and authorization rules for the system.

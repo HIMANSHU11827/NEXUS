@@ -1,0 +1,1 @@
+HTTP/gRPC server implementations, API endpoints, and network service layer for external communication.

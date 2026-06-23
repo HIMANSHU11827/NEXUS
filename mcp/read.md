@@ -1,0 +1,1 @@
+Model Context Protocol integration — bridges NEXUS agents with external tools, data sources, and services.

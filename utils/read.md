@@ -1,0 +1,1 @@
+Shared utility functions, helper modules, and common libraries used across the NEXUS platform.

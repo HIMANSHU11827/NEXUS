@@ -1,0 +1,1 @@
+Request routing and dispatch — directs messages, tasks, and data to appropriate handlers or agents.

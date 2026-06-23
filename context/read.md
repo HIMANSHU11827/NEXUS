@@ -1,0 +1,1 @@
+Manages contextual state and session information for ongoing conversations and agent interactions.

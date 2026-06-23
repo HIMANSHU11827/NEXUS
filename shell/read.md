@@ -1,0 +1,1 @@
+Interactive shell environment for direct agent communication, debugging, and REPL-style usage.

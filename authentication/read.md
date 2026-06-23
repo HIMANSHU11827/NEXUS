@@ -1,0 +1,1 @@
+Handles user identity verification, login flows, session tokens, and credential management across the NEXUS ecosystem.

@@ -1,0 +1,1 @@
+External service provider integrations — connectors for LLM APIs, vector stores, databases, and cloud services.

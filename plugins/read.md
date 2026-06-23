@@ -1,0 +1,1 @@
+Plugin architecture and plugin registry — extensible modules that add functionality to the core platform.

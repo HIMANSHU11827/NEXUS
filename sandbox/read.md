@@ -1,0 +1,1 @@
+Isolated execution environment for running untrusted code, agent scripts, or third-party integrations safely.

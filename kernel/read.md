@@ -1,0 +1,1 @@
+Core kernel logic — the foundational runtime engine that orchestrates AI operations and system services.
