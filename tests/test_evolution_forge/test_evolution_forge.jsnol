@@ -1,5 +1,6 @@
 {
   "name": "test_evolution_forge",
+  "version": "1.0.0",
   "description": "Tests for the ToolForge evolution module",
   "category": "evolution",
   "entry": "scripts/test_evolution_forge.py",

@@ -1,0 +1,8 @@
+{
+  "name": "version",
+  "version": "1.0.0",
+  "description": "Centralized version management for all NEXUS modules",
+  "entry": "scripts/version.py",
+  "class": "VersionManager",
+  "category": "system"
+}

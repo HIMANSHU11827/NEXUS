@@ -1,1 +1,7 @@
-{"name": "skill_synthesizer", "description": "Generates skills from descriptions", "entry": "scripts/skill_synthesizer.py", "class": "SkillSynthesizer"}
+{
+  "name": "skill_synthesizer",
+  "version": "1.0.0",
+  "description": "Generates skills from descriptions",
+  "entry": "scripts/skill_synthesizer.py",
+  "class": "SkillSynthesizer"
+}

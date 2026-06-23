@@ -1,5 +1,6 @@
 {
   "name": "test_evolution_knowledge_forge",
+  "version": "1.0.0",
   "description": "Tests for the KnowledgeForge evolution module",
   "category": "evolution",
   "entry": "scripts/test_evolution_knowledge_forge.py",

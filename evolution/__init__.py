@@ -9,9 +9,11 @@ from evolution.knowledge_forge.scripts.forge import KnowledgeForge
 from evolution.nudge.scripts.engine import NudgeEngine
 from evolution.self_improvement.scripts.engine import SelfImprovementEngine, ImprovementRecord
 from evolution.intent.scripts.engine import NexusIntentEngine
+from evolution.version import VersionManager
 
 __all__ = [
     "EvolutionLog", "EvolutionLedger", "EvolutionStatus", "LogAnalyzer",
     "ToolForge", "SkillForge", "PluginForge", "MemoryForge", "KnowledgeForge",
     "NudgeEngine", "SelfImprovementEngine", "ImprovementRecord", "NexusIntentEngine",
+    "VersionManager",
 ]

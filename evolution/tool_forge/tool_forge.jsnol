@@ -1,6 +1,7 @@
 {
   "name": "tool_forge",
-  "description": "Tool forge — creates new NEXUS tools from LLM-generated specifications",
+  "version": "1.0.0",
+  "description": "Tool forge \u2014 creates new NEXUS tools from LLM-generated specifications",
   "entry": "scripts/engine.py",
   "class": "ToolForge"
 }

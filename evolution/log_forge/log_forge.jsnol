@@ -1,5 +1,6 @@
 {
   "name": "log_forge",
+  "version": "1.0.0",
   "description": "Reads all logs, finds patterns, drives evolution",
   "entry": "scripts/log_analyzer.py",
   "class": "LogAnalyzer"

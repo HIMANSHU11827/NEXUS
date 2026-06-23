@@ -1,5 +1,6 @@
 {
   "name": "test_evolution_nudge",
+  "version": "1.0.0",
   "description": "Tests for the NudgeEngine evolution module",
   "category": "evolution",
   "entry": "scripts/test_evolution_nudge.py",

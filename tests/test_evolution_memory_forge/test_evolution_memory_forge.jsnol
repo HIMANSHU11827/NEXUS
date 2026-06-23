@@ -1,5 +1,6 @@
 {
   "name": "test_evolution_memory_forge",
+  "version": "1.0.0",
   "description": "Tests for the MemoryForge evolution module",
   "category": "evolution",
   "entry": "scripts/test_evolution_memory_forge.py",

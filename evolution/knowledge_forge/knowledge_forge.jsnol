@@ -1,6 +1,7 @@
 {
   "name": "knowledge_forge",
-  "description": "Knowledge forge — creates structured knowledge artifacts from research",
+  "version": "1.0.0",
+  "description": "Knowledge forge \u2014 creates structured knowledge artifacts from research",
   "entry": "scripts/forge.py",
   "class": "KnowledgeForge"
 }

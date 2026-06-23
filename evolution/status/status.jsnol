@@ -1,5 +1,6 @@
 {
   "name": "status",
+  "version": "1.0.0",
   "description": "Unified evolution dashboard across all forges",
   "entry": "scripts/status.py",
   "class": "EvolutionStatus"

@@ -1,5 +1,6 @@
 {
   "name": "test_loop",
+  "version": "1.0.0",
   "description": "Tests for NexusLoop evolution hooks and core types",
   "category": "core",
   "entry": "scripts/test_loop.py",

@@ -1,6 +1,7 @@
 {
   "name": "memory_forge",
-  "description": "Memory forge — persists important cross-session context as structured memory",
+  "version": "1.0.0",
+  "description": "Memory forge \u2014 persists important cross-session context as structured memory",
   "entry": "scripts/forge.py",
   "class": "MemoryForge"
 }

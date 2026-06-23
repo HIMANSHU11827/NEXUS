@@ -1,5 +1,6 @@
 {
   "name": "test_evolution_status",
+  "version": "1.0.0",
   "description": "Tests for the EvolutionStatus evolution module",
   "category": "evolution",
   "entry": "scripts/test_evolution_status.py",
