@@ -27,7 +27,7 @@ from permissions import PermissionMode, PermissionResult
 from router import IntentRouter
 from sandbox.risk import CommandRiskScorer
 from sandbox.sandbox_manager import SovereignSandbox, SandboxTier
-from evolution.forge.scripts.engine import ToolForge
+from evolution.tool_forge.scripts.engine import ToolForge
 from evolution.skill_forge.scripts.forge import SkillForge
 from evolution.memory_forge.scripts.forge import MemoryForge
 from evolution.knowledge_forge.scripts.forge import KnowledgeForge
@@ -564,7 +564,7 @@ class NexusLoop:
     async def _fill_gap_during_session(self, context: str):
         """Detect real gaps during chat using LLM analysis of full conversation context."""
         try:
-            from evolution.forge.scripts.engine import ToolForge
+            from evolution.tool_forge.scripts.engine import ToolForge
             from evolution.skill_forge.scripts.forge import SkillForge
             from evolution.memory_forge.scripts.forge import MemoryForge
             from evolution.knowledge_forge.scripts.forge import KnowledgeForge

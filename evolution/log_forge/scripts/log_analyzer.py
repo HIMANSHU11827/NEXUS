@@ -78,7 +78,7 @@ class LogAnalyzer:
                 pass
         for gap in patterns.get("tool_opportunities", []):
             try:
-                from evolution.forge.scripts.engine import ToolForge
+                from evolution.tool_forge.scripts.engine import ToolForge
                 forge = ToolForge(self.root)
                 result = forge.forge(gap)
                 if result.get("created"):

@@ -1,6 +1,0 @@
-{
-  "name": "log",
-  "description": "Evolution logging and run tracking",
-  "entry": "scripts/log.py",
-  "class": "EvolutionLog"
-}
