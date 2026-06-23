@@ -133,28 +133,15 @@ python -m voice_chat --warmup
 ## Verification
 
 ```powershell
-python -m compileall -q assets config_loader discovery indexer kernel nexus_compat nexus_path observer permissions router session_bus skills stream_filters tool_adapters world_model server nexus shell voice_chat prompts neural authentication sandbox code_intel optimization
-python tests\test_sandbox.py
-python tests\test_cognition.py
-python tests\test_hardening.py
-python tests\test_nextgen_power.py
-python tests\test_advanced_tools.py
-python tests\test_gui_security.py
-python tests\test_provider_routing.py
-python tests\test_secret_scanner.py
-python tests\test_core.py
-python tests\test_unified_loop.py
-python tests\test_genesis.py
-cd gui
-npm run build
+python -m pytest tests/ -v --tb=short
 ```
 
-Benchmark gate:
+Version integrity:
 
 ```powershell
-python -c "from tools.nexus_tools.registry import ToolRegistry; print(ToolRegistry().execute('benchmark', command='run', compress=False))"
+python -c "from evolution.version.scripts.version import VersionManager; vm=VersionManager('.'); print(vm.get_all_versions_report())"
 ```
 
 ## Current Status
 
-NEXUS is an advanced prototype, not a production service yet. The core loop, tools, adaptive memory graph, zero-token context packets, RAG, gui, repo map, risk scorer, Hive orchestrator, world model, self-improvement store, intent forecaster, skill forge, and model provider layers exist. Several systems remain experimental: long-task durability, sandboxing, role-specific LLM agents, and benchmark-driven training.
+NEXUS is an advanced prototype, not a production service yet. The core loop, tools, adaptive memory graph, zero-token context packets, RAG, gui, repo map, risk scorer, Hive orchestrator, world model, self-improvement store, intent forecaster, skill forge, and model provider layers exist. The evolution system is fully restructured into per-module folders with auto-version tracking across all 39 modules via `VersionManager`. Several systems remain experimental: long-task durability, sandboxing, role-specific LLM agents, and benchmark-driven training.

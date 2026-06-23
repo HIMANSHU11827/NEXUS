@@ -6,26 +6,52 @@ workflows, see
 [`docs/NEXUS_UNIFIED_AGENT_ARCHITECTURE.md`](NEXUS_UNIFIED_AGENT_ARCHITECTURE.md)
 and [`docs/NEXUS_WORKFLOW_MODEL.md`](NEXUS_WORKFLOW_MODEL.md).
 
-NEXUS is a local-first autonomous agent platform organized around a small set of package directories directly under the root:
+NEXUS is a local-first autonomous agent platform organized around these package directories:
 
+### Core Runtime
+- `orchestrators/loop.py`: primary reasoning loop (7-state sovereign cognitive loop: GROUNDING → PLANNING → INFERENCE → AUDITING → EXECUTION → VERIFICATION → EVOLVE), tool extraction, prompt assembly, memory sync, and self-correction hooks.
 - `kernel/`: singleton runtime, workspace ownership, shared module cache, stats, and boot health.
-- `orchestrators/loop.py`: primary reasoning loop, tool extraction, tool execution, prompt assembly, memory sync, and self-correction hooks.
-- `tools/nexus_tools/`: executable capability layer for shell, files, search, memory, providers, audits, and automation.
-- `rag/`: retrieval layer for project memory and source recall.
-- `code_intel/`: static repo map, diagnostics, edit planning, side-effect analysis, and symbol graph primitives.
-- `sandbox/`: direct-execution safety, risk scoring, and failure memory.
-- `cognition/`: adaptive memory graph, zero-token context packets, self-improvement strategies, intent forecasting, and skill forge.
-- `reasoning/`: explicit planner/critic/verifier primitives with uncertainty and replan triggers.
-- `os_power/`: rollback snapshots and managed background processes.
-- `optimization/`: mission replay, tool economy, targeted test selection, and failure vaccines for the next-generation runtime.
-- `providers/`: provider factory, health telemetry, capability registry, and fallback routing.
-- `security/`: lightweight release hygiene checks such as secret scanning.
-- `world_model/`: deterministic action impact simulation for risk, reversibility, and safeguards.
-- `hive/engine.py`: local Hive orchestration with planning, queues, retries, cancellation, artifacts, and result consolidation.
 - `nexus/` and `shell/`: **Terminal** — live operator shell package with direct `NexusLoop` access.
+
+### Tools & Sandbox
+- `tools/<name>/`: executable capability layer — 10 tools under `tools/` (bash, code_search, file_ops, knowledge, mcp, memory, reasoning, system, task, web_search). Each tool has its own folder with `<name>.jsnol` (version metadata), `scripts/` (implementation), and `<name>.md` (docs).
+- `sandbox/`: direct-execution safety, risk scoring (`CommandRiskScorer`), and failure memory via `SovereignSandbox`.
+- `safety/`: safety laws, prover engine, and policy evaluation.
+
+### Evolution & Self-Improvement
+- `evolution/`: 18 submodules in per-folder format — `tool_forge/`, `skill_forge/` (includes `SkillSynthesizer`), `plugin_forge/`, `memory_forge/`, `knowledge_forge/`, `logs/`, `status/`, `ledger/`, `nudge/`, `intent/`, `self_improvement/`, `sop/`, `ensemble/`, `version/`. Each has `<name>.jsnol`, `scripts/`, and `<name>.md`. Auto-version tracking via `VersionManager` across all 39 modules.
+
+### Memory & Knowledge
+- `memory/`: persistent JSON-based memory storage (per artifact).
+- `knowledge/`: knowledge store with RAG index files.
+- `rag/`: retrieval layer — BM25 + hybrid vector retrieval with Atlas deep indexing.
+- `context/`: context persistence and compression (`NexusContextCompressor`).
+
+### Reasoning & Planning
+- `reasoning/`: hyper reasoning engine for planner/critic/verifier workflows with uncertainty and replan triggers.
+- `router/`: intent router — multi-signal intent classification with confidence scoring.
+
+### Providers
+- `providers/`: 35+ model providers (OpenAI, Anthropic, Groq, Gemini, Ollama, DeepSeek, Mistral, etc.) with health telemetry, capability registry, and fallback routing.
+
+### User Surfaces
 - `cli/`: **CLI** — TypeScript Ink UI (API thin client; not the live terminal).
 - `gui/`: **GUI** — FastAPI backend and React operator surface.
 - `gateway/`: **Gateway** — Telegram, Discord, WhatsApp, and other external channels.
+
+### Support
+- `config/`: YAML configuration (provider.yml, settings.yml, system.yml) loaded by `config_loader.py`.
+- `prompts/`: `NexusPromptEngine` — token-efficient dynamic prompt builder.
+- `security/`: lightweight release hygiene checks, secret scanner.
+- `permissions/`: permission policy definitions.
+- `lifecycle/`: lifecycle management hooks.
+- `tasks/`: task scheduler.
+- `skills/`: skill definitions and `NexusSkillMaster` singleton.
+- `plugins/`: plugin system (early stage).
+- `utils/`: utilities (logger, encryption, compression, math, token counter).
+- `mcp/`: MCP stdio server for code graph (Claude/Cursor/Windsurf-style).
+- `voice/`: voice mode (Distil-Whisper + KittenTTS).
+- `tests/`: test suites (42 passing, 3 pre-existing failures).
 
 ## Four User Surfaces
 

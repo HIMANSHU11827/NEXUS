@@ -1,4 +1,4 @@
-# NEXUS Unified Cognitive Loop 10.0 (Sovereign Dual-Core Architecture)
+# NEXUS Unified Cognitive Loop (7-State Sovereign Architecture)
 
 The `NexusLoop` (`orchestrators/loop.py`) is the core reasoning and execution runtime of NEXUS AI. It is implemented as an asynchronous, event-driven state machine coordinating context, dynamic sandboxing, customizable lifecycle hooks, permission policies, and automated self-evolution.
 
@@ -76,6 +76,6 @@ To support integration with the Live Operator Shell, command-line interfaces, an
 
 To verify state transitions, configuration parameters, and dynamic compilers, execute:
 ```powershell
-.venv\Scripts\python -m pytest tests/core/test_loop.py
+python -m pytest tests/ -v --tb=short
 ```
 All tests verify parallel grounding, dynamic planning, hook callbacks, and context-aware failure vaccine generation.

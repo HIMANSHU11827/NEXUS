@@ -1,63 +1,79 @@
 # NEXUS AI: Sovereign Engineering Project Memory (A to Z)
 
-This document is the definitive technical record of the NEXUS AI platform. It captures the entire architecture and the "Dominance Upgrades" implemented to achieve absolute technical superiority.
+This document captures the core architecture and evolution system of the NEXUS AI platform.
 
 ---
 
-## 🏛️ A to Z Architecture Breakdown
+## Core Architecture
 
-### **A. The Sovereign Kernel (`kernel/` package)**
-The heart of the system. A thread-safe singleton that manages lazy-loading for all core services:
+### The Sovereign Kernel (`kernel/` package)
+A thread-safe singleton managing lazy-loading for all core services:
 *   **MoE Router:** Dynamic model tiering (NANO to EXTREME).
 *   **Hive Engine:** Asynchronous Hive worker orchestration.
-*   **RAG Engine:** Long-term vector memory.
-*   **Tool Registry:** Hardened access to bash, files, git, and more.
+*   **RAG Engine:** Long-term vector memory (BM25 + hybrid vector).
+*   **Tool Registry:** Hardened access to 10 tools (bash, code_search, file_ops, knowledge, mcp, memory, reasoning, system, task, web_search).
 
-### **B. Unified Cognitive Loop (`orchestrators/loop.py`)**
-A single-stage execution loop inspired by Claude Code and OpenClaw:
-*   **Grounding:** Unified assembly of codebase maps, memories, and failures.
-*   **Reasoning:** Recursive DAG planning via the Architect.
-*   **Action:** Parallel read/serial write tool execution.
-*   **Learning:** Real-time Neural Backprop (Experience Replay).
+### Unified Cognitive Loop (`orchestrators/loop.py`)
+A 7-state sovereign cognitive loop (`SCAState`):
+*   **GROUNDING:** Parallel load of rules, RAG, and compiler status.
+*   **PLANNING:** Complexity classifier (tiers 0/1/2) — direct chat, checklist, or architect roadmap.
+*   **INFERENCE:** LLM call via MoE router with tool call extraction.
+*   **AUDITING:** Permission policy resolution + `CommandRiskScorer` + `SafetyLaws`.
+*   **EXECUTION:** Concurrent reads / serial writes via `SovereignSandbox`.
+*   **VERIFICATION:** Diagnostics, failure vaccines, context compaction, gap detection.
+*   **EVOLVE:** Session sync, memory persist, evolution logging.
 
-### **C. Efficiency & Token Savings**
-*   **NexusContextCompressor:** LLM-driven high-fidelity history compaction.
-*   **Zero-Token Context Engine:** Replaces large text with ID pointers + 900-char summaries.
-*   **Dynamic Protocol Injection:** Only includes complex instructions (Self-Correction/Improvement) when necessary.
+### Evolution & Version System (`evolution/` package)
+18 modules in per-folder format:
+*   `tool_forge/`, `skill_forge/`, `plugin_forge/`, `memory_forge/`, `knowledge_forge/`, `log_forge/`
+*   Support: `logs/`, `status/`, `ledger/`, `nudge/`, `intent/`, `self_improvement/`, `sop/`, `ensemble/`, `version/`
+*   `VersionManager` tracks semver (1.0.0) across all 39 `.jsnol` module files
+*   All 6 forges auto-bump versions on refine (minor by default, major on upgrade)
+*   Every `scripts/*.py` has `__version__` embedded inline
+*   Config YAMLs also versioned (`config/provider.yml`, `settings.yml`, `system.yml`)
+
+### User Surfaces
+| Surface | Start | Path |
+|---------|-------|------|
+| **Terminal** (live) | `python -m nexus` | `nexus/` package |
+| **CLI** (Ink client) | `cd cli && npm start` | `cli/` — needs API on `:8000` |
+| **GUI** | `cd gui && python -m server` | `gui/`, `server/` package |
+| **Gateway** | `python -m gateway.main` | `gateway/` — Telegram, Discord, WA |
 
 ---
 
-## 🛠️ Implemented Dominance Upgrades (A to Z)
+## Implemented Upgrades
 
-1.  **🚀 Recursive DAG Architect:** Decomposes missions into technical sub-goal graphs with logical dependencies.
-2.  **Async Hive Kernel:** Non-blocking task execution allowing 10+ Hive workers to operate in parallel.
-3.  **🧠 Active Experience Replay:** Immediate strategy adjustment and memory graph updates following tool failures.
-4.  **🔗 Knowledge Graph Reasoning:** Multi-hop semantic traversal linking failures to historical project context.
-5.  **🏗️ Architectural Foresight:** Real-time cross-file dependency scanning after every file edit.
-6.  **🛡️ Unified Cognitive Grounding:** Single-pass deduplicated injection of RAG and Graph facts.
-7.  **👁️ Multi-modal Vision Grounding:** Image/UI analysis bridge for layout auditing.
-8.  **🧬 Neural Self-Distillation:** Automatic collection of "Gold Standard" interactions for GGUF fine-tuning.
-9.  **🛡️ Sovereign Sandbox Execution:** 2-tier security (Restricted Shell / Docker) with risk-based filtering.
+1.  **7-State Sovereign Loop:** GROUNDING → PLANNING → INFERENCE → AUDITING → EXECUTION → VERIFICATION → EVOLVE
+2.  **Auto-Version Tracking:** VersionManager tracks all 39 modules with semver bump on every forge refine
+3.  **Per-Module Evolution Structure:** Every evolution module has `<name>.jsnol` (metadata), `scripts/` (code), `<name>.md` (docs)
+4.  **Embedded Inline Versions:** Every script file has `__version__ = "1.0.0"` at the source level
+5.  **Tool Registry:** 10 tools under `tools/<name>/` with jsnol metadata + sandboxed execution
+6.  **Sovereign Sandbox:** 2-tier security (Restricted Shell / Docker) with risk-based filtering
 
 ---
 
-## 🛡️ Security & Autonomy Configuration
+## Security & Autonomy Configuration
 
-### **Autonomy Modes**
+### Autonomy Modes
 *   **AUTO_PILOT (Default):** Agent self-governs; blocks only high-risk commands.
 *   **BYPASS:** Sovereign mode; no blocks, maximum speed.
 *   **APPROVE:** Manual control; prompts for every action.
 *   **PRE_AUTHORIZED:** Whitelist mode; only runs saved/approved commands.
 
-### **Sandbox Tiers**
+### Sandbox Tiers
 *   **NO_SANDBOX (Default):** Direct speed.
 *   **SANDBOX:** Isolation via **Normal** (Shell) or **Docker** backends.
 
 ---
 
-## 🧠 Memory Persistence
+## Memory Persistence
 *   **Session Context:** Automatically saved to `logs/sessions/` and reloaded on start.
 *   **Global History:** Permanent record in `logs/memory/global_history.md`.
-*   **Impact Sensing:** `ARCHITECTURAL_IMPACT_SCAN` active on all file edits.
+*   **Impact Sensing:** Evolution hooks track changes for auto-version bumps.
 
-**NEXUS AI is now the benchmark for autonomous engineering. This memory file ensures continuity across all future sessions.**
+## Verification
+```powershell
+python -m pytest tests/ -v --tb=short
+python -c "from evolution.version.scripts.version import VersionManager; vm=VersionManager('.'); print(vm.get_all_versions_report())"
+```
