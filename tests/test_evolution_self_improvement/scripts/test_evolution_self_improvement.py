@@ -1,5 +1,5 @@
 import pytest
-from evolution.self_improvement.engine import SelfImprovementEngine, ImprovementRecord
+from evolution.self_improvement.scripts.engine import SelfImprovementEngine, ImprovementRecord
 
 
 @pytest.fixture

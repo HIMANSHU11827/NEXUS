@@ -1,5 +1,5 @@
 import pytest
-from evolution.memory_forge.forge import MemoryForge
+from evolution.memory_forge.scripts.forge import MemoryForge
 
 
 @pytest.fixture

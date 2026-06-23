@@ -69,7 +69,7 @@ class LogAnalyzer:
         actions = []
         for gap in patterns.get("skill_gaps", []):
             try:
-                from evolution.skill_forge.forge import SkillForge
+                from evolution.skill_forge.scripts.forge import SkillForge
                 forge = SkillForge(self.root)
                 result = forge.forge(gap["name"], gap["reason"])
                 if result.get("created"):
@@ -78,7 +78,7 @@ class LogAnalyzer:
                 pass
         for gap in patterns.get("tool_opportunities", []):
             try:
-                from evolution.forge.engine import ToolForge
+                from evolution.forge.scripts.engine import ToolForge
                 forge = ToolForge(self.root)
                 result = forge.forge(gap)
                 if result.get("created"):

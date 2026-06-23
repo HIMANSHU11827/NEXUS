@@ -1,0 +1,6 @@
+{
+  "name": "ledger",
+  "description": "Tracks self-improvement metrics over time",
+  "entry": "scripts/ledger.py",
+  "class": "EvolutionLedger"
+}

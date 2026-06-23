@@ -1,0 +1,6 @@
+{
+  "name": "intent",
+  "description": "NEXUS intent and proactive engine",
+  "entry": "scripts/engine.py",
+  "class": "NexusIntentEngine"
+}

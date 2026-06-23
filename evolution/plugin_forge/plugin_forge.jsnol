@@ -1,0 +1,6 @@
+{
+  "name": "plugin_forge",
+  "description": "Plugin forge — creates and refines NEXUS plugins",
+  "entry": "scripts/forge.py",
+  "class": "PluginForge"
+}

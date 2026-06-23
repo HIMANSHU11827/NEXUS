@@ -1,1 +1,2 @@
-from evolution.knowledge_forge.forge import KnowledgeForge
+from evolution.knowledge_forge.scripts.forge import KnowledgeForge
+__all__ = ["KnowledgeForge"]

@@ -1,2 +1,2 @@
-from evolution.ledger.ledger import EvolutionLedger
+from evolution.ledger.scripts.ledger import EvolutionLedger
 __all__ = ["EvolutionLedger"]

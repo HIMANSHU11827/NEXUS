@@ -1,0 +1,6 @@
+{
+  "name": "log_analyzer",
+  "description": "Reads all logs, finds patterns, drives evolution",
+  "entry": "scripts/log_analyzer.py",
+  "class": "LogAnalyzer"
+}

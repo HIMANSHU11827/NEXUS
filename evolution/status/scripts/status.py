@@ -2,9 +2,10 @@
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
-from evolution.log import EvolutionLog
+from evolution.log.scripts.log import EvolutionLog
 logger = logging.getLogger(__name__)
 
 class EvolutionStatus:
@@ -127,7 +128,7 @@ class EvolutionStatus:
         return {"count": len(items), "items": items}
 
     def _scan_sops(self) -> Dict:
-        sop_dir = os.path.join(os.path.dirname(__file__), "sop")
+        sop_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "sop")
         items = []
         if os.path.isdir(sop_dir):
             for fname in sorted(os.listdir(sop_dir)):
@@ -143,7 +144,7 @@ class EvolutionStatus:
 
     def _read_ledger_summary(self) -> Dict:
         try:
-            from evolution.ledger import EvolutionLedger
+            from evolution.ledger.scripts.ledger import EvolutionLedger
             s = EvolutionLedger(self.root).summary()
             return {"events": {"total": s.get("total_events", 0), "by_kind": s.get("by_kind", {}), "applied": s.get("applied", 0)}}
         except Exception:

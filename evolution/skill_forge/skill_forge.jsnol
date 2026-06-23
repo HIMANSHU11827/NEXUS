@@ -1,0 +1,6 @@
+{
+  "name": "skill_forge",
+  "description": "Skill forge — creates procedural skill memories in skills/",
+  "entry": "scripts/forge.py",
+  "class": "SkillForge"
+}

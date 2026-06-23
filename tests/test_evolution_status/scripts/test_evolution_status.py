@@ -1,5 +1,5 @@
 import pytest
-from evolution.status import EvolutionStatus
+from evolution.status.scripts.status import EvolutionStatus
 
 
 @pytest.fixture

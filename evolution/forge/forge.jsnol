@@ -1,0 +1,6 @@
+{
+  "name": "forge",
+  "description": "Tool forge — creates new NEXUS tools from LLM-generated specifications",
+  "entry": "scripts/engine.py",
+  "class": "ToolForge"
+}

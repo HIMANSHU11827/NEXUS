@@ -1,15 +1,15 @@
-from evolution.log import EvolutionLog
-from evolution.ledger.ledger import EvolutionLedger
-from evolution.status import EvolutionStatus
-from evolution.log_analyzer import LogAnalyzer
-from evolution.forge.engine import ToolForge
-from evolution.skill_forge.forge import SkillForge
-from evolution.plugin_forge.forge import PluginForge
-from evolution.memory_forge.forge import MemoryForge
-from evolution.knowledge_forge.forge import KnowledgeForge
-from evolution.nudge.engine import NudgeEngine
-from evolution.self_improvement.engine import SelfImprovementEngine, ImprovementRecord
-from evolution.intent.engine import NexusIntentEngine
+from evolution.log.scripts.log import EvolutionLog
+from evolution.ledger.scripts.ledger import EvolutionLedger
+from evolution.status.scripts.status import EvolutionStatus
+from evolution.log_analyzer.scripts.log_analyzer import LogAnalyzer
+from evolution.forge.scripts.engine import ToolForge
+from evolution.skill_forge.scripts.forge import SkillForge
+from evolution.plugin_forge.scripts.forge import PluginForge
+from evolution.memory_forge.scripts.forge import MemoryForge
+from evolution.knowledge_forge.scripts.forge import KnowledgeForge
+from evolution.nudge.scripts.engine import NudgeEngine
+from evolution.self_improvement.scripts.engine import SelfImprovementEngine, ImprovementRecord
+from evolution.intent.scripts.engine import NexusIntentEngine
 
 __all__ = [
     "EvolutionLog", "EvolutionLedger", "EvolutionStatus", "LogAnalyzer",

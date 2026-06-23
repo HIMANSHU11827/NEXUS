@@ -27,12 +27,12 @@ from permissions import PermissionMode, PermissionResult
 from router import IntentRouter
 from sandbox.risk import CommandRiskScorer
 from sandbox.sandbox_manager import SovereignSandbox, SandboxTier
-from evolution.forge.engine import ToolForge
-from evolution.skill_forge.forge import SkillForge
-from evolution.memory_forge.forge import MemoryForge
-from evolution.knowledge_forge.forge import KnowledgeForge
-from evolution.log import EvolutionLog
-from evolution.self_improvement.engine import SelfImprovementEngine
+from evolution.forge.scripts.engine import ToolForge
+from evolution.skill_forge.scripts.forge import SkillForge
+from evolution.memory_forge.scripts.forge import MemoryForge
+from evolution.knowledge_forge.scripts.forge import KnowledgeForge
+from evolution.log.scripts.log import EvolutionLog
+from evolution.self_improvement.scripts.engine import SelfImprovementEngine
 
 class SCAState(str, Enum):
     GROUNDING = "grounding"          # Parallel RAG, unified graph, rules loading
@@ -153,11 +153,11 @@ class NexusLoop:
         return self.kernel._get_or_init("failure_memory", lambda: FailureMemory(self.root))
     @property
     def self_improvement(self):
-        from evolution.self_improvement.engine import SelfImprovementEngine
+        from evolution.self_improvement.scripts.engine import SelfImprovementEngine
         return self.kernel._get_or_init("self_improvement", lambda: SelfImprovementEngine(self.root))
     @property
     def evolution_log(self):
-        from evolution.log import EvolutionLog
+        from evolution.log.scripts.log import EvolutionLog
         return self.kernel._get_or_init("evolution_log", lambda: EvolutionLog(self.root))
 
     # ── Entry Points ──
@@ -564,10 +564,10 @@ class NexusLoop:
     async def _fill_gap_during_session(self, context: str):
         """Detect real gaps during chat using LLM analysis of full conversation context."""
         try:
-            from evolution.forge.engine import ToolForge
-            from evolution.skill_forge.forge import SkillForge
-            from evolution.memory_forge.forge import MemoryForge
-            from evolution.knowledge_forge.forge import KnowledgeForge
+            from evolution.forge.scripts.engine import ToolForge
+            from evolution.skill_forge.scripts.forge import SkillForge
+            from evolution.memory_forge.scripts.forge import MemoryForge
+            from evolution.knowledge_forge.scripts.forge import KnowledgeForge
 
             prompt = f"""[EVOLUTION_GAP_DETECTION]
 Analyze the following conversation context for gaps NEXUS should fill:

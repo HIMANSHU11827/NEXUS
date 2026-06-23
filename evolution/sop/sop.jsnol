@@ -1,0 +1,6 @@
+{
+  "name": "sop",
+  "description": "Standard operating procedures for evolution tasks",
+  "entry": "scripts/sop.py",
+  "functions": ["load_sop", "list_sops"]
+}

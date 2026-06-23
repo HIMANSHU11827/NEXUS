@@ -1,0 +1,6 @@
+{
+  "name": "memory_forge",
+  "description": "Memory forge — persists important cross-session context as structured memory",
+  "entry": "scripts/forge.py",
+  "class": "MemoryForge"
+}

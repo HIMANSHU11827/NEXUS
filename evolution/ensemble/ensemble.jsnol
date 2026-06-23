@@ -1,0 +1,6 @@
+{
+  "name": "ensemble",
+  "description": "Orchestrates multiple reasoning strategies",
+  "entry": "scripts/ensemble.py",
+  "class": "EnsembleManager"
+}

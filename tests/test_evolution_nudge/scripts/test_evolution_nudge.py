@@ -1,5 +1,5 @@
 import pytest
-from evolution.nudge.engine import NudgeEngine
+from evolution.nudge.scripts.engine import NudgeEngine
 
 
 @pytest.fixture

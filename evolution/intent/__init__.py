@@ -1,2 +1,2 @@
-from evolution.intent.engine import NexusIntentEngine
+from evolution.intent.scripts.engine import NexusIntentEngine
 __all__ = ["NexusIntentEngine"]

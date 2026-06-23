@@ -1,5 +1,5 @@
 import pytest
-from evolution.log import EvolutionLog
+from evolution.log.scripts.log import EvolutionLog
 
 
 @pytest.fixture

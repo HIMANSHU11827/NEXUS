@@ -1,0 +1,6 @@
+{
+  "name": "self_improvement",
+  "description": "Self-improvement engine for NEXUS",
+  "entry": "scripts/engine.py",
+  "class": "SelfImprovementEngine"
+}

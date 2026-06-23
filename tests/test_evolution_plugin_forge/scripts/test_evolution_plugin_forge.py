@@ -1,5 +1,5 @@
 import pytest
-from evolution.plugin_forge.forge import PluginForge
+from evolution.plugin_forge.scripts.forge import PluginForge
 
 
 @pytest.fixture

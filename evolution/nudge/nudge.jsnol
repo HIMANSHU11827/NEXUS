@@ -1,0 +1,6 @@
+{
+  "name": "nudge",
+  "description": "Periodic self-reminders for NEXUS",
+  "entry": "scripts/engine.py",
+  "class": "NudgeEngine"
+}
