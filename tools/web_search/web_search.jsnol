@@ -5,8 +5,16 @@
   "entry": "scripts/web_search.py",
   "class": "WebSearchTool",
   "params": {
-    "query": {"type": "string", "description": "Search query", "required": true},
-    "max_results": {"type": "integer", "description": "Max results to return", "default": 5}
+    "query": {
+      "type": "string",
+      "description": "Search query",
+      "required": true
+    },
+    "max_results": {
+      "type": "integer",
+      "description": "Max results to return",
+      "default": 5
+    }
   },
   "category": "web"
 }
