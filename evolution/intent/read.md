@@ -1,7 +1,10 @@
-# Intent
+# Intent Engine
 
-Parses and resolves user intent from natural language queries. Maps intents to actionable system commands.
+NexusIntentEngine — intent forecasting for likely next tests, security checks, and repo refresh work.
 
-## Key Classes
-- `IntentResolver` — Intent parsing and classification
-- Methods: `resolve()`, `classify()`, `extract_params()`
+**Version:** 1.0.0
+
+## Features
+- forecast(context) — Predict likely next actions
+- analyze_patterns() — Learn from historical intent patterns
+- Security check and test prioritization

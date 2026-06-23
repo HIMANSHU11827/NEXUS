@@ -1,8 +1,5 @@
 # Bash Tool
 
-Execute shell commands in a sandboxed environment with timeout control.
+Shell command execution in a sandboxed environment with timeout control.
 
-## Files
-- `bash.jsnol` — Tool definition
-- `scripts/bash.py` — Implementation (BashTool class)
-- `bash.md` — Documentation
+**Version:** 1.0.0

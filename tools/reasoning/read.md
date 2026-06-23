@@ -1,8 +1,5 @@
 # Reasoning Tool
 
-Perform multi-step reasoning and chain-of-thought analysis.
+Chain-of-thought and structured reasoning tool.
 
-## Files
-- `reasoning.jsnol` — Tool definition
-- `scripts/reasoning.py` — Implementation (ReasoningTool class)
-- `reasoning.md` — Documentation
+**Version:** 1.0.0

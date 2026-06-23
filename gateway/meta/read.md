@@ -1,6 +1,5 @@
-# Meta Platform
+# Meta Gateway
 
-Meta/Messenger adapter for NEXUS AI. Sends messages via Meta Graph API.
+Meta (Facebook/Instagram) adapter for NEXUS AI messaging gateway.
 
-Version: 1.0
-Requires: META_PAGE_TOKEN env var
+**Version:** 1.0.0

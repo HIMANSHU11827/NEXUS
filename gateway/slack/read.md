@@ -1,6 +1,5 @@
-# Slack Platform
+# Slack Gateway
 
-Slack bot adapter for NEXUS AI. Sends messages via Slack Web API.
+Slack bot adapter for NEXUS AI messaging gateway.
 
-Version: 1.0
-Requires: SLACK_TOKEN env var
+**Version:** 1.0.0

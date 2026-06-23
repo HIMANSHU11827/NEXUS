@@ -1,7 +1,11 @@
 # Skill Forge
 
-Skill creation and management. Generates composable skills from definitions and manages their lifecycle.
+Creates and refines NEXUS skills under \skills/<name>.md\ with YAML frontmatter.
 
-## Key Classes
-- `SkillForge` — Skill factory
-- Methods: `create_skill()`, `register()`, `execute()`, `deprecate()`
+**Version:** 1.0.0
+
+## Features
+- forge(name, prompt, description) — Create a new skill at version 1.0.0
+- refine(name, new_prompt) — Update skill with auto-version bump
+- SkillSynthesizer — Synthesizes new skills from conversation patterns
+- Integrated with VersionManager for version tracking

@@ -1,8 +1,5 @@
 # System Tool
 
-Access system information, environment variables, and platform utilities.
+System monitoring and management tool.
 
-## Files
-- `system.jsnol` — Tool definition
-- `scripts/system.py` — Implementation (SystemTool class)
-- `system.md` — Documentation
+**Version:** 1.0.0

@@ -1,8 +1,5 @@
 # Memory Tool
 
-Maintain and query conversational memory across sessions.
+Memory store, retrieve, and management tool.
 
-## Files
-- `memory.jsnol` — Tool definition
-- `scripts/memory.py` — Implementation (MemoryTool class)
-- `memory.md` — Documentation
+**Version:** 1.0.0

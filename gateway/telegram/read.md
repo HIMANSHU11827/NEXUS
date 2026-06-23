@@ -1,6 +1,5 @@
-# Telegram Platform
+# Telegram Gateway
 
-Telegram bot adapter for NEXUS AI. Sends and receives messages via Telegram Bot API.
+Telegram bot adapter for NEXUS AI messaging gateway.
 
-Version: 1.0
-Requires: TELEGRAM_TOKEN env var
+**Version:** 1.0.0

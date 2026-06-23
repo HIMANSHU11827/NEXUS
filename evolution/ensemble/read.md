@@ -1,7 +1,10 @@
-# Ensemble
+# Ensemble Manager
 
-Coordinates multiple agents to solve tasks collectively. Routes queries to the best-suited agent and aggregates responses.
+EnsembleManager — multi-strategy reasoning for improved decision making.
 
-## Key Classes
-- `EnsembleDirector` — Orchestrates agent collaboration
-- Methods: `dispatch()`, `collect()`, `synthesize()`
+**Version:** 1.0.0
+
+## Features
+- Ensemble of reasoning strategies
+- Weighted voting for decision aggregation
+- Strategy performance tracking

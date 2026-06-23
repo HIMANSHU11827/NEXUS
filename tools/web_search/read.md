@@ -1,8 +1,5 @@
 # Web Search Tool
 
-Search the web and fetch live content from URLs.
+Web search and content fetching with result aggregation.
 
-## Files
-- `web_search.jsnol` — Tool definition
-- `scripts/web_search.py` — Implementation (WebSearchTool class)
-- `web_search.md` — Documentation
+**Version:** 1.0.0

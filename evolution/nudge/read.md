@@ -1,7 +1,10 @@
-# Nudge
+# Nudge Engine
 
-Proactive suggestion engine. Monitors system state and agent behavior to recommend improvements or actions.
+NudgeEngine — proactive behavioral nudges based on system state and user patterns.
 
-## Key Classes
-- `NudgeEngine` — Suggestion generation
-- Methods: `evaluate()`, `suggest()`, `dismiss()`
+**Version:** 1.0.0
+
+## Features
+- analyze(state) — Evaluate system state for nudge opportunities
+- generate_nudges() — Produce contextual suggestions
+- Integrated with IntentEngine for forecasting

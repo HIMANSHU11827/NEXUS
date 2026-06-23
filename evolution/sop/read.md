@@ -1,7 +1,10 @@
-# SOP
+# SOP (Standard Operating Procedures)
 
-Standard Operating Procedures engine. Defines, validates, and executes step-by-step workflows and protocols.
+Standard Operating Procedures for NEXUS AI — defines repeatable workflows and operational patterns.
 
-## Key Classes
-- `SOPEngine` — Procedure execution engine
-- Methods: `define()`, `validate()`, `execute()`, `audit()`
+**Version:** 1.0.0
+
+## Features
+- define(name, steps) — Create SOP definition
+- execute(name) — Run SOP workflow
+- analyze(name) — Evaluate SOP effectiveness

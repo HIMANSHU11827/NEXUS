@@ -1,8 +1,5 @@
 # Code Search Tool
 
-Search codebases using regex and glob patterns with fast indexing.
+Glob and grep code search with pattern matching across the codebase.
 
-## Files
-- `code_search.jsnol` — Tool definition
-- `scripts/code_search.py` — Implementation (CodeSearchTool class)
-- `code_search.md` — Documentation
+**Version:** 1.0.0

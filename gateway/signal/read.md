@@ -1,6 +1,5 @@
-# Signal Platform
+# Signal Gateway
 
-Signal CLI adapter for NEXUS AI. Sends messages via signal-cli.
+Signal messenger adapter for NEXUS AI messaging gateway.
 
-Version: 1.0
-Requires: SIGNAL_NUMBER env var, signal-cli installed
+**Version:** 1.0.0

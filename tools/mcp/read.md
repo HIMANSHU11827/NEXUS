@@ -1,8 +1,5 @@
 # MCP Tool
 
-Interact with Model Context Protocol servers and resources.
+MCP server management and integration tool.
 
-## Files
-- `mcp.jsnol` — Tool definition
-- `scripts/mcp.py` — Implementation (MCPTool class)
-- `mcp.md` — Documentation
+**Version:** 1.0.0

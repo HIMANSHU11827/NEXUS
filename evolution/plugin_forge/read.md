@@ -1,7 +1,10 @@
 # Plugin Forge
 
-Third-party plugin integration system. Loads, validates, and manages external plugins extending system capabilities.
+Creates and refines NEXUS plugins under \plugins/<name>/\ with metadata, entry point, and documentation.
 
-## Key Classes
-- `PluginForge` — Plugin lifecycle manager
-- Methods: `load()`, `unload()`, `validate()`, `list_plugins()`
+**Version:** 1.0.0
+
+## Features
+- forge(name, entry_point, description) — Create a new plugin at version 1.0.0
+- refine(name, config) — Update plugin with auto-version bump (minor/major)
+- Integrated with VersionManager for version tracking

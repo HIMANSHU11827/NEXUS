@@ -1,8 +1,5 @@
 # Knowledge Tool
 
-Retrieve and store knowledge documents for long-term reference.
+Knowledge base query and management tool.
 
-## Files
-- `knowledge.jsnol` — Tool definition
-- `scripts/knowledge.py` — Implementation (KnowledgeTool class)
-- `knowledge.md` — Documentation
+**Version:** 1.0.0

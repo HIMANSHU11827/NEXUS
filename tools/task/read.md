@@ -1,8 +1,5 @@
 # Task Tool
 
-Delegate and manage complex multi-step tasks across tools.
+Task management and background job tracking tool.
 
-## Files
-- `task.jsnol` — Tool definition
-- `scripts/task.py` — Implementation (TaskTool class)
-- `task.md` — Documentation
+**Version:** 1.0.0

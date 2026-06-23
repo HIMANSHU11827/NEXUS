@@ -1,8 +1,5 @@
 # File Ops Tool
 
-Read, write, edit, and manage files on the local filesystem.
+File read, write, and edit operations with safety checks.
 
-## Files
-- `file_ops.jsnol` — Tool definition
-- `scripts/file_ops.py` — Implementation (FileOpsTool class)
-- `file_ops.md` — Documentation
+**Version:** 1.0.0

@@ -1,7 +1,10 @@
 # Knowledge Forge
 
-Manages persistent knowledge artifacts. Stores, retrieves, and indexes structured knowledge for agents.
+Creates and refines knowledge entries for NEXUS AI's knowledge base.
 
-## Key Classes
-- `KnowledgeForge` — Knowledge storage engine
-- Methods: `store()`, `retrieve()`, `index()`, `search()`
+**Version:** 1.0.0
+
+## Features
+- forge(topic, content, key_concepts, tags) — Create knowledge entry at version 1.0.0
+- refine(name, updates) — Update knowledge with auto-version bump
+- Persistent JSON-based storage under \knowledge/- Integrated with VersionManager for version tracking

@@ -1,7 +1,10 @@
 # Memory Forge
 
-Long-term memory management for agents. Stores, consolidates, and recalls agent experiences and learnings.
+Creates and refines persistent memory entries for NEXUS AI.
 
-## Key Classes
-- `MemoryForge` — Memory storage and retrieval
-- Methods: `remember()`, `recall()`, `consolidate()`, `forget()`
+**Version:** 1.0.0
+
+## Features
+- forge(title, content, importance, tags) — Create memory entry at version 1.0.0
+- refine(name, updates) — Update memory with auto-version bump
+- Persistent JSON-based storage under \memory/- Integrated with VersionManager for version tracking

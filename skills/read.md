@@ -1,6 +1,8 @@
 # Skills
 
-NEXUS AI skill management system. Skills are `.md` files with YAML frontmatter.
+NEXUS AI skill management system. Skills are .md files with YAML frontmatter.
+
+**Version:** 1.0.0
 
 ## Structure
 - `__init__.py` — `NexusSkillMaster` class (singleton manager)
