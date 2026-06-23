@@ -289,24 +289,42 @@ class NexusLoop:
     # ── Internal Methods ──
 
     async def _ground_context(self, task_desc: str) -> List[Dict[str, str]]:
-        # Run grounding RAG, rules, and engine check in parallel
+        # Run grounding: rules, RAG, tools, compiler status in parallel
         tasks = [
             asyncio.to_thread(self._load_progressive_rules),
             asyncio.to_thread(self.rag.retrieve_as_text, task_desc, top_k=2),
+            asyncio.to_thread(self._load_tool_descriptions),
             asyncio.to_thread(self._check_compiler_status)
         ]
-        system_rules, grounding, _ = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        if isinstance(system_rules, Exception):
-            system_rules = "You are NEXUS, a sovereign AI code engine."
-        if isinstance(grounding, Exception):
-            grounding = ""
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        system_rules = results[0] if not isinstance(results[0], Exception) else "You are NEXUS AI, a local-first autonomous engineering agent."
+        grounding = results[1] if not isinstance(results[1], Exception) else ""
+        tool_descriptions = results[2] if not isinstance(results[2], Exception) else ""
 
         messages = [{"role": "system", "content": system_rules}]
+        if tool_descriptions:
+            messages.append({"role": "system", "content": f"[AVAILABLE_TOOLS]:\n{tool_descriptions}"})
         if grounding and "No relevant matches" not in grounding:
             messages.append({"role": "system", "content": f"[GROUNDING_MEMORIES]:\n{grounding}"})
 
         return messages
+
+    def _load_tool_descriptions(self) -> str:
+        try:
+            tools = self.kernel.tools.list_tools()
+            lines = ["You have these tools available. To use one, output a JSON object with \"action\": \"<tool_name>\" and \"params\": {...}:", ""]
+            for name, info in tools.items():
+                desc = info.get("description", "").strip()
+                if desc:
+                    lines.append(f"  {name}: {desc}")
+                else:
+                    lines.append(f"  {name}")
+            lines.append("")
+            lines.append('Example: {"action": "bash", "params": {"command": "echo hello"}}')
+            lines.append("When you are done, end your response with TASK_COMPLETE.")
+            return "\n".join(lines)
+        except Exception:
+            return "Tools: bash, code_search, file_ops, knowledge, memory, reasoning, system, task, web_search, mcp"
 
     def _check_compiler_status(self):
         try:
