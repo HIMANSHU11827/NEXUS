@@ -1,6 +1,0 @@
-{
-  "name": "skill_synthesizer",
-  "description": "Auto-generates new skills from examples and natural language descriptions",
-  "entry": "scripts/skill_synthesizer.py",
-  "class": "SkillSynthesizer"
-}

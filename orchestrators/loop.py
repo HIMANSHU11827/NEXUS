@@ -31,7 +31,7 @@ from evolution.forge.scripts.engine import ToolForge
 from evolution.skill_forge.scripts.forge import SkillForge
 from evolution.memory_forge.scripts.forge import MemoryForge
 from evolution.knowledge_forge.scripts.forge import KnowledgeForge
-from evolution.log.scripts.log import EvolutionLog
+from evolution.logs import EvolutionLog
 from evolution.self_improvement.scripts.engine import SelfImprovementEngine
 
 class SCAState(str, Enum):
@@ -157,7 +157,7 @@ class NexusLoop:
         return self.kernel._get_or_init("self_improvement", lambda: SelfImprovementEngine(self.root))
     @property
     def evolution_log(self):
-        from evolution.log.scripts.log import EvolutionLog
+        from evolution.logs import EvolutionLog
         return self.kernel._get_or_init("evolution_log", lambda: EvolutionLog(self.root))
 
     # ── Entry Points ──

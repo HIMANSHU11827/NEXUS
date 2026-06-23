@@ -1,2 +1,3 @@
 from evolution.skill_forge.scripts.forge import SkillForge
-__all__ = ["SkillForge"]
+from evolution.skill_forge.scripts.skill_synthesizer import SkillSynthesizer
+__all__ = ["SkillForge", "SkillSynthesizer"]

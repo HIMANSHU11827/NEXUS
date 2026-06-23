@@ -1,2 +1,2 @@
-from evolution.log.scripts.log import EvolutionLog
+from evolution.logs import EvolutionLog
 __all__ = ["EvolutionLog"]

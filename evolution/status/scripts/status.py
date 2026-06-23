@@ -5,7 +5,7 @@ import os
 import re
 import time
 from typing import Any, Dict, List, Optional
-from evolution.log.scripts.log import EvolutionLog
+from evolution.logs import EvolutionLog
 logger = logging.getLogger(__name__)
 
 class EvolutionStatus:

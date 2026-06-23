@@ -1,2 +1,3 @@
-from evolution.skill_synthesizer.scripts.skill_synthesizer import SkillSynthesizer
-__all__ = ["SkillSynthesizer"]
+from evolution.skill_forge import SkillSynthesizer
+from evolution.skill_forge import SkillSynthesizer as NexusSkillSynthesizer
+__all__ = ["SkillSynthesizer", "NexusSkillSynthesizer"]

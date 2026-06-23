@@ -1,2 +1,2 @@
-from evolution.log_analyzer.scripts.log_analyzer import LogAnalyzer
+from evolution.logs import LogAnalyzer
 __all__ = ["LogAnalyzer"]

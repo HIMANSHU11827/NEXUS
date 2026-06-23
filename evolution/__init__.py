@@ -1,7 +1,6 @@
-from evolution.log.scripts.log import EvolutionLog
+from evolution.logs import EvolutionLog, LogAnalyzer
 from evolution.ledger.scripts.ledger import EvolutionLedger
 from evolution.status.scripts.status import EvolutionStatus
-from evolution.log_analyzer.scripts.log_analyzer import LogAnalyzer
 from evolution.forge.scripts.engine import ToolForge
 from evolution.skill_forge.scripts.forge import SkillForge
 from evolution.plugin_forge.scripts.forge import PluginForge
