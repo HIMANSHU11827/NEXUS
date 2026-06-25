@@ -52,7 +52,7 @@ class GatewayRunner:
         if not adapter:
             return
 
-        from session_bus import set_active_session_id, sync_loop_from_disk
+        from utils.session_bus import set_active_session_id, sync_loop_from_disk
 
         session_id = self.session_id_for(event)
         logger.info(

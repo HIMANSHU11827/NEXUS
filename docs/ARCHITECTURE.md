@@ -50,7 +50,7 @@ NEXUS is a local-first autonomous agent platform organized around these package 
 - `plugins/`: plugin system (early stage).
 - `utils/`: utilities (logger, encryption, compression, math, token counter).
 - `mcp/`: MCP stdio server for code graph (Claude/Cursor/Windsurf-style).
-- `voice/`: voice mode (Distil-Whisper + KittenTTS).
+- `voice/`: voice mode (whisper.cpp `ggml-tiny-q5_1.bin` + KittenTTS Nano int8).
 - `tests/`: test suites (42 passing, 3 pre-existing failures).
 
 ## Four User Surfaces

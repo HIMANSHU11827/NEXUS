@@ -1,0 +1,9 @@
+{
+  "title": "platform_specific_commands",
+  "content": "System lacks knowledge of platform-specific command equivalents (ls vs dir, cat vs type, etc.)",
+  "key_concepts": [],
+  "tags": [],
+  "version": "1.0.0",
+  "created_at": 1782224557.788961,
+  "updated_at": 1782224557.7889612
+}

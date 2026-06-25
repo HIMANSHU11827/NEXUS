@@ -1,10 +1,10 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import nexus_path  # noqa: F401
+import utils.nexus_path as nexus_path  # noqa: F401
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
-from config_loader import NexusConfigLoader
+from config.config_loader import NexusConfigLoader
 
 
 def get_nexus_llm(temperature: float = 0.7, streaming: bool = True) -> ChatOpenAI:

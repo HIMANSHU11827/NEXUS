@@ -3,7 +3,7 @@ import json
 import yaml
 import os
 from typing import Dict, Any, Optional
-from config_loader import NexusConfigLoader
+from config.config_loader import NexusConfigLoader
 
 
 class LMStudioAutoProvider:

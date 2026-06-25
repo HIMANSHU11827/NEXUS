@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import threading
 from collections import deque
 from typing import Any, Optional
@@ -8,6 +9,159 @@ import numpy as np
 
 class AudioUnavailable(RuntimeError):
     pass
+
+
+class ContinuousSpeechSession:
+    def __init__(
+        self,
+        audio_io: "AudioIO",
+        max_seconds: float,
+        silence_threshold: float,
+        silence_timeout_seconds: float,
+        min_speech_seconds: float,
+        status_callback: Optional[callable] = None,
+    ):
+        self.audio_io = audio_io
+        self.max_seconds = float(max_seconds)
+        self.silence_threshold = float(silence_threshold)
+        self.silence_timeout_seconds = float(silence_timeout_seconds)
+        self.min_speech_seconds = float(min_speech_seconds)
+        self.status_callback = status_callback
+        self._segments: "queue.Queue[np.ndarray]" = queue.Queue()
+        self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        self._thread = None
+        self.clear_pending()
+
+    def pause_capture(self) -> None:
+        self._pause_event.set()
+        self.clear_pending()
+
+    def resume_capture(self) -> None:
+        self.clear_pending()
+        self._pause_event.clear()
+        self._emit_status("waiting")
+
+    def clear_pending(self) -> None:
+        while True:
+            try:
+                self._segments.get_nowait()
+            except queue.Empty:
+                return
+
+    def read_utterance(self, timeout: Optional[float] = None) -> np.ndarray:
+        try:
+            return self._segments.get(timeout=timeout)
+        except queue.Empty:
+            return np.asarray([], dtype=np.float32)
+
+    def _emit_status(self, state: str) -> None:
+        if self.status_callback:
+            self.status_callback(state)
+
+    def _capture_loop(self) -> None:
+        import torch
+
+        self.audio_io._load_vad()
+        sd = self.audio_io._sounddevice()
+        stream_rate = self.audio_io.input_sample_rate
+        silero_rate = 16000
+        chunk_frames_silero = 512
+        chunk_frames = max(512, int(chunk_frames_silero * stream_rate / silero_rate))
+        max_frames = int(self.max_seconds * stream_rate)
+        silence_limit_chunks = max(1, int(self.silence_timeout_seconds / (chunk_frames_silero / silero_rate)))
+        min_speech_chunks = max(1, int(self.min_speech_seconds / (chunk_frames_silero / silero_rate)))
+
+        def reset_state():
+            return [], deque(maxlen=25), False, 0, 0
+
+        captured, preroll, speech_started, chunks_since_speech, speech_chunks_count = reset_state()
+        self._emit_status("waiting")
+
+        with sd.InputStream(
+            samplerate=stream_rate,
+            channels=1,
+            dtype="float32",
+            device=self.audio_io.input_device,
+            blocksize=chunk_frames,
+        ) as stream:
+            while not self._stop_event.is_set():
+                chunk, _ = stream.read(chunk_frames)
+                audio_chunk = np.asarray(chunk, dtype=np.float32).reshape(-1)
+
+                if self._pause_event.is_set():
+                    captured, preroll, speech_started, chunks_since_speech, speech_chunks_count = reset_state()
+                    continue
+
+                if stream_rate != silero_rate:
+                    audio_chunk_16k = self.audio_io._resample_if_needed(audio_chunk, stream_rate, silero_rate)
+                else:
+                    audio_chunk_16k = audio_chunk
+
+                is_speech = False
+                if self.audio_io._vad_model:
+                    chunk_len = len(audio_chunk_16k)
+                    if chunk_len >= chunk_frames_silero:
+                        vad_input = audio_chunk_16k[:chunk_frames_silero]
+                    else:
+                        vad_input = np.pad(audio_chunk_16k, (0, chunk_frames_silero - chunk_len))
+                    with torch.no_grad():
+                        tensor_chunk = torch.from_numpy(vad_input)
+                        prob = self.audio_io._vad_model(tensor_chunk, silero_rate).item()
+                        is_speech = prob > 0.4
+                else:
+                    rms = np.sqrt(np.mean(audio_chunk**2))
+                    is_speech = rms > self.silence_threshold
+
+                utterance_complete = False
+                if is_speech:
+                    if not speech_started:
+                        self._emit_status("hearing")
+                        captured.extend(preroll)
+                        preroll.clear()
+                        speech_started = True
+                    captured.append(audio_chunk)
+                    speech_chunks_count += 1
+                    chunks_since_speech = 0
+                else:
+                    if speech_started:
+                        captured.append(audio_chunk)
+                        chunks_since_speech += 1
+                        current_silence_limit = silence_limit_chunks
+                        if speech_chunks_count > 100:
+                            current_silence_limit = int(silence_limit_chunks * 1.5)
+                        if speech_chunks_count >= min_speech_chunks and chunks_since_speech >= current_silence_limit:
+                            utterance_complete = True
+                    else:
+                        preroll.append(audio_chunk)
+
+                total_frames = sum(len(part) for part in captured)
+                if speech_started and total_frames >= max_frames:
+                    utterance_complete = True
+
+                if not utterance_complete:
+                    continue
+
+                if captured:
+                    raw = np.concatenate(captured)
+                    resampled = self.audio_io._resample_if_needed(raw, stream_rate)
+                    if resampled.size:
+                        self._segments.put(resampled)
+                captured, preroll, speech_started, chunks_since_speech, speech_chunks_count = reset_state()
+                self._emit_status("waiting")
 
 
 class AudioIO:
@@ -45,44 +199,83 @@ class AudioIO:
         except Exception:
             return configured_device
 
-        best_index: Optional[int] = None
-        best_score = -1
+        # Build ranked candidate list — hard-block WDM-KS which always errors on Windows
+        WDM_KS_BLOCKED = {"wdm-ks", "ks", "wdm"}
+        candidates = []
         for index, device in enumerate(devices):
             channels = int(device["max_input_channels"] if want_input else device["max_output_channels"])
             if channels <= 0:
                 continue
             name = str(device["name"])
-            hostapi_name = str(hostapis[device["hostapi"]]["name"]).lower()
             lower_name = name.lower()
+            hostapi_name = str(hostapis[device["hostapi"]]["name"]).lower()
+
+            # Hard-skip WDM-KS — it always throws PaErrorCode -9999 on Windows
+            if any(kw in hostapi_name for kw in WDM_KS_BLOCKED):
+                continue
+            # Skip stereo mix / virtual loopback for input
+            if want_input and "stereo mix" in lower_name:
+                continue
+
             score = 0
-            if "wasapi" in hostapi_name:
-                score += 40
-            if want_input and "microphone" in lower_name:
-                score += 30
-            if not want_input and ("speaker" in lower_name or "headphone" in lower_name):
-                score += 30
+            # Prefer MME > WASAPI > DirectSound for input (DirectSound capture is silent on Windows)
+            # Prefer DirectSound > MME > WASAPI for output
             if want_input:
-                try:
-                    sd.check_input_settings(device=index, samplerate=16000, channels=1, dtype="float32")
+                if "mme" in hostapi_name:
+                    score += 100
+                elif "wasapi" in hostapi_name:
                     score += 80
-                except Exception:
-                    pass
-                try:
-                    default_rate = int(float(device["default_samplerate"]))
-                    if default_rate == 16000:
-                        score += 25
-                    elif default_rate in {32000, 44100, 48000}:
-                        score += 5
-                except Exception:
-                    pass
-            if "stereo mix" in lower_name:
-                score -= 50
+                elif "directsound" in hostapi_name:
+                    score += 30
+                elif "core audio" in hostapi_name or "alsa" in hostapi_name:
+                    score += 100
+            else:
+                if "directsound" in hostapi_name:
+                    score += 100
+                elif "mme" in hostapi_name:
+                    score += 80
+                elif "wasapi" in hostapi_name:
+                    score += 50
+                elif "core audio" in hostapi_name or "alsa" in hostapi_name:
+                    score += 100
+
+            # Prefer real microphone/speaker by name
+            if want_input and "microphone" in lower_name:
+                score += 20
+            if not want_input and ("speaker" in lower_name or "headphone" in lower_name):
+                score += 20
+
+            # Penalise mapper/primary aliases
             if "mapper" in lower_name or "primary sound" in lower_name:
                 score -= 10
-            if score > best_score:
-                best_score = score
-                best_index = index
-        return best_index if best_index is not None else configured_device
+
+            candidates.append((score, index))
+
+        # Sort best-first
+        candidates.sort(key=lambda x: -x[0])
+
+        # Walk candidates, return first that actually opens
+        for score, index in candidates:
+            try:
+                if want_input:
+                    rate = 16000
+                    try:
+                        sd.check_input_settings(device=index, samplerate=rate, channels=1, dtype="float32")
+                    except Exception:
+                        info = sd.query_devices(index)
+                        rate = int(float(info.get("default_samplerate", 44100)))
+                    # Actually attempt to open stream (only real test on Windows)
+                    import sounddevice as _sd
+                    with _sd.InputStream(device=index, samplerate=rate, channels=1, dtype="float32", blocksize=512):
+                        pass
+                else:
+                    sd.check_output_settings(device=index, samplerate=16000, channels=1, dtype="float32")
+                return index
+            except Exception:
+                continue
+
+        return configured_device
+
 
     @classmethod
     def _resolve_input_sample_rate(cls, input_device: Optional[int | str], requested_rate: int) -> int:
@@ -170,19 +363,23 @@ class AudioIO:
     ) -> Any:
         import torch
         self._load_vad()
-        
+
         sd = self._sounddevice()
-        stream_rate = 16000 # Silero prefers 16k
-        # Use 512 samples (32ms) as required by Silero
-        chunk_frames = 512 
+        # Use the device's native rate to avoid PortAudio rate-mismatch errors
+        stream_rate = self.input_sample_rate
+        silero_rate = 16000  # Silero always needs 16kHz
+        # 512 samples at silero_rate = 32ms chunks as required by Silero
+        chunk_frames_silero = 512
+        # Scale blocksize to the native device rate
+        chunk_frames = max(512, int(chunk_frames_silero * stream_rate / silero_rate))
         max_frames = int(float(max_seconds) * stream_rate)
-        
+
         # Adaptive limits based on time
-        silence_limit_chunks = int(float(silence_timeout_seconds) / (chunk_frames / stream_rate))
-        min_speech_chunks = int(float(min_speech_seconds) / (chunk_frames / stream_rate))
+        silence_limit_chunks = int(float(silence_timeout_seconds) / (chunk_frames_silero / silero_rate))
+        min_speech_chunks = int(float(min_speech_seconds) / (chunk_frames_silero / silero_rate))
 
         captured = []
-        preroll = deque(maxlen=25) # Increased to ~800ms of pre-buffer for better context
+        preroll = deque(maxlen=25)  # ~800ms of pre-buffer
         speech_started = False
         chunks_since_speech = 0
         speech_chunks_count = 0
@@ -200,14 +397,25 @@ class AudioIO:
             while len(captured) * chunk_frames < max_frames:
                 chunk, _ = stream.read(chunk_frames)
                 audio_chunk = np.asarray(chunk, dtype=np.float32).reshape(-1)
-                
+
+                # Resample chunk to 16kHz for Silero if needed
+                if stream_rate != silero_rate:
+                    audio_chunk_16k = self._resample_if_needed(audio_chunk, stream_rate, silero_rate)
+                else:
+                    audio_chunk_16k = audio_chunk
+
                 is_speech = False
                 if self._vad_model:
-                    # Neural path
+                    # Neural path — Silero needs exactly 512 samples at 16kHz
+                    chunk_len = len(audio_chunk_16k)
+                    if chunk_len >= chunk_frames_silero:
+                        vad_input = audio_chunk_16k[:chunk_frames_silero]
+                    else:
+                        vad_input = np.pad(audio_chunk_16k, (0, chunk_frames_silero - chunk_len))
                     with torch.no_grad():
-                        tensor_chunk = torch.from_numpy(audio_chunk)
-                        prob = self._vad_model(tensor_chunk, stream_rate).item()
-                        is_speech = prob > 0.4 # Slightly more sensitive threshold
+                        tensor_chunk = torch.from_numpy(vad_input)
+                        prob = self._vad_model(tensor_chunk, silero_rate).item()
+                        is_speech = prob > 0.4
                 else:
                     # Fallback RMS path
                     rms = np.sqrt(np.mean(audio_chunk**2))
@@ -227,12 +435,11 @@ class AudioIO:
                     if speech_started:
                         captured.append(audio_chunk)
                         chunks_since_speech += 1
-                        
-                        # Adaptive silence: if user spoke for a long time, allow slightly more silence
+
                         current_silence_limit = silence_limit_chunks
-                        if speech_chunks_count > 100: # Over ~3 seconds of speech
+                        if speech_chunks_count > 100:
                             current_silence_limit = int(silence_limit_chunks * 1.5)
-                        
+
                         if speech_chunks_count >= min_speech_chunks and chunks_since_speech >= current_silence_limit:
                             break
                     else:
@@ -243,8 +450,30 @@ class AudioIO:
 
         if not speech_started or not captured:
             return np.asarray([], dtype=np.float32)
-            
-        return self._resample_if_needed(np.concatenate(captured), stream_rate)
+
+        # Concatenate at native rate then resample to the STT target rate
+        raw = np.concatenate(captured)
+        return self._resample_if_needed(raw, stream_rate)
+
+    def open_continuous_session(
+        self,
+        max_seconds: float,
+        silence_threshold: float,
+        silence_timeout_seconds: float,
+        min_speech_seconds: float,
+        status_callback: Optional[callable] = None,
+    ) -> ContinuousSpeechSession:
+        session = ContinuousSpeechSession(
+            self,
+            max_seconds,
+            silence_threshold,
+            silence_timeout_seconds,
+            min_speech_seconds,
+            status_callback=status_callback,
+        )
+        session.start()
+        return session
+
 
     def is_silent(self, audio: Any, threshold: float) -> bool:
         import numpy as np

@@ -18,7 +18,8 @@ class OpenRouterProvider(NexusBaseProvider):
         super().__init__("openrouter", "https://openrouter.ai/api/v1/chat/completions")
         if not self.model:
             self.model = "openrouter/free"
-            
+        self._base_model = self.model
+
         self.fallback_models = [
             "openrouter/free",
             "nvidia/nemotron-3-nano-30b-a3b:free",
@@ -34,6 +35,9 @@ class OpenRouterProvider(NexusBaseProvider):
             "Content-Type": "application/json",
         }
 
+    def configure_thinking(self, enabled: bool):
+        self.thinking = enabled
+
     def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         if not self.validate_api_key():
             return "Error: OpenRouter API key is missing or invalid. Set OPENROUTER_API_KEY to use openrouter/free."
@@ -46,6 +50,8 @@ class OpenRouterProvider(NexusBaseProvider):
         
         for i, model_name in enumerate(models_to_try):
             payload = {"model": model_name, "messages": msgs}
+            if self.thinking:
+                payload["thinking"] = {}
             try:
                 response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=timeout)
                 if response.status_code == 200:
@@ -81,6 +87,8 @@ class OpenRouterProvider(NexusBaseProvider):
                 yield "Error in stream: OpenRouter stream deadline exceeded"
                 return
             payload = {"model": model_name, "messages": msgs, "stream": True}
+            if self.thinking:
+                payload["thinking"] = {}
             try:
                 response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=timeout)
                 if response.status_code == 200:

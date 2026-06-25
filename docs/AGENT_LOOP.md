@@ -11,7 +11,7 @@ The engine cycles through seven distinct execution states (`SCAState`) during a 
 ```mermaid
 stateDiagram-v2
     [*] --> GROUNDING : Task Received
-    GROUNDING --> PLANNING : Load context, RAG & CLAUDE.md
+    GROUNDING --> PLANNING : Load context, RAG & docs/NEXUS.md
     PLANNING --> INFERENCE : Determine Tier (0/1/2) & Checklist
     INFERENCE --> AUDITING : Extract tool calls
     AUDITING --> EXECUTION : Safety audit & permissions approved
@@ -24,7 +24,7 @@ stateDiagram-v2
 
 ### 1. Grounding (`SCAState.GROUNDING`)
 Performs concurrent operations using `asyncio.gather` to minimize latency:
-*   Loads progressive workspace rules (`CLAUDE.md`).
+*   Loads progressive workspace rules (`docs/NEXUS.md`).
 *   Retrieves relevant background knowledge via RAG index matches.
 *   Performs structural compiler and target engine status checks.
 

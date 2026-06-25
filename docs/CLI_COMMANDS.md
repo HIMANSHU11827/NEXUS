@@ -55,7 +55,7 @@ The CLI (`cli/nexus-cli.tsx`) is an Ink-based TypeScript thin client that talks 
 | `/files` | — | Searches workspace files via `GET /api/files?q=` |
 | `/readme` | — | Previews README.md |
 | `/docs` | — | Lists docs/ directory |
-| `/init` | — | Creates CLAUDE.md + NEXUS.md memory files |
+| `/init` | — | Creates `docs/NEXUS.md` if missing |
 | `/memory` | — | Shows or opens memory file |
 | `/paste` | — | Attaches clipboard image |
 

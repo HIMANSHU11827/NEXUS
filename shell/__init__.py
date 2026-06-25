@@ -9,6 +9,9 @@ import sys
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 import atexit
+
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", ".env"))
 from collections import deque
 from typing import Optional, List
 
@@ -154,6 +157,7 @@ class NexusShell:
         "/load": "Load conversation",
         "/gui": "Launch GUI",
         "/workflow": "Run workflow from YAML",
+        "/thinking": "Toggle thinking mode on/off",
     }
 
     def __init__(self):
@@ -177,14 +181,14 @@ class NexusShell:
 
     def _apply_session(self, session_id: str, source: str = "terminal") -> None:
         """Switch to a shared session visible across terminal, CLI, GUI, and gateway."""
-        from session_bus import set_active_session_id
+        from utils.session_bus import set_active_session_id
 
         self.session_id = session_id
         self.brain.load_memory(session_id)
         set_active_session_id(self.brain.root, session_id, source=source)
 
     def _show_banner(self):
-        from assets import BANNER_PRO
+        from shell.assets import BANNER_PRO
         console.clear()
         console.print(BANNER_PRO)
         console.print()
@@ -228,7 +232,7 @@ class NexusShell:
             uptime = stats.get("uptime", 0)
             mode = "?"
             try:
-                mode = getattr(self.brain.router.base_router, "mode", "?")
+                mode = getattr(self.brain.base_router, "mode", "?")
             except AttributeError:
                 pass
             status = stats.get("status", "OK")
@@ -246,50 +250,36 @@ class NexusShell:
         except Exception as e:
             console.print(f"[yellow]Kernel not ready ({type(e).__name__}) — starting up...[/yellow]")
 
-    def _stream_response(self, user_input: str) -> tuple[str, bool]:
+    async def _stream_response(self, user_input: str) -> tuple[str, bool]:
         """Stream the response chunk by chunk, colorizing markers. Handles Ctrl+C gracefully."""
-        from session_bus import sync_loop_from_disk
+        from utils.session_bus import sync_loop_from_disk
 
         full_response = ""
         interrupted = False
         try:
-            from stream_filters import is_internal_stream_line, filter_stream_text
-
-            sync_loop_from_disk(self.brain)
-            for chunk in self.brain.stream_run(user_input):
-                if "[* Processing Tools...]" in chunk:
-                    continue
-
-                chunk = filter_stream_text(chunk)
-                if not chunk.strip():
-                    continue
-                if any(is_internal_stream_line(line) for line in chunk.splitlines()):
-                    chunk = "\n".join(
-                        line for line in chunk.splitlines() if not is_internal_stream_line(line)
-                    )
-                if not chunk.strip():
-                    continue
-
-                if chunk.startswith("[THINKING:"):
-                    console.print(f"[cyan]{escape(chunk)}[/cyan]")
-                elif chunk.startswith("[ERROR]:"):
-                    console.print(f"[bold red]{escape(chunk)}[/bold red]")
-                elif chunk.startswith("[NEXUS_ACTIVITY]:"):
-                    console.print(f"[grey70]{escape(chunk)}[/grey70]")
-                elif chunk.startswith("[TOOL_START:"):
-                    console.print(f"[yellow]{escape(chunk)}[/yellow]")
-                elif chunk.startswith("[TOOL_END:"):
-                    console.print(f"[green]{escape(chunk)}[/green]")
-                elif chunk.startswith("[ABORTED]"):
-                    console.print(f"[bold red]{escape(chunk)}[/bold red]")
-                elif chunk.startswith("[SYSTEM:"):
-                    console.print(f"[grey50 italic]{escape(chunk)}[/grey50 italic]")
-                else:
-                    console.print(chunk, end="")
-
-                full_response += chunk
+            sync_loop_from_disk()
+            async for chunk in self.brain.stream_run(user_input):
+                t = chunk.get("type", "?")
+                d = chunk.get("data", "")
+                if t == "content":
+                    console.print(d, end="")
+                    full_response += d
+                elif t == "status":
+                    label = d.strip()
+                    if label.startswith("[error") or label.startswith("[aborted"):
+                        console.print(f"[bold red]{escape(d)}[/bold red]")
+                    else:
+                        console.print(f"[grey50 italic]{escape(d)}[/grey50 italic]")
+                elif t == "plan":
+                    console.print(f"[bold cyan]{escape(d)}[/bold cyan]")
+                elif t == "observations":
+                    for line in d if isinstance(d, list) else [d]:
+                        console.print(f"[grey70]{escape(str(line))}[/grey70]")
+                elif t == "tools_discovered":
+                    for tc in d if isinstance(d, list) else []:
+                        console.print(f"[yellow]tool: {tc.get('name','?')}[/yellow]")
         except KeyboardInterrupt:
-            console.print("\n[yellow]⚠ Interrupted by user.[/yellow]")
+            console.print("\n[yellow]Interrupted.[/yellow]")
             interrupted = True
         except Exception as e:
             console.print(f"\n[bold red]ERROR:[/bold red] {escape(str(e))}")
@@ -317,7 +307,7 @@ class NexusShell:
 
     def _list_sessions(self):
         """List saved sessions from the session directory."""
-        session_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "sessions")
+        session_dir = os.path.join(self.brain.root, "logs", "sessions")
         if not os.path.exists(session_dir):
             console.print("[yellow]No sessions yet.[/yellow]")
             return
@@ -413,7 +403,7 @@ class NexusShell:
 
     def _show_skills(self):
         """List skills from .commandcode/skills."""
-        skills_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".commandcode", "skills")
+        skills_dir = os.path.join(self.brain.root, ".commandcode", "skills")
         if not os.path.isdir(skills_dir):
             console.print("[yellow]No skills directory found.[/yellow]")
             return
@@ -434,7 +424,7 @@ class NexusShell:
 
     def _show_agents(self):
         """List agents from .commandcode/agents."""
-        agents_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".commandcode", "agents")
+        agents_dir = os.path.join(self.brain.root, ".commandcode", "agents")
         if not os.path.isdir(agents_dir):
             console.print("[yellow]No agents directory found.[/yellow]")
             return
@@ -568,6 +558,12 @@ class NexusShell:
         if base == "/tasks":
             self._show_tasks()
             return True
+        if base == "/thinking":
+            new_state = not self.brain.thinking_mode
+            self.brain.configure_thinking(new_state)
+            state = "ON" if new_state else "OFF"
+            console.print(f"[cyan]Thinking mode: {state} (native model thinking)[/cyan]")
+            return True
         if base == "/status":
             self._show_status()
             return True
@@ -620,8 +616,8 @@ class NexusShell:
 
         return False
 
-    def start(self):
-        from session_bus import get_active_session_id
+    async def start(self):
+        from utils.session_bus import get_active_session_id
 
         active = get_active_session_id(self.brain.root, self.session_id)
         if active != self.session_id:
@@ -651,7 +647,7 @@ class NexusShell:
 
                 self.conversation_history.append({"role": "user", "content": user_msg})
                 console.print("[dim italic]processing...[/dim italic]")
-                full_response, interrupted = self._stream_response(user_msg)
+                full_response, interrupted = await self._stream_response(user_msg)
                 print()
 
                 if not interrupted:

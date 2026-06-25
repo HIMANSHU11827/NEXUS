@@ -1,6 +1,6 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import nexus_path  # noqa: F401 — ensures project root on sys.path for IDE + runtime
+import utils.nexus_path as nexus_path  # noqa: F401 — ensures project root on sys.path for IDE + runtime
 
 from langchain.agents import create_react_agent, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder

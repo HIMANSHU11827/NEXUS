@@ -15,7 +15,7 @@ class LlamaCPPProvider(NexusBaseProvider):
         # We need to load config first to get ctx_size and gpu_layers
         self.config_data = {}
         try:
-            from config_loader import NexusConfigLoader
+            from config.config_loader import NexusConfigLoader
             loader = NexusConfigLoader()
             self.config_data = loader.get_provider_config("llama_cpp")
         except Exception: 

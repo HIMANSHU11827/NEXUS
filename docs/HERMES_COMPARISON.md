@@ -97,7 +97,7 @@ guardrails.
 
 ### 3.5 Local Model Sovereignty (STRENGTH)
 First-class offline support with LM Studio, Ollama, llama.cpp, local
-STT (Distil-Whisper), TTS (KittenTTS), and vision (MediaPipe). Hermes is
+STT (whisper.cpp `ggml-tiny-q5_1.bin`), TTS (KittenTTS Nano int8), and vision (MediaPipe). Hermes is
 primarily cloud-API oriented with local model support being secondary.
 
 ### 3.6 Provider Breadth (STRENGTH)

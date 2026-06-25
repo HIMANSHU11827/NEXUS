@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 # 🌌 [NEXUS_PATH_CORE]
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-load_dotenv(os.path.join(_ROOT, ".env"))
+load_dotenv(os.path.join(_ROOT, "config", ".env"))
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, Response
 from orchestrators.loop import NexusLoop
 _UPLOAD_DIR = os.path.join(_ROOT, "workspace", "uploads")
@@ -981,6 +981,8 @@ def list_work_events(session_id: str, limit: int = 200, active_turn_id: str = ""
             with open(todo_path, "r", encoding="utf-8") as f:
                 content = f.read()
             plan = parse_todo_markdown(content)
+            if not plan:
+                return filtered_events
             task_text = "Agent Workspace Plan"
             task_match = re.search(r"^\s*Task:\s*(.*)", content, re.IGNORECASE | re.MULTILINE)
             if task_match:
@@ -1123,7 +1125,7 @@ def filter_chat_chunk(chunk: str, show_thinking: bool = False) -> str:
     return "".join(filtered)
 
 def get_loop(session_id: str = "default") -> NexusLoop:
-    from session_bus import sync_loop_from_disk
+    from utils.session_bus import sync_loop_from_disk
 
     session_id = safe_session_id(session_id)
     if session_id not in _LOOPS:
@@ -1136,7 +1138,7 @@ def get_loop(session_id: str = "default") -> NexusLoop:
 
 @app.get("/api/sessions/active")
 def get_active_session():
-    from session_bus import get_active_session, load_session_history
+    from utils.session_bus import get_active_session, load_session_history
 
     active = get_active_session(_ROOT)
     sid = safe_session_id(active.get("session_id", "default"))
@@ -1150,7 +1152,7 @@ def get_active_session():
 
 @app.post("/api/sessions/active")
 async def set_active_session(request: Request):
-    from session_bus import set_active_session_id
+    from utils.session_bus import set_active_session_id
 
     data = await request.json()
     sid = set_active_session_id(_ROOT, data.get("session_id", "default"), source=str(data.get("source", "api")))
@@ -1200,7 +1202,7 @@ def list_sessions():
 
 @app.post("/api/sessions/new")
 def create_session():
-    from session_bus import set_active_session_id
+    from utils.session_bus import set_active_session_id
 
     new_id = f"session_{int(time.time())}"
     clear_workspace_todo_plan()
@@ -1211,7 +1213,7 @@ def create_session():
 
 @app.post("/api/sessions/load")
 async def load_session(request: Request):
-    from session_bus import set_active_session_id
+    from utils.session_bus import set_active_session_id
 
     data = await request.json()
     sid = safe_session_id(data.get("id", "default"))
@@ -1293,7 +1295,7 @@ async def chat(request: Request):
             {"status": "error", "message": f"Invalid chat JSON: {exc}"},
             status_code=400,
         )
-    from session_bus import set_active_session_id
+    from utils.session_bus import set_active_session_id
 
     prompt = str(data.get("prompt", ""))[:50000]
     sid = safe_session_id(data.get("session_id", "default"))

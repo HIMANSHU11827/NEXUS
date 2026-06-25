@@ -7,6 +7,7 @@ __pycache__/
 .pyre/
 .venv/
 venv/
+.voice-venv/
 
 node_modules/
 dist/
@@ -21,6 +22,9 @@ replay_pid*.log
 logs/
 workspace/
 scratch/
+memory/session_*/
+memory/incomplete_assistant_response/
+nul
 
 models/local/
 data/

@@ -62,3 +62,25 @@ class TestHookRegistry:
         import asyncio
         asyncio.run(registry.trigger("on_state_change"))
         assert len(results) == 1
+
+
+class TestVoiceModeCleaning:
+    def test_voice_mode_cleaning(self, tmp_path, monkeypatch):
+        loop = NexusLoop(root_dir=str(tmp_path))
+        
+        # Mock stream_run to yield nothing
+        async def mock_stream_run(*args, **kwargs):
+            if False:
+                yield {}
+        monkeypatch.setattr(loop, "stream_run", mock_stream_run)
+        
+        # Run loop.run with a voice prompt
+        prompt = "Yeah\n\n[VOICE_MODE]: Keep it extremely brief (max 15 words). Conversational. No markdown."
+        import asyncio
+        asyncio.run(loop.run(prompt, voice_mode=True))
+        
+        # Verify user message in memory is cleaned
+        assert len(loop.memory) >= 1
+        user_msg = next((m for m in loop.memory if m["role"] == "user"), None)
+        assert user_msg is not None
+        assert user_msg["content"] == "Yeah"

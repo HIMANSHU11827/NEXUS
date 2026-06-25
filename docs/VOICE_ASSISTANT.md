@@ -3,7 +3,7 @@
 NEXUS voice mode connects local speech input, the existing NEXUS LLM loop, and local speech output:
 
 ```text
-microphone -> local Distil-Whisper Large v3 -> NEXUS/LLM -> KittenTTS Micro 0.8 (40M) -> speaker
+microphone -> whisper.cpp ggml-tiny-q5_1.bin -> NEXUS/LLM -> KittenTTS Nano 0.8 int8 (15M) -> speaker
 ```
 
 ## Install
@@ -50,26 +50,27 @@ voice:
   sample_rate: 16000
   record_seconds: 3.0
   silence_threshold: 0.01
-  whisper_model: models/local/voice/distil-whisper-large-v3
+  whisper_model: models/local/voice/ggml-tiny-q5_1.bin
   whisper_device: auto
   whisper_language: auto
   whisper_chunk_length_s: 15
   whisper_batch_size: 1
-  kitten_model: KittenML/kitten-tts-micro-0.8
+  kitten_model: KittenML/kitten-tts-nano-0.8-int8
   voice_name: Jasper
   speech_speed: 1.0
   volume: 1.0
   push_to_talk_key: none
+  continuous_listening: true
   wake_word_enabled: false
   wake_word: nexus
   allow_text_fallback: true
   keep_models_loaded: true
 ```
 
-The default STT model is the local `models/local/voice/distil-whisper-large-v3` folder. Use `openai/whisper-tiny` for weak hardware, or switch to another local/Hugging Face Whisper-compatible model path when needed.
-Set `whisper_language: auto` to let Whisper detect English, Hindi, and Hinglish-style mixed speech automatically. Set a fixed language such as `en` only if you want to force one language.
+The default STT model is `models/local/voice/ggml-tiny-q5_1.bin`, a multilingual quantized whisper.cpp model chosen for low memory use and fast CPU inference. Switch to another local Whisper-compatible file or model name if you need a different speed/accuracy tradeoff.
+Set `whisper_language: auto` when you want mixed-language detection such as English + Hindi.
 
-If the configured local Whisper folder is missing Transformer weight files such as `model.safetensors`, NEXUS now falls back to `openai/whisper-tiny` automatically so voice mode can still start.
+If the configured local whisper.cpp file is invalid, NEXUS falls back to a smaller built-in Whisper path automatically so voice mode can still start.
 
 KittenTTS voices include `Bella`, `Jasper`, `Luna`, `Bruno`, `Rosie`, `Hugo`, `Kiki`, and `Leo`.
 KittenTTS works best for English text and usually handles Hinglish written in Roman characters reasonably well. Pure Devanagari Hindi speech output may sound less natural than English or Hinglish output.
@@ -108,8 +109,9 @@ python -m voice_chat --text --once --no-speak
 
 Controls:
 
-- Default mode auto-records after each `[voice] listening...` prompt.
-- In auto mode NEXUS records for `record_seconds`, then transcribes, then sends the text to the main NEXUS loop.
+- Default auto mode now keeps one microphone stream open and listens continuously in the background.
+- Completed speech segments are cut by VAD silence, then sent to STT without reopening the microphone each turn.
+- During TTS playback NEXUS temporarily pauses capture so it does not transcribe its own voice.
 - Press `Ctrl+C` to stop auto-listen mode.
 - Use `python -m voice_chat --manual` for the old Enter/push-to-talk behavior.
 - Use `python -m voice_chat --text` to skip STT and type messages.
@@ -131,6 +133,7 @@ docs/VOICE_ASSISTANT.md
 ## Behavior
 
 - Whisper and KittenTTS stay loaded after first use when `keep_models_loaded: true`.
+- Auto voice mode uses an always-on background capture stream when `continuous_listening: true`.
 - TTS chunks long replies into sentence-sized pieces.
 - New speech stops current playback before speaking, preventing overlapping audio.
 - If Whisper/dependencies fail, NEXUS prompts for typed text when `allow_text_fallback: true`.
@@ -158,7 +161,7 @@ python -m pip install https://github.com/KittenML/KittenTTS/releases/download/0.
 
 Whisper is slow on CPU:
 
-- Use `openai/whisper-tiny` or a smaller local Whisper-compatible model.
+- Use `ggml-tiny-q5_1.bin` for the smallest multilingual local STT path in this setup.
 - Keep `record_seconds` near `3.0` to `5.0`.
 - Keep `whisper_batch_size: 1` on CPU.
 - Use a CUDA PyTorch build and set `whisper_device: auto` if you have an NVIDIA GPU.
@@ -175,6 +178,6 @@ The first request is slow:
 
 ## Sources
 
-- KittenTTS Micro model card and usage: https://huggingface.co/KittenML/kitten-tts-micro-0.8
+- KittenTTS Nano int8 model card and usage: https://huggingface.co/KittenML/kitten-tts-nano-0.8-int8
 - KittenTTS repository/API notes: https://github.com/KittenML/KittenTTS
 - Whisper usage and model guidance: https://github.com/openai/whisper

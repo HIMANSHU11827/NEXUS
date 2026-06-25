@@ -5,7 +5,7 @@ log_level: INFO
 max_turns: 20
 workspace: ./workspace
 default_provider: cloud
-provider_name: openai
+provider_name: deepseek
 memory:
   type: hybrid
   vector_store: chromadb

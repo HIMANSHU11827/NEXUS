@@ -13,20 +13,21 @@ class VoiceSettings:
     microphone_device: Optional[int | str] = None
     speaker_device: Optional[int | str] = None
     sample_rate: int = 16000
-    record_seconds: float = 60.0
-    silence_threshold: float = 0.008
-    min_speech_seconds: float = 0.25
-    silence_timeout_seconds: float = 2.0
-    whisper_model: str = "models/local/voice/distil-whisper-large-v3"
+    record_seconds: float = 6.0
+    silence_threshold: float = 0.010
+    min_speech_seconds: float = 0.18
+    silence_timeout_seconds: float = 0.9
+    whisper_model: str = "models/local/voice/ggml-tiny-q5_1.bin"
     whisper_device: str = "auto"
     whisper_language: str = "auto"
     whisper_chunk_length_s: int = 15
     whisper_batch_size: int = 1
-    kitten_model: str = "KittenML/kitten-tts-micro-0.8"
+    kitten_model: str = "KittenML/kitten-tts-nano-0.8-int8"
     voice_name: str = "Jasper"
-    speech_speed: float = 1.2
+    speech_speed: float = 1.0
     volume: float = 1.0
     push_to_talk_key: str = "none"
+    continuous_listening: bool = True
     wake_word_enabled: bool = False
     wake_word: str = "nexus"
     allow_text_fallback: bool = True
@@ -42,9 +43,9 @@ class VoiceSettings:
         Falls back to NEXUS_PROVIDER_TIMEOUT env var for timeout.
         """
         if config is None:
-            from config_loader import ProfilesManager
+            from config.config_loader import NexusConfigLoader
             try:
-                pm = ProfilesManager()
+                pm = NexusConfigLoader()
                 raw = pm.get("voice", {})
             except Exception:
                 raw = {}

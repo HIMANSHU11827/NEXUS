@@ -6,12 +6,17 @@ Entry point for the local-first agent runtime.
 import os
 import sys
 
+from dotenv import load_dotenv
+# Load .env file from the config directory
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", ".env"))
+
 _root = os.path.dirname(os.path.abspath(__file__))
 if _root not in sys.path:
     sys.path.insert(0, _root)
 
 if os.name == "nt":
-    _venv_scripts = os.path.abspath(os.path.join(_root, ".venv", "Scripts"))
+    _project_root = os.path.dirname(_root)
+    _venv_scripts = os.path.abspath(os.path.join(_project_root, ".venv", "Scripts"))
     if os.path.exists(_venv_scripts):
         try:
             os.add_dll_directory(_venv_scripts)
@@ -40,12 +45,14 @@ console = Console()
 def boot():
     argv = sys.argv
     _root = os.path.dirname(os.path.abspath(__file__))
+    _project_root = os.path.dirname(_root)
 
     # Use --shell or --python to explicitly launch the Python shell instead
     if "--shell" in argv or "--python" in argv:
+        import asyncio
         from shell import NexusShell
         shell = NexusShell()
-        shell.start()
+        asyncio.run(shell.start())
         return
 
     print("--- NEXUS AI: launching CLI ---", flush=True)
@@ -53,13 +60,32 @@ def boot():
     import subprocess
     import time
     import urllib.request
+    import re
 
-    cli_dir = os.path.join(_root, "cli")
+    # Clean up any stale process listening on port 8000 to avoid binding conflict
+    if os.name == "nt":
+        try:
+            output = subprocess.check_output("netstat -ano", shell=True, text=True)
+            for line in output.splitlines():
+                if ":8000 " in line and "LISTENING" in line:
+                    match = re.search(r"\s+(\d+)\s*$", line)
+                    if match:
+                        pid = match.group(1)
+                        subprocess.run(f"taskkill /F /PID {pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    else:
+        try:
+            subprocess.run("fuser -k 8000/tcp", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    cli_dir = os.path.join(_project_root, "cli")
 
     # Start API server in background
     server_proc = subprocess.Popen(
         [sys.executable, "-m", "server"],
-        cwd=_root,
+        cwd=_project_root,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

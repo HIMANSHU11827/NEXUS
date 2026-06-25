@@ -161,6 +161,8 @@ tid = task_res.get("task", {}).get("id", "") if "task" in task_res else ""
 if tid:
     patch_res = api_post(f"/tasks/{tid}", {"status": "in_progress"}, method="PATCH")
     report("PATCH /api/tasks/{id}", patch_res.get("status") == "updated", str(patch_res.get("_error", ""))[:80])
+    # Cleanup task
+    api_post(f"/tasks/{tid}", {}, method="DELETE")
 
 # Run (safe)
 run_res = api_post("/run", {"command": "echo hello"})

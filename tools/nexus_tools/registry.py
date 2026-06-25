@@ -21,6 +21,27 @@ class ToolEntry:
         self.instance = instance
         self.check_fn = check_fn
 
+    def is_read_only(self, params=None) -> bool:
+        if self.instance and hasattr(self.instance, "is_read_only"):
+            try:
+                # support both no-args and args signatures
+                sig = inspect.signature(self.instance.is_read_only)
+                if len(sig.parameters) == 0:
+                    return self.instance.is_read_only()
+                return self.instance.is_read_only(params)
+            except Exception:
+                pass
+        name_lower = self.name.lower()
+        return any(x in name_lower for x in ("read", "view", "search", "grep", "glob", "get", "find", "list", "status", "health"))
+
+    def is_concurrency_safe(self) -> bool:
+        if self.instance and hasattr(self.instance, "is_concurrency_safe"):
+            try:
+                return self.instance.is_concurrency_safe()
+            except Exception:
+                pass
+        return self.is_read_only()
+
 
 class ToolRegistry:
     """Discovers tools from tools/<name>/ and provides runtime execution."""

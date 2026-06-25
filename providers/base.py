@@ -21,10 +21,11 @@ class NexusBaseProvider(ABC):
         self.api_key = ""
         self.headers = {}
         self.session = requests.Session()
+        self.thinking = False
         
         # ⚡ Load from Config
         try:
-            from config_loader import NexusConfigLoader
+            from config.config_loader import NexusConfigLoader
             loader = NexusConfigLoader()
             config = loader.get_provider_config(provider_name)
             
@@ -43,6 +44,9 @@ class NexusBaseProvider(ABC):
                 
         except Exception as e:
             logger.warning(f"[{provider_name.upper()}_INIT]: Failed to load config: {e}")
+
+    def configure_thinking(self, enabled: bool):
+        self.thinking = enabled
 
     @abstractmethod
     def generate(self, prompt: str = "", system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:

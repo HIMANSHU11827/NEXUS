@@ -8,7 +8,7 @@ import os
 import sys
 import time
 from typing import List, Dict, Any, Optional
-from nexus_compat import s, safe_del, sx  # type: ignore
+from utils.nexus_compat import s, safe_del, sx  # type: ignore
 
 
 class KnowledgeVault:

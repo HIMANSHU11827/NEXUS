@@ -51,8 +51,11 @@ class IntentRouter:
     """
 
     def __init__(self, router=None):
-        from cognition.intent_engine import IntentEngine
-        self.neural_engine = IntentEngine(router)
+        try:
+            from cognition.intent_engine import IntentEngine
+            self.neural_engine = IntentEngine(router)
+        except ImportError:
+            self.neural_engine = None
 
     SIGNALS: Dict[str, Dict[str, Any]] = {
         "code": {
@@ -158,7 +161,7 @@ class IntentRouter:
 
         # ⚡ 3.9: Skill-Deep Mapping (Prioritize Learned Logic)
         from skills import NexusSkillMaster
-        from nexus_path import _ROOT
+        from utils.nexus_path import _ROOT
         skills = NexusSkillMaster(_ROOT).list_skills()
         for s in skills:
             if s["id"].lower() in text_lower:

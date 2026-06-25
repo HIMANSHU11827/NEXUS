@@ -1,3 +1,4 @@
 """Shell entry point for python -m shell"""
+import asyncio
 from shell import NexusShell
-NexusShell().start()
+asyncio.run(NexusShell().start())

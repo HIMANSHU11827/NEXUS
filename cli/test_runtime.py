@@ -2,6 +2,12 @@
 """Runtime validation for NEXUS AI CLI v2.1."""
 import os, sys, json, time, subprocess, urllib.request, urllib.error, threading
 
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
 if ROOT not in sys.path:
@@ -141,6 +147,8 @@ tid = d.get("task", {}).get("id", "") if "task" in d else ""
 if tid:
     d2 = api_post(f"/tasks/{tid}", {"status": "in_progress"}, method="PATCH")
     report("PATCH /tasks/{id}", d2.get("status") == "updated", str(d2.get("_error", ""))[:60])
+    # Cleanup task
+    api_post(f"/tasks/{tid}", {}, method="DELETE")
 
 # Multi-agent
 d = api_post("/multi_agent", {"command": "/review", "prompt": "test"})
@@ -148,7 +156,7 @@ report("POST /multi_agent", d.get("status") == "started", str(d.get("_error", ""
 
 # Chat stream
 try:
-    body = json.dumps({"prompt": "say hello v2.1", "session_id": "runtime_test"}).encode()
+    body = json.dumps({"prompt": "say hello v2.1", "session_id": "runtime_test", "stream": True}).encode()
     req = urllib.request.Request(f"{API}/chat", data=body,
         headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=15) as r:

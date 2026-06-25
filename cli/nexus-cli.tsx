@@ -1,7 +1,7 @@
 import React, {useState, useEffect, useRef} from 'react';
 import {existsSync} from 'node:fs';
 import {mkdir, readFile, readdir, stat, writeFile} from 'node:fs/promises';
-import {execFile, spawn} from 'node:child_process';
+import {execFile, execFileSync, spawn} from 'node:child_process';
 import {promisify} from 'node:util';
 import path from 'node:path';
 import {render, Box, Text, useApp, useInput} from 'ink';
@@ -13,6 +13,23 @@ const PROJECT_ROOT = existsSync(path.resolve(process.cwd(), 'pyproject.toml'))
     ? process.cwd()
     : path.resolve(process.cwd(), '..');
 const execFileAsync = promisify(execFile);
+
+const syncStopVoiceProcess = () => {
+    try {
+        execFileSync('powershell.exe', [
+            '-NoProfile',
+            '-Command',
+            `$ProgressPreference='SilentlyContinue'; try { Invoke-RestMethod -Method Post -Uri '${API_BASE}/voice/stop' | Out-Null } catch { }`
+        ], {
+            cwd: PROJECT_ROOT,
+            stdio: 'ignore',
+            timeout: 2500,
+            windowsHide: true
+        });
+    } catch {
+        // Best effort shutdown.
+    }
+};
 
 interface Message {
     role: string;
@@ -54,7 +71,7 @@ interface TaskItem {
     agent?: string;
 }
 
-type ActivityKind = 'file' | 'run' | 'mcp' | 'terminal' | 'tool' | 'search' | 'todo';
+type ActivityKind = 'file' | 'run' | 'mcp' | 'terminal' | 'tool' | 'search' | 'todo' | 'skill' | 'plugin' | 'hive';
 
 interface ActivityItem {
     id: string;
@@ -79,7 +96,88 @@ interface PendingQuestion {
     id: string;
     prompt: string;
     options: string[];
+    allowCustom?: boolean;
 }
+
+const voicePhaseLabel = (phase: string) => {
+    const normalized = String(phase || 'off').toLowerCase();
+    if (normalized === 'off') return 'off';
+    if (normalized === 'ready') return 'ready';
+    if (normalized === 'starting') return 'starting';
+    if (normalized === 'listening') return 'listening';
+    if (normalized === 'waiting') return 'waiting';
+    if (normalized === 'hearing') return 'hearing';
+    if (normalized === 'processing') return 'processing';
+    if (normalized === 'speaking') return 'speaking';
+    if (normalized === 'paused') return 'paused';
+    if (normalized === 'stopped') return 'stopped';
+    if (normalized === 'error') return 'error';
+    if (normalized === 'idle') return 'idle';
+    return normalized.replace(/_/g, ' ');
+};
+
+const voicePhaseColor = (phase: string) => {
+    const normalized = String(phase || 'off').toLowerCase();
+    if (normalized === 'error') return 'red';
+    if (normalized === 'speaking' || normalized === 'processing' || normalized === 'hearing') return 'yellow';
+    if (normalized === 'waiting' || normalized === 'listening' || normalized === 'ready') return 'green';
+    if (normalized === 'paused') return 'magentaBright';
+    if (normalized === 'starting') return 'blueBright';
+    if (normalized === 'off' || normalized === 'stopped' || normalized === 'idle') return 'grey30';
+    return 'cyan';
+};
+
+const voiceBarsForFrame = (phase: string, frame: number, count = 10) => {
+    const normalized = String(phase || 'off').toLowerCase();
+    if (normalized === 'off' || normalized === 'stopped' || normalized === 'idle') {
+        return Array.from({length: count}, () => 1);
+    }
+
+    const amplitude = normalized === 'speaking'
+        ? 5.4
+        : normalized === 'hearing'
+            ? 6.0
+            : normalized === 'processing'
+                ? 4.2
+                : 3.0;
+    const speed = normalized === 'speaking'
+        ? 0.62
+        : normalized === 'hearing'
+            ? 0.78
+            : normalized === 'processing'
+                ? 0.42
+                : 0.24;
+
+    return Array.from({length: count}, (_, index) => {
+        const waveA = Math.sin((frame * speed) + index * 0.82);
+        const waveB = Math.sin((frame * (speed * 0.57)) + index * 1.41 + 1.2);
+        const raw = Math.abs(waveA * 0.7 + waveB * 0.3);
+        return Math.max(1, Math.min(8, Math.round(1 + raw * amplitude)));
+    });
+};
+
+const VoiceEqualizer = React.memo(({
+    phase,
+    frame,
+    color,
+    bars = 10
+}: {
+    phase: string;
+    frame: number;
+    color?: string;
+    bars?: number;
+}) => {
+    const heights = voiceBarsForFrame(phase, frame, bars);
+    return (
+        <Box>
+            {heights.map((height, index) => (
+                <Text key={`voice-bar-${index}`} color={color || voicePhaseColor(phase)}>
+                    {'▁▂▃▄▅▆▇█'[Math.max(0, Math.min(7, height - 1))]}{index < heights.length - 1 ? ' ' : ''}
+                </Text>
+            ))}
+        </Box>
+    );
+});
 
 interface NexusWorkspacePanelProps {
     timeline: TimelineEvent[];
@@ -92,6 +190,7 @@ interface NexusWorkspacePanelProps {
     pendingQuestion: PendingQuestion | null;
     selectedActivityId: string | null;
     selectedAgentId: string | null;
+    motionFrame: number;
     width: number;
     height: number;
 }
@@ -120,13 +219,45 @@ const NEXUS_LOGO = [
 ];
 const LOGO_GRADIENT = ['#4f8cff', '#5d83ff', '#6f78f0', '#806edf', '#9167d2', '#7d7cff'];
 const LOGO_OUTLINE_CHARS = new Set(['╔', '╗', '╚', '╝', '═', '║']);
-type WorkingPhase = 'thinking' | 'querying' | 'streaming' | 'tool';
+type WorkingPhase =
+    | 'thinking'
+    | 'querying'
+    | 'streaming'
+    | 'tool'
+    | 'skill'
+    | 'plugin'
+    | 'mcp'
+    | 'hive'
+    | 'evolution'
+    | 'self_improvement'
+    | 'knowledge'
+    | 'memory'
+    | 'no_planning'
+    | 'simple_planning'
+    | 'advance_planning'
+    | 'auditing'
+    | 'verifying'
+    | 'working';
 
 const WORKING_STATES: Record<WorkingPhase, {frames: string[]; text: string; color: string}> = {
-    thinking: {frames: ['◐', '◓', '◑', '◒'], text: 'thinking', color: 'cyan'},
-    querying: {frames: ['▱▱▱', '▰▱▱', '▰▰▱', '▰▰▰'], text: 'querying model', color: 'blueBright'},
-    streaming: {frames: ['▸  ', '▸▸ ', '▸▸▸'], text: 'streaming response', color: 'cyan'},
-    tool: {frames: ['⬡', '⬢', '⬣', '⬢'], text: 'using tools', color: 'green'}
+    thinking: {frames: ['◜ ', '◠ ', '◝ ', '◞ '], text: 'thinking', color: 'cyan'},
+    querying: {frames: ['▰▱▱', '▰▰▱', '▰▰▰', '▱▰▰'], text: 'working', color: 'blueBright'},
+    streaming: {frames: ['›  ', '›› ', '›››', ' ››'], text: 'streaming response', color: 'cyan'},
+    tool: {frames: ['✣ ', '✥ ', '✣ ', '✥ '], text: 'using tools', color: 'green'},
+    skill: {frames: ['✦ ', '✧ ', '✦ ', '✧ '], text: 'using skills', color: 'magentaBright'},
+    plugin: {frames: ['◫ ', '◧ ', '◨ ', '◫ '], text: 'loading plugins', color: 'yellowBright'},
+    mcp: {frames: ['◎ ', '◉ ', '◎ ', '◉ '], text: 'calling mcp', color: 'cyanBright'},
+    hive: {frames: ['⬡ ', '⬢ ', '⬣ ', '⬢ '], text: 'syncing hive', color: 'blueBright'},
+    evolution: {frames: ['↺ ', '↻ ', '↺ ', '↻ '], text: 'evolving', color: 'greenBright'},
+    self_improvement: {frames: ['△ ', '▲ ', '△ ', '▲ '], text: 'self improving', color: 'greenBright'},
+    knowledge: {frames: ['✶ ', '✷ ', '✶ ', '✷ '], text: 'loading knowledge', color: 'yellow'},
+    memory: {frames: ['◨ ', '◧ ', '◩ ', '◪ '], text: 'reading memory', color: 'yellowBright'},
+    no_planning: {frames: ['·  ', '·· ', '···', ' ··'], text: 'direct response', color: 'grey'},
+    simple_planning: {frames: ['□  ', '▣  ', '▣▣ ', '▣▣▣'], text: 'simple planning', color: 'cyan'},
+    advance_planning: {frames: ['▁▃▅', '▂▄▆', '▃▅▇', '▄▆█'], text: 'advance planning', color: 'cyanBright'},
+    auditing: {frames: ['◰ ', '◳ ', '◲ ', '◱ '], text: 'auditing', color: 'yellowBright'},
+    verifying: {frames: ['✓  ', '✓· ', '✓✓ ', '✓✓✓'], text: 'verifying', color: 'greenBright'},
+    working: {frames: ['▖ ', '▘ ', '▝ ', '▗ '], text: 'working', color: 'white'}
 };
 const READ_TOOLS = new Set(['read', 'glob', 'grep', 'find', 'ls', 'diagnostics', 'warpgrep']);
 const WRITE_TOOLS = new Set(['edit', 'write', 'patch', 'multi_edit', 'multiedit', 'apply_patch', 'file_edit', 'write_file']);
@@ -367,6 +498,61 @@ const classifyTool = (toolName: string): TimelineKind => {
     return 'tool';
 };
 
+const inferActivityKind = (toolName: string, params: Record<string, any>): ActivityKind => {
+    const normalized = toolName.toLowerCase();
+    const blob = `${normalized} ${JSON.stringify(params || {})}`.toLowerCase();
+
+    if (blob.includes('hive') || blob.includes('worker') || blob.includes('agent')) return 'hive';
+    if (blob.includes('skill')) return 'skill';
+    if (blob.includes('plugin')) return 'plugin';
+    if (blob.includes('mcp')) return 'mcp';
+    if (SEARCH_TOOLS.has(normalized) || normalized.includes('search')) return 'search';
+    if (TODO_TOOLS.has(normalized) || normalized.includes('todo')) return 'todo';
+    if (normalized === 'terminal') return 'terminal';
+    if (RUN_TOOLS.has(normalized)) return 'run';
+    if (normalized === 'file_edit' || normalized === 'write_file' || WRITE_TOOLS.has(normalized)) return 'file';
+    return 'tool';
+};
+
+const inferWorkingPhaseFromTool = (toolName: string, params: Record<string, any>): WorkingPhase => {
+    const normalized = toolName.toLowerCase();
+    const blob = `${normalized} ${JSON.stringify(params || {})}`.toLowerCase();
+
+    if (blob.includes('self_improvement') || blob.includes('improvement')) return 'self_improvement';
+    if (blob.includes('evolution')) return 'evolution';
+    if (blob.includes('memory')) return 'memory';
+    if (blob.includes('knowledge')) return 'knowledge';
+    if (blob.includes('audit')) return 'auditing';
+    if (blob.includes('verify') || blob.includes('validation') || blob.includes('check')) return 'verifying';
+    if (blob.includes('hive') || blob.includes('worker') || blob.includes('agent')) return 'hive';
+    if (blob.includes('plugin')) return 'plugin';
+    if (blob.includes('skill')) return 'skill';
+    if (blob.includes('mcp')) return 'mcp';
+    if (blob.includes('advanced_plan') || blob.includes('ultraplan')) return 'advance_planning';
+    if (blob.includes('plan')) return 'simple_planning';
+    if (RUN_TOOLS.has(normalized) || normalized === 'terminal') return 'working';
+    return 'tool';
+};
+
+const inferWorkingPhaseFromText = (text: string): WorkingPhase | null => {
+    const normalized = text.toLowerCase();
+    if (!normalized.trim()) return null;
+    if (normalized.includes('self improvement')) return 'self_improvement';
+    if (normalized.includes('evolution')) return 'evolution';
+    if (normalized.includes('memory')) return 'memory';
+    if (normalized.includes('knowledge')) return 'knowledge';
+    if (normalized.includes('plugin')) return 'plugin';
+    if (normalized.includes('skill')) return 'skill';
+    if (normalized.includes('mcp')) return 'mcp';
+    if (normalized.includes('hive') || normalized.includes('worker')) return 'hive';
+    if (normalized.includes('auditing') || normalized.includes('audit')) return 'auditing';
+    if (normalized.includes('verify') || normalized.includes('checking')) return 'verifying';
+    if (normalized.includes('advanced plan') || normalized.includes('step by step plan')) return 'advance_planning';
+    if (normalized.includes('plan')) return 'simple_planning';
+    if (normalized.includes('working')) return 'working';
+    return null;
+};
+
 const statusColor = (status: string) => {
     const normalized = status.toLowerCase();
     if (normalized.includes('error') || normalized.includes('fail')) return 'red';
@@ -381,6 +567,9 @@ const activityColor = (kind: ActivityKind) => {
     if (kind === 'todo') return 'green';
     if (kind === 'run' || kind === 'terminal') return 'cyan';
     if (kind === 'mcp') return 'magenta';
+    if (kind === 'skill') return 'yellowBright';
+    if (kind === 'plugin') return 'yellow';
+    if (kind === 'hive') return 'cyanBright';
     return 'blueBright';
 };
 
@@ -390,6 +579,9 @@ const activityGlyph = (kind: ActivityKind) => {
     if (kind === 'todo') return '☑';
     if (kind === 'run' || kind === 'terminal') return '▹';
     if (kind === 'mcp') return '◇';
+    if (kind === 'skill') return '✦';
+    if (kind === 'plugin') return '⬢';
+    if (kind === 'hive') return '⬡';
     return '◦';
 };
 
@@ -592,6 +784,7 @@ const readYamlSectionNames = async (filePath: string) => {
 
 const activityFromTool = (toolName: string, params: Record<string, any>): Omit<ActivityItem, 'id' | 'number'> => {
     const normalized = toolName.toLowerCase();
+    const kind = inferActivityKind(toolName, params);
     const rawPath = params.path || params.filename || params.file || params.filepath || params.uri || '';
     const fileName = rawPath ? getFileName(String(rawPath)) : '';
     const command = String(params.command || params.cmd || params.script || '');
@@ -644,13 +837,46 @@ const activityFromTool = (toolName: string, params: Record<string, any>): Omit<A
         };
     }
 
-    if (normalized.includes('mcp')) {
+    if (kind === 'mcp') {
         return {
             kind: 'mcp',
             title: 'MCP call',
             summary: toolName,
             status: 'running',
             command: command || undefined,
+            detail: formatToolInput(params),
+            toolName
+        };
+    }
+
+    if (kind === 'skill') {
+        return {
+            kind: 'skill',
+            title: 'Used skill',
+            summary: toolName,
+            status: 'running',
+            detail: formatToolInput(params),
+            toolName
+        };
+    }
+
+    if (kind === 'plugin') {
+        return {
+            kind: 'plugin',
+            title: 'Used plugin',
+            summary: toolName,
+            status: 'running',
+            detail: formatToolInput(params),
+            toolName
+        };
+    }
+
+    if (kind === 'hive') {
+        return {
+            kind: 'hive',
+            title: 'Hive action',
+            summary: command || query || toolName,
+            status: 'running',
             detail: formatToolInput(params),
             toolName
         };
@@ -720,6 +946,17 @@ const extractSsePayload = (frame: string) => frame
     .filter(line => !line.startsWith('event:'))
     .map(line => line.startsWith('data:') ? line.replace(/^data:\s?/, '') : line)
     .join('\n');
+
+const cleanVisibleAssistantText = (text: string) => {
+    let cleaned = String(text || '');
+    cleaned = cleaned.replace(/\[NEXUS_BOOT\]:[^\n]*/g, '');
+    cleaned = cleaned.replace(/\[THINKING:[^\]]+\]/g, '');
+    cleaned = cleaned.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+    cleaned = cleaned.replace(/<\/?thinking>/gi, '');
+    cleaned = cleaned.replace(/TASK_COMPLETE/g, '');
+    cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+    return cleaned.trim();
+};
 
 const logoColorForColumn = (column: number, width: number, frame = 0) => {
     const ratio = width <= 1 ? 0 : column / (width - 1);
@@ -936,9 +1173,71 @@ const buildChatLines = (history: Message[], activityItems: ActivityItem[], width
             return;
         }
 
-        appendWrapped(`assistant-${index}`, msg.content, 'white');
+        appendWrapped(`assistant-${index}`, cleanVisibleAssistantText(msg.content), 'white');
         appendGap(`after-assistant-${index}`);
     });
+
+    return rows;
+};
+
+const appendVoicePreviewLines = (
+    rows: ChatLine[],
+    width: number,
+    voiceMode: 'off' | 'auto' | 'manual' | 'text',
+    voicePhase: string,
+    voiceTranscriptPreview: string,
+    voiceReplyPreview: string,
+    history: Message[]
+) => {
+    if (voiceMode === 'off') return rows;
+
+    const latestUser = [...history].reverse().find(msg => msg.role === 'user')?.content.trim() || '';
+    const latestAssistant = [...history].reverse().find(msg => msg.role === 'assistant')?.content.trim() || '';
+    const transcript = String(voiceTranscriptPreview || '').trim();
+    const reply = String(voiceReplyPreview || '').trim();
+    const normalizedLatestAssistant = cleanVisibleAssistantText(latestAssistant);
+
+    const appendWrapped = (
+        key: string,
+        content: string,
+        color: string,
+        prefix = '',
+        prefixColor = 'grey'
+    ) => {
+        const reservePrefix = prefix.length > 0;
+        const contentWidth = Math.max(1, width - (reservePrefix ? 2 : 0));
+        const sourceLines = content.replace(/\r/g, '').split('\n');
+        let first = true;
+
+        for (const sourceLine of sourceLines) {
+            for (const wrapped of wrapPlainLine(sourceLine, contentWidth)) {
+                rows.push({
+                    key: `${key}-${rows.length}`,
+                    text: wrapped,
+                    color,
+                    prefix: first ? prefix : undefined,
+                    prefixColor,
+                    reservePrefix
+                });
+                first = false;
+            }
+        }
+    };
+
+    if (rows.length > 0 && rows[rows.length - 1].text !== '') {
+        rows.push({key: `voice-gap-${rows.length}`, text: '', color: 'grey'});
+    }
+
+    if (transcript && transcript !== latestUser) {
+        appendWrapped(`voice-heard-${rows.length}`, transcript, 'green', '> ', 'blue');
+    }
+
+    if (reply && reply !== normalizedLatestAssistant) {
+        appendWrapped(`voice-reply-${rows.length}`, reply, 'yellow');
+    }
+
+    const statusText = `🎙 ${voiceMode} · ${voicePhaseLabel(voicePhase)}`;
+    appendWrapped(`voice-status-${rows.length}`, statusText, voicePhaseColor(voicePhase));
 
     return rows;
 };
@@ -978,13 +1277,14 @@ const parseQuestionMarker = (text: string): PendingQuestion | null => {
     try {
         const data = JSON.parse(match[1]);
         const options = Array.isArray(data.options)
-            ? data.options.map((option: unknown) => String(option)).filter(Boolean).slice(0, 3)
+            ? data.options.map((option: unknown) => String(option)).filter(Boolean).slice(0, 8)
             : [];
         if (!data.prompt || options.length === 0) return null;
         return {
             id: `question-${Date.now()}`,
             prompt: String(data.prompt),
-            options
+            options,
+            allowCustom: data.allowCustom !== false
         };
     } catch {
         return null;
@@ -995,22 +1295,28 @@ const stripQuestionMarkers = (text: string) => text.replace(/\[QUESTION:.*?\]/gs
 
 const detectChoiceQuestion = (text: string): PendingQuestion | null => {
     const lines = text.replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean);
-    const options = lines
-        .map(line => line.match(/^(?:[-*]\s*)?(?:\(?([A-Ca-c1-3])\)?[.)-])\s+(.+)$/))
-        .filter((match): match is RegExpMatchArray => Boolean(match))
-        .map(match => match[2].trim())
-        .slice(0, 3);
+    const optionMatches = lines
+        .map((line, index) => ({index, match: line.match(/^(?:[-*]\s*)?(?:\(?([A-Ha-h1-8])\)?[.)-])\s+(.+)$/)}))
+        .filter((item): item is {index: number; match: RegExpMatchArray} => Boolean(item.match))
+        .slice(0, 8);
+    const options = optionMatches.map(item => item.match[2].trim());
 
     if (options.length < 2) return null;
 
-    const firstOptionIndex = lines.findIndex(line => /^(?:[-*]\s*)?(?:\(?[A-Ca-c1-3]\)?[.)-])\s+/.test(line));
+    const firstOptionIndex = optionMatches[0]?.index ?? -1;
+    const contiguous = optionMatches.every((item, index) => index === 0 || item.index === optionMatches[index - 1].index + 1);
+    if (!contiguous || firstOptionIndex < 0) return null;
+
     const promptLines = firstOptionIndex > 0 ? lines.slice(Math.max(0, firstOptionIndex - 3), firstOptionIndex) : [];
     const prompt = promptLines.join(' ') || 'Choose how Nexus should continue.';
+    const promptLooksLikeQuestion = /[?]/.test(prompt) || /\b(choose|pick|select|option|which|what|question)\b/i.test(prompt);
+    if (!promptLooksLikeQuestion) return null;
 
     return {
         id: `question-${Date.now()}`,
         prompt,
-        options
+        options,
+        allowCustom: true
     };
 };
 
@@ -1093,6 +1399,98 @@ const TodoPanelBody = React.memo(({tasks, width}: {tasks: TaskItem[]; width: num
                     );
                 })}
             </Box>
+
+            <Box flexGrow={1} />
+        </Box>
+    );
+});
+
+const WorkspacePanelBody = React.memo(({
+    tasks,
+    activityItems,
+    pendingQuestion,
+    voiceMode,
+    voicePhase,
+    voiceTranscriptPreview,
+    voiceReplyPreview,
+    motionFrame
+}: {
+    tasks: TaskItem[];
+    activityItems: ActivityItem[];
+    pendingQuestion: PendingQuestion | null;
+    voiceMode: 'off' | 'auto' | 'manual' | 'text';
+    voicePhase: string;
+    voiceTranscriptPreview: string;
+    voiceReplyPreview: string;
+    motionFrame: number;
+}) => {
+    const recent = activityItems.slice(0, 6);
+
+    return (
+        <Box flexDirection="column" flexGrow={1}>
+            <Box marginBottom={1}>
+                <Text color="white" bold>Status</Text>
+            </Box>
+
+            <Text color="grey">
+                voice: <Text color={voiceMode === 'off' ? 'grey30' : 'green'}>{voiceMode}</Text>
+                <Text color="grey30"> · </Text>
+                phase: <Text color={voicePhaseColor(voicePhase)}>{voicePhaseLabel(voicePhase)}</Text>
+            </Text>
+
+            {voiceMode !== 'off' && (
+                <Box marginTop={1} flexDirection="column">
+                    <Text color="white" bold>Voice</Text>
+                    <VoiceEqualizer phase={voicePhase} frame={motionFrame} bars={10} />
+                    <Text color={voicePhaseColor(voicePhase)}>{voicePhaseLabel(voicePhase)}</Text>
+                    {voiceTranscriptPreview ? (
+                        <Text color="grey" wrap="wrap">heard: {voiceTranscriptPreview}</Text>
+                    ) : null}
+                    {voiceReplyPreview ? (
+                        <Text color="grey" wrap="wrap">reply: {voiceReplyPreview}</Text>
+                    ) : null}
+                </Box>
+            )}
+
+            {pendingQuestion && (
+                <Box marginTop={1} flexDirection="column">
+                    <Text color="white" bold>Question ready</Text>
+                    <Text color="grey" wrap="wrap">{pendingQuestion.prompt}</Text>
+                </Box>
+            )}
+
+            <Box marginTop={1} flexDirection="column">
+                <Text color="white" bold>Recent Activity</Text>
+                {recent.length === 0 ? (
+                    <Text color="grey30">No tracked activity yet</Text>
+                ) : (
+                    recent.map(item => (
+                        <Box key={item.id} marginTop={1}>
+                            <Box width={2} flexShrink={0}>
+                                <Text color={activityColor(item.kind)}>{activityGlyph(item.kind)}</Text>
+                            </Box>
+                            <Box flexDirection="column">
+                                <Text color="white" wrap="wrap">{item.title}</Text>
+                                <Text color="grey" wrap="wrap">{item.summary}</Text>
+                            </Box>
+                        </Box>
+                    ))
+                )}
+            </Box>
+
+            {tasks.length > 0 && (
+                <Box marginTop={1} flexDirection="column">
+                    <Text color="white" bold>Todo</Text>
+                    {tasks.slice(0, 4).map(task => (
+                        <Box key={task.id} marginTop={1}>
+                            <Box width={2} flexShrink={0}>
+                                <Text color={statusColor(task.status)}>{taskStatusGlyph(task.status)}</Text>
+                            </Box>
+                            <Text color="grey" wrap="wrap">{compactTaskSubject(task.subject)}</Text>
+                        </Box>
+                    ))}
+                </Box>
+            )}
 
             <Box flexGrow={1} />
         </Box>
@@ -1209,7 +1607,7 @@ const QuestionPanelBody = React.memo(({question}: {question: PendingQuestion | n
         {question ? (
             <>
                 <Box marginBottom={1}>
-                    <Text color="grey" wrap="wrap">{question.prompt}</Text>
+                    <Text color="white" wrap="wrap">{question.prompt}</Text>
                 </Box>
 
                 {question.options.map((option, index) => (
@@ -1221,15 +1619,17 @@ const QuestionPanelBody = React.memo(({question}: {question: PendingQuestion | n
                     </Box>
                 ))}
 
-                <Box marginTop={1}>
-                    <Box width={3}>
-                        <Text color="magenta">4.</Text>
+                {question.allowCustom !== false && (
+                    <Box marginTop={1}>
+                        <Box width={3}>
+                            <Text color="magenta">{question.options.length + 1}.</Text>
+                        </Box>
+                        <Text color="grey">write answer in chat box</Text>
                     </Box>
-                    <Text color="grey">custom answer in chat box</Text>
-                </Box>
+                )}
 
                 <Box marginTop={1}>
-                    <Text color="grey30">press 1-3 to choose, 4 to type custom</Text>
+                    <Text color="grey30">press number to choose, or type custom in chat box</Text>
                 </Box>
             </>
         ) : (
@@ -1307,7 +1707,29 @@ const HivePanelBody = React.memo(({agents, selectedAgentId, tasks}: {agents: Age
     );
 });
 
-const NexusWorkspacePanel = React.memo(({timeline, usage, mode, agents, tasks, activityItems, pendingQuestion, selectedActivityId, selectedAgentId, width, height}: NexusWorkspacePanelProps) => {
+const NexusWorkspacePanel = React.memo(({
+    timeline,
+    usage,
+    mode,
+    agents,
+    tasks,
+    activityItems,
+    pendingQuestion,
+    selectedActivityId,
+    selectedAgentId,
+    width,
+    height,
+    voiceMode,
+    voicePhase,
+    voiceTranscriptPreview,
+    voiceReplyPreview,
+    motionFrame
+}: NexusWorkspacePanelProps & {
+    voiceMode: 'off' | 'auto' | 'manual' | 'text';
+    voicePhase: string;
+    voiceTranscriptPreview: string;
+    voiceReplyPreview: string;
+}) => {
     const selectedActivity = activityItems.find(activity => activity.id === selectedActivityId) || null;
 
     return (
@@ -1334,11 +1756,21 @@ const NexusWorkspacePanel = React.memo(({timeline, usage, mode, agents, tasks, a
             ) : mode === 'activity' ? (
                 <ActivityPanelBody activity={selectedActivity} />
             ) : (
-                <TodoPanelBody tasks={tasks} width={Math.max(20, width - 4)} />
+                <WorkspacePanelBody
+                    tasks={tasks}
+                    activityItems={activityItems}
+                    pendingQuestion={pendingQuestion}
+                    voiceMode={voiceMode}
+                    voicePhase={voicePhase}
+                    voiceTranscriptPreview={voiceTranscriptPreview}
+                    voiceReplyPreview={voiceReplyPreview}
+                    motionFrame={motionFrame}
+                />
             )}
         </Box>
     );
 });
+
 
 const App = () => {
     const [input, setInput] = useState('');
@@ -1352,6 +1784,12 @@ const App = () => {
     const [touchedFiles, setTouchedFiles] = useState<FileStatus[]>([]);
     const [lastChange, setLastChange] = useState<string>('');
     const [panelMode, setPanelMode] = useState<PanelMode>('workspace');
+    const [voiceMode, setVoiceMode] = useState<'off' | 'auto' | 'manual' | 'text'>('off');
+    const [voicePhase, setVoicePhase] = useState('off');
+    const [voiceTranscriptPreview, setVoiceTranscriptPreview] = useState('');
+    const [voiceReplyPreview, setVoiceReplyPreview] = useState('');
+    const voiceSessionIdRef = useRef<string | null>(null);
+    const voiceShutdownRef = useRef(false);
     const [agents, setAgents] = useState<AgentInfo[]>([]);
     const [tasks, setTasks] = useState<TaskItem[]>([]);
     const [activityItems, setActivityItems] = useState<ActivityItem[]>([]);
@@ -1364,6 +1802,7 @@ const App = () => {
     const [chatScroll, setChatScroll] = useState(0);
     const activityCounter = useRef(0);
     const previousChatLineCount = useRef(0);
+    const voiceJustStartedRef = useRef(0);
     const [isThinking, setIsThinking] = useState(false);
     const [workingPhase, setWorkingPhase] = useState<WorkingPhase>('thinking');
     const [motionFrame, setMotionFrame] = useState(0);
@@ -1382,7 +1821,16 @@ const App = () => {
     const leftPanelWidth = Math.max(40, width - sidebarWidth);
     const chatContentWidth = Math.max(20, leftPanelWidth - 2);
     const chatViewportHeight = Math.max(3, height - 12);
-    const chatLines = buildChatLines(history, activityItems, chatContentWidth);
+    const baseChatLines = buildChatLines(history, activityItems, chatContentWidth);
+    const chatLines = appendVoicePreviewLines(
+        [...baseChatLines],
+        chatContentWidth,
+        voiceMode,
+        voicePhase,
+        voiceTranscriptPreview,
+        voiceReplyPreview,
+        history
+    );
     const visibleChatLineCount = Math.max(1, chatViewportHeight - (isThinking ? 1 : 0));
     const maxChatScroll = Math.max(0, chatLines.length - visibleChatLineCount);
     const safeChatScroll = Math.min(chatScroll, maxChatScroll);
@@ -1421,17 +1869,59 @@ const App = () => {
         return () => clearInterval(timer);
     }, []);
 
+    const stopVoiceIfRunning = async () => {
+        if (voiceShutdownRef.current) return;
+        voiceShutdownRef.current = true;
+        try {
+            const statusRes = await fetch(`${API_BASE}/voice/status`);
+            const statusData = await statusRes.json();
+            if (statusData?.running) {
+                await fetch(`${API_BASE}/voice/stop`, {method: 'POST'});
+            }
+        } catch {
+            // Best effort shutdown.
+        } finally {
+            setVoiceMode('off');
+            setVoicePhase('off');
+            setVoiceTranscriptPreview('');
+            setVoiceReplyPreview('');
+            voiceSessionIdRef.current = null;
+            voiceShutdownRef.current = false;
+        }
+    };
+
+    useEffect(() => {
+        const handleProcessShutdown = () => {
+            syncStopVoiceProcess();
+        };
+
+        process.once('SIGINT', handleProcessShutdown);
+        process.once('SIGTERM', handleProcessShutdown);
+        process.once('SIGHUP', handleProcessShutdown);
+        process.once('beforeExit', handleProcessShutdown);
+        process.once('exit', handleProcessShutdown);
+
+        return () => {
+            process.removeListener('SIGINT', handleProcessShutdown);
+            process.removeListener('SIGTERM', handleProcessShutdown);
+            process.removeListener('SIGHUP', handleProcessShutdown);
+            process.removeListener('beforeExit', handleProcessShutdown);
+            process.removeListener('exit', handleProcessShutdown);
+            handleProcessShutdown();
+        };
+    }, []);
+
     useInput((value, key) => {
         const scrollPage = Math.max(1, visibleChatLineCount - 2);
         const wheelDirection = mouseWheelDirection(value, leftPanelWidth);
 
-        if (panelMode === 'question' && pendingQuestion && /^[1-4]$/.test(value)) {
+        if (panelMode === 'question' && pendingQuestion && /^[1-9]$/.test(value)) {
             const selectedIndex = Number(value) - 1;
             if (selectedIndex >= 0 && selectedIndex < pendingQuestion.options.length) {
                 setInput(pendingQuestion.options[selectedIndex]);
                 setPendingQuestion(null);
                 setPanelMode('workspace');
-            } else if (value === '4') {
+            } else if (pendingQuestion.allowCustom !== false && selectedIndex === pendingQuestion.options.length) {
                 setInput('');
             }
             return;
@@ -1534,6 +2024,24 @@ const App = () => {
             }
         }
 
+        try {
+            const voiceResponse = await fetch(`${API_BASE}/voice/status`);
+            const voiceData = await voiceResponse.json();
+            if (voiceData.running) {
+                setVoiceMode(voiceData.mode || 'auto');
+                setVoicePhase(String(voiceData.phase || 'idle'));
+                setVoiceTranscriptPreview(String(voiceData.transcript_preview || ''));
+                setVoiceReplyPreview(String(voiceData.reply_preview || ''));
+            } else {
+                setVoiceMode('off');
+                setVoicePhase('off');
+                setVoiceTranscriptPreview('');
+                setVoiceReplyPreview('');
+            }
+        } catch {
+            // Ignore errors querying voice status
+        }
+
         return {agents: nextAgents, tasks: nextTasks};
     };
 
@@ -1544,6 +2052,80 @@ const App = () => {
         }, 6000);
         return () => clearInterval(timer);
     }, []);
+
+    useEffect(() => {
+        const syncStartupSession = async () => {
+            try {
+                const active = await apiJson('/sessions/active');
+                const nextSessionId = String(active?.session_id || 'default');
+                const loadedHistory = Array.isArray(active?.history)
+                    ? active.history.map((msg: any) => ({
+                        role: String(msg.role || 'assistant'),
+                        content: String(msg.role || 'assistant') === 'assistant'
+                            ? cleanVisibleAssistantText(String(msg.content || ''))
+                            : String(msg.content || '')
+                    }))
+                    : [];
+                setSessionId(nextSessionId);
+                setHistory(loadedHistory);
+            } catch {
+                // Keep local defaults if the API is not ready yet.
+            }
+        };
+
+        void syncStartupSession();
+    }, []);
+
+    // Real-time chat + voice sync during voice mode
+    useEffect(() => {
+        if (voiceMode === 'off') return;
+        
+        const syncHistory = async () => {
+            try {
+                // Skip history loading for 3s after voice starts (voice status still updates)
+                const skipUntil = voiceJustStartedRef.current;
+                const inGracePeriod = skipUntil && Date.now() < skipUntil;
+                if (skipUntil && !inGracePeriod) voiceJustStartedRef.current = 0;
+                const voiceData = await apiJson('/voice/status').catch(() => null);
+                if (voiceData && voiceData.running) {
+                    setVoiceMode(voiceData.mode || 'auto');
+                    setVoicePhase(String(voiceData.phase || 'idle'));
+                    setVoiceTranscriptPreview(String(voiceData.transcript_preview || ''));
+                    setVoiceReplyPreview(String(voiceData.reply_preview || ''));
+                } else if (voiceData && !voiceData.running) {
+                    setVoiceMode('off');
+                    setVoicePhase('off');
+                    setVoiceTranscriptPreview('');
+                    setVoiceReplyPreview('');
+                    return;
+                }
+
+                // Only fetch history after grace period (prevents old history flash on voice start)
+                if (!inGracePeriod) {
+                    const loaded = await apiJson(`/history?session_id=${encodeURIComponent(sessionId)}`);
+                    if (Array.isArray(loaded)) {
+                        const loadedHistory = loaded.map((msg: any) => ({
+                            role: msg.role,
+                            content: msg.role === 'assistant'
+                                ? cleanVisibleAssistantText(String(msg.content || ''))
+                                : String(msg.content || '')
+                        }));
+                        setHistory(prev => {
+                            const hasChanged = loadedHistory.length !== prev.length ||
+                                loadedHistory.some((msg, i) => !prev[i] || msg.role !== prev[i].role || msg.content !== prev[i].content);
+                            return hasChanged ? loadedHistory : prev;
+                        });
+                    }
+                }
+            } catch {
+                // Ignore history load errors
+            }
+        };
+
+        void syncHistory();
+        const interval = setInterval(syncHistory, 350);
+        return () => clearInterval(interval);
+    }, [voiceMode, sessionId]);
 
     const inputTokens = history
         .filter(msg => msg.role === 'user')
@@ -1620,6 +2202,29 @@ const App = () => {
 
     const pushSystem = (content: string) => {
         setHistory(prev => [...prev, {role: 'system', content}]);
+    };
+
+    const ensureApiAvailable = async () => {
+        try {
+            const health = await fetch(`${API_BASE}/health`);
+            if (health.ok) return true;
+        } catch {
+            // Try to start it below.
+        }
+
+        startDetached('python', ['-m', 'server'], PROJECT_ROOT);
+
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+            await new Promise(resolve => setTimeout(resolve, 400));
+            try {
+                const health = await fetch(`${API_BASE}/health`);
+                if (health.ok) return true;
+            } catch {
+                // keep polling briefly
+            }
+        }
+
+        return false;
     };
 
     const apiJson = async (endpoint: string, init?: RequestInit) => {
@@ -1769,6 +2374,7 @@ const App = () => {
             }
 
             if (command === '/exit') {
+                await stopVoiceIfRunning();
                 exit();
                 return true;
             }
@@ -1897,6 +2503,107 @@ const App = () => {
                 return true;
             }
 
+            if (command === '/voice') {
+                const sub = parts[0]?.toLowerCase();
+                const apiReady = await ensureApiAvailable();
+                if (!apiReady) {
+                    pushSystem('COMMAND_ERROR: voice API did not start in time');
+                    return true;
+                }
+                const ensureCleanVoiceSession = async () => {
+                    if (sessionId !== 'default' && history.length === 0) {
+                        voiceSessionIdRef.current = sessionId;
+                        return sessionId;
+                    }
+                    if (sessionId !== 'default' && history.length > 0) {
+                        voiceSessionIdRef.current = sessionId;
+                        return sessionId;
+                    }
+                    const created = await apiJson('/sessions/new', {method: 'POST'});
+                    const nextSessionId = String(created.id || sessionId);
+                    setSessionId(nextSessionId);
+                    setHistory([]);
+                    voiceSessionIdRef.current = nextSessionId;
+                    pushCommand(`voice session: ${nextSessionId}`);
+                    return nextSessionId;
+                };
+                if (!sub) {
+                    const defaultMode = 'auto';
+                    // Toggle: if running stop, if stopped start listening immediately
+                    const statusRes = await fetch(`${API_BASE}/voice/status`);
+                    const statusData = await statusRes.json();
+                    if (statusData.running) {
+                        pushCommand('🎙️ stopping voice...');
+                        await fetch(`${API_BASE}/voice/stop`, { method: 'POST' });
+                        setVoiceMode('off');
+                        setVoicePhase('off');
+                        setVoiceTranscriptPreview('');
+                        setVoiceReplyPreview('');
+                        voiceSessionIdRef.current = null;
+                        pushCommand('🎙️ voice stopped');
+                    } else {
+                        const targetSessionId = await ensureCleanVoiceSession();
+                        setHistory([]);
+                        voiceJustStartedRef.current = Date.now() + 3000;
+                        pushCommand(`🎙️ starting voice (${defaultMode})...`);
+                        const startRes = await fetch(`${API_BASE}/voice/start`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ mode: defaultMode, session_id: targetSessionId, owner_pid: process.pid })
+                        });
+                        const startData = await startRes.json();
+                        if (startData.status === 'success') {
+                            setVoiceMode(defaultMode as any);
+                            setVoicePhase(String(startData.phase || 'starting'));
+                            pushCommand(`✓ voice active (${defaultMode}) — speak now, NEXUS is listening`);
+                        } else {
+                            pushCommand(`✗ voice failed: ${startData.detail || 'unknown error'}`);
+                            if (defaultMode === 'auto') {
+                                pushCommand('retry with /voice manual if your mic driver does not like auto mode');
+                            }
+                        }
+                    }
+                } else if (sub === 'status') {
+                    const statusRes = await fetch(`${API_BASE}/voice/status`);
+                    const statusData = await statusRes.json();
+                    if (statusData.running) {
+                        pushCommand(`🎙️ voice active — mode: ${statusData.mode}  phase: ${statusData.phase || 'idle'}  pid: ${statusData.pid}`);
+                    } else {
+                        pushCommand('🎙️ voice off');
+                    }
+                } else if (sub === 'off' || sub === 'stop') {
+                    pushCommand('🎙️ stopping voice...');
+                    await fetch(`${API_BASE}/voice/stop`, { method: 'POST' });
+                    setVoiceMode('off');
+                    setVoicePhase('off');
+                    setVoiceTranscriptPreview('');
+                    setVoiceReplyPreview('');
+                    voiceSessionIdRef.current = null;
+                    pushCommand('🎙️ voice stopped');
+                } else if (sub === 'auto' || sub === 'manual' || sub === 'text') {
+                    const targetSessionId = await ensureCleanVoiceSession();
+                    setHistory([]);
+                    voiceJustStartedRef.current = Date.now() + 3000;
+                    pushCommand(`🎙️ starting voice (${sub})...`);
+                    const startRes = await fetch(`${API_BASE}/voice/start`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ mode: sub, session_id: targetSessionId, owner_pid: process.pid })
+                    });
+                    const startData = await startRes.json();
+                    if (startData.status === 'success') {
+                        setVoiceMode(sub as any);
+                        setVoicePhase(String(startData.phase || 'starting'));
+                        pushCommand(`✓ voice active (${sub}) — speak now, NEXUS is listening`);
+                    } else {
+                        pushCommand(`✗ voice failed: ${startData.detail || 'unknown error'}`);
+                    }
+                } else {
+                    pushCommand('usage: /voice [auto|manual|text|off|status]');
+                }
+                return true;
+            }
+
             if (command === '/where') {
                 pushCommand(formatRows([
                     `project: ${PROJECT_ROOT}`,
@@ -1979,7 +2686,12 @@ const App = () => {
                 if (target === 'session' || target === 'history') {
                     const loaded = await apiJson(`/history?session_id=${encodeURIComponent(sessionId)}`);
                     const loadedHistory = Array.isArray(loaded)
-                        ? loaded.map((msg: any) => ({role: String(msg.role || 'assistant'), content: String(msg.content || '')}))
+                        ? loaded.map((msg: any) => ({
+                            role: String(msg.role || 'assistant'),
+                            content: String(msg.role || 'assistant') === 'assistant'
+                                ? cleanVisibleAssistantText(String(msg.content || ''))
+                                : String(msg.content || '')
+                        }))
                         : [];
                     setHistory(loadedHistory);
                     pushCommand(`reloaded session: ${sessionId}`);
@@ -2545,7 +3257,9 @@ const App = () => {
                     const loadedHistory = Array.isArray(loaded.history)
                         ? loaded.history.map((msg: any) => ({
                             role: String(msg.role || 'assistant'),
-                            content: String(msg.content || '')
+                            content: String(msg.role || 'assistant') === 'assistant'
+                                ? cleanVisibleAssistantText(String(msg.content || ''))
+                                : String(msg.content || '')
                         }))
                         : [];
                     setHistory(loadedHistory);
@@ -2574,7 +3288,12 @@ const App = () => {
             if (command === '/history') {
                 const loaded = await apiJson(`/history?session_id=${encodeURIComponent(sessionId)}`);
                 const loadedHistory = Array.isArray(loaded)
-                    ? loaded.map((msg: any) => ({role: String(msg.role || 'assistant'), content: String(msg.content || '')}))
+                    ? loaded.map((msg: any) => ({
+                        role: String(msg.role || 'assistant'),
+                        content: String(msg.role || 'assistant') === 'assistant'
+                            ? cleanVisibleAssistantText(String(msg.content || ''))
+                            : String(msg.content || '')
+                    }))
                     : [];
                 setHistory(loadedHistory);
                 pushCommand(`history loaded: ${sessionId}`);
@@ -2849,6 +3568,7 @@ const App = () => {
     const handleSubmit = async (value: string) => {
         if (!value) return;
         if (value.toLowerCase() === 'exit' || value.toLowerCase() === 'quit') {
+            await stopVoiceIfRunning();
             exit();
             return;
         }
@@ -2883,7 +3603,7 @@ const App = () => {
             const response = await fetch(`${API_BASE}/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt, session_id: sessionId, provider, model })
+                body: JSON.stringify({ prompt, session_id: sessionId, provider, model, stream: true })
             });
 
             if (!response.body) throw new Error("No response body");
@@ -2913,9 +3633,9 @@ const App = () => {
                     try {
                         const markerMatch = text.match(/\[TOOL_START:([^:]+):(.*)\]/);
                         if (markerMatch) {
-                            setWorkingPhase('tool');
                             const [_, toolName, paramsStr] = markerMatch;
                             const params = JSON.parse(paramsStr);
+                            setWorkingPhase(inferWorkingPhaseFromTool(toolName, params));
                             const toolKind = classifyTool(toolName);
                             const normalizedToolName = toolName.toLowerCase();
                             appendTimeline({kind: toolKind, weight: 40, label: toolName});
@@ -2954,9 +3674,9 @@ const App = () => {
                     try {
                         const resultMatch = text.match(/\[TOOL_RESULT:([^:]+):(.*)\]/);
                         if (resultMatch) {
-                            setWorkingPhase('streaming');
                             const [, toolName, resultStr] = resultMatch;
                             const result = JSON.parse(resultStr);
+                            setWorkingPhase(inferWorkingPhaseFromTool(toolName, result));
                             updateLatestActivityForTool(toolName, result);
                         }
                     } catch(e) {
@@ -2971,7 +3691,7 @@ const App = () => {
                     && !visibleChunk.startsWith("[TOOL_RESULT:")
                     && !visibleChunk.startsWith("[TOOL_END:")
                 ) {
-                    setWorkingPhase('streaming');
+                    setWorkingPhase(inferWorkingPhaseFromText(visibleChunk) || 'streaming');
                     assistantContent += text;
                     setHistory(prev => {
                         const newHist = [...prev];
@@ -3049,6 +3769,15 @@ const App = () => {
                     />
                 )}
 
+                {voiceMode !== 'off' && (
+                    <Box paddingX={1} paddingY={0} justifyContent="space-between" backgroundColor={THEME.panelAltBg}>
+                        <Box>
+                            <Text color={voicePhaseColor(voicePhase)} bold>🎙 {voiceMode} · {voicePhaseLabel(voicePhase)} </Text>
+                            <VoiceEqualizer phase={voicePhase} frame={motionFrame} bars={18} />
+                        </Box>
+                    </Box>
+                )}
+
                 {/* PROMPT BOX */}
                 <Box height={3} paddingX={1} paddingY={1} marginBottom={0} backgroundColor={THEME.inputBg}>
                     <Box marginRight={1}>
@@ -3064,7 +3793,13 @@ const App = () => {
                         <Text color="red">no sandbox </Text>
                         <Text color="grey30">(see /docs)</Text>
                     </Box>
-                    <Text color="magenta">auto</Text>
+                    <Box>
+                        {voiceMode !== 'off' ? (
+                            <Text color={voicePhaseColor(voicePhase)} bold>🎙️ voice: {voiceMode} · {voicePhaseLabel(voicePhase)}</Text>
+                        ) : (
+                            <Text color="grey30">🎙️ voice: off</Text>
+                        )}
+                    </Box>
                 </Box>
             </Box>
 
@@ -3081,6 +3816,11 @@ const App = () => {
                         pendingQuestion={pendingQuestion}
                         selectedActivityId={selectedActivityId}
                         selectedAgentId={selectedAgentId}
+                        motionFrame={motionFrame}
+                        voiceMode={voiceMode}
+                        voicePhase={voicePhase}
+                        voiceTranscriptPreview={voiceTranscriptPreview}
+                        voiceReplyPreview={voiceReplyPreview}
                         width={sidebarWidth}
                         height={height}
                     />

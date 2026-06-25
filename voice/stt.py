@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import warnings
 from typing import Any, Dict
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
@@ -17,14 +25,20 @@ class NexusWhisperSTT:
         self._pipe = None
         self._gguf_stt = None
         self._faster_stt = None
+        self._whispercpp_stt = None
         self._lock = threading.Lock()
 
     def load(self) -> None:
-        if self._pipe is not None or self._gguf_stt is not None or self._faster_stt is not None:
+        if self._pipe is not None or self._gguf_stt is not None or self._faster_stt is not None or self._whispercpp_stt is not None:
             return
         
         with self._lock:
             model_name = self._resolve_model_name(self.settings.whisper_model)
+
+            # whisper.cpp-style quantized files should bypass faster-whisper entirely.
+            if model_name.endswith(".gguf") or model_name.endswith(".bin"):
+                self._load_gguf(model_name)
+                return
             
             # ⚡ [OPTIMIZATION]: Try faster-whisper first for maximum efficiency
             try:
@@ -33,11 +47,6 @@ class NexusWhisperSTT:
                     return
             except Exception as e:
                 print(f"[voice-info] Falling back from faster-whisper: {e}")
-
-            # ⚡ Check if this is a GGUF/GGML model
-            if model_name.endswith(".gguf") or model_name.endswith(".bin"):
-                self._load_gguf(model_name)
-                return
 
             try:
                 # print("[voice] Loading Whisper STT Engine (torch/transformers)...")
@@ -86,29 +95,63 @@ class NexusWhisperSTT:
         try:
             from faster_whisper import WhisperModel
             import torch
-            
-            # Determine best device and compute type
+
             device = "cuda" if torch.cuda.is_available() else "cpu"
             compute_type = "float16" if device == "cuda" else "int8"
-            
-            # print(f"[voice] Initializing Faster-Whisper Engine ({model_name}, {compute_type})...")
-            
-            # Map friendly names to faster-whisper names if needed
+
+            # Map HuggingFace / local paths → faster-whisper model names
             fw_model = model_name
-            if "tiny-en.gguf" in model_name or "openai/whisper-tiny" in model_name:
+            if model_name in {"tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en", "large", "large-v2", "large-v3"}:
+                fw_model = model_name  # already a valid faster-whisper name
+            elif "tiny-en.gguf" in model_name or "openai/whisper-tiny.en" in model_name:
                 fw_model = "tiny.en"
+            elif "openai/whisper-tiny" in model_name:
+                fw_model = "tiny"
+            elif "openai/whisper-base" in model_name:
+                fw_model = "base"
+            elif "openai/whisper-small" in model_name:
+                fw_model = "small"
             elif "distil-whisper" in model_name:
                 fw_model = "distil-large-v3"
-            
+
+            print(f"[voice] Loading faster-whisper ({fw_model}, {device}/{compute_type})...")
             self._faster_stt = WhisperModel(fw_model, device=device, compute_type=compute_type)
-            # print("[voice] Faster-Whisper Engine Online.")
+            print(f"[voice] faster-whisper ready.")
         except ImportError:
             raise ImportError("faster-whisper not installed.")
         except Exception as e:
             print(f"[voice-error] Faster-Whisper Load Failed: {e}")
             self._faster_stt = None
 
+    def _retry_faster_whisper_with_tiny(self) -> bool:
+        try:
+            print("[voice-warning] STT hit memory pressure. Retrying with faster-whisper tiny.")
+            self._faster_stt = None
+            self._load_faster_whisper("tiny")
+            return self._faster_stt is not None
+        except Exception:
+            self._faster_stt = None
+            return False
+
+
     def _load_gguf(self, model_path: str) -> None:
+        try:
+            from pywhispercpp.model import Model
+
+            model_dir = os.path.dirname(os.path.abspath(model_path))
+            model_file = os.path.basename(model_path)
+            self._whispercpp_stt = Model(
+                model=model_file,
+                models_dir=model_dir,
+                redirect_whispercpp_logs_to=False,
+            )
+            return
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"[voice-error] whisper.cpp Python load failed: {e}")
+            self._whispercpp_stt = None
+
         try:
             # print(f"[voice] Initializing GGUF Whisper Engine with {os.path.basename(model_path)}...")
             from llama_cpp import Whisper
@@ -122,7 +165,7 @@ class NexusWhisperSTT:
 
     @staticmethod
     def _resolve_model_name(configured_model: str) -> str:
-        model_name = str(configured_model or "").strip() or "openai/whisper-tiny"
+        model_name = str(configured_model or "").strip() or "tiny.en"
         if not os.path.isdir(model_name):
             return model_name
         expected_files = (
@@ -132,7 +175,7 @@ class NexusWhisperSTT:
         )
         if any(os.path.exists(os.path.join(model_name, filename)) for filename in expected_files):
             return model_name
-        fallback = "openai/whisper-tiny"
+        fallback = "tiny.en"
         print(
             f"[voice-warning] Whisper model folder '{model_name}' is missing Transformer weights. "
             f"Falling back to '{fallback}'."
@@ -145,14 +188,33 @@ class NexusWhisperSTT:
 
         # ⚡ Faster-Whisper Path
         if self._faster_stt:
-            segments, _info = self._faster_stt.transcribe(
-                np.asarray(audio, dtype=np.float32), 
-                beam_size=1,
-                vad_filter=True
-            )
-            return "".join([segment.text for segment in segments]).strip()
+            try:
+                segments, _info = self._faster_stt.transcribe(
+                    np.asarray(audio, dtype=np.float32),
+                    beam_size=1,
+                    vad_filter=True
+                )
+                return "".join([segment.text for segment in segments]).strip()
+            except Exception as exc:
+                message = str(exc).lower()
+                if any(token in message for token in ("mkl_malloc", "bad allocation", "out of memory", "std::bad_alloc")):
+                    if self._retry_faster_whisper_with_tiny():
+                        segments, _info = self._faster_stt.transcribe(
+                            np.asarray(audio, dtype=np.float32),
+                            beam_size=1,
+                            vad_filter=True
+                        )
+                        return "".join([segment.text for segment in segments]).strip()
+                raise
 
         # ⚡ GGUF Path
+        if self._whispercpp_stt:
+            segments = self._whispercpp_stt.transcribe(
+                np.asarray(audio, dtype=np.float32),
+                language=str(getattr(self.settings, "whisper_language", "auto") or "auto"),
+            )
+            return "".join([getattr(segment, "text", str(segment)) for segment in segments]).strip()
+
         if self._gguf_stt:
             # llama-cpp-python Whisper takes ndarray directly
             result = self._gguf_stt.transcribe(np.asarray(audio, dtype=np.float32))

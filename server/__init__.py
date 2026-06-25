@@ -11,6 +11,9 @@ import re
 import time
 from typing import Any, Dict, Optional
 
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", ".env"))
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -44,6 +47,13 @@ _RUNTIME_FEATURE_DEFAULTS = {
     "reminders": True,
     "health": True,
 }
+
+import subprocess
+
+_VOICE_PROCESS: Optional[subprocess.Popen] = None
+_VOICE_MODE = "off"
+_VOICE_STARTED_AT = 0.0
+_VOICE_LOG_PATH = os.path.join(_PROJECT_ROOT, "logs", "voice-runtime.log")
 
 app = FastAPI(title="NEXUS AI API", version="2.1.0")
 
@@ -477,7 +487,7 @@ async def load_session(request: Request):
         loop = get_loop(sid)
         apply_runtime_settings(loop)
         set_active_session(sid, source="cli-api:load")
-        return {"status": "success", "id": loop.session_id, "history": loop.memory}
+        return {"status": "success", "id": loop.session_id, "history": _sanitize_history_messages(loop.memory)}
     except HTTPException:
         raise
     except Exception as e:
@@ -594,7 +604,7 @@ def get_history(session_id: str = "default"):
     try:
         loop = get_loop(session_id)
         loop.sync_memory()
-        return loop.memory
+        return _sanitize_history_messages(loop.memory)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
 
@@ -1000,7 +1010,16 @@ async def manage_runtime(request: Request):
 @app.get("/api/tasks")
 def list_tasks():
     """List current tasks."""
-    return {"tasks": list(_TASKS.values())}
+    tasks = []
+    for task in _TASKS.values():
+        subject = str(task.get("subject", "")).strip().lower()
+        agent = str(task.get("agent", "") or "").strip().lower()
+        if agent == "test":
+            continue
+        if subject in {"e2e task", "test task"}:
+            continue
+        tasks.append(task)
+    return {"tasks": tasks}
 
 
 @app.post("/api/tasks")
@@ -1234,14 +1253,17 @@ def search_files(q: str = ""):
     root = _PROJECT_ROOT
     q_lower = q.lower()
     try:
-        for dirpath, _, filenames in os.walk(root):
+        for dirpath, dirnames, filenames in os.walk(root):
+            # Prune directory list in place to avoid walking into unwanted trees
+            dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in {"node_modules", "__pycache__", "venv", ".venv"}]
+            
             rel = os.path.relpath(dirpath, root)
-            # Skip common noise dirs
-            if any(part.startswith((".", "node_modules", "__pycache__", "venv", ".venv")) for part in rel.split(os.sep)):
-                continue
+            if rel != ".":
+                if any(part.startswith((".", "node_modules", "__pycache__", "venv", ".venv")) for part in rel.split(os.sep)):
+                    continue
             for fname in filenames:
-                full = os.path.join(rel, fname)
-                if q_lower in full.lower() and len(files) < 10:
+                full = os.path.join(rel, fname) if rel != "." else fname
+                if q_lower in full.lower():
                     files.append(full)
                 if len(files) >= 10:
                     break
@@ -1250,6 +1272,275 @@ def search_files(q: str = ""):
     except Exception:
         pass
     return {"files": files[:10]}
+
+
+# ── Voice API ─────────────────────────────────────────────────────────────────
+
+def _voice_python_executable() -> str:
+    candidates = [
+        os.path.join(_PROJECT_ROOT, ".voice-venv", "Scripts", "python.exe"),
+        os.path.join(_PROJECT_ROOT, ".voice-venv", "bin", "python"),
+        os.path.join(_PROJECT_ROOT, ".venv", "Scripts", "python.exe"),
+        os.path.join(_PROJECT_ROOT, ".venv", "bin", "python"),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    import sys
+    return sys.executable
+
+
+def _voice_command_for_mode(mode: str, session_id: str = "default", owner_pid: int | None = None) -> list:
+    python = _voice_python_executable()
+    command = [python, "-c", "from voice.voice_chat import main; main()"]
+    if mode == "manual":
+        command.append("--manual")
+    elif mode == "text":
+        command.append("--text")
+    command.extend(["--session-id", session_id])
+    if owner_pid and owner_pid > 0:
+        command.extend(["--owner-pid", str(owner_pid)])
+    return command
+
+
+def _kill_stray_voice_processes() -> None:
+    try:
+        import psutil
+    except Exception:
+        return
+
+    current_pid = os.getpid()
+    signatures = (
+        "from voice.voice_chat import main; main()",
+        "voice_chat.py",
+    )
+
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            if proc.info["pid"] == current_pid:
+                continue
+            cmdline = " ".join(proc.info.get("cmdline") or [])
+            if not cmdline:
+                continue
+            if any(signature in cmdline for signature in signatures):
+                proc.terminate()
+        except Exception:
+            continue
+
+
+def _voice_launch_options(mode: str) -> Dict[str, Any]:
+    log_handle = open(_VOICE_LOG_PATH, "a", encoding="utf-8")
+    flags = 0
+    if os.name == "nt":
+        CREATE_NO_WINDOW = 0x08000000
+        flags = CREATE_NO_WINDOW
+    return {
+        "stdout": log_handle,
+        "stderr": log_handle,
+        "stdin": subprocess.DEVNULL,
+        "creationflags": flags,
+        "log_handle": log_handle,
+    }
+
+
+def _voice_is_running() -> bool:
+    global _VOICE_PROCESS
+    if _VOICE_PROCESS is None:
+        return False
+    if _VOICE_PROCESS.poll() is None:
+        return True
+    _VOICE_PROCESS = None
+    return False
+
+
+def _strip_ansi(text: str) -> str:
+    if not text:
+        return ""
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
+
+
+def _tail_voice_log(max_chars: int = 24000) -> str:
+    if not os.path.exists(_VOICE_LOG_PATH):
+        return ""
+    try:
+        with open(_VOICE_LOG_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+        return text[-max_chars:]
+    except Exception:
+        return ""
+
+
+def _voice_log_snapshot() -> Dict[str, str]:
+    tail = _strip_ansi(_tail_voice_log()).replace("\r", "\n")
+    phase_markers = {
+        "ready": tail.rfind("[voice] Ready."),
+        "starting": max(tail.rfind("[voice] Assistant ready."), tail.rfind("[voice] Manual voice mode.")),
+        "listening": tail.rfind("[voice] listening..."),
+        "waiting": tail.rfind("[voice] Waiting for speech..."),
+        "hearing": tail.rfind("[voice] Hearing speech..."),
+        "processing": tail.rfind("[voice] Processing..."),
+        "speaking": max(tail.rfind("[voice] speaking..."), tail.rfind("[voice] Speaking reply...")),
+        "paused": tail.rfind("[voice] paused."),
+        "stopped": tail.rfind("[voice] stopped."),
+        "error": max(tail.rfind("[voice-error]"), tail.rfind("[voice-warning]")),
+    }
+    phase = "idle"
+    best_index = -1
+    for candidate, index in phase_markers.items():
+        if index > best_index:
+            best_index = index
+            phase = candidate
+
+    transcript_matches = re.findall(r"You:\s*(.+)", tail)
+    reply_matches = re.findall(r"NEXUS:\s*(.+)", tail)
+    transcript_preview = transcript_matches[-1].strip() if transcript_matches else ""
+    reply_preview = reply_matches[-1].strip() if reply_matches else ""
+    reply_preview = re.sub(r"<thinking>.*?</thinking>", "", reply_preview, flags=re.DOTALL | re.IGNORECASE).strip()
+    reply_preview = re.sub(r"</?thinking>", "", reply_preview, flags=re.IGNORECASE).strip()
+
+    return {
+        "phase": phase,
+        "transcript_preview": transcript_preview,
+        "reply_preview": reply_preview,
+    }
+
+
+def _voice_status_payload() -> Dict[str, Any]:
+    running = _voice_is_running()
+    snapshot = _voice_log_snapshot() if running else {
+        "phase": "off",
+        "transcript_preview": "",
+        "reply_preview": "",
+    }
+    return {
+        "running": running,
+        "mode": _VOICE_MODE if running else "off",
+        "pid": _VOICE_PROCESS.pid if running and _VOICE_PROCESS else None,
+        "started_at": _VOICE_STARTED_AT if running else None,
+        "log_path": _VOICE_LOG_PATH,
+        "phase": snapshot["phase"],
+        "transcript_preview": snapshot["transcript_preview"],
+        "reply_preview": snapshot["reply_preview"],
+    }
+
+
+def _clean_visible_message_text(text: str) -> str:
+    cleaned = str(text or "")
+    cleaned = re.sub(r"\[NEXUS_BOOT\]:[^\n]*", "", cleaned)
+    cleaned = re.sub(r"\[THINKING:[^\]]+\]", "", cleaned)
+    cleaned = re.sub(r"<thinking>.*?</thinking>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"</?thinking>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.replace("TASK_COMPLETE", "")
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _sanitize_history_messages(messages: Any) -> list:
+    if not isinstance(messages, list):
+        return []
+    cleaned_messages = []
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "") or "")
+        content = item.get("content", "")
+        cleaned_messages.append({
+            **item,
+            "role": role,
+            "content": _clean_visible_message_text(content) if role == "assistant" else str(content or ""),
+        })
+    return cleaned_messages
+
+
+def _stop_voice_process() -> Dict[str, Any]:
+    global _VOICE_PROCESS, _VOICE_MODE, _VOICE_STARTED_AT
+    if _VOICE_PROCESS is not None:
+        try:
+            if _VOICE_PROCESS.poll() is None:
+                _VOICE_PROCESS.terminate()
+                _VOICE_PROCESS.wait(timeout=5)
+        except Exception:
+            try:
+                _VOICE_PROCESS.kill()
+            except Exception:
+                pass
+        finally:
+            _VOICE_PROCESS = None
+    _kill_stray_voice_processes()
+    _VOICE_MODE = "off"
+    _VOICE_STARTED_AT = 0.0
+    return _voice_status_payload()
+
+
+@app.get("/api/voice/status")
+def get_voice_status():
+    return {"status": "success", **_voice_status_payload()}
+
+
+@app.post("/api/voice/start")
+async def start_voice(request: Request):
+    global _VOICE_PROCESS, _VOICE_MODE, _VOICE_STARTED_AT
+    data = await request.json()
+    requested_mode = str(data.get("mode", "auto")).strip().lower()
+    mode = requested_mode if requested_mode in {"auto", "manual", "text"} else "auto"
+    session_id = str(data.get("session_id", "default")).strip()
+    owner_pid = int(data.get("owner_pid") or 0)
+
+    if _voice_is_running():
+        return {"status": "success", **_voice_status_payload()}
+
+    os.makedirs(os.path.dirname(_VOICE_LOG_PATH), exist_ok=True)
+    _kill_stray_voice_processes()
+    try:
+        with open(_VOICE_LOG_PATH, "w", encoding="utf-8") as f:
+            f.write("")
+    except Exception:
+        pass
+    command = _voice_command_for_mode(mode, session_id, owner_pid=owner_pid)
+    launch = _voice_launch_options(mode)
+    try:
+        _VOICE_PROCESS = subprocess.Popen(
+            command,
+            cwd=_PROJECT_ROOT,
+            stdout=launch["stdout"],
+            stderr=launch["stderr"],
+            stdin=launch["stdin"],
+            creationflags=launch["creationflags"],
+            shell=False,
+        )
+    except FileNotFoundError as exc:
+        if launch.get("log_handle"):
+            launch["log_handle"].close()
+        raise HTTPException(status_code=500, detail=f"Voice Python runtime not found: {exc}") from exc
+    except Exception as exc:
+        if launch.get("log_handle"):
+            launch["log_handle"].close()
+        raise HTTPException(status_code=500, detail=f"Unable to start voice mode: {exc}") from exc
+
+    time.sleep(1.0)
+    if _VOICE_PROCESS.poll() is not None:
+        tail = ""
+        if os.path.exists(_VOICE_LOG_PATH):
+            try:
+                with open(_VOICE_LOG_PATH, "r", encoding="utf-8", errors="ignore") as f:
+                    tail = f.read()[-2000:].strip()
+            except Exception:
+                tail = ""
+        _VOICE_PROCESS = None
+        _VOICE_MODE = "off"
+        _VOICE_STARTED_AT = 0.0
+        detail = tail or "Voice process exited immediately after launch."
+        raise HTTPException(status_code=500, detail=detail)
+
+    _VOICE_MODE = mode
+    _VOICE_STARTED_AT = time.time()
+    return {"status": "success", **_voice_status_payload()}
+
+
+@app.post("/api/voice/stop")
+def stop_voice():
+    status = _stop_voice_process()
+    return {"status": "success", **status}
 
 
 @app.post("/api/multi_agent")

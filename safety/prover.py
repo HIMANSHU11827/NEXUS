@@ -8,7 +8,7 @@ import ast
 import re
 import os
 from typing import Tuple, List, Any, Optional
-from discovery import NexusAutoDiscover
+from utils.discovery import NexusAutoDiscover
 
 SHELL_RULES: List[Tuple[str, str, bool]] = [
     (r"rm\s+-rf?\s+/", "Recursive delete from root", True),

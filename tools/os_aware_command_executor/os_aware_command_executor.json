@@ -1,0 +1,10 @@
+{
+  "name": "os_aware_command_executor",
+  "version": "1.0.0",
+  "description": "System attempted to use 'ls' command in Windows environment where 'dir' is appropriate. Need OS-aware command routing.",
+  "defaults": {},
+  "permissions": {
+    "auto_approve": false
+  },
+  "created_at": 1782224552.845848
+}

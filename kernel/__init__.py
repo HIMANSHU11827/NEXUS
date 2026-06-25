@@ -9,7 +9,7 @@ import threading
 import glob
 from typing import List, Dict, Any, Optional
 import psutil
-from nexus_compat import import_requests, s, safe_round, itail
+from utils.nexus_compat import import_requests, s, safe_round, itail
 from utils.singleton import ThreadSafeSingleton
 
 _requests: Any = import_requests()
@@ -56,7 +56,7 @@ class NexusKernel(ThreadSafeSingleton):
 
     @property
     def config(self):
-        from config_loader import NexusConfigLoader
+        from config.config_loader import NexusConfigLoader
         return self._get_or_init("config", NexusConfigLoader)
 
     @property

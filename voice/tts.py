@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import os
+import queue
 import sys
 import threading
 import time
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 import re
 from typing import List
 from contextlib import contextmanager, redirect_stdout
@@ -16,6 +24,7 @@ from voice.config import VoiceSettings
 
 def speech_text(text: str) -> str:
     cleaned = text or ""
+    cleaned = re.sub(r"<thinking>.*?</thinking>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
     cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
     cleaned = re.sub(r"`([^`]*)`", r"\1", cleaned)
     cleaned = re.sub(r"^\s*[-*]\s+", "", cleaned, flags=re.MULTILINE)
@@ -56,6 +65,34 @@ def sentence_chunks(text: str, max_chars: int = 160) -> List[str]:
     return chunks
 
 
+def low_latency_chunks(text: str, max_chars: int = 72) -> List[str]:
+    cleaned = speech_text(text)
+    if not cleaned:
+        return []
+    pieces = re.split(r"(?<=[.!?,:;])\s+", cleaned)
+    chunks: List[str] = []
+    current = ""
+    for piece in pieces:
+        if not piece:
+            continue
+        words = piece.split()
+        if not words:
+            continue
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if len(candidate) > max_chars and current:
+                chunks.append(current)
+                current = word
+            else:
+                current = candidate
+        if current and current[-1:] in ".!?":
+            chunks.append(current)
+            current = ""
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 class KittenTTSSpeaker:
     sample_rate = 24000
 
@@ -65,6 +102,7 @@ class KittenTTSSpeaker:
         self._model = None
         self._lock = threading.Lock()
         self._speaking_thread: threading.Thread | None = None
+        self._stream_stop = threading.Event()
 
     def load(self) -> None:
         if self._model is not None:
@@ -107,10 +145,12 @@ class KittenTTSSpeaker:
             )
 
     def stop(self) -> None:
+        self._stream_stop.set()
         self.audio_io.stop_playback()
 
     def speak(self, text: str, blocking: bool = True) -> None:
         self.stop()
+        self._stream_stop = threading.Event()
         if blocking:
             self._speak_worker(text)
             return
@@ -119,10 +159,36 @@ class KittenTTSSpeaker:
         thread.start()
 
     def _speak_worker(self, text: str) -> None:
+        chunks = low_latency_chunks(text)
+        if not chunks:
+            return
         try:
-            for chunk in sentence_chunks(text):
-                audio = self.synthesize(chunk)
-                self.audio_io.play(audio, self.sample_rate)
-                time.sleep(0.12)
+            audio_queue: "queue.Queue[tuple[str, object] | None]" = queue.Queue(maxsize=3)
+
+            def producer():
+                try:
+                    for chunk in chunks:
+                        if self._stream_stop.is_set():
+                            break
+                        audio = self.synthesize(chunk)
+                        audio_queue.put((chunk, audio))
+                    audio_queue.put(None)
+                except Exception as exc:
+                    audio_queue.put(("__error__", exc))
+
+            producer_thread = threading.Thread(target=producer, daemon=True)
+            producer_thread.start()
+
+            while not self._stream_stop.is_set():
+                item = audio_queue.get()
+                if item is None:
+                    break
+                label, payload = item
+                if label == "__error__":
+                    raise payload
+                self.audio_io.play(payload, self.sample_rate)
+                if self._stream_stop.is_set():
+                    break
+                time.sleep(0.04)
         except Exception as e:
             print(f"[voice-error] TTS synthesis/playback failed: {e}")

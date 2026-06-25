@@ -6,8 +6,17 @@ import argparse
 import logging
 import os
 import sys
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 import time
 import warnings
+
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "config", ".env"))
 
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -22,11 +31,20 @@ warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*You are sending unauthenticated requests to the HF Hub.*")
 warnings.filterwarnings("ignore", message=".*TypedStorage is deprecated.*")
 
-from config_loader import NexusConfigLoader
+from config.config_loader import NexusConfigLoader
 from voice import VoiceAssistant, VoiceSettings
 
 import subprocess
 import signal
+import threading
+
+
+def _safe_console_text(value: str) -> str:
+    text = str(value or "")
+    try:
+        return text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+    except Exception:
+        return text
 
 def cleanup_voice_processes():
     """Ensure no other voice_chat.py instances are competing for audio/memory."""
@@ -58,6 +76,28 @@ def wait_for_push_to_talk(key: str) -> None:
     time.sleep(0.1)
 
 
+def start_owner_monitor(owner_pid: int) -> None:
+    if owner_pid <= 0:
+        return
+
+    def monitor() -> None:
+        try:
+            import psutil
+        except ImportError:
+            return
+
+        while True:
+            try:
+                if not psutil.pid_exists(owner_pid):
+                    print(f"[voice] owner process {owner_pid} exited. stopping voice.")
+                    os._exit(0)
+                time.sleep(1.0)
+            except Exception:
+                time.sleep(1.0)
+
+    threading.Thread(target=monitor, daemon=True).start()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="NEXUS voice assistant using local Whisper-compatible STT and KittenTTS.")
     parser.add_argument("--text", action="store_true", help="Use typed text instead of microphone input.")
@@ -66,7 +106,11 @@ def main() -> None:
     parser.add_argument("--once", action="store_true", help="Run one turn and exit.")
     parser.add_argument("--no-speak", action="store_true", help="Print replies without loading or playing TTS.")
     parser.add_argument("--message", type=str, default=None, help="Message to send (reads from stdin if not provided).")
+    parser.add_argument("--session-id", type=str, default="default", help="Active session ID to load/save chat history.")
+    parser.add_argument("--owner-pid", type=int, default=0, help="CLI process PID that owns this voice session.")
     args = parser.parse_args()
+
+    start_owner_monitor(int(args.owner_pid or 0))
 
     # cleanup_voice_processes()
     # print("[debug] Loading config...")
@@ -77,7 +121,7 @@ def main() -> None:
     # print("[debug] Initializing VoiceAssistant...")
     try:
         check_system_health()
-        assistant = VoiceAssistant(settings)
+        assistant = VoiceAssistant(settings, session_id=args.session_id)
     except Exception as e:
         print(f"[voice-error] Initialization failed: {e}")
         return
@@ -115,20 +159,15 @@ def main() -> None:
 
     if args.manual:
         print("[voice] Manual voice mode. Press Enter/push-to-talk for each recording, /exit to quit.")
-        assistant.speak("Welcome back sir, how may I assist you today?", blocking=False)
         run_manual_voice_loop(assistant, settings, args.once)
         return
 
-    import time
-    time.sleep(0.5)
-    assistant.speak("Initializing.", blocking=True)
-    assistant.speak("Welcome back sir, how may I assist you today?", blocking=True)
     run_auto_voice_loop(assistant, settings, args.once)
 
 
 def print_turn(user_text: str, reply: str, spoken: bool, settings: VoiceSettings) -> None:
     if reply:
-        print(f"NEXUS: {reply}")
+        print(f"NEXUS: {_safe_console_text(reply)}")
         if settings.auto_speak and not spoken:
             print("[voice] TTS unavailable; text-only reply shown.")
 
@@ -152,7 +191,7 @@ def run_text_loop(assistant: VoiceAssistant, settings: VoiceSettings, once: bool
             spoken = assistant.speak(reply, blocking=False)
             print_turn(typed, reply, spoken, settings)
         except Exception as exc:
-            print(f"[voice-error] {exc}", file=sys.stderr)
+            print(f"[voice-error] {_safe_console_text(str(exc))}", file=sys.stderr)
         if once:
             return
 
@@ -180,9 +219,11 @@ def run_manual_voice_loop(assistant: VoiceAssistant, settings: VoiceSettings, on
                 wait_for_push_to_talk(settings.push_to_talk_key)
                 print("[voice] listening...")
                 user_text, reply, spoken = assistant.voice_turn(speech_blocking=True)
+                if user_text:
+                    print(f"You: {_safe_console_text(user_text)}")
                 print_turn(user_text, reply, spoken, settings)
         except Exception as exc:
-            print(f"[voice-error] {exc}", file=sys.stderr)
+            print(f"[voice-error] {_safe_console_text(str(exc))}", file=sys.stderr)
         if once:
             return
 
@@ -212,37 +253,57 @@ def run_auto_voice_loop(assistant: VoiceAssistant, settings: VoiceSettings, once
             sys.stdout.write("\r\033[K[voice] Hearing speech...  ")
         elif state == "processing":
             sys.stdout.write("\r\033[K[voice] Processing...      ")
+        elif state == "speaking":
+            sys.stdout.write("\r\033[K[voice] Speaking reply...  ")
         sys.stdout.flush()
 
-    while True:
-        try:
-            user_text, reply, spoken = assistant.voice_turn(
-                prompt_text_fallback=False,
-                speech_blocking=True,
-                status_callback=status_cb
-            )
-            
-            if user_text:
-                # Clear the status line before printing the transcription
-                sys.stdout.write("\r\033[K")
-                sys.stdout.flush()
-                print(f"You: {user_text}")
-                print_turn(user_text, reply, spoken, settings)
-            else:
-                # Silent turn, loop back
-                pass
-        except KeyboardInterrupt:
-            assistant.stop_speaking()
-            print("\n[voice] stopped.")
-            return
-        except Exception as exc:
-            if settings.allow_text_fallback:
-                print(f"\r\033[K[voice-error] {exc}", file=sys.stderr)
-                print("[voice] STT failed. Restart with --text for typed fallback.")
-            else:
-                print(f"\r\033[K[voice-error] {exc}", file=sys.stderr)
-        if once:
-            return
+    def emit_transcript_preview(user_text: str) -> None:
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+        if user_text:
+            print(f"You: {_safe_console_text(user_text)}")
+
+    def emit_turn_preview(user_text: str, reply: str) -> None:
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+        if reply:
+            print(f"NEXUS: {_safe_console_text(reply)}")
+            if settings.auto_speak:
+                print("[voice] Speaking reply...")
+
+    use_continuous = bool(getattr(settings, "continuous_listening", True))
+    if use_continuous:
+        assistant.start_continuous_listening(status_cb)
+    try:
+        while True:
+            try:
+                status_cb("waiting")
+                user_text, reply, spoken = assistant.voice_turn(
+                    prompt_text_fallback=False,
+                    speech_blocking=True,
+                    status_callback=status_cb,
+                    continuous=use_continuous,
+                    on_transcript_callback=emit_transcript_preview,
+                    before_speak_callback=emit_turn_preview,
+                )
+                
+                if user_text and reply and settings.auto_speak and not spoken:
+                    print("[voice] TTS unavailable; text-only reply shown.")
+            except KeyboardInterrupt:
+                assistant.stop_speaking()
+                print("\n[voice] stopped.")
+                return
+            except Exception as exc:
+                if settings.allow_text_fallback:
+                    print(f"\r\033[K[voice-error] {_safe_console_text(str(exc))}", file=sys.stderr)
+                    print("[voice] STT failed. Restart with --text for typed fallback.")
+                else:
+                    print(f"\r\033[K[voice-error] {_safe_console_text(str(exc))}", file=sys.stderr)
+            if once:
+                return
+    finally:
+        if use_continuous:
+            assistant.stop_continuous_listening()
 
 
 if __name__ == "__main__":

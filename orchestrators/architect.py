@@ -12,7 +12,7 @@ from typing import List, Dict, Any, Optional, Tuple, Iterator, Union
 
 logger = logging.getLogger("NEXUS_ARCHITECT")
 
-from discovery import NexusAutoDiscover
+from utils.discovery import NexusAutoDiscover
 from router import IntentRouter
 from prompts import NexusPromptEngine
 from providers.router import ModelRouter
@@ -24,7 +24,7 @@ from tool_adapters import RegistryGitTools as NexusGitTools
 from hive.engine import NexusHiveEngine
 from tools.reporter.script import NexusLSPTool
 from tool_adapters import RegistryTestTool as NexusTestTool
-from nexus_compat import s, sx, itail
+from utils.nexus_compat import s, sx, itail
 from tools.nexus_tools.registry import ToolRegistry
 from tasks import TaskManager, TaskType
 from permissions import PermissionSystem, PermissionMode

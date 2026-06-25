@@ -1,0 +1,10 @@
+{
+  "name": "ls command",
+  "version": "1.0.0",
+  "description": "The 'ls' command is not recognized in the current environment, causing execution failure.",
+  "defaults": {},
+  "permissions": {
+    "auto_approve": false
+  },
+  "created_at": 1782224508.786631
+}

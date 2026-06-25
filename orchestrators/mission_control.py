@@ -2,7 +2,7 @@ import threading
 import time
 import uuid
 from typing import List, Dict, Any, Optional
-from nexus_compat import s # type: ignore
+from utils.nexus_compat import s # type: ignore
 
 class MissionMission:
     """

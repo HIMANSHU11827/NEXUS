@@ -6,7 +6,7 @@ from utils.singleton import ThreadSafeSingleton
 
 # Linter-proof imports
 def get_loader() -> Any:
-    mod = importlib.import_module("config_loader")
+    mod = importlib.import_module("config.config_loader")
     return getattr(mod, "NexusConfigLoader")()
 
 

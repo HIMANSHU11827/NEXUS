@@ -2,11 +2,17 @@
 """Compile check TSX without npm."""
 import subprocess, sys, os
 
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 # Check npx tsc --noEmit
 print("Running npx tsc --noEmit...")
-result = subprocess.run(["npx", "tsc", "--noEmit"], capture_output=True, text=True)
+result = subprocess.run(["npx", "tsc", "--noEmit"], capture_output=True, text=True, shell=True)
 if result.returncode == 0:
     print("✅ TypeScript compiles clean — 0 errors")
 else:

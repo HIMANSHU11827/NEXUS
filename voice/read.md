@@ -11,6 +11,6 @@ python -m voice_chat --warmup
 `
 
 ## Components
-- Distil-Whisper (STT)
-- KittenTTS Micro 40M (TTS)
+- whisper.cpp `ggml-tiny-q5_1.bin` (STT)
+- KittenTTS Nano int8 (TTS)
 - Voice activity detection
