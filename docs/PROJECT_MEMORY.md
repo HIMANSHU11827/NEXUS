@@ -1,3 +1,5 @@
+> _(Architectural reference — may not reflect latest code changes)_
+
 # NEXUS AI: Sovereign Engineering Project Memory (A to Z)
 
 This document captures the core architecture and evolution system of the NEXUS AI platform.
@@ -11,17 +13,10 @@ A thread-safe singleton managing lazy-loading for all core services:
 *   **MoE Router:** Dynamic model tiering (NANO to EXTREME).
 *   **Hive Engine:** Asynchronous Hive worker orchestration.
 *   **RAG Engine:** Long-term vector memory (BM25 + hybrid vector).
-*   **Tool Registry:** Hardened access to 10 tools (bash, code_search, file_ops, knowledge, mcp, memory, reasoning, system, task, web_search).
+*   **Tool Registry:** Hardened access to current tools: bash, code_search, creating, deep_research, deleting, git_ops, hive, knowledge, memory, modifying, planning, reading, reasoning, shortcuts, system, task, terminal, test_runner, web_search.
 
 ### Unified Cognitive Loop (`orchestrators/loop.py`)
-A 7-state sovereign cognitive loop (`SCAState`):
-*   **GROUNDING:** Parallel load of rules, RAG, and compiler status.
-*   **PLANNING:** Complexity classifier (tiers 0/1/2) — direct chat, checklist, or architect roadmap.
-*   **INFERENCE:** LLM call via MoE router with tool call extraction.
-*   **AUDITING:** Permission policy resolution + `CommandRiskScorer` + `SafetyLaws`.
-*   **EXECUTION:** Concurrent reads / serial writes via `SovereignSandbox`.
-*   **VERIFICATION:** Diagnostics, failure vaccines, context compaction, gap detection.
-*   **EVOLVE:** Session sync, memory persist, evolution logging.
+The current `NexusLoop` uses a unified model/tool runtime rather than the removed `SCAState` enum. It grounds prompt context, classifies whether real tools are required, streams provider output, extracts tool calls, applies permission/risk/sandbox checks, executes read tools in parallel and write tools sequentially, verifies outcomes, persists session memory, and emits canonical work events throughout.
 
 ### Evolution & Version System (`evolution/` package)
 18 modules in per-folder format:
@@ -30,15 +25,15 @@ A 7-state sovereign cognitive loop (`SCAState`):
 *   `VersionManager` tracks semver (1.0.0) across all 39 `.jsnol` module files
 *   All 6 forges auto-bump versions on refine (minor by default, major on upgrade)
 *   Every `scripts/*.py` has `__version__` embedded inline
-*   Config YAMLs also versioned (`config/provider.yml`, `settings.yml`, `system.yml`)
+*   Config YAMLs are versioned for non-secret settings. Provider YAML should use environment-variable placeholders for credentials.
 
-### User Surfaces
-| Surface | Start | Path |
-|---------|-------|------|
-| **Terminal** (live) | `python -m nexus` | `nexus/` package |
-| **CLI** (Ink client) | `cd cli && npm start` | `cli/` — needs API on `:8000` |
-| **GUI** | `cd gui && python -m server` | `gui/`, `server/` package |
-| **Gateway** | `python -m gateway.main` | `gateway/` — Telegram, Discord, WA |
+### User Interfaces
+| Interface | Start | Path |
+|-----------|-------|------|
+| **TUI** | `python -m nexus` | `tui/` + `gui.api` backend |
+| **Rich shell** | `python -m nexus --shell` | `shell/` — in-process |
+| **GUI** | `python -m nexus --gui` | `gui/` + `gui.api` |
+| **Gateway** | `python -m nexus --gateway` | `gateway/` — Telegram, Discord, WhatsApp, Slack |
 
 ---
 
@@ -48,8 +43,11 @@ A 7-state sovereign cognitive loop (`SCAState`):
 2.  **Auto-Version Tracking:** VersionManager tracks all 39 modules with semver bump on every forge refine
 3.  **Per-Module Evolution Structure:** Every evolution module has `<name>.jsnol` (metadata), `scripts/` (code), `<name>.md` (docs)
 4.  **Embedded Inline Versions:** Every script file has `__version__ = "1.0.0"` at the source level
-5.  **Tool Registry:** 10 tools under `tools/<name>/` with jsnol metadata + sandboxed execution
-6.  **Sovereign Sandbox:** 2-tier security (Restricted Shell / Docker) with risk-based filtering
+5.  **Tool Registry:** Current split tools under `tools/<name>/` with jsnol metadata + sandboxed execution, including dedicated `reading`, `creating`, `modifying`, and `deleting` filesystem tools instead of the removed `file_ops` tool.
+6.  **Sovereign Sandbox:** 3-tier security (`no_sandbox`, `normal`, `docker`) with `normal` as the safe default and risk-based filtering before command execution.
+7.  **NATE (NEXUS Native Tool Engine):** `intelligence/nate/` — 5-layer fused tool calling runtime with universal format adapter, **NATE-Route** embedding router (all-MiniLM-L6-v2 + FAISS, 88% schema reduction, 67% token savings), STRAP clustering, necessity gate, OATS feedback. Solves all 12 skill alignment problems. Two-Phase Schema Loader integrated into NexusLoop. See `docs/NATE.md`.
+8.  **Self-Improving Lifecycle:** `evolution/local_trainer/` — auto harvests tool logs → fine-tunes embedding + Zupra-50M → exports GGUF → reloads. Triggered when 20-50+ examples accumulate.
+9.  **Zupra Local Provider:** `providers/zupra.py` — MultivexAI/Zupra-1.6-50M-Instruct-Ultra-exp for fully offline CPU inference. Registered in factory as "zupra". No API key needed.
 
 ---
 
@@ -62,8 +60,9 @@ A 7-state sovereign cognitive loop (`SCAState`):
 *   **PRE_AUTHORIZED:** Whitelist mode; only runs saved/approved commands.
 
 ### Sandbox Tiers
-*   **NO_SANDBOX (Default):** Direct speed.
-*   **SANDBOX:** Isolation via **Normal** (Shell) or **Docker** backends.
+*   **NORMAL (Default):** Workspace-scoped shell execution with reduced environment exposure.
+*   **DOCKER:** Container-backed execution when available.
+*   **NO_SANDBOX:** Direct execution for explicit local override only.
 
 ---
 

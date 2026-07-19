@@ -1,7 +1,10 @@
-import discord
 import asyncio
 import logging
-from typing import Optional, Dict, Any
+import os
+from typing import Optional
+
+import discord
+
 from gateway.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 
 logger = logging.getLogger(__name__)
@@ -12,9 +15,9 @@ class DiscordAdapter(BasePlatformAdapter):
     Uses discord.py to interface with the Discord Bot API.
     """
     
-    def __init__(self, token: str):
+    def __init__(self, token: str = ""):
         super().__init__("discord")
-        self.token = token
+        self.token = token or os.getenv("DISCORD_BOT_TOKEN", "") or os.getenv("DISCORD_TOKEN", "")
         intents = discord.Intents.default()
         intents.message_content = True
         self.client = discord.Client(intents=intents)
@@ -83,4 +86,5 @@ class DiscordAdapter(BasePlatformAdapter):
             if channel:
                 await channel.typing()
         except Exception:
+            logger.warning("gateway/platforms/discord.py:87 async send_typing: suppressed error", exc_info=True)
             pass

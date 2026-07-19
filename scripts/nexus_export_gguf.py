@@ -1,8 +1,8 @@
 
+import logging
 import os
 import subprocess
 import sys
-import logging
 
 # 🌌 [NEXUS_EXPORT_PROTOCOL]: SafeTensors -> GGUF Transition
 # Designed for the local-first sovereign workflow.
@@ -13,10 +13,11 @@ logger = logging.getLogger("NEXUS_EXPORT")
 def merge_adapter(model_dir: str):
     """Fuses LoRA adapter weights into the base model for GGUF compatibility."""
     try:
+        import json
+
+        import torch
         from peft import PeftModel
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        import torch
-        import json
         
         logger.info("[*] GGUF_EXPORT: Merging LoRA weights...")
         
@@ -83,7 +84,6 @@ def export_to_gguf(model_dir: str, output_name: str = "nexus_model.gguf"):
             logger.info(f"[+] GGUF_EXPORT: SUCCESS. Model saved at {output_path}")
             # Cleanup temp dir if it was created
             if model_dir.endswith("_merged"):
-                import shutil
                 # shutil.rmtree(model_dir) # Keep for now for debugging if needed
                 pass
             return True

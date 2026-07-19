@@ -1,0 +1,13 @@
+{
+  "name": "deep_research",
+  "version": "1.0.0",
+  "description": "Deep research — spawns dedicated research sub-agents to investigate a topic thoroughly across multiple angles",
+  "entry": "scripts/deep_research.py",
+  "class": "DeepResearchTool",
+  "params": {
+    "query": {"type": "string", "description": "Research query or topic to investigate", "required": true},
+    "depth": {"type": "string", "description": "quick|deep|comprehensive", "default": "deep"},
+    "focus_areas": {"type": "array", "description": "Optional specific focus areas to explore", "default": []}
+  },
+  "category": "research"
+}

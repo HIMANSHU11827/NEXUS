@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cat & Mouse</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0a; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: 'Courier New', monospace; }
+    .game-wrapper { text-align: center; }
+    canvas { border: 2px solid #00ff88; background: #111; display: block; margin: 0 auto; box-shadow: 0 0 20px rgba(0,255,136,0.3); }
+    .status { margin-top: 12px; color: #00ff88; font-size: 18px; }
+    .status span { margin: 0 15px; }
+    .controls { margin-top: 10px; color: #00aa66; font-size: 14px; }
+  </style>
+</head>
+<body>
+<div class="game-wrapper">
+  <canvas id="gameCanvas" width="800" height="400"></canvas>
+  <div class="status">
+    <span>Score: <span id="scoreDisplay">0</span></span>
+    <span>Best: <span id="bestDisplay">0</span></span>
+  </div>
+  <div class="controls">Arrow Keys / WASD to move cat</div>
+</div>
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const scoreSpan = document.getElementById('scoreDisplay');
+const bestSpan = document.getElementById('bestDisplay');
+
+const W = 800, H = 400;
+const CAT_SIZE = 30;
+const MOUSE_SIZE = 15;
+const SPEED = 5;
+
+let cat = { x: 100, y: 200 };
+let mouse = { x: 600, y: 200 };
+let score = 0;
+let best = parseInt(localStorage.getItem('catMouseBest')) || 0;
+bestSpan.textContent = best;
+
+const keys = {};
+document.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  e.preventDefault();
+});
+document.addEventListener('keyup', e => {
+  keys[e.key] = false;
+  e.preventDefault();
+});
+
+function moveCat() {
+  let dx = 0, dy = 0;
+  if (keys['ArrowUp'] || keys['w'] || keys['W']) dy = -SPEED;
+  if (keys['ArrowDown'] || keys['s'] || keys['S']) dy = SPEED;
+  if (keys['ArrowLeft'] || keys['a'] || keys['A']) dx = -SPEED;
+  if (keys['ArrowRight'] || keys['d'] || keys['D']) dx = SPEED;
+  // Diagonal normalization
+  if (dx !== 0 && dy !== 0) {
+    const len = Math.sqrt(dx*dx + dy*dy);
+    dx = dx / len * SPEED;
+    dy = dy / len * SPEED;
+  }
+  cat.x = Math.max(CAT_SIZE/2, Math.min(W - CAT_SIZE/2, cat.x + dx));
+  cat.y = Math.max(CAT_SIZE/2, Math.min(H - CAT_SIZE/2, cat.y + dy));
+}
+
+function moveMouse() {
+  // Random walk — biased away from cat
+  const dx = (Math.random() - 0.5) * 6;
+  const dy = (Math.random() - 0.5) * 6;
+  mouse.x = Math.max(MOUSE_SIZE/2, Math.min(W - MOUSE_SIZE/2, mouse.x + dx));
+  mouse.y = Math.max(MOUSE_SIZE/2, Math.min(H - MOUSE_SIZE/2, mouse.y + dy));
+}
+
+function checkCollision() {
+  const dist = Math.hypot(cat.x - mouse.x, cat.y - mouse.y);
+  if (dist < (CAT_SIZE/2 + MOUSE_SIZE/2)) {
+    score++;
+    scoreSpan.textContent = score;
+    if (score > best) {
+      best = score;
+      bestSpan.textContent = best;
+      localStorage.setItem('catMouseBest', best);
+    }
+    // Reset mouse to random location away from cat
+    let safe = false;
+    while (!safe) {
+      mouse.x = MOUSE_SIZE/2 + Math.random() * (W - MOUSE_SIZE);
+      mouse.y = MOUSE_SIZE/2 + Math.random() * (H - MOUSE_SIZE);
+      const d = Math.hypot(cat.x - mouse.x, cat.y - mouse.y);
+      if (d > 150) safe = true;
+    }
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  // Grid (subtle)
+  ctx.strokeStyle = '#1a1a1a';
+  ctx.lineWidth = 1;
+  for (let x = 0; x <= W; x += 40) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, H);
+    ctx.stroke();
+  }
+  for (let y = 0; y <= H; y += 40) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+    ctx.stroke();
+  }
+
+  // Draw mouse (small, faster-moving)
+  ctx.fillStyle = '#ffaa00';
+  ctx.shadowColor = '#ffaa00';
+  ctx.shadowBlur = 10;
+  ctx.beginPath();
+  ctx.arc(mouse.x, mouse.y, MOUSE_SIZE/2, 0, Math.PI * 2);
+  ctx.fill();
+  // Mouse tail
+  ctx.strokeStyle = '#ffaa00';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(mouse.x - MOUSE_SIZE/2, mouse.y);
+  ctx.lineTo(mouse.x - MOUSE_SIZE/2 - 12, mouse.y - 6);
+  ctx.stroke();
+  // Mouse ears
+  ctx.fillStyle = '#ff8800';
+  ctx.beginPath();
+  ctx.arc(mouse.x - 4, mouse.y - 6, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(mouse.x + 4, mouse.y - 6, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Draw cat
+  ctx.shadowColor = '#00ff88';
+  ctx.shadowBlur = 15;
+  ctx.fillStyle = '#00ff88';
+  ctx.beginPath();
+  ctx.arc(cat.x, cat.y, CAT_SIZE/2, 0, Math.PI * 2);
+  ctx.fill();
+  // Cat ears
+  ctx.fillStyle = '#00cc6a';
+  ctx.beginPath();
+  ctx.moveTo(cat.x - 18, cat.y - 18);
+  ctx.lineTo(cat.x - 8, cat.y - 30);
+  ctx.lineTo(cat.x + 2, cat.y - 18);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(cat.x + 18, cat.y - 18);
+  ctx.lineTo(cat.x + 8, cat.y - 30);
+  ctx.lineTo(cat.x - 2, cat.y - 18);
+  ctx.fill();
+  // Eyes
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.arc(cat.x - 8, cat.y - 4, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(cat.x + 8, cat.y - 4, 4, 0, Math.PI * 2);
+  ctx.fill();
+  // Pupils (white dots)
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(cat.x - 6, cat.y - 6, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(cat.x + 10, cat.y - 6, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  // Nose
+  ctx.fillStyle = '#ff88aa';
+  ctx.beginPath();
+  ctx.arc(cat.x, cat.y + 2, 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Reset shadow
+  ctx.shadowBlur = 0;
+}
+
+function gameLoop() {
+  moveCat();
+  moveMouse();
+  checkCollision();
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+gameLoop();
+</script>
+</body>
+</html>

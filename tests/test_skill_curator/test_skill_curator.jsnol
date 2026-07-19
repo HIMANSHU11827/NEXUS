@@ -1,0 +1,8 @@
+{
+  "name": "test_skill_curator",
+  "version": "1.0.0",
+  "description": "Tests for SkillCurator — skill lifecycle management, archiving, pinning, usage tracking",
+  "category": "test",
+  "entry": "scripts/test_skill_curator.py",
+  "class": "TestSkillCurator"
+}

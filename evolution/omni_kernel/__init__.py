@@ -1,6 +1,4 @@
-"""OmniEvolutionKernel stub."""
+"""OmniEvolutionKernel — unified evolution orchestration layer."""
+from evolution.omni_kernel.scripts.omni_kernel import OmniEvolutionKernel
 
-
-class OmniEvolutionKernel:
-    def __init__(self, root: str):
-        self.root = root
+__all__ = ["OmniEvolutionKernel"]

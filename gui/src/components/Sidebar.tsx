@@ -31,6 +31,7 @@ type SidebarProps = {
   setIsSidebarResizing: (value: boolean) => void;
   setSettingsOpen: (value: boolean) => void;
   newChat?: () => void;
+  onOpenSettings?: () => void;
 };
 
 const sidebarStyle = (sidebarWidth: number): CSSProperties => ({
@@ -64,6 +65,7 @@ export function Sidebar({
   setIsSidebarResizing,
   setSettingsOpen,
   newChat,
+  onOpenSettings,
 }: SidebarProps) {
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
@@ -95,22 +97,24 @@ export function Sidebar({
       <div
         onClick={() => setActiveTab('session')}
         style={{
-          fontSize: '1.2rem',
-          fontWeight: 900,
+          fontSize: '1.1rem',
+          fontWeight: 800,
           letterSpacing: '4px',
-          marginBottom: '15px',
+          marginBottom: '22px',
           whiteSpace: 'nowrap',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          gap: '8px',
+          gap: '12px',
           cursor: 'pointer',
-          background: 'linear-gradient(to right, #fff, #999)',
-          WebkitBackgroundClip: 'text',
-          WebkitTextFillColor: 'transparent',
+          color: '#f4f4f5',
         }}
       >
-        {showLogoMark && <span style={{ WebkitTextFillColor: 'initial', fontSize: '1.25rem' }}>{brandMark}</span>}
+        {showLogoMark && (
+          <span style={{ fontSize: '1rem', color: '#f59e0b', display: 'inline-flex', width: '28px', height: '28px', alignItems: 'center', justifyContent: 'center', borderRadius: '8px', background: '#15161a', border: '1px solid #262830' }}>
+            {brandMark}
+          </span>
+        )}
         <span>{(brandName.trim() || 'NEXUS').toUpperCase()}</span>
       </div>
 
@@ -121,9 +125,6 @@ export function Sidebar({
 
       <style>{`
             :root { --accent-cyan: #22d3ee; --bg-deep: #050505; }
-            @keyframes pulse { 0% { opacity: 0.6; transform: scale(0.98); } 50% { opacity: 1; transform: scale(1); } 100% { opacity: 0.6; transform: scale(0.98); } }
-            @keyframes glow { 0% { box-shadow: 0 0 5px rgba(59, 130, 246, 0.2); } 50% { box-shadow: 0 0 15px rgba(59, 130, 246, 0.5); } 100% { box-shadow: 0 0 5px rgba(59, 130, 246, 0.2); } }
-            @keyframes slideIn { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
             
             .lemon-new-btn {
               display: flex;
@@ -132,33 +133,30 @@ export function Sidebar({
               gap: 8px;
               width: calc(100% - 30px);
               margin: 0 15px 20px 15px;
-              padding: 11px 16px;
-              background-color: #fffdf0;
-              border: 1px solid #f2e9cb;
+              padding: 12px 14px;
+              background-color: #18191d;
+              border: 1px solid #2a2c34;
               border-radius: 12px;
-              color: #1a1a1a;
-              font-size: 0.95rem;
-              font-weight: 600;
+              color: #f4f4f5;
+              font-size: 0.92rem;
+              font-weight: 700;
               cursor: pointer;
-              transition: all 0.2s ease-in-out;
-              box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+              transition: all 0.15s ease-in-out;
             }
             .lemon-new-btn:hover {
-              background-color: #fef8e2;
-              border-color: #e6dbb5;
-              transform: translateY(-1px);
-              box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+              background-color: #1d1f24;
+              border-color: #3a3d46;
             }
             .lemon-new-btn:active {
               transform: translateY(1px);
             }
             .hover-menu-item:hover {
-              background-color: rgba(255, 255, 255, 0.06) !important;
+              background-color: #27272a !important;
               color: #fff !important;
             }
             .hover-menu-item-delete:hover {
-              background-color: rgba(239, 68, 68, 0.15) !important;
-              color: #fca5a5 !important;
+              background-color: #3f1515 !important;
+              color: #f87171 !important;
             }
       `}</style>
 
@@ -184,7 +182,7 @@ export function Sidebar({
             placeholder="Search history..."
             value={historySearch}
             onChange={(event) => setHistorySearch(event.target.value)}
-            style={{ width: '100%', background: '#1e1e1e', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '6px', padding: '8px 10px 8px 30px', color: '#fff', fontSize: '0.8rem', outline: 'none' }}
+            style={{ width: '100%', background: '#15161a', border: '1px solid #262830', borderRadius: '10px', padding: '10px 12px 10px 30px', color: '#e4e4e7', fontSize: '0.8rem', outline: 'none' }}
           />
         </div>
       </div>
@@ -198,18 +196,18 @@ export function Sidebar({
               onMouseEnter={() => setHoveredSessionId(session.id)}
               onMouseLeave={() => setHoveredSessionId(null)}
               style={{
-                padding: '8px 9px 8px 12px',
+                padding: '8px 10px 8px 12px',
                 borderRadius: '10px',
-                fontSize: '0.75rem',
-                color: currentSessionId === session.id ? '#fff' : 'rgba(255,255,255,0.4)',
-                background: currentSessionId === session.id ? 'rgba(59, 130, 246, 0.08)' : 'transparent',
-                border: currentSessionId === session.id ? '1px solid rgba(59, 130, 246, 0.15)' : '1px solid transparent',
+                fontSize: '0.8rem',
+                color: currentSessionId === session.id ? '#fff' : '#a1a1aa',
+                background: currentSessionId === session.id ? '#17191f' : 'transparent',
+                border: currentSessionId === session.id ? '1px solid #2e3340' : '1px solid transparent',
                 cursor: 'pointer',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
-                transition: 'all 0.2s',
-                fontWeight: currentSessionId === session.id ? 700 : 400,
+                transition: 'all 0.15s',
+                fontWeight: currentSessionId === session.id ? 600 : 400,
                 position: 'relative',
               }}
               onClick={() => loadSession(session.id)}
@@ -248,10 +246,10 @@ export function Sidebar({
                       display: 'inline-flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      background: 'rgba(255,255,255,0.06)',
-                      border: '1px solid rgba(255,255,255,0.1)',
-                      borderRadius: '6px',
-                      color: '#bbb',
+                      background: 'transparent',
+                      border: 'none',
+                      borderRadius: '4px',
+                      color: '#a1a1aa',
                       cursor: 'pointer'
                     }}
                     className="hover-white"
@@ -266,14 +264,14 @@ export function Sidebar({
                       top: '28px',
                       zIndex: 100,
                       background: '#18181b',
-                      border: '1px solid rgba(255,255,255,0.08)',
-                      borderRadius: '8px',
+                      border: '1px solid #2a2c34',
+                      borderRadius: '10px',
                       padding: '4px',
                       width: '100px',
                       display: 'flex',
                       flexDirection: 'column',
                       gap: '2px',
-                      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.4)',
+                      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.5)',
                     }}>
                       <button
                         title="Rename chat"
@@ -339,55 +337,60 @@ export function Sidebar({
 
 
       <div className="footer-section" style={{ padding: '10px 0', borderTop: '1px solid var(--border-dim)', marginTop: 'auto' }}>
-        <div
-          className={`nav-item ${settingsOpen ? 'active' : ''}`}
-          onClick={() => setSettingsOpen(true)}
+        <button
+          type="button"
+          className={`nav-item hover-white ${settingsOpen ? 'active' : ''}`}
+          aria-label="Open admin settings"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (onOpenSettings) {
+              onOpenSettings();
+              return;
+            }
+            setSettingsOpen(true);
+            setActiveTab('session');
+          }}
           style={{
-            background: 'rgba(255,255,255,0.02)',
-            borderRadius: '12px',
-            border: '1px solid var(--border-dim)',
+            background: 'transparent',
+            borderRadius: '6px',
+            border: '1px solid transparent',
             padding: '8px 10px',
             display: 'flex',
             alignItems: 'center',
+            width: '100%',
+            textAlign: 'left',
+            cursor: 'pointer',
+            position: 'relative',
+            zIndex: 2,
+            transition: 'background 0.15s'
           }}
         >
           <div style={{
-            width: '36px',
-            height: '36px',
-            borderRadius: '10px',
-            background: '#40b5d0',
+            width: '32px',
+            height: '32px',
+            borderRadius: '50%',
+            background: '#17191f',
+            border: '1px solid #2e3340',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            color: '#fff',
-            fontWeight: 800,
-            fontSize: '1.15rem',
-            boxShadow: '0 2px 8px rgba(64, 181, 208, 0.2)',
+            color: '#e4e4e7',
+            fontWeight: 600,
+            fontSize: '0.9rem',
             flexShrink: 0,
           }}>
             {operatorName.charAt(0).toUpperCase() || 'H'}
           </div>
-          <div style={{ display: sidebarVisible ? 'flex' : 'none', flexDirection: 'column', marginLeft: '10px', alignItems: 'flex-start', gap: '3px' }}>
-            <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#fff', letterSpacing: '0.2px', lineHeight: 1.2 }}>
+          <div style={{ display: sidebarVisible ? 'flex' : 'none', flexDirection: 'column', marginLeft: '12px', alignItems: 'flex-start', gap: '2px' }}>
+            <span style={{ fontSize: '0.85rem', fontWeight: 500, color: '#e4e4e7' }}>
               {operatorName}
             </span>
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '4px',
-              background: '#fef3c7',
-              padding: '2px 8px',
-              borderRadius: '6px',
-              fontSize: '0.72rem',
-              fontWeight: 700,
-              color: '#b45309',
-              lineHeight: 1,
-            }}>
-              <span style={{ color: '#d97706', fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center' }}>✨</span>
-              <span>0</span>
-            </div>
+            <span style={{ fontSize: '0.7rem', color: '#a1a1aa' }}>
+              Operator
+            </span>
           </div>
-        </div>
+        </button>
       </div>
     </div>
   );

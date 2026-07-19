@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import {
   MessageSquare,
   FileCode2,
@@ -40,16 +39,16 @@ export function ActivityBar({
   return (
     <div
       style={{
-        width: '48px',
-        minWidth: '48px',
+        width: '58px',
+        minWidth: '58px',
         height: '100vh',
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        background: agentLite ? '#f0efec' : '#111113',
-        borderRight: agentLite ? '1px solid #d4d0c8' : '1px solid rgba(255,255,255,0.06)',
-        padding: '8px 0',
-        gap: '2px',
+        background: agentLite ? '#f4f1ea' : '#0f1014',
+        borderRight: agentLite ? '1px solid #d4d0c8' : '1px solid #1d1f26',
+        padding: '12px 0 10px',
+        gap: '6px',
         zIndex: 20,
         userSelect: 'none',
       }}
@@ -57,19 +56,19 @@ export function ActivityBar({
       {/* Top icon - app brand */}
       <div
         style={{
-          width: '36px',
-          height: '36px',
-          borderRadius: '10px',
-          background: 'linear-gradient(135deg, #3b82f6, #6366f1)',
+          width: '40px',
+          height: '40px',
+          borderRadius: '12px',
+          background: agentLite ? '#ffffff' : '#16181e',
+          border: agentLite ? '1px solid #d6d3d1' : '1px solid #2a2d36',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          color: '#fff',
+          color: agentLite ? '#2563eb' : '#60a5fa',
           fontWeight: 900,
           fontSize: '1.1rem',
-          marginBottom: '12px',
+          marginBottom: '14px',
           cursor: 'pointer',
-          boxShadow: '0 2px 8px rgba(59,130,246,0.3)',
         }}
         onClick={onToggleSidebar}
         title={sidebarVisible ? 'Collapse sidebar' : 'Expand sidebar'}
@@ -97,17 +96,17 @@ export function ActivityBar({
               style={{
                 width: '36px',
                 height: '36px',
-                borderRadius: '10px',
+                borderRadius: '12px',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 background: isActive
                   ? agentLite
-                    ? 'rgba(59,130,246,0.12)'
-                    : 'rgba(59,130,246,0.15)'
+                    ? '#ffffff'
+                    : '#171a20'
                   : 'transparent',
-                border: 'none',
-                color: isActive ? '#3b82f6' : agentLite ? '#6b7280' : 'rgba(255,255,255,0.35)',
+                border: isActive ? (agentLite ? '1px solid #d6d3d1' : '1px solid #2a2d36') : '1px solid transparent',
+                color: isActive ? '#60a5fa' : agentLite ? '#6b7280' : '#6b7280',
                 cursor: 'pointer',
                 transition: 'all 0.15s ease',
                 position: 'relative',
@@ -115,15 +114,15 @@ export function ActivityBar({
               onMouseEnter={(e) => {
                 if (!isActive) {
                   e.currentTarget.style.background = agentLite
-                    ? 'rgba(0,0,0,0.04)'
-                    : 'rgba(255,255,255,0.06)';
-                  e.currentTarget.style.color = agentLite ? '#374151' : 'rgba(255,255,255,0.7)';
+                    ? '#ffffff'
+                    : '#171a20';
+                  e.currentTarget.style.color = agentLite ? '#374151' : '#d4d4d8';
                 }
               }}
               onMouseLeave={(e) => {
                 if (!isActive) {
                   e.currentTarget.style.background = 'transparent';
-                  e.currentTarget.style.color = agentLite ? '#6b7280' : 'rgba(255,255,255,0.35)';
+                  e.currentTarget.style.color = agentLite ? '#6b7280' : '#6b7280';
                 }
               }}
             >
@@ -135,7 +134,7 @@ export function ActivityBar({
                     top: '50%',
                     transform: 'translateY(-50%)',
                     width: '3px',
-                    height: '20px',
+                    height: '16px',
                     borderRadius: '0 3px 3px 0',
                     background: '#3b82f6',
                   }}
@@ -154,26 +153,26 @@ export function ActivityBar({
         style={{
           width: '36px',
           height: '36px',
-          borderRadius: '10px',
+          borderRadius: '12px',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
           background: 'transparent',
           border: 'none',
-          color: agentLite ? '#6b7280' : 'rgba(255,255,255,0.3)',
+          color: agentLite ? '#6b7280' : '#6b7280',
           cursor: 'pointer',
           transition: 'all 0.15s ease',
           marginTop: 'auto',
         }}
         onMouseEnter={(e) => {
           e.currentTarget.style.background = agentLite
-            ? 'rgba(0,0,0,0.04)'
-            : 'rgba(255,255,255,0.06)';
-          e.currentTarget.style.color = agentLite ? '#374151' : 'rgba(255,255,255,0.7)';
+            ? '#ffffff'
+            : '#171a20';
+          e.currentTarget.style.color = agentLite ? '#374151' : '#d4d4d8';
         }}
         onMouseLeave={(e) => {
           e.currentTarget.style.background = 'transparent';
-          e.currentTarget.style.color = agentLite ? '#6b7280' : 'rgba(255,255,255,0.3)';
+          e.currentTarget.style.color = agentLite ? '#6b7280' : '#6b7280';
         }}
       >
         {sidebarVisible ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}

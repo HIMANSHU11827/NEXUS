@@ -8,7 +8,11 @@ export interface ProviderPanelProps {
    model: string;
    instanceName: string;
    editingInstanceId: string | null;
+   // eslint-disable-next-line @typescript-eslint/no-explicit-any
    providerCheck: any;
+   authMethod?: string;
+   oauthAvailable?: boolean;
+   oauthConnected?: boolean;
    setApiKey: (val: string) => void;
    setTargetModel: (val: string) => void;
    setProviderEndpoint: (val: string) => void;
@@ -26,6 +30,9 @@ export function ProviderPanel({
    instanceName,
    editingInstanceId,
    providerCheck,
+   authMethod,
+   oauthAvailable,
+   oauthConnected,
    setApiKey,
    setTargetModel,
    setProviderEndpoint,
@@ -35,6 +42,7 @@ export function ProviderPanel({
    onCheck
 }: ProviderPanelProps) {
    const [showKey, setShowKey] = useState(false);
+   const usesOauth = oauthAvailable || authMethod === 'oauth';
 
    const title = editingInstanceId ? `Edit Provider Route: ${editingInstanceId}` : `Configure New ${name || 'LLM'} Route`;
 
@@ -103,6 +111,24 @@ export function ProviderPanel({
 
             {/* Content / Form */}
             <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px', overflowY: 'auto', maxHeight: '70vh' }}>
+               {usesOauth && (
+                  <div style={{
+                     padding: '12px 16px',
+                     borderRadius: '8px',
+                     background: oauthConnected ? 'rgba(34, 197, 94, 0.08)' : 'rgba(59, 130, 246, 0.08)',
+                     border: oauthConnected ? '1px solid rgba(34, 197, 94, 0.16)' : '1px solid rgba(59, 130, 246, 0.16)',
+                     display: 'flex',
+                     alignItems: 'center',
+                     gap: '12px'
+                  }}>
+                     {oauthConnected ? <ShieldCheck size={16} style={{ color: '#4ade80' }} /> : <ShieldAlert size={16} style={{ color: '#60a5fa' }} />}
+                     <span style={{ fontSize: '0.78rem', color: oauthConnected ? '#4ade80' : '#93c5fd', fontWeight: 500 }}>
+                        {oauthConnected
+                           ? 'OAuth already connected for this provider.'
+                           : 'This provider supports OAuth login. API key is optional if you sign in with OAuth.'}
+                     </span>
+                  </div>
+               )}
                
                {/* Route ID */}
                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
@@ -153,13 +179,13 @@ export function ProviderPanel({
 
                {/* API Key */}
                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  <label style={{ fontSize: '0.75rem', fontWeight: 650, color: '#a1a1aa', letterSpacing: '0.5px' }}>API KEY</label>
+                  <label style={{ fontSize: '0.75rem', fontWeight: 650, color: '#a1a1aa', letterSpacing: '0.5px' }}>{usesOauth ? 'API KEY / ACCESS TOKEN' : 'API KEY'}</label>
                   <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
                      <input
                         type={showKey ? 'text' : 'password'}
                         value={apiKey}
                         onChange={(e) => setApiKey(e.target.value)}
-                        placeholder="sk-..."
+                        placeholder={usesOauth ? 'Optional if OAuth is connected' : 'sk-...'}
                         style={{
                            background: 'rgba(255, 255, 255, 0.02)',
                            border: '1px solid rgba(255, 255, 255, 0.08)',

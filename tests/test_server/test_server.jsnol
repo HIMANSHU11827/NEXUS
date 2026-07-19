@@ -1,0 +1,8 @@
+{
+  "name": "test_server",
+  "version": "1.0.0",
+  "description": "Tests for the FastAPI server — SSE encoding, OpenAI-compatible endpoints, auth middleware",
+  "category": "test",
+  "entry": "scripts/test_sse_encoding.py",
+  "class": "TestServer"
+}

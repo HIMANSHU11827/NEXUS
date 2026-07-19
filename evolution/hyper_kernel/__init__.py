@@ -1,6 +1,4 @@
-"""HyperKernel stub."""
+"""HyperKernel — meta-reasoning kernel for cross-domain synthesis."""
+from evolution.hyper_kernel.scripts.hyper_kernel import HyperKernel
 
-
-class HyperKernel:
-    def __init__(self, root: str):
-        self.root = root
+__all__ = ["HyperKernel"]

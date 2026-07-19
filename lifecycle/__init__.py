@@ -7,6 +7,7 @@ with defined states, valid transitions, and transition hooks.
 Inspired by Hermes Agent's curator and plugin lifecycle patterns.
 """
 
+import logging
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional
 
@@ -108,7 +109,8 @@ class LifecycleManager:
             try:
                 hook(entity_id, from_state, to_state, metadata)
             except Exception:
-                pass
+                _logger = logging.getLogger("nexus.lifecycle")
+                _logger.warning("lifecycle/__init__.py:110 _run_hooks: suppressed error", exc_info=True)
 
     def get_stats(self) -> Dict[str, Any]:
         states = {}
@@ -124,7 +126,8 @@ class LifecycleManager:
 from .cron_lifecycle import CronLifecycle, CronState
 from .memory_lifecycle import MemoryLifecycle, MemoryState
 from .plugin_lifecycle import PluginLifecycle, PluginState
-from .self_improvement_lifecycle import SelfImprovementLifecycle, SelfImprovementState as ImprovementState
+from .self_improvement_lifecycle import SelfImprovementLifecycle
+from .self_improvement_lifecycle import SelfImprovementState as ImprovementState
 from .skill_lifecycle import SkillLifecycle, SkillState
 from .tool_lifecycle import ToolLifecycle, ToolState
 

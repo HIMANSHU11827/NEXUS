@@ -1,0 +1,12 @@
+{
+  "name": "planning",
+  "version": "1.3.0",
+  "description": "Write a TODO LIST plan to todo.md — phase headers only, no hardcoded tasks",
+  "entry": "scripts/planning.py",
+  "class": "PlanningTool",
+  "params": {
+    "goal": {"type": "string", "description": "Goal or task to plan", "required": true},
+    "context": {"type": "string", "description": "Additional context for the plan"}
+  },
+  "category": "planning"
+}

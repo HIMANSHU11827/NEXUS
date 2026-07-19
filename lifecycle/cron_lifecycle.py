@@ -10,9 +10,9 @@ Versioning:
   major_upgrade:    1.x → 2.0 → 2.1 → 3.0
 """
 
+from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
-from datetime import datetime
 
 from . import LifecycleManager, LifecycleState
 from .version import default_version, improve_version

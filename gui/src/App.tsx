@@ -1,4 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, no-useless-escape, prefer-const */
 import React, { useState, useEffect, useRef } from 'react'
+import { flushSync } from 'react-dom'
 import {
    Search, Edit2, Trash2, X, Eye, EyeOff, PlusCircle,
    Shield, Cpu, Activity, User, Palette, Settings2,
@@ -10,15 +12,44 @@ import {
 import { BackendOfflineBanner, FloatingNavControls, HeaderStatusRail, LoadingScreen } from './components/AppChrome'
 import { CanvasPanel } from './components/CanvasPanel'
 import { ConfigPanel } from './components/ConfigPanel'
-import { HealthDrawer, HiveDrawer, RemindersDrawer } from './components/DrawerPanels'
+import { ProviderPanel } from './components/ProviderPanel'
+import { HealthDrawer, HiveDrawer, RemindersDrawer, FilesDrawer, TerminalDrawer } from './components/DrawerPanels'
 import { Sidebar } from './components/Sidebar'
 import { ActivityBar } from './components/ActivityBar'
 import { cleanAssistantText, cleanUserMessage } from './textUtils'
+
 import { WorkActivityTimeline } from './components/WorkActivityTimeline'
+import {
+   parseWorkActivityLine,
+   getWorkActivityIcon,
+   getWorkActivityLabel,
+   getWorkActivityTarget,
+   normalizeWorkEvent,
+   resolveWorkActivityTarget,
+   shortWorkTarget,
+   fileDisplayName,
+   isDisplayableWorkActivity,
+   collapseWorkActivityUpdates,
+   boundedLiveOutput,
+   mergeLiveWorkEvents,
+   MAX_LIVE_WORK_EVENTS
+} from './utils/workActivityUtils';
+
+import { MessageBubble } from './components/chat/MessageBubble'
+import { ChatInput } from './components/chat/ChatInput'
+import { McpTab } from './components/workspace/McpTab'
+import { SkillsTab } from './components/workspace/SkillsTab'
+import { ToolsTab } from './components/workspace/ToolsTab'
+import { ProvidersTab } from './components/workspace/ProvidersTab'
+import { AuditTab } from './components/workspace/AuditTab'
+import { PluginsTab } from './components/workspace/PluginsTab'
+import { SettingsModal } from './components/workspace/SettingsModal'
+import { DiffViewer } from './components/DiffViewer'
 import type { ChatMessage, NexusState, SessionNotice, SessionSummary, WorkEvent } from './types'
 import type { ActivityTab } from './components/ActivityBar'
+import { getSseData, getSseEventType, splitSseFrames } from './utils/sse'
 
-import { cleanAssistantText, cleanUserMessage } from './textUtils'
+
 type SourceItem = {
    id: string;
    name: string;
@@ -71,7 +102,7 @@ function App() {
    const [sidebarVisible, setSidebarVisible] = useState(true);
    const [sidebarWidth, setSidebarWidth] = useState(() => {
       const saved = Number(localStorage.getItem('nexus.sidebarWidth'));
-      return Number.isFinite(saved) && saved > 0 ? saved : 250;
+      return Number.isFinite(saved) && saved > 0 ? saved : 236;
    });
    const [isSidebarResizing, setIsSidebarResizing] = useState(false);
    const [settingsOpen, setSettingsOpen] = useState(false);
@@ -87,7 +118,7 @@ function App() {
    const [assistantAvatar, setAssistantAvatar] = useState(() => localStorage.getItem('nexus.assistantAvatar') || '🧠');
    const [userAvatar, setUserAvatar] = useState(() => localStorage.getItem('nexus.userAvatar') || '👤');
    const [interfaceMode, setInterfaceMode] = useState('dark'); // dark, light, grey, night, white
-   const [drawerType, setDrawerType] = useState<'none' | 'hive' | 'reminders' | 'health' | 'canvas'>('none');
+   const [drawerType, setDrawerType] = useState<'none' | 'hive' | 'reminders' | 'health' | 'canvas' | 'files' | 'terminal'>('none');
    const [drawerWidth, setDrawerWidth] = useState(() => {
       const saved = Number(localStorage.getItem('nexus.drawerWidth'));
       return Number.isFinite(saved) && saved > 0 ? saved : 390;
@@ -184,9 +215,13 @@ function App() {
    const messagesEndRef = useRef<HTMLDivElement>(null);
    const lastMessageCountRef = useRef(0);
    const currentSessionIdRef = useRef(currentSessionId);
+   const activeStreamSessionRef = useRef('');
+   const activeStreamTurnRef = useRef('');
+   const chatAbortControllerRef = useRef<AbortController | null>(null);
    const sessionMessagesCacheRef = useRef<Record<string, ChatMessage[]>>({});
    const artifactCacheRef = useRef<Record<string, any>>({});
    const artifactPathIndexRef = useRef<Record<string, string>>({});
+   const workEventsRequestRef = useRef(0);
    const composerInputRef = useRef<HTMLTextAreaElement>(null);
    const screenStreamRef = useRef<MediaStream | null>(null);
    const recognitionRef = useRef<any>(null);
@@ -197,7 +232,7 @@ function App() {
    }, [currentSessionId]);
 
    const setMessagesForSession = (sessionId: string, next: ChatMessage[] | ((previous: ChatMessage[]) => ChatMessage[])) => {
-      const sid = sessionId || 'default';
+      const sid = sessionId || currentSessionId;
       const previous = sessionMessagesCacheRef.current[sid] || [];
       const resolved = typeof next === 'function' ? next(previous) : next;
       sessionMessagesCacheRef.current[sid] = resolved;
@@ -284,7 +319,7 @@ function App() {
 
       const index = (() => {
          if (canvasPlaybackTime === null || timelineWorkActivities.length === 0) return rows.length - 1;
-         const stepIndex = Math.min(timelineWorkActivities.length - 1, Math.floor(canvasPlaybackTime / 5));
+         const stepIndex = Math.min(timelineWorkActivities.length - 1, Math.floor(canvasPlaybackTime));
          const activeEvent = timelineWorkActivities[stepIndex];
          if (!activeEvent) return rows.length - 1;
          const idx = allWorkActivities.indexOf(activeEvent);
@@ -336,7 +371,7 @@ function App() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-               session_id: currentSessionId || 'default',
+               session_id: currentSessionId || currentSessionId,
                turn_id: currentTurnId,
                event_id: event.id,
                command,
@@ -357,8 +392,8 @@ function App() {
             if (!payload || typeof payload !== 'object') return;
             if (payload.type === 'chunk') {
                const text = String(payload.text || '');
-               if (payload.stream === 'stderr') stderr += text;
-               else stdout += text;
+               if (payload.stream === 'stderr') stderr = boundedLiveOutput(stderr + text);
+               else stdout = boundedLiveOutput(stdout + text);
                setCommandRuns(prev => ({
                   ...prev,
                   [key]: {
@@ -366,14 +401,14 @@ function App() {
                      command,
                      stdout,
                      stderr,
-                     output: `${stdout}${stderr}`,
+                     output: boundedLiveOutput(`${stdout}${stderr}`),
                   },
                }));
             }
             if (payload.type === 'done') {
                finalStatus = payload.status || 'done';
-               stdout = String(payload.stdout ?? stdout);
-               stderr = String(payload.stderr ?? stderr);
+               stdout = boundedLiveOutput(String(payload.stdout ?? stdout));
+               stderr = boundedLiveOutput(String(payload.stderr ?? stderr));
                setCommandRuns(prev => ({
                   ...prev,
                   [key]: {
@@ -381,12 +416,12 @@ function App() {
                      command: payload.command || command,
                      stdout,
                      stderr,
-                     output: String(payload.output ?? `${stdout}${stderr}`),
+                     output: boundedLiveOutput(String(payload.output ?? `${stdout}${stderr}`)),
                   },
                }));
                if (payload.event) {
                   const normalized = normalizeWorkEvent(payload.event);
-                  setWorkEvents(prev => [...prev.filter(item => item.id !== normalized.id), normalized]);
+                  setWorkEvents(prev => mergeLiveWorkEvents(prev, [normalized]));
                   setSelectedWorkEvent(current => current && commandEventKey(current) === key ? { ...current, ...normalized } : current);
                }
             }
@@ -395,23 +430,24 @@ function App() {
             const { value, done } = await reader.read();
             if (done) break;
             sseBuffer += decoder.decode(value, { stream: true });
-            const frames = sseBuffer.split('\n\n');
-            sseBuffer = frames.pop() || '';
+            const parsedFrames = splitSseFrames(sseBuffer);
+            sseBuffer = parsedFrames.remainder;
+            const frames = parsedFrames.frames;
             frames.forEach(frame => {
-               const dataLine = frame.split('\n').find(line => line.startsWith('data:'));
-               if (!dataLine) return;
+               const data = getSseData(frame).trim();
+               if (!data || data === '[DONE]') return;
                try {
-                  applyPayload(JSON.parse(dataLine.slice(5).trim()));
+                  applyPayload(JSON.parse(data));
                } catch {
                   // Ignore malformed partial frames; the next chunk may complete them.
                }
             });
          }
          if (sseBuffer.trim()) {
-            const dataLine = sseBuffer.split('\n').find(line => line.startsWith('data:'));
-            if (dataLine) {
+            const data = getSseData(sseBuffer).trim();
+            if (data && data !== '[DONE]') {
                try {
-                  applyPayload(JSON.parse(dataLine.slice(5).trim()));
+                  applyPayload(JSON.parse(data));
                } catch {
                   // Ignore incomplete final frame.
                }
@@ -430,14 +466,12 @@ function App() {
       setSelectedSource(null);
       setSelectedWorkEvent(event);
       setCanvasPlaybackTurnId(String(event?.turn_id || currentTurnId || ''));
-      if (typeof playbackIndex === 'number') {
-         // Convert step index to virtual seconds (each step = 5s)
-         setCanvasPlaybackTime(playbackIndex * 5);
-         setIsPlaying(false);
-      } else {
-         setCanvasPlaybackTime(null);
-         setIsPlaying(false);
-      }
+      // A row click means "inspect this exact event", not "play the whole
+      // chat timeline at this timestamp". Playback previously fell back to
+      // the assistant transcript whenever an event had no file preview.
+      void playbackIndex;
+      setCanvasPlaybackTime(null);
+      setIsPlaying(false);
       if (event?.lang === 'html' || String(event?.path || event?.target || '').toLowerCase().endsWith('.html')) {
          setCanvasViewMode('preview');
       } else {
@@ -466,338 +500,9 @@ function App() {
       return null;
    };
 
-   const buildDinoGameHtml = () => `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>NEXUS Dino Game</title>
-<style>
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    min-height: 100vh;
-    display: grid;
-    place-items: center;
-    background: linear-gradient(#dbeafe, #f8fafc 52%, #dcfce7 52%);
-    font-family: system-ui, -apple-system, Segoe UI, sans-serif;
-    color: #111827;
-  }
-  .wrap { width: min(920px, 94vw); }
-  .hud {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 16px;
-    margin-bottom: 12px;
-    font-weight: 800;
-  }
-  .hint { color: #475569; font-weight: 650; }
-  #game {
-    position: relative;
-    width: 100%;
-    height: 260px;
-    overflow: hidden;
-    border: 3px solid #111827;
-    border-radius: 16px;
-    background:
-      radial-gradient(circle at 80% 22%, #fde68a 0 32px, transparent 33px),
-      linear-gradient(#bfdbfe 0 62%, #86efac 62% 100%);
-    box-shadow: 0 18px 40px rgba(15, 23, 42, .18);
-  }
-  #ground {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 38px;
-    height: 5px;
-    background: #334155;
-  }
-  #dino {
-    position: absolute;
-    left: 74px;
-    bottom: 43px;
-    width: 48px;
-    height: 52px;
-    border-radius: 13px 13px 8px 8px;
-    background: #16a34a;
-    box-shadow: inset -8px 0 #15803d;
-  }
-  #dino::before {
-    content: "";
-    position: absolute;
-    right: 7px;
-    top: 10px;
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #fff;
-    box-shadow: 2px 1px 0 #111827;
-  }
-  #dino::after {
-    content: "";
-    position: absolute;
-    left: -18px;
-    bottom: 11px;
-    border-top: 10px solid transparent;
-    border-bottom: 5px solid transparent;
-    border-right: 22px solid #15803d;
-  }
-  #cactus {
-    position: absolute;
-    right: -60px;
-    bottom: 43px;
-    width: 34px;
-    height: 62px;
-    border-radius: 11px 11px 5px 5px;
-    background: #0f766e;
-    box-shadow: inset -6px 0 #115e59;
-  }
-  #cactus::before,
-  #cactus::after {
-    content: "";
-    position: absolute;
-    width: 18px;
-    height: 28px;
-    border-radius: 9px;
-    background: #0f766e;
-    top: 18px;
-  }
-  #cactus::before { left: -13px; }
-  #cactus::after { right: -13px; top: 28px; }
-  #message {
-    position: absolute;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    pointer-events: none;
-    font-size: clamp(22px, 4vw, 42px);
-    font-weight: 900;
-    color: rgba(17, 24, 39, .82);
-    text-align: center;
-  }
-</style>
-</head>
-<body>
-  <main class="wrap">
-    <div class="hud">
-      <div>NEXUS Dino</div>
-      <div>Score: <span id="score">0</span></div>
-      <div class="hint">Space / Up / Click to jump</div>
-    </div>
-    <section id="game" aria-label="Dino game">
-      <div id="ground"></div>
-      <div id="dino"></div>
-      <div id="cactus"></div>
-      <div id="message"></div>
-    </section>
-  </main>
-<script>
-  const game = document.getElementById('game');
-  const dino = document.getElementById('dino');
-  const cactus = document.getElementById('cactus');
-  const scoreEl = document.getElementById('score');
-  const message = document.getElementById('message');
-  let y = 0, vy = 0, cactusX = game.clientWidth + 80, score = 0, speed = 5.2, over = false;
-  function jump() {
-    if (over) { restart(); return; }
-    if (y === 0) vy = 15;
-  }
-  function restart() {
-    y = 0; vy = 0; cactusX = game.clientWidth + 80; score = 0; speed = 5.2; over = false; message.textContent = '';
-    requestAnimationFrame(loop);
-  }
-  function rectsHit(a, b) {
-    return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
-  }
-  function loop() {
-    if (over) return;
-    vy -= .72;
-    y = Math.max(0, y + vy);
-    if (y === 0 && vy < 0) vy = 0;
-    dino.style.transform = 'translateY(' + (-y) + 'px)';
-    cactusX -= speed;
-    if (cactusX < -90) { cactusX = game.clientWidth + Math.random() * 240; score += 1; speed += .18; }
-    cactus.style.transform = 'translateX(' + cactusX + 'px)';
-    scoreEl.textContent = String(score);
-    if (rectsHit(dino.getBoundingClientRect(), cactus.getBoundingClientRect())) {
-      over = true;
-      message.innerHTML = 'Game Over<br><span style="font-size:18px">click or press Space to restart</span>';
-      return;
-    }
-    requestAnimationFrame(loop);
-  }
-  addEventListener('keydown', e => { if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); jump(); } });
-  game.addEventListener('pointerdown', jump);
-  restart();
-</script>
-</body>
-</html>`;
 
-   const buildDinoGamePython = () => `import random
-import tkinter as tk
-
-
-WIDTH = 900
-HEIGHT = 360
-GROUND_Y = 285
-PLAYER_X = 90
-
-
-class DinoGame:
-    def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("NEXUS Dino Runner")
-        self.root.resizable(False, False)
-
-        self.canvas = tk.Canvas(self.root, width=WIDTH, height=HEIGHT, bg="#f8fafc", highlightthickness=0)
-        self.canvas.pack()
-
-        self.score = 0
-        self.best = 0
-        self.speed = 7
-        self.gravity = 1.0
-        self.jump_power = -17
-        self.velocity_y = 0
-        self.on_ground = True
-        self.running = True
-        self.obstacles = []
-        self.clouds = []
-        self.spawn_timer = 0
-
-        self.player = self.canvas.create_rectangle(PLAYER_X, GROUND_Y - 46, PLAYER_X + 42, GROUND_Y, fill="#22c55e", outline="")
-        self.eye = self.canvas.create_oval(PLAYER_X + 27, GROUND_Y - 38, PLAYER_X + 34, GROUND_Y - 31, fill="#052e16", outline="")
-        self.canvas.create_line(0, GROUND_Y, WIDTH, GROUND_Y, fill="#334155", width=3)
-        self.score_text = self.canvas.create_text(18, 18, anchor="nw", text="Score: 0", fill="#0f172a", font=("Consolas", 16, "bold"))
-        self.canvas.create_text(WIDTH // 2, 28, text="SPACE / UP / CLICK to jump    R to restart", fill="#64748b", font=("Consolas", 12, "bold"))
-
-        self.root.bind("<space>", self.jump)
-        self.root.bind("<Up>", self.jump)
-        self.root.bind("<Button-1>", self.jump)
-        self.root.bind("r", self.restart)
-        self.root.bind("R", self.restart)
-
-        self.make_clouds()
-        self.loop()
-
-    def make_clouds(self):
-        for _ in range(4):
-            x = random.randint(80, WIDTH - 60)
-            y = random.randint(45, 120)
-            cloud = self.canvas.create_oval(x, y, x + 70, y + 24, fill="#e2e8f0", outline="")
-            self.clouds.append(cloud)
-
-    def jump(self, _event=None):
-        if not self.running:
-            self.restart()
-            return
-        if self.on_ground:
-            self.velocity_y = self.jump_power
-            self.on_ground = False
-
-    def restart(self, _event=None):
-        self.canvas.delete("obstacle")
-        self.canvas.delete("gameover")
-        self.obstacles.clear()
-        self.score = 0
-        self.speed = 7
-        self.velocity_y = 0
-        self.on_ground = True
-        self.running = True
-        self.spawn_timer = 0
-        self.canvas.coords(self.player, PLAYER_X, GROUND_Y - 46, PLAYER_X + 42, GROUND_Y)
-        self.canvas.coords(self.eye, PLAYER_X + 27, GROUND_Y - 38, PLAYER_X + 34, GROUND_Y - 31)
-        self.loop()
-
-    def spawn_obstacle(self):
-        width = random.randint(22, 38)
-        height = random.randint(34, 66)
-        obstacle = self.canvas.create_rectangle(WIDTH + 20, GROUND_Y - height, WIDTH + 20 + width, GROUND_Y, fill="#ef4444", outline="", tags="obstacle")
-        self.obstacles.append(obstacle)
-
-    def move_player(self):
-        if self.on_ground:
-            return
-
-        self.velocity_y += self.gravity
-        self.canvas.move(self.player, 0, self.velocity_y)
-        self.canvas.move(self.eye, 0, self.velocity_y)
-
-        x1, _y1, x2, y2 = self.canvas.coords(self.player)
-        if y2 >= GROUND_Y:
-            self.canvas.coords(self.player, x1, GROUND_Y - 46, x2, GROUND_Y)
-            self.canvas.coords(self.eye, PLAYER_X + 27, GROUND_Y - 38, PLAYER_X + 34, GROUND_Y - 31)
-            self.velocity_y = 0
-            self.on_ground = True
-
-    def move_world(self):
-        for cloud in self.clouds:
-            self.canvas.move(cloud, -1.0, 0)
-            _x1, _y1, x2, _y2 = self.canvas.coords(cloud)
-            if x2 < 0:
-                new_y = random.randint(45, 120)
-                self.canvas.coords(cloud, WIDTH + 40, new_y, WIDTH + 110, new_y + 24)
-
-        for obstacle in self.obstacles[:]:
-            self.canvas.move(obstacle, -self.speed, 0)
-            _x1, _y1, x2, _y2 = self.canvas.coords(obstacle)
-            if x2 < -20:
-                self.canvas.delete(obstacle)
-                self.obstacles.remove(obstacle)
-
-    def hit_obstacle(self):
-        px1, py1, px2, py2 = self.canvas.coords(self.player)
-        player_box = (px1 + 4, py1 + 4, px2 - 4, py2 - 4)
-        for obstacle in self.obstacles:
-            ox1, oy1, ox2, oy2 = self.canvas.coords(obstacle)
-            if player_box[0] < ox2 and player_box[2] > ox1 and player_box[1] < oy2 and player_box[3] > oy1:
-                return True
-        return False
-
-    def game_over(self):
-        self.running = False
-        self.best = max(self.best, self.score)
-        self.canvas.create_rectangle(230, 105, 670, 225, fill="#0f172a", outline="", tags="gameover")
-        self.canvas.create_text(WIDTH // 2, 145, text="GAME OVER", fill="#f8fafc", font=("Consolas", 28, "bold"), tags="gameover")
-        self.canvas.create_text(WIDTH // 2, 185, text=f"Score {self.score}   Best {self.best}   Press R or SPACE", fill="#cbd5e1", font=("Consolas", 14, "bold"), tags="gameover")
-
-    def loop(self):
-        if not self.running:
-            return
-
-        self.spawn_timer -= 1
-        if self.spawn_timer <= 0:
-            self.spawn_obstacle()
-            self.spawn_timer = random.randint(55, 95)
-
-        self.move_player()
-        self.move_world()
-
-        self.score += 1
-        self.speed = min(17, 7 + self.score // 450)
-        self.canvas.itemconfig(self.score_text, text=f"Score: {self.score}   Best: {self.best}")
-
-        if self.hit_obstacle():
-            self.game_over()
-            return
-
-        self.root.after(16, self.loop)
-
-    def run(self):
-        self.root.mainloop()
-
-
-if __name__ == "__main__":
-    DinoGame().run()
-`;
 
    const repairGeneratedArtifact = (artifact: { lang: string; name: string; content: string }, prompt = '') => {
-      if (artifact.lang.toLowerCase() === 'html' && /\bdino\b|\bdinosaur\b/i.test(`${prompt} ${artifact.content}`)) {
-         return { ...artifact, name: 'index.html', content: buildDinoGameHtml() };
-      }
-      if (/\bdino\b|\bdinosaur\b/i.test(`${prompt} ${artifact.content}`) && ['python', 'py'].includes(artifact.lang.toLowerCase())) {
-         return { ...artifact, name: 'dino_game.py', content: buildDinoGamePython() };
-      }
       return artifact;
    };
 
@@ -813,7 +518,7 @@ if __name__ == "__main__":
          method: 'POST',
          headers: { 'Content-Type': 'application/json' },
          body: JSON.stringify({
-            session_id: sessionId || 'default',
+            session_id: sessionId || currentSessionId,
             name: artifact.name,
             lang: artifact.lang,
             content: artifact.content,
@@ -830,7 +535,7 @@ if __name__ == "__main__":
       const createFileEvent: WorkEvent = {
          ...(data.event || {}),
          id: data?.event?.id || `artifact-${Date.now()}-${artifact.name}`,
-         session_id: sessionId || 'default',
+         session_id: sessionId || currentSessionId,
          kind: 'file',
          action: 'Create file',
          title: title || `Create ${artifact.name}`,
@@ -846,7 +551,7 @@ if __name__ == "__main__":
          : '';
       const verifyEvent: WorkEvent | null = data?.verify_event ? normalizeWorkEvent(data.verify_event) : verifyCommand ? {
          id: `verify-${Date.now()}-${artifact.name}`,
-         session_id: sessionId || 'default',
+         session_id: sessionId || currentSessionId,
          kind: 'command',
          action: 'Run command',
          title: `Verify ${artifact.name}`,
@@ -870,221 +575,25 @@ if __name__ == "__main__":
       return data;
    };
 
-   const parseWorkActivityLine = (line: string): WorkEvent | null => {
-      const trim = String(line || '').trim();
-      if (!trim) return null;
-
-      const normalizeEvent = (event: any, fallbackTarget = ''): WorkEvent | null => {
-         if (!event || typeof event !== 'object') return null;
-         const rawKind = String(event.kind || event.type || '').toLowerCase();
-         const rawAction = String(event.action || event.title || '').toLowerCase();
-         const rawTool = String(event.tool || event.name || '').toLowerCase();
-         const target = event.target || event.path || event.command || event.query || event.tool || event.name || event.result || fallbackTarget;
-         if (!target) return null;
-         const targetText = String(target || '').toLowerCase();
-         const role = String(event.role || '').toLowerCase();
-         const isTodoPlan = role === 'planning_artifact' || targetText.endsWith('todo.md');
-         const kind = isTodoPlan || rawKind.includes('todo') ? 'todo'
-            : rawKind.includes('rag') || rawAction.includes('rag') || rawAction.includes('retrieval') || rawTool.includes('atlas') ? 'rag'
-            : rawKind.includes('mcp') || rawAction.includes('mcp') || rawTool.includes('mcp') ? 'mcp'
-            : rawKind.includes('browser') || rawAction.includes('browser') || rawTool.includes('browser') ? 'browser'
-            : rawKind.includes('search') || rawKind.includes('web') || rawAction.includes('search') || rawTool.includes('search') || rawTool.includes('grep') || rawTool.includes('glob') ? 'search'
-            : rawKind.includes('command') || rawKind.includes('bash') || rawKind.includes('terminal') || rawKind.includes('shell') || event.command ? 'command'
-            : rawKind.includes('file') || rawAction.includes('file') || rawTool.includes('file') || event.path ? 'file'
-            : rawKind.includes('skill') ? 'skill'
-            : rawKind.includes('plugin') ? 'plugin'
-            : rawKind.includes('provider') ? 'provider'
-            : rawKind.includes('hive') || rawKind.includes('agent') || rawKind.includes('worker') ? 'hive'
-            : rawKind.includes('tool') || event.tool ? 'tool'
-            : 'tool';
-         const action = event.action || (
-            kind === 'file' ? (rawAction.includes('create') ? 'Create file' : rawAction.includes('read') ? 'Read file' : 'Edit file') :
-            kind === 'search' ? 'Searching' :
-            kind === 'rag' ? 'RAG' :
-            kind === 'mcp' ? 'MCP' :
-            kind === 'browser' ? 'Browser' :
-            kind === 'command' ? 'Run command' :
-            kind === 'skill' ? 'Skill' :
-            kind === 'plugin' ? 'Plugin' :
-            kind === 'provider' ? 'Provider' :
-            kind === 'hive' ? 'Delegate task' :
-            kind === 'todo' ? 'Todo' :
-            'Use tool'
-         );
-         return {
-            ...event,
-            kind,
-            action,
-            target,
-            status: event.status || (/error|fail/i.test(String(event.output || target)) ? 'error' : 'done'),
-         };
-      };
-
-      const structured = trim.match(/^\[NEXUS_ACTIVITY\]:\s*(\{.*\})$/i);
-      if (structured) {
-         try {
-            return normalizeEvent(JSON.parse(structured[1]), trim);
-         } catch {
-            return null;
-         }
-      }
-
-      return null;
-   };
-
-   const getWorkActivityIcon = (kind = '') => {
-      const normalized = String(kind || '').toLowerCase();
-      return normalized === 'file' ? Edit2
-         : normalized === 'search' ? Search
-         : normalized === 'command' ? TerminalSquare
-         : normalized === 'browser' ? Monitor
-         : normalized === 'rag' ? BrainCircuit
-         : normalized === 'mcp' ? Database
-         : normalized === 'reflection' ? BrainCircuit
-         : normalized === 'provider' ? Cpu
-         : normalized === 'plugin' ? Puzzle
-         : normalized === 'skill' ? GraduationCap
-         : normalized === 'hive' ? Activity
-         : normalized === 'todo' ? CheckCircle2
-         : Wrench;
-   };
-
-   const shortWorkTarget = (value = '', maxLength = 72) => {
-      const compact = String(value || '').replace(/\s+/g, ' ').trim();
-      if (!compact) return '';
-      return compact.length > maxLength ? `${compact.slice(0, maxLength - 3)}...` : compact;
-   };
-
-   const fileDisplayName = (value = '') => {
-      const clean = String(value || '').replace(/^["']|["']$/g, '').replace(/\\/g, '/').trim();
-      return clean.split('/').filter(Boolean).pop() || clean;
-   };
-
-   const getWorkActivityLabel = (row: any) => {
-      const kind = String(row?.kind || row?.type || '').toLowerCase();
-      const action = String(row?.action || row?.title || row?.tool || '').toLowerCase();
-      const target = String(row?.path || row?.target || '').toLowerCase();
-      if (kind === 'todo') return 'Planning';
-      if (String(row?.role || '').toLowerCase() === 'planning_artifact' || target.endsWith('todo.md')) return 'Planning';
-      if (kind === 'search') return 'Searching';
-      if (kind === 'rag') return 'Reading context';
-      if (kind === 'browser') return 'Browsing';
-      if (kind === 'command') return 'Run command';
-      if (kind === 'file') {
-         if (action.includes('delete') || action.includes('remove')) return 'Delete file';
-         if (action.includes('create')) return 'Create file';
-         if (action.includes('read') || action.includes('view')) return 'Read file';
-         if (action.includes('update')) return 'Update file';
-         return 'Edit file';
-      }
-      if (kind === 'hive') return 'Delegating';
-      if (kind === 'mcp') return 'Using MCP';
-      if (kind === 'provider') return 'Checking provider';
-      if (kind === 'skill') return 'Using skill';
-      if (kind === 'plugin') return 'Using plugin';
-      if (kind === 'tool') {
-         if (action.includes('read')) return 'Reading';
-         if (action.includes('list') || action.includes('glob')) return 'Listing';
-         if (action.includes('grep') || action.includes('find') || action.includes('search')) return 'Searching';
-         if (action.includes('run') || action.includes('execute')) return 'Running tool';
-         return 'Using tool';
-      }
-      return 'Working';
-   };
-
-   const getWorkActivityTarget = (row: any) => {
-      const kind = String(row?.kind || row?.type || '').toLowerCase();
-      const role = String(row?.role || '').toLowerCase();
-      if (String(row?.kind || row?.type || '').toLowerCase() === 'todo') {
-         return 'todo.md';
-      }
-      if (role === 'planning_artifact' || String(row?.path || row?.target || '').toLowerCase().endsWith('todo.md')) {
-         return 'todo.md';
-      }
-      if (kind === 'file') {
-         return fileDisplayName(row?.path || row?.target || 'file');
-      }
-      if (kind === 'command') {
-         return shortWorkTarget(resolveWorkActivityTarget(row), 96);
-      }
-      const raw = resolveWorkActivityTarget(row);
-      return shortWorkTarget(raw);
-   };
-
-   const normalizeWorkEvent = (event: WorkEvent): WorkEvent => {
-      const kind = String(event?.kind || event?.type || '').toLowerCase();
-      const action = String(event?.action || event?.title || '').toLowerCase();
-      const tool = String(event?.tool || event?.name || '').toLowerCase();
-      const rawTarget = String(event?.path || event?.target || '').toLowerCase();
-      const role = String(event?.role || '').toLowerCase();
-      const isTodoPlan = role === 'planning_artifact' || rawTarget.endsWith('todo.md');
-      const normalizedKind = isTodoPlan || kind.includes('todo') ? 'todo' :
-         kind === 'artifact' ? 'file' :
-         kind.includes('rag') || action.includes('rag') || action.includes('retrieval') || tool.includes('atlas') ? 'rag' :
-         kind.includes('mcp') || action.includes('mcp') || tool.includes('mcp') ? 'mcp' :
-         kind.includes('browser') || action.includes('browser') || tool.includes('browser') ? 'browser' :
-         kind.includes('search') || kind.includes('web') || action.includes('search') || tool.includes('search') || tool.includes('grep') || tool.includes('glob') ? 'search' :
-         kind.includes('command') || kind.includes('bash') || kind.includes('terminal') || kind.includes('shell') || event?.command ? 'command' :
-         kind.includes('file') || action.includes('file') || tool.includes('file') || event?.path ? 'file' :
-         kind.includes('skill') ? 'skill' :
-         kind.includes('plugin') ? 'plugin' :
-         kind.includes('provider') ? 'provider' :
-         kind.includes('hive') || kind.includes('agent') || kind.includes('worker') ? 'hive' :
-         kind || 'tool';
-      const normalizedAction =
-         normalizedKind === 'file' && (action.includes('delete') || action.includes('remove')) ? 'Delete file' :
-         normalizedKind === 'file' && action.includes('artifact') ? 'Create file' :
-         normalizedKind === 'file' && action.includes('create') ? 'Create file' :
-         normalizedKind === 'file' && action.includes('write') ? 'Create file' :
-         normalizedKind === 'file' && action.includes('read') ? 'Read file' :
-         normalizedKind === 'file' && action.includes('view') ? 'Read file' :
-         normalizedKind === 'file' && action.includes('update') ? 'Update file' :
-         normalizedKind === 'file' && action.includes('edit') ? 'Edit file' :
-         normalizedKind === 'search' ? 'Searching' :
-         normalizedKind === 'rag' ? 'Read context' :
-         normalizedKind === 'mcp' ? 'Use MCP' :
-         normalizedKind === 'browser' ? 'Browse' :
-         normalizedKind === 'command' ? 'Run command' :
-         normalizedKind === 'hive' ? 'Delegate task' :
-         normalizedKind === 'todo' ? 'Plan work' :
-         normalizedKind === 'skill' ? 'Use skill' :
-         normalizedKind === 'plugin' ? 'Use plugin' :
-         normalizedKind === 'provider' ? 'Check provider' :
-         normalizedKind === 'tool' ? 'Use tool' :
-         event.action || event.title || (normalizedKind === 'command' ? 'Run command' : 'Use tool');
-      const inferredPhaseIndex = Number(event.phase_index) || undefined;
-      const phase = event.phase || event.phase_title || undefined;
-      return {
-         ...event,
-         kind: normalizedKind,
-         action: normalizedAction,
-         phase,
-         phase_index: inferredPhaseIndex,
-         target: normalizedKind === 'todo'
-            ? (event.target || (Array.isArray(event.items) ? event.items.map((item: any, index: number) => `${index + 1}. ${item}`).join('; ') : '') || event.task || '')
-            : event.target || event.path || event.command || event.tool || event.title || '',
-      };
-   };
-
-   const resolveWorkActivityTarget = (row: any) => {
-      const raw = String(row?.target || row?.path || row?.command || row?.query || row?.result || row?.tool || 'open detail').trim();
-      for (const [name, path] of Object.entries(artifactPathIndexRef.current)) {
-         if (!name || !path || !raw.includes(name) || raw.includes(path)) continue;
-         const safePath = path.includes(' ') ? `"${path}"` : path;
-         return raw.replace(new RegExp(`(?<![\\w./\\\\-])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w./\\\\-])`, 'g'), safePath);
-      }
-      return raw;
-   };
+   // Helper functions imported from workActivityUtils.ts
+   // resolveWorkActivityTarget is partially bound to artifactPathIndexRef.current
+   const localResolveWorkActivityTarget = (row: any) => resolveWorkActivityTarget(row, artifactPathIndexRef.current);
+   const localGetWorkActivityTarget = (row: any) => getWorkActivityTarget(row, artifactPathIndexRef.current);
+   const localNormalizeWorkEvent = (row: any) => normalizeWorkEvent(row, artifactPathIndexRef.current);
+   const localParseWorkActivityLine = (line: string) => parseWorkActivityLine(line, artifactPathIndexRef.current);
 
    const loadWorkEvents = async (sessionId = currentSessionId, turnId = currentTurnId) => {
+      const sid = sessionId || currentSessionIdRef.current;
+      const requestId = ++workEventsRequestRef.current;
       try {
          const turnParam = turnId ? `&turn_id=${encodeURIComponent(turnId)}` : '';
-         const res = await fetch(`/api/work-events?session_id=${encodeURIComponent(sessionId || 'default')}&limit=200${turnParam}`, {
+         const res = await fetch(`/api/work-events?session_id=${encodeURIComponent(sid)}&limit=200${turnParam}`, {
             cache: 'no-store',
             signal: AbortSignal.timeout(8000)
          });
          if (!res.ok) throw new Error(`HTTP ${res.status}`);
          const data = await res.json();
+         if (requestId !== workEventsRequestRef.current || currentSessionIdRef.current !== sid) return;
          const events = Array.isArray(data.events) ? data.events.map(normalizeWorkEvent) : [];
          events.forEach((event: any) => {
             const path = String(event?.path || event?.target || '').trim();
@@ -1093,24 +602,35 @@ if __name__ == "__main__":
                artifactPathIndexRef.current[name] = path;
             }
          });
-         setWorkEvents(events);
+         setWorkEvents(previous => {
+            if (!turnId) return events;
+            return mergeLiveWorkEvents(previous, events);
+         });
          setSelectedWorkEvent(current => {
             if (!current) return null;
             const updated = events.find((e: any) => e.id === current.id);
             return updated ? { ...current, ...updated } : current;
          });
       } catch (err) {
-         console.error("Failed to fetch work events:", err);
+         const name = String((err as any)?.name || '');
+         const message = String((err as any)?.message || err || '');
+         if (!/AbortError|TimeoutError|aborted|timed out/i.test(`${name} ${message}`)) {
+            console.error("Failed to fetch work events:", err);
+         }
+      } finally {
+         // Request identity suppresses stale responses without blocking a
+         // newly selected session behind an older polling request.
       }
    };
 
    useEffect(() => {
       if (!isStreaming) return;
-      const sessionId = currentSessionId || 'default';
+      const sessionId = currentSessionId || currentSessionId;
       const turnId = currentTurnId;
       loadWorkEvents(sessionId, turnId);
       const interval = window.setInterval(() => loadWorkEvents(sessionId, turnId), 1200);
       return () => window.clearInterval(interval);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
    }, [isStreaming, currentSessionId, currentTurnId]);
 
    useEffect(() => {
@@ -1204,6 +724,7 @@ if __name__ == "__main__":
          });
 
       return () => controller.abort();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [messages, canvasPlaybackTime, selectedWorkEvent, selectedSource]);
 
    useEffect(() => {
@@ -1216,7 +737,7 @@ if __name__ == "__main__":
             return turnEvents.length - 1;
          }
          // Convert virtual seconds back to step index
-         const stepIndex = Math.min(timelineWorkActivities.length - 1, Math.floor(canvasPlaybackTime / 5));
+         const stepIndex = Math.min(timelineWorkActivities.length - 1, Math.floor(canvasPlaybackTime));
          const activeEvent = timelineWorkActivities[stepIndex];
          if (!activeEvent) return turnEvents.length - 1;
          const index = turnEvents.indexOf(activeEvent);
@@ -1239,6 +760,7 @@ if __name__ == "__main__":
       } else {
          setCanvasViewMode('source');
       }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
    }, [selectedWorkEvent, workEvents, canvasPlaybackTime, canvasPlaybackTurnId, currentTurnId]);
 
    useEffect(() => {
@@ -1516,6 +1038,7 @@ if __name__ == "__main__":
    };
 
    const handleSend = async (overridePrompt?: string, options?: { voiceMode?: boolean }) => {
+      if (chatAbortControllerRef.current) return;
       const prompt = (overridePrompt ?? inputValue).trim();
       if (!prompt && uploadedFiles.length === 0) return;
 
@@ -1538,11 +1061,29 @@ if __name__ == "__main__":
          if (prev.some(s => s.id === sessionId)) return prev;
          return [{ id: sessionId, title: cleanUserMessage(prompt) || 'New Chat', updated_at: Date.now() / 1000 }, ...prev];
       });
-      const userMsg = { role: 'user', content: prompt };
-      const assistantPlaceholder = { role: 'assistant', content: '' };
+      const userMsg: ChatMessage = {
+         id: `user_${turnId}`,
+         role: 'user',
+         content: prompt,
+         turnId,
+         createdAt: turnStartedAt
+      };
+      const assistantPlaceholder: ChatMessage = {
+         id: `assistant_${turnId}`,
+         role: 'assistant',
+         content: '',
+         turnId,
+         createdAt: turnStartedAt,
+         workflowStart: turnStartedAt,
+         isStreaming: true
+      };
       setMessagesForSession(sessionId, prev => [...prev, userMsg, assistantPlaceholder]);
       setInputValue('');
       setIsStreaming(true);
+      activeStreamSessionRef.current = sessionId;
+      activeStreamTurnRef.current = turnId;
+      const controller = new AbortController();
+      chatAbortControllerRef.current = controller;
 
       try {
          // 1. Handle File Uploads
@@ -1561,12 +1102,15 @@ if __name__ == "__main__":
          const response = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
             body: JSON.stringify({
                prompt,
                session_id: sessionId,
                turn_id: turnId,
                source: 'gui',
-               provider: selectedSessionProvider || instanceName || 'openrouter',
+               stream: true,
+               canonical_events: true,
+               provider: selectedSessionProvider || instanceName || undefined,
                voice_mode: !!options?.voiceMode
             })
          });
@@ -1574,7 +1118,11 @@ if __name__ == "__main__":
          if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
             const message = errorData?.message || errorData?.detail || `Chat request failed with HTTP ${response.status}`;
-            setMessagesForSession(sessionId, prev => [...prev, { role: 'assistant', content: `NEXUS chat error: ${message}` }]);
+            setMessagesForSession(sessionId, prev => prev.map(item => (
+               item.role === 'assistant' && item.turnId === turnId
+                  ? { ...item, content: `NEXUS chat error: ${message}` }
+                  : item
+            )));
             return;
          }
 
@@ -1583,40 +1131,184 @@ if __name__ == "__main__":
          const decoder = new TextDecoder();
 
          let assistantContent = '';
+         let assistantSegments = [''];
+         let receivedPublicActivity = false;
+         let buffer = '';
+         let currentEvent = '';
+         const appendAssistantChunk = (chunk: string) => {
+            assistantSegments[assistantSegments.length - 1] += chunk;
+            assistantContent = assistantSegments.filter(Boolean).join('\n\n');
+         };
+         const sanitizeStreamChunk = (value: string) =>
+            value
+               .replace(/TASK_COMPLETE/gi, '')
+               .replace(/<\/?thinking>/gi, '');
 
          while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            const chunk = decoder.decode(value);
-            if (!chunk.trim()) continue;
-            assistantContent += chunk;
-            const streamedEvents = chunk
-               .split('\n')
-               .map(line => parseWorkActivityLine(line))
-               .filter(Boolean)
+            
+            buffer += decoder.decode(value, { stream: true });
+            const parsedFrames = splitSseFrames(buffer);
+            buffer = parsedFrames.remainder;
+
+            const streamedEvents: any[] = [];
+
+            const processStreamRecord = (eventName: string, dataStr: string) => {
+               const trimmedData = dataStr.trim();
+               if (!trimmedData || trimmedData === '[DONE]') return;
+
+               try {
+                  const payload = JSON.parse(trimmedData);
+
+                  if (eventName === 'work_event' || payload.event || payload.kind || payload.type) {
+                     const parsed = parseWorkActivityLine(trimmedData);
+                     if (parsed) streamedEvents.push(parsed);
+                  } else if (payload.content !== undefined) {
+                     const nextChunk = sanitizeStreamChunk(typeof payload.content === 'string' ? payload.content : String(payload.content ?? ''));
+                     if (nextChunk.trim() && nextChunk.trim() !== '[working]') {
+                        appendAssistantChunk(nextChunk);
+                     }
+                  } else {
+                      // Fallback if the payload doesn't match expected formats
+                      const parsed = parseWorkActivityLine(trimmedData);
+                      if (parsed) streamedEvents.push(parsed);
+                  }
+               } catch (e) {
+                  // If it's not JSON, it's raw text content
+                  const nextChunk = sanitizeStreamChunk(trimmedData);
+                  if (nextChunk.trim() && nextChunk.trim() !== '[working]') {
+                     appendAssistantChunk(nextChunk);
+                  }
+                  // Still attempt to extract any work activities if they match the regex pattern
+                  const parsed = parseWorkActivityLine(trimmedData);
+                  if (parsed) streamedEvents.push(parsed);
+               }
+            };
+
+            for (const frame of parsedFrames.frames) {
+               const eventName = getSseEventType(frame);
+               const dataStr = getSseData(frame);
+               if (dataStr) {
+                  processStreamRecord(eventName, dataStr);
+                  currentEvent = '';
+                  continue;
+               }
+
+               // Fallback for old raw-line streams that were not framed as SSE.
+               const lines = frame.split('\n');
+               for (let i = 0; i < lines.length; i++) {
+                  const line = lines[i];
+                  if (line.startsWith('event:')) {
+                     currentEvent = line.substring(6).trim();
+                  } else if (line.startsWith('data:')) {
+                     processStreamRecord(currentEvent || 'message', line.substring(5));
+                     currentEvent = '';
+                  } else if (line.trim().startsWith('{')) {
+                     const parsed = parseWorkActivityLine(line);
+                     if (parsed) streamedEvents.push(parsed);
+                  }
+               }
+            }
+
+            const looksLikePartialSseFrame = /^\s*(event|data|id|retry):/m.test(buffer);
+            if (!parsedFrames.frames.length && buffer.includes('\n') && !looksLikePartialSseFrame) {
+               const lines = buffer.split('\n');
+               buffer = lines.pop() || '';
+               for (let i = 0; i < lines.length; i++) {
+                  const line = lines[i];
+                  if (line.startsWith('event:')) {
+                     currentEvent = line.substring(6).trim();
+                  } else if (line.startsWith('data:')) {
+                     processStreamRecord(currentEvent || 'message', line.substring(5));
+                     currentEvent = '';
+                  } else if (line.trim().startsWith('{')) {
+                     const parsed = parseWorkActivityLine(line);
+                     if (parsed) streamedEvents.push(parsed);
+                  }
+               }
+            }
+
+            const validEvents = streamedEvents
                .map(event => normalizeWorkEvent(event as WorkEvent))
+               .map(event => ({ ...event, session_id: sessionId, turn_id: turnId }))
                .filter(event => !isWorkflowBookkeepingEvent(event));
-            if (streamedEvents.length > 0) {
-               setWorkEvents(prev => {
-                  const byId = new Map<string, WorkEvent>();
-                  [...prev, ...streamedEvents].forEach(event => {
-                     const key = event.id || `${event.kind}|${event.phase_index}|${event.target || event.path || event.command || event.action}`;
-                     byId.set(key, event);
+
+            if (validEvents.length > 0) {
+               // A single network read can contain several SSE records. Commit
+               // each real event separately and yield to the browser paint loop
+               // so the timeline advances in actual arrival order instead of
+               // appearing as one batch beside the final answer.
+               for (const streamedEvent of validEvents) {
+                  if (isDisplayableWorkActivity(streamedEvent)) receivedPublicActivity = true;
+                  if (
+                     assistantSegments.length === 1
+                     && assistantSegments[0].trim()
+                     && isDisplayableWorkActivity(streamedEvent)
+                  ) {
+                     assistantSegments.push('');
+                  }
+                  flushSync(() => {
+                     setWorkEvents(prev => {
+                        const byId = new Map<string, WorkEvent>();
+                        [...prev, streamedEvent].forEach((event, eventIndex) => {
+                       const eventAny = event as any;
+                       const key = eventAny.id || `unkeyed:${eventIndex}`;
+                       const existing = byId.get(key);
+                      if (existing && Number(existing.sequence || 0) > Number(eventAny.sequence || 0) && Number(eventAny.sequence || 0) > 0) return;
+                      if (eventAny.append && existing) {
+                         const chunk = String(eventAny.chunk || eventAny.output || '');
+                         const streamKey = eventAny.stream === 'stderr' ? 'stderr' : 'stdout';
+                         const accumulated = boundedLiveOutput(`${String((existing as any)[streamKey] || '')}${chunk}`);
+                         byId.set(key, {
+                            ...existing,
+                            ...event,
+                            [streamKey]: accumulated,
+                            output: boundedLiveOutput(`${streamKey === 'stdout' ? accumulated : String((existing as any).stdout || '')}${streamKey === 'stderr' ? accumulated : String((existing as any).stderr || '')}`),
+                         });
+                      } else {
+                         byId.set(key, { ...existing, ...event });
+                      }
+                        });
+                        const merged = Array.from(byId.values());
+                        return merged.length > MAX_LIVE_WORK_EVENTS ? merged.slice(-MAX_LIVE_WORK_EVENTS) : merged;
+                     });
                   });
-                  return Array.from(byId.values());
-               });
+                  // Move to the next browser task so this committed event can
+                  // paint. Unlike requestAnimationFrame this also progresses in
+                  // a background tab and never stalls the live SSE reader.
+                  await new Promise<void>(resolve => window.setTimeout(resolve, 0));
+               }
             }
 
             setMessagesForSession(sessionId, prev => {
-               const newMsgs = [...prev];
-               const lastIndex = newMsgs.length - 1;
-               if (lastIndex >= 0 && newMsgs[lastIndex]?.role === 'assistant') {
-                  newMsgs[lastIndex] = { role: 'assistant', content: assistantContent };
-               } else {
-                  newMsgs.push({ role: 'assistant', content: assistantContent });
-               }
-               return newMsgs;
+               const firstTurnAssistant = prev.findIndex(message => message.role === 'assistant' && message.turnId === turnId);
+               const insertionIndex = firstTurnAssistant >= 0 ? firstTurnAssistant : prev.length;
+               const withoutTurnAssistants = prev.filter(message => !(message.role === 'assistant' && message.turnId === turnId));
+               const turnMessages = assistantSegments.map((content, segmentIndex) => ({
+                     id: `assistant_${turnId}_${segmentIndex}`,
+                     role: 'assistant',
+                     content,
+                     turnId,
+                     createdAt: turnStartedAt + segmentIndex / 1000,
+                     workflowStart: turnStartedAt,
+                     isStreaming: true
+                  } as ChatMessage));
+               return [
+                  ...withoutTurnAssistants.slice(0, insertionIndex),
+                  ...turnMessages,
+                  ...withoutTurnAssistants.slice(insertionIndex),
+               ];
             });
+         }
+         if (!assistantContent.trim() && !receivedPublicActivity) {
+            assistantSegments = ['NEXUS finished without returning a response or public work evidence. Retry the task or check the selected provider.'];
+            assistantContent = assistantSegments[0];
+            setMessagesForSession(sessionId, prev => prev.map(message => (
+               message.role === 'assistant' && message.turnId === turnId
+                  ? { ...message, content: assistantContent }
+                  : message
+            )));
          }
          const artifact = extractGeneratedArtifact(assistantContent);
          const wantsArtifact = /\b(code|make|create|build|game|app|website|html|canvas|run|play)\b/i.test(prompt);
@@ -1630,12 +1322,45 @@ if __name__ == "__main__":
          }
          if (options?.voiceMode) speakAssistantReply(assistantContent);
       } catch (err) {
+         if ((err as Error)?.name === 'AbortError') {
+            setWorkEvents(previous => previous.map(event => (
+               ['queued', 'pending', 'running', 'in_progress', 'started'].includes(String(event.status || '').toLowerCase())
+                  ? { ...event, status: 'cancelled' }
+                  : event
+            )));
+            setMessagesForSession(sessionId, prev => prev.map(message => (
+               message.role === 'assistant' && message.turnId === turnId && !message.content.trim()
+                  ? { ...message, content: 'Turn cancelled.' }
+                  : message
+            )));
+            setSessionNotice({ kind: 'success', message: 'Current turn cancelled.' });
+            return;
+         }
          console.error("Chat error:", err);
          setBackendOffline(true);
-         setSessionNotice({ kind: 'success', message: 'Reconnecting to NEXUS… your chat stayed open.' });
+         const detail = String((err as Error)?.message || err || 'The local API connection failed.');
+         setMessagesForSession(sessionId, prev => prev.map(message => (
+            message.role === 'assistant' && message.turnId === turnId
+               ? { ...message, content: `NEXUS could not complete this turn: ${detail}` }
+               : message
+         )));
+         setSessionNotice({ kind: 'error', message: 'NEXUS disconnected. Your prompt is restored so you can retry.' });
          setInputValue(current => current || prompt);
       } finally {
+         if (chatAbortControllerRef.current === controller) chatAbortControllerRef.current = null;
+         const turnEndedAt = Date.now() / 1000;
+         setMessagesForSession(sessionId, prev => prev.map(message => (
+            message.role === 'assistant' && message.turnId === turnId
+               ? { ...message, isStreaming: false, workflowEnd: turnEndedAt }
+               : message
+         )));
          setIsStreaming(false);
+         if (activeStreamSessionRef.current === sessionId) {
+            activeStreamSessionRef.current = '';
+         }
+         if (activeStreamTurnRef.current === turnId) {
+            activeStreamTurnRef.current = '';
+         }
          fetchSessions(); // Refresh list to update titles/mtime
          loadWorkEvents(sessionId, turnId);
       }
@@ -1807,6 +1532,7 @@ if __name__ == "__main__":
                 setCurrentSessionId(sid);
                 sessionMessagesCacheRef.current[sid] = nextHistory;
                 setMessages(nextHistory);
+                setWorkEvents([]);
                 setWorkflowStartedAt(Date.now() / 1000);
                 setCurrentTurnId('');
                 setCommandRuns({});
@@ -1815,7 +1541,7 @@ if __name__ == "__main__":
                 artifactCacheRef.current = {};
                 artifactPathIndexRef.current = {};
                 setCanvasViewMode('source');
-                loadWorkEvents(data.id);
+                loadWorkEvents(sid, '');
                 setActiveTab('session');
                 setInputValue('');
             }
@@ -1922,7 +1648,7 @@ if __name__ == "__main__":
    const [configDraft, setConfigDraft] = useState<Record<string, any> | null>(null);
    const [configSection, setConfigSection] = useState('system');
    const [configSearch, setConfigSearch] = useState('');
-   const [configMode, setConfigMode] = useState<'form' | 'json'>('form');
+   const [configMode, setConfigMode] = useState<any>('form');
    const [configJsonText, setConfigJsonText] = useState('');
    const [configStatus, setConfigStatus] = useState<{ kind: 'idle' | 'valid' | 'error' | 'saving'; message: string }>({ kind: 'idle', message: 'Not loaded' });
    const [pluginSearch, setPluginSearch] = useState('');
@@ -1933,7 +1659,7 @@ if __name__ == "__main__":
    const [pluginStatus, setPluginStatus] = useState<{ kind: 'idle' | 'valid' | 'error' | 'saving'; message: string }>({ kind: 'idle', message: 'Ready' });
 
    const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
-   const [selectedSessionProvider, setSelectedSessionProvider] = useState<string>('openrouter');
+   const [selectedSessionProvider, setSelectedSessionProvider] = useState<string>('');
    const [isDragging, setIsDragging] = useState(false);
    const [showModelMenu, setShowModelMenu] = useState(false);
    const modelMenuRef = useRef<HTMLDivElement>(null);
@@ -1951,16 +1677,15 @@ if __name__ == "__main__":
 
    useEffect(() => {
        if (state?.provider_instances && state.provider_instances.length > 0) {
-          const hasCurrent = state.provider_instances.some((inst: any) => inst.id === selectedSessionProvider && inst.status === 'ACTIVE');
+          const hasCurrent = selectedSessionProvider
+             ? state.provider_instances.some((inst: any) => inst.id === selectedSessionProvider && inst.status === 'ACTIVE')
+             : true;
           if (!hasCurrent) {
-             const hasOpenRouter = state.provider_instances.some((inst: any) => inst.id === 'openrouter' && inst.status === 'ACTIVE');
-             if (hasOpenRouter) {
-                setSelectedSessionProvider('openrouter');
+             const activeInst = state.provider_instances.find((inst: any) => inst.status === 'ACTIVE');
+             if (activeInst) {
+                setSelectedSessionProvider(activeInst.id);
              } else {
-                const activeInst = state.provider_instances.find((inst: any) => inst.status === 'ACTIVE');
-                if (activeInst) {
-                   setSelectedSessionProvider(activeInst.id);
-                }
+                setSelectedSessionProvider('');
              }
           }
        }
@@ -1968,18 +1693,19 @@ if __name__ == "__main__":
 
    async function fetchHistory(sessionId = currentSessionId) {
       try {
-         const res = await fetch(`/api/history?session_id=${encodeURIComponent(sessionId || 'default')}`);
+         const res = await fetch(`/api/history?session_id=${encodeURIComponent(sessionId || currentSessionId)}`);
          if (!res.ok) throw new Error(`HTTP ${res.status}`);
          const data = await res.json();
          if (Array.isArray(data)) {
-            const sid = sessionId || 'default';
+            const sid = sessionId || currentSessionId;
+            if (activeStreamSessionRef.current === sid) return;
             sessionMessagesCacheRef.current[sid] = data;
             if (currentSessionIdRef.current === sid) {
                setMessages(data);
             }
          }
          setBackendOffline(false);
-         loadWorkEvents(sessionId);
+         loadWorkEvents(sessionId, '');
       } catch (err) {
          setBackendOffline(true);
       }
@@ -2001,10 +1727,13 @@ if __name__ == "__main__":
 
    async function syncActiveSession() {
       try {
+         // The backend active-session pointer can lag a newly submitted turn.
+         // Never let background reconciliation navigate away from live work.
+         if (activeStreamSessionRef.current) return;
          const res = await fetch('/api/sessions/active');
          if (!res.ok) return;
          const data = await res.json();
-         const activeId = data.session_id || 'default';
+         const activeId = data.session_id || currentSessionId;
          if (activeId && activeId !== currentSessionIdRef.current) {
             currentSessionIdRef.current = activeId;
             setCurrentSessionId(activeId);
@@ -2044,7 +1773,7 @@ if __name__ == "__main__":
       }
    }
 
-   async function runEvolutionControl(action: 'plan' | 'verify') {
+   async function runEvolutionControl(action: any) {
       setEvolutionWorking(action);
       setEvolutionAction({ kind: action, message: action === 'plan' ? 'Generating real evolution plan...' : 'Running real verification gates...' });
       try {
@@ -2085,9 +1814,10 @@ if __name__ == "__main__":
       'disabled_plugins',
       'deleted_plugins',
       'voice',
+      'security',
    ]);
    const configSections = configDraft ? Object.keys(configDraft).filter(section => !hiddenConfigSections.has(section)).sort((a, b) => {
-      const order = ['system', 'gui', 'vision', 'security', 'memory', 'autonomy', 'context', 'diagnostics', 'storage'];
+      const order = ['system', 'gui', 'vision', 'memory', 'autonomy', 'context', 'diagnostics', 'storage'];
       const ia = order.indexOf(a);
       const ib = order.indexOf(b);
       if (ia !== -1 || ib !== -1) return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
@@ -2637,7 +2367,7 @@ if __name__ == "__main__":
          setSessionNotice({ kind: 'error', message: 'No downloadable files in this chat yet.' });
          return;
       }
-      window.location.href = `/api/session-files.zip?session_id=${encodeURIComponent(currentSessionId || 'default')}`;
+      window.location.href = `/api/session-files.zip?session_id=${encodeURIComponent(currentSessionId || currentSessionId)}`;
       setTaskMenuOpen(false);
    };
 
@@ -2667,6 +2397,7 @@ if __name__ == "__main__":
 
       document.addEventListener('click', handleToolbarClick, true);
       return () => document.removeEventListener('click', handleToolbarClick, true);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
    }, [currentSessionId, sources, workEvents]);
 
    const stopVoiceConversation = () => {
@@ -2928,7 +2659,7 @@ if __name__ == "__main__":
       };
    };
 
-   const configureAsset = (kind: 'skills' | 'tools', item: { name: string; active?: boolean; description: string; config?: Record<string, any> }) => {
+   const configureAsset = (kind: any, item: { name: string; active?: boolean; description: string; config?: Record<string, any> }) => {
       const active = item.active !== false;
       const description = cleanAssetDescription(item.description, item.name);
       const config = {
@@ -3067,9 +2798,9 @@ if __name__ == "__main__":
       cursor: 'pointer'
    });
 
-   const toggleAsset = async (kind: 'skills' | 'tools', name: string, active: boolean | undefined, description: string, config?: Record<string, any>) => {
+   const toggleAsset = async (kind: any, name: string, active: boolean | undefined, description: string, config?: Record<string, any>) => {
       const nextActive = !(active !== false);
-      updateVisibleActiveState(kind, [name], nextActive);
+      updateVisibleActiveState(kind as any, [name], nextActive);
       try {
          const res = await fetch(`/api/assets/${kind}/configure`, {
             method: 'POST',
@@ -3143,7 +2874,20 @@ if __name__ == "__main__":
 
    const currentProviderRoute = () => state?.provider_instances?.find((inst) => inst.id === editingInstanceId || inst.id === instanceName);
 
-   const runProviderCheck = async (kind: 'test' | 'ping') => {
+   const configureProviderRoute = (inst: any, providerInfo: any) => {
+      setProviderFamilyName(providerInfo.name || '');
+      setSelectedProv(providerInfo);
+      setInstanceName(inst.id || '');
+      setEditingInstanceId(inst.id || '');
+      setProviderEndpoint(inst.endpoint || '');
+      setTargetModel(inst.model || '');
+      setShowApiKey(false);
+      setApiKey('');
+      setProviderCheck(null);
+      setShowProviderPanel(true);
+   };
+
+   const runProviderCheck = async (kind: any) => {
       const providerId = (providerFamilyName || selectedProv?.name || '').trim();
       if (!providerId) return;
       setProviderCheck({ status: 'running', message: kind === 'test' ? 'Testing API...' : 'Pinging endpoint...' });
@@ -3237,7 +2981,7 @@ if __name__ == "__main__":
       setShowProviderPanel(false);
    };
 
-   const deleteAsset = (kind: 'skills' | 'tools', name: string) => {
+   const deleteAsset = (kind: string, name: string) => {
       setConfirmModal({
          show: true,
          title: `DELETE ${kind === 'skills' ? 'SKILL' : 'TOOL'}`,
@@ -3380,6 +3124,7 @@ if __name__ == "__main__":
          clearInterval(interval);
          clearInterval(sessionInterval);
       };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
    }, []);
 
    useEffect(() => {
@@ -3392,19 +3137,33 @@ if __name__ == "__main__":
    useEffect(() => {
       if (activeTab !== 'config') return;
       if (!configDraft) loadConfig();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
    }, [activeTab]);
 
    const isPlanningArtifact = (row: any): boolean => {
       const kind = String(row?.kind || row?.type || '').toLowerCase();
       const target = String(row?.target || row?.path || '').toLowerCase();
-      return kind === 'artifact' && (
+      const role = String(row?.role || '').toLowerCase();
+      return role === 'planning_artifact' || kind === 'todo' || (
+         (kind === 'artifact' || kind === 'file') && (
          target.includes('implementation_plan') ||
          target.includes('task.md') ||
-         target.includes('walkthrough')
+            target.includes('todo.md') ||
+            target.includes('walkthrough')
+         )
       );
    };
 
    const getWorkEventsForMessage = (msgIndex: number, _isLatest: boolean) => {
+      const messageTurnId = String((messages[msgIndex] as any)?.turnId || '');
+      if (messageTurnId) {
+         const sameTurnAssistantIndices = messages
+            .map((message, index) => ({ message, index }))
+            .filter(item => item.message.role === 'assistant' && String((item.message as any).turnId || '') === messageTurnId)
+            .map(item => item.index);
+         if (sameTurnAssistantIndices[sameTurnAssistantIndices.length - 1] !== msgIndex) return [];
+         return workEvents.filter(e => e.turn_id === messageTurnId);
+      }
       const assistantMessageIndices = messages
          .map((m, idx) => ({ role: m.role, index: idx }))
          .filter(m => m.role === 'assistant')
@@ -3424,9 +3183,6 @@ if __name__ == "__main__":
          targetTurnId = currentTurnId;
       }
       if (!targetTurnId) {
-         if (isLatestAssistant) {
-            return workEvents.filter(e => !e.turn_id || e.turn_id === currentTurnId);
-         }
          return [];
       }
       return workEvents.filter(e => e.turn_id === targetTurnId);
@@ -3451,10 +3207,11 @@ if __name__ == "__main__":
    // NO sorting — todo rows have created_at=0 which corrupts any timestamp sort.
    // Trust the order events were inserted: that IS the real execution order.
    const timelineWorkActivities = allWorkActivities
-      .filter(row => !isPlanningArtifact(row));
+      .filter(row => !isPlanningArtifact(row))
+      .filter(isDisplayableWorkActivity);
 
    const activePlaybackIndex = canvasPlaybackTime !== null
-      ? Math.min(timelineWorkActivities.length - 1, Math.floor(canvasPlaybackTime / 5))
+      ? Math.min(timelineWorkActivities.length - 1, Math.floor(canvasPlaybackTime))
       : Math.max(0, timelineWorkActivities.length - 1);
 
    const clampedCanvasPlaybackIndex = activePlaybackIndex;
@@ -3463,7 +3220,7 @@ if __name__ == "__main__":
       : selectedWorkEvent || timelineWorkActivities[clampedCanvasPlaybackIndex] || null;
 
    const canvasProgress = canvasPlaybackTime !== null && timelineWorkActivities.length > 1
-      ? (canvasPlaybackTime / ((timelineWorkActivities.length - 1) * 5)) * 100
+      ? (canvasPlaybackTime / (timelineWorkActivities.length - 1)) * 100
       : 100;
 
 
@@ -3471,20 +3228,20 @@ if __name__ == "__main__":
       if (!isPlaying) return;
       const interval = window.setInterval(() => {
          setCanvasPlaybackTime(prev => {
-            const current = prev !== null ? prev : (timelineWorkActivities.length - 1) * 5;
-            const totalDuration = (timelineWorkActivities.length - 1) * 5;
-            if (current >= totalDuration) {
+            const current = prev !== null ? Math.floor(prev) : timelineWorkActivities.length - 1;
+            const lastIndex = timelineWorkActivities.length - 1;
+            if (current >= lastIndex) {
                setIsPlaying(false);
                return null;
             }
-            const next = current + 0.1;
-            if (next >= totalDuration) {
+            const next = current + 1;
+            if (next >= lastIndex) {
                setIsPlaying(false);
-               return null;
+               return lastIndex;
             }
             return next;
          });
-      }, 50);
+      }, 800);
       return () => window.clearInterval(interval);
    }, [isPlaying, timelineWorkActivities.length]);
 
@@ -3561,7 +3318,7 @@ if __name__ == "__main__":
       ? Math.round(evolutionTools.reduce((sum: number, tool: any) => sum + (Number(tool.success_rate) || 0), 0) / evolutionTools.length * 100)
       : 0;
    const compactNumber = (value: any) => Intl.NumberFormat('en', { notation: Number(value) >= 10000 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(Number(value) || 0);
-   const formatEventTime = (timestamp?: number) => timestamp ? new Date(timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--';
+   const formatEventTime = (timestamp?: any) => timestamp ? new Date(Number(timestamp) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--';
    const canvasLatestAssistant = [...messages].reverse().find(message => message.role === 'assistant' && message.content.trim());
 
    const isAssistantError = (content: string): boolean => {
@@ -3578,13 +3335,17 @@ if __name__ == "__main__":
    };
 
    const collapseWorkActivities = (rows: any[]): any[] => {
-      const seen = new Set<string>();
-      return rows.filter(row => {
-         const key = `${row.kind || row.type}|${row.target || row.path || row.action}`;
-         if (seen.has(key)) return false;
-         seen.add(key);
-         return true;
-      });
+      return collapseWorkActivityUpdates(rows);
+   };
+
+   const stopCurrentTurn = async () => {
+      const sid = activeStreamSessionRef.current || currentSessionIdRef.current || currentSessionId;
+      const turnId = activeStreamTurnRef.current || currentTurnId;
+      if (sid) {
+         const suffix = turnId ? `?turn_id=${encodeURIComponent(turnId)}` : '';
+         fetch(`/api/chat/${encodeURIComponent(sid)}/cancel${suffix}`, { method: 'POST' }).catch(() => {});
+      }
+      chatAbortControllerRef.current?.abort();
    };
 
    // Alias: active canvas file preview (same as canvasPreview state)
@@ -3634,14 +3395,33 @@ if __name__ == "__main__":
 
    const renderMessageMarkdown = (content: string, _isUserMsg: boolean): React.ReactNode => {
       if (!content) return null;
-      const parts = content.split(/(```[\s\S]*?```)/g);
+      // Preserve code blocks before splitting, supporting unclosed blocks for streaming
+      const parts = content.split(/(```[\s\S]*?(?:```|$))/g);
       return (
-         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+         <div className="markdown-body" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             {parts.map((part, index) => {
                if (part.startsWith('```')) {
-                  const match = part.match(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/);
+                  const match = part.match(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)(?:```|$)/);
                   const lang = match ? match[1] : '';
-                  const code = match ? match[2].trim() : part.slice(3, -3).trim();
+                  const codeBlock = match ? match[2].trim() : part.slice(3).replace(/```$/, '').trim();
+                  
+                  if (lang === 'thought') {
+                     return (
+                        <details key={index} open style={{ margin: '4px 0', border: '1px solid ' + (agentLite ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.1)'), borderRadius: '6px', overflow: 'hidden' }}>
+                           <summary style={{ padding: '8px 12px', cursor: 'pointer', background: agentLite ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.03)', fontWeight: 500, fontSize: '0.85rem', color: agentLite ? '#4b5563' : '#a1a1aa', listStyle: 'none', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span style={{ animation: 'spin 2s linear infinite' }}>⚙️</span> Working Process...
+                           </summary>
+                           <div style={{ padding: '12px', background: agentLite ? '#f9fafb' : 'rgba(0,0,0,0.2)', fontSize: '0.8rem', color: agentLite ? '#6b7280' : '#a1a1aa', borderTop: '1px solid ' + (agentLite ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.05)') }}>
+                              {renderMessageMarkdown(codeBlock, _isUserMsg)}
+                           </div>
+                        </details>
+                     );
+                  }
+
+                  if (lang === 'diff') {
+                     return <DiffViewer key={index} diffString={codeBlock} />;
+                  }
+
                   return (
                      <div key={index} className="code-block-card" style={{
                         margin: '10px 0',
@@ -3665,7 +3445,7 @@ if __name__ == "__main__":
                            <span>{lang ? lang.toUpperCase() : 'CODE'}</span>
                            <button
                               onClick={() => {
-                                 navigator.clipboard.writeText(code);
+                                 navigator.clipboard.writeText(codeBlock);
                               }}
                               style={{
                                  background: 'transparent',
@@ -3688,74 +3468,103 @@ if __name__ == "__main__":
                            lineHeight: '1.45',
                            color: agentLite ? '#111827' : '#e5e7eb'
                         }}>
-                           <code>{code}</code>
+                           <code>{codeBlock}</code>
                         </pre>
                      </div>
                   );
                }
+               
+               // Group standard lines into paragraphs and lists
                const lines = part.split('\n');
-               return (
-                  <div key={index} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                     {lines.map((line, lineIdx) => {
-                        const trimmed = line.trim();
-                        if (!trimmed && lineIdx > 0 && lineIdx < lines.length - 1) {
-                           return <div key={lineIdx} style={{ height: '8px' }} />;
-                        }
-                        const headerMatch = line.match(/^(#{1,6})\s+(.*)/);
-                        if (headerMatch) {
-                           const level = headerMatch[1].length;
-                           const fontSize = level === 1 ? '1.35rem' : level === 2 ? '1.18rem' : '1.05rem';
-                           return (
-                              <div key={lineIdx} style={{
-                                 fontWeight: 800,
-                                 fontSize,
-                                 margin: '12px 0 6px',
-                                 color: agentLite ? '#111827' : '#ffffff'
-                              }}>
-                                 {parseInlineMarkdown(headerMatch[2])}
-                              </div>
+               const elements: React.ReactNode[] = [];
+               let currentParagraph: string[] = [];
+               
+               const flushParagraph = () => {
+                   if (currentParagraph.length > 0) {
+                       elements.push(
+                           <p key={elements.length} style={{ margin: '2px 0', lineHeight: 1.5, wordBreak: 'break-word', color: agentLite ? '#111827' : '#e5e7eb' }}>
+                               {parseInlineMarkdown(currentParagraph.join(' '))}
+                           </p>
+                       );
+                       currentParagraph = [];
+                   }
+               };
+
+               let currentListType: 'ul' | 'ol' | null = null;
+               let currentListItems: React.ReactNode[] = [];
+
+               const flushList = () => {
+                   if (currentListItems.length > 0) {
+                       if (currentListType === 'ul') {
+                           elements.push(
+                               <ul key={elements.length} style={{ paddingLeft: '24px', margin: '4px 0', display: 'flex', flexDirection: 'column', gap: '4px', color: agentLite ? '#111827' : '#e5e7eb' }}>
+                                   {currentListItems}
+                               </ul>
                            );
-                        }
-                        const bulletMatch = line.match(/^([-*+])\s+(.*)/);
-                        if (bulletMatch) {
-                           return (
-                              <div key={lineIdx} style={{
-                                 display: 'flex',
-                                 flexDirection: 'row',
-                                 alignItems: 'flex-start',
-                                 paddingLeft: '12px',
-                                 gap: '8px',
-                                 margin: '2px 0'
-                              }}>
-                                 <span style={{ color: '#3b82f6', fontWeight: 'bold' }}>•</span>
-                                 <span>{parseInlineMarkdown(bulletMatch[2])}</span>
-                              </div>
+                       } else {
+                           elements.push(
+                               <ol key={elements.length} style={{ paddingLeft: '24px', margin: '4px 0', display: 'flex', flexDirection: 'column', gap: '4px', color: agentLite ? '#111827' : '#e5e7eb' }}>
+                                   {currentListItems}
+                               </ol>
                            );
-                        }
-                        const numMatch = line.match(/^(\d+)\.\s+(.*)/);
-                        if (numMatch) {
-                           return (
-                              <div key={lineIdx} style={{
-                                 display: 'flex',
-                                 flexDirection: 'row',
-                                 alignItems: 'flex-start',
-                                 paddingLeft: '12px',
-                                 gap: '8px',
-                                 margin: '2px 0'
-                              }}>
-                                 <span style={{ color: '#3b82f6', fontWeight: 600 }}>{numMatch[1]}.</span>
-                                 <span>{parseInlineMarkdown(numMatch[2])}</span>
-                              </div>
-                           );
-                        }
-                        return (
-                           <div key={lineIdx} style={{ margin: '1px 0' }}>
-                              {parseInlineMarkdown(line)}
+                       }
+                       currentListItems = [];
+                       currentListType = null;
+                   }
+               };
+
+               lines.forEach((line) => {
+                   const trimmed = line.trim();
+                   if (!trimmed) {
+                       flushParagraph();
+                       flushList();
+                       return;
+                   }
+
+                   const headerMatch = line.match(/^(#{1,6})\s+(.*)/);
+                   if (headerMatch) {
+                       flushParagraph();
+                       flushList();
+                       const level = headerMatch[1].length;
+                       const fontSize = level === 1 ? '1.35rem' : level === 2 ? '1.18rem' : '1.05rem';
+                       elements.push(
+                           <div key={elements.length} style={{
+                               fontWeight: 800,
+                               fontSize,
+                               margin: '12px 0 6px',
+                               color: agentLite ? '#111827' : '#ffffff'
+                           }}>
+                               {parseInlineMarkdown(headerMatch[2])}
                            </div>
-                        );
-                     })}
-                  </div>
-               );
+                       );
+                       return;
+                   }
+
+                   const bulletMatch = line.match(/^([-*+])\s+(.*)/);
+                   if (bulletMatch) {
+                       flushParagraph();
+                       if (currentListType === 'ol') flushList();
+                       currentListType = 'ul';
+                       currentListItems.push(<li key={currentListItems.length} style={{ display: 'list-item' }}>{parseInlineMarkdown(bulletMatch[2])}</li>);
+                       return;
+                   }
+
+                   const numMatch = line.match(/^(\d+)\.\s+(.*)/);
+                   if (numMatch) {
+                       flushParagraph();
+                       if (currentListType === 'ul') flushList();
+                       currentListType = 'ol';
+                       currentListItems.push(<li key={currentListItems.length} style={{ display: 'list-item' }}>{parseInlineMarkdown(numMatch[2])}</li>);
+                       return;
+                   }
+
+                   flushList();
+                   currentParagraph.push(line);
+               });
+               flushParagraph();
+               flushList();
+               
+               return <React.Fragment key={index}>{elements}</React.Fragment>;
             })}
          </div>
       );
@@ -3861,9 +3670,17 @@ if __name__ == "__main__":
        { label: 'Action', value: getWorkActivityLabel(activeCanvasWorkEvent) },
        { label: 'Target', value: selectedResolvedTarget || getWorkActivityTarget(activeCanvasWorkEvent) },
        { label: 'Status', value: activeCanvasWorkEvent.status },
+       { label: 'Duration', value: activeCanvasWorkEvent.duration_ms != null ? `${activeCanvasWorkEvent.duration_ms} ms` : '' },
+       { label: 'Exit code', value: activeCanvasWorkEvent.exit_code },
+       { label: 'Changed lines', value: activeCanvasWorkEvent.changed_lines || activeCanvasWorkEvent.line_changes },
+       { label: 'Diff', value: activeCanvasWorkEvent.diff || activeCanvasWorkEvent.patch },
        { label: 'Tool', value: activeCanvasWorkEvent.tool || activeCanvasWorkEvent.name },
        { label: 'Server', value: activeCanvasWorkEvent.server || activeCanvasWorkEvent.mcp_server },
        { label: 'Provider', value: activeCanvasWorkEvent.provider || activeCanvasWorkEvent.model },
+       { label: 'Command', value: activeCanvasWorkEvent.command },
+       { label: 'Query', value: activeCanvasWorkEvent.query },
+       { label: 'Input', value: activeCanvasWorkEvent.input },
+       { label: 'Arguments', value: activeCanvasWorkEvent.args || activeCanvasWorkEvent.arguments },
        { label: 'Result', value: activeCanvasWorkEvent.result || activeCanvasWorkEvent.output || activeCanvasWorkEvent.stdout },
        { label: 'Error', value: activeCanvasWorkEvent.stderr || activeCanvasWorkEvent.preview_error || activeCanvasWorkEvent.error },
     ]
@@ -3873,7 +3690,7 @@ if __name__ == "__main__":
     const selectedWorkDetail = activeCanvasWorkEvent
        ? String(activeCanvasWorkEvent.kind || activeCanvasWorkEvent.type || '').toLowerCase() === 'todo'
          ? String(activeCanvasWorkEvent.preview || '').trim() || [
-            '# TODO Plan',
+            '# NEXUS Plan',
             '',
             activeCanvasWorkEvent.task ? `Task: ${activeCanvasWorkEvent.task}` : '',
             '',
@@ -3953,8 +3770,7 @@ if __name__ == "__main__":
         
         let code = '';
         if (canvasPlaybackTime !== null) {
-           // Convert virtual seconds to step index for slicing
-           const _sliceStepIndex = Math.min(timelineWorkActivities.length - 1, Math.floor(canvasPlaybackTime / 5));
+           const _sliceStepIndex = Math.min(timelineWorkActivities.length - 1, Math.floor(canvasPlaybackTime));
            const pastFileEvents = timelineWorkActivities
               .slice(0, _sliceStepIndex + 1)
               .filter(event => 
@@ -3970,7 +3786,14 @@ if __name__ == "__main__":
         } else {
            if (activeCanvasPreview?.content) code = activeCanvasPreview.content;
            else if (activeCanvasWorkEvent?.preview) code = activeCanvasWorkEvent.preview;
-           else code = selectedWorkDetail || (canvasPreviewError ? `Preview unavailable: ${canvasPreviewError}` : canvasArtifact.code || 'No artifact yet.');
+           else if (activeCanvasWorkEvent) {
+              // A clicked work bubble must always describe that exact event.
+              // Never substitute the assistant chat transcript when a tool did
+              // not provide a dedicated preview payload.
+              code = selectedWorkDetail || formatActivityValue(activeCanvasWorkEvent) || 'No event data available.';
+           } else {
+              code = canvasPreviewError ? `Preview unavailable: ${canvasPreviewError}` : canvasArtifact.code || 'No artifact yet.';
+           }
         }
 
         if (activeCanvasWorkEvent && String(activeCanvasWorkEvent.kind || '').toLowerCase() === 'todo') {
@@ -4249,524 +4072,6 @@ if __name__ == "__main__":
       isAddingProvider,
       runProviderCheck,
    ];
-   const modalTextColor = agentLite ? '#111827' : '#f8fafc';
-   const modalMutedColor = agentLite ? '#64748b' : '#9ca3af';
-   const modalCardStyle: React.CSSProperties = {
-      background: agentLite ? '#fbfaf8' : 'rgba(255,255,255,0.035)',
-      border: agentLite ? '1px solid #e4dfd8' : '1px solid rgba(255,255,255,0.08)',
-      borderRadius: '12px',
-      padding: '16px',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '10px',
-      minHeight: '118px',
-   };
-   const modalGridStyle: React.CSSProperties = {
-      display: 'grid',
-      gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
-      gap: '14px',
-      paddingRight: '6px',
-   };
-   const modalButtonStyle: React.CSSProperties = {
-      border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.10)',
-      background: agentLite ? '#ffffff' : 'rgba(255,255,255,0.045)',
-      color: modalTextColor,
-      borderRadius: '9px',
-      padding: '8px 10px',
-      fontWeight: 800,
-      fontSize: '0.72rem',
-      cursor: 'pointer',
-   };
-   const modalCardActionsStyle: React.CSSProperties = {
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'flex-end',
-      gap: '7px',
-      flexShrink: 0,
-      flexWrap: 'wrap',
-   };
-   const modalIconButtonStyle = (tone: 'neutral' | 'blue' | 'red' = 'neutral'): React.CSSProperties => ({
-      width: '30px',
-      height: '30px',
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: 0,
-      background: tone === 'blue'
-         ? 'rgba(59,130,246,0.10)'
-         : tone === 'red'
-            ? 'rgba(239,68,68,0.08)'
-            : modalButtonStyle.background,
-      border: tone === 'blue'
-         ? '1px solid rgba(59,130,246,0.25)'
-         : tone === 'red'
-            ? '1px solid rgba(239,68,68,0.18)'
-            : modalButtonStyle.border,
-      color: tone === 'blue' ? 'var(--accent-blue)' : tone === 'red' ? '#f87171' : modalButtonStyle.color,
-      borderRadius: '8px',
-      cursor: 'pointer',
-   });
-   const modalVersionBadgeStyle: React.CSSProperties = {
-      width: '30px',
-      height: '30px',
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      fontSize: '0.68rem',
-      fontWeight: 900,
-      color: '#b8c7ff',
-      background: 'rgba(59,130,246,0.10)',
-      border: '1px solid rgba(59,130,246,0.22)',
-      borderRadius: '8px',
-      whiteSpace: 'nowrap',
-   };
-   const configDrawerOverlayStyle: React.CSSProperties = {
-      position: 'absolute',
-      top: 0,
-      left: 0,
-      width: '100%',
-      height: '100%',
-      zIndex: 9100,
-      display: 'flex',
-      justifyContent: 'flex-end',
-      alignItems: 'stretch',
-      padding: 0,
-      background: agentLite ? 'rgba(15, 23, 42, 0.15)' : 'rgba(0, 0, 0, 0.45)',
-      backdropFilter: 'blur(5px)',
-      WebkitBackdropFilter: 'blur(5px)',
-      borderRadius: '24px',
-      pointerEvents: 'auto',
-   };
-   const configDrawerStyle: React.CSSProperties = {
-      width: '460px',
-      maxWidth: 'calc(100% - 60px)',
-      height: '100%',
-      maxHeight: '100%',
-      overflow: 'hidden',
-      borderRadius: '0 24px 24px 0',
-      padding: 0,
-      borderLeft: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.08)',
-      background: agentLite ? '#ffffff' : '#0d0d11',
-      boxShadow: '-10px 0 40px rgba(0,0,0,0.3)',
-      animation: 'config-drawer-in 220ms cubic-bezier(0.16, 1, 0.3, 1)',
-      pointerEvents: 'auto',
-   };
-   const modalInputStyle: React.CSSProperties = {
-      width: '100%',
-      height: '38px',
-      border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.10)',
-      background: agentLite ? '#ffffff' : 'rgba(0,0,0,0.22)',
-      color: modalTextColor,
-      borderRadius: '9px',
-      padding: '0 12px',
-      outline: 'none',
-      fontWeight: 700,
-   };
-   const getModalInputStyle = (disabled?: boolean): React.CSSProperties => ({
-      ...modalInputStyle,
-      border: disabled
-         ? (agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.05)')
-         : modalInputStyle.border,
-      background: disabled
-         ? (agentLite ? '#f1f5f9' : 'rgba(0,0,0,0.35)')
-         : modalInputStyle.background,
-      color: disabled
-         ? (agentLite ? '#94a3b8' : '#55555d')
-         : modalInputStyle.color,
-      cursor: disabled ? 'not-allowed' : 'text',
-      opacity: disabled ? 0.75 : 1,
-   });
-   const renderSettingsHeader = (title: string, subtitle: string, action?: React.ReactNode) => (
-      <div style={{
-         display: 'flex',
-         justifyContent: 'space-between',
-         alignItems: 'flex-start',
-         gap: '16px',
-         marginBottom: '16px',
-         padding: '0 44px 10px 0',
-         position: 'sticky',
-         top: 0,
-         zIndex: 4,
-         background: agentLite ? '#ffffff' : '#0d0d0d',
-      }}>
-         <div>
-            <h2 style={{ fontSize: '1.55rem', fontWeight: 900, color: modalTextColor, margin: '0 0 8px' }}>{title}</h2>
-            <p style={{ color: modalMutedColor, margin: 0, lineHeight: 1.5, fontSize: '0.84rem' }}>{subtitle}</p>
-         </div>
-         {action}
-      </div>
-   );
-   const settingsBulkOn = (tab: string) => (
-      tab === 'mcp' ? allFilteredMcpOn
-      : tab === 'skills' ? allFilteredSkillsOn
-      : tab === 'tools' ? allFilteredToolsOn
-      : false
-   );
-   const renderSettingsSearch = (
-      value: string,
-      setValue: (value: string) => void,
-      placeholder: string,
-      tab?: 'mcp' | 'skills' | 'tools',
-   ) => (
-      <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '16px' }}>
-         <div style={{ position: 'relative', flex: 1 }}>
-            <Search size={15} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: modalMutedColor }} />
-            <input value={value} onChange={(event) => setValue(event.target.value)} placeholder={placeholder} style={{ ...modalInputStyle, paddingLeft: '36px' }} />
-         </div>
-         {tab && (
-            <button
-               disabled={bulkUpdating}
-               onClick={() => {
-                  const targetActive = !settingsBulkOn(tab);
-                  if (tab === 'mcp') bulkToggleMcp(filteredMcpServers, targetActive);
-                  if (tab === 'skills') bulkToggleAssets('skills', filteredSkills, targetActive);
-                  if (tab === 'tools') bulkToggleAssets('tools', filteredTools, targetActive);
-               }}
-               style={{ ...modalButtonStyle, minWidth: '92px', opacity: bulkUpdating ? 0.55 : 1 }}
-            >
-               {bulkUpdating ? 'Updating' : settingsBulkOn(tab) ? 'All On' : 'All Off'}
-            </button>
-         )}
-      </div>
-   );
-   const renderAssetSettingsCards = (kind: 'skills' | 'tools') => {
-      const items = kind === 'skills' ? filteredSkills : filteredTools;
-      return (
-         <div style={modalGridStyle}>
-            {items.map((item: any) => (
-               <div key={item.name} style={modalCardStyle}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'flex-start' }}>
-                     <strong style={{ color: modalTextColor, fontSize: '0.98rem', overflowWrap: 'anywhere' }}>{formatCardName(item.name)}</strong>
-                     <div style={modalCardActionsStyle}>
-                        <span title="Version" style={modalVersionBadgeStyle}>{cardVersion(item)}</span>
-                        <button title="Configure" style={modalIconButtonStyle('blue')} onClick={() => configureAsset(kind, item)}><Settings2 size={13} /></button>
-                        <button title={item.active === false ? 'Off - click to turn on' : 'On - click to turn off'} style={powerButtonStyle(item.active !== false)} onClick={() => toggleAsset(kind, item.name, item.active, item.description, item.config)}><Power size={13} /></button>
-                        <button title="Delete" style={modalIconButtonStyle('red')} onClick={() => deleteAsset(kind, item.name)}><Trash2 size={13} /></button>
-                     </div>
-                  </div>
-                  <p style={{ color: modalMutedColor, lineHeight: 1.45, fontSize: '0.76rem', margin: 0 }}>{cleanAssetDescription(item.description, item.name)}</p>
-               </div>
-            ))}
-            {items.length === 0 && <div style={modalCardStyle}>No {kind} match this search.</div>}
-         </div>
-      );
-   };
-   const renderMcpSettings = () => (
-      <>
-         {renderSettingsHeader('MCP Servers', `${filteredMcpServers.length} shown / ${state?.mcp?.total || state?.mcp?.servers?.length || 0} configured.`, (
-            <button style={modalButtonStyle} onClick={openAddMcpPanel}>+ Add MCP</button>
-         ))}
-         {renderSettingsSearch(mcpSearch, setMcpSearch, 'Search MCP servers...', 'mcp')}
-         <div style={modalGridStyle}>
-            {filteredMcpServers.map((srv: any) => (
-               <div key={srv.name} style={modalCardStyle}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'flex-start' }}>
-                     <strong style={{ color: modalTextColor, overflowWrap: 'anywhere' }}>{formatCardName(srv.name)}</strong>
-                     <div style={modalCardActionsStyle}>
-                        <span title="Version" style={modalVersionBadgeStyle}>{cardVersion(srv)}</span>
-                        <button title="Configure MCP" style={modalIconButtonStyle('blue')} onClick={() => configureMcp(srv)}><Settings2 size={13} /></button>
-                        <button title={srv.active === false ? 'Off - click to turn on' : 'On - click to turn off'} style={powerButtonStyle(srv.active !== false)} onClick={() => toggleMcp(srv)}><Power size={13} /></button>
-                        <button title="Delete" style={modalIconButtonStyle('red')} onClick={() => deleteMcp(srv.name)}><Trash2 size={13} /></button>
-                     </div>
-                  </div>
-                  <p style={{ color: modalMutedColor, fontSize: '0.76rem', lineHeight: 1.45, margin: 0 }}>{cleanAssetDescription(srv.description || srv.command, srv.name)}</p>
-               </div>
-            ))}
-         </div>
-      </>
-   );
-   const renderProviderSettings = () => (
-      <>
-         {renderSettingsHeader('LLM Providers', `${state?.provider_instances?.length || 0} routes across ${state?.providers?.length || 0} providers.`, (
-            <button style={modalButtonStyle} onClick={addProvider}>+ Add Provider</button>
-         ))}
-         <div style={modalGridStyle}>
-            {(state?.providers || []).map((provider: any) => {
-               const routes = state?.provider_instances?.filter(route => route.parent === provider.name) || [];
-               return (
-                  <div key={provider.name} style={modalCardStyle}>
-                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'flex-start' }}>
-                        <strong style={{ color: modalTextColor, overflowWrap: 'anywhere' }}>{formatProviderName(provider.name)}</strong>
-                        <div style={modalCardActionsStyle}>
-                           <span title="Saved routes" style={modalVersionBadgeStyle}>{routes.length}</span>
-                           <button
-                              title="Add route"
-                              style={modalIconButtonStyle('blue')}
-                              onClick={() => {
-                                 const routeId = nextProviderRouteId(provider.name, routes);
-                                 setSelectedProv(provider);
-                                 setProviderFamilyName(provider.name);
-                                 setInstanceName(routeId);
-                                 setEditingInstanceId(null);
-                                 setApiKey('');
-                                 setTargetModel(routes[0]?.model || '');
-                                 setProviderEndpoint(provider.endpoint || '');
-                                 setProviderCheck(null);
-                                 setShowProviderPanel(true);
-                              }}
-                           >
-                              <PlusCircle size={13} />
-                           </button>
-                        </div>
-                     </div>
-                     <p style={{ color: modalMutedColor, fontSize: '0.76rem', lineHeight: 1.45, margin: 0 }}>{cleanAssetDescription(provider.description || provider.endpoint, provider.name)}</p>
-                     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                        {routes.slice(0, 3).map(route => (
-                           <button
-                              key={route.id}
-                              style={{ ...modalButtonStyle, textAlign: 'left', display: 'flex', justifyContent: 'space-between', gap: '8px' }}
-                              onClick={() => {
-                                 setSelectedProv(provider);
-                                 setProviderFamilyName(provider.name);
-                                 setInstanceName(route.id);
-                                 setEditingInstanceId(route.id);
-                                 setApiKey(route.api_key || '');
-                                 setTargetModel(route.model || '');
-                                 setProviderEndpoint(route.endpoint || provider.endpoint || '');
-                                 setProviderCheck(null);
-                                 setShowProviderPanel(true);
-                              }}
-                           >
-                              <span>{route.id}</span>
-                              <span style={{ color: route.has_api_key ? '#4ade80' : '#f87171' }}>{route.has_api_key ? 'KEY' : 'NO KEY'}</span>
-                           </button>
-                        ))}
-                     </div>
-                  </div>
-               );
-            })}
-         </div>
-      </>
-   );
-   const renderPluginSettings = () => (
-      <>
-         {renderSettingsHeader('Plugins', `${filteredPlugins.length} shown / ${(state?.plugins || []).length} installed or available.`, (
-            <button style={modalButtonStyle} onClick={refreshPlugins} disabled={pluginBusy === 'install'}>Rescan</button>
-         ))}
-         <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px', marginBottom: '10px' }}>
-            <input value={pluginInstallUrl} onChange={(event) => setPluginInstallUrl(event.target.value)} placeholder="owner/repo, Git URL, or marketplace URL" style={modalInputStyle} />
-            <button style={modalButtonStyle} onClick={installPlugin} disabled={pluginBusy === 'install'}>{pluginBusy === 'install' ? 'Installing' : 'Install'}</button>
-         </div>
-         {renderSettingsSearch(pluginSearch, setPluginSearch, 'Search plugins...')}
-         <div style={modalGridStyle}>
-            {filteredPlugins.map((plugin: any) => (
-               <div key={plugin.id || plugin.name} style={modalCardStyle}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'flex-start' }}>
-                     <strong style={{ color: modalTextColor, overflowWrap: 'anywhere' }}>{formatCardName(plugin.name)}</strong>
-                     <div style={modalCardActionsStyle}>
-                        <span title="Version" style={modalVersionBadgeStyle}>{cardVersion(plugin)}</span>
-                        {plugin.installed === false ? (
-                           <button style={{ ...modalButtonStyle, height: '30px', padding: '0 10px', opacity: pluginBusy === plugin.id ? 0.55 : 1 }} onClick={() => installPluginFromCard(plugin)} disabled={pluginBusy === plugin.id}>Install</button>
-                        ) : (
-                        <>
-                           <button title="Configure plugin" style={{ ...modalIconButtonStyle('blue'), opacity: pluginBusy === plugin.id ? 0.55 : 1 }} onClick={() => configurePlugin(plugin)} disabled={pluginBusy === plugin.id}><Settings2 size={13} /></button>
-                           <button title={plugin.active === false ? 'Off - click to turn on' : 'On - click to turn off'} style={{ ...powerButtonStyle(plugin.active !== false), opacity: pluginBusy === plugin.id ? 0.55 : 1 }} onClick={() => togglePlugin(plugin)} disabled={pluginBusy === plugin.id}><Power size={13} /></button>
-                           <button title={plugin.disk_removable ? 'Delete plugin files' : 'Hide plugin'} style={{ ...modalIconButtonStyle('red'), opacity: pluginBusy === plugin.id ? 0.55 : 1 }} onClick={() => removePlugin(plugin)} disabled={pluginBusy === plugin.id}><Trash2 size={13} /></button>
-                        </>
-                        )}
-                     </div>
-                  </div>
-                  <p style={{ color: modalMutedColor, fontSize: '0.76rem', lineHeight: 1.45, margin: 0 }}>{cleanAssetDescription(plugin.description, plugin.name)}</p>
-               </div>
-            ))}
-         </div>
-      </>
-   );
-   const modalSwitchStyle = (isOn: boolean): React.CSSProperties => ({
-      width: '42px',
-      height: '24px',
-      borderRadius: '999px',
-      border: isOn ? '1px solid rgba(34,197,94,0.35)' : agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.14)',
-      background: isOn ? 'rgba(34,197,94,0.18)' : agentLite ? '#e5e7eb' : 'rgba(255,255,255,0.08)',
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: isOn ? 'flex-end' : 'flex-start',
-      padding: '2px',
-      transition: 'all 0.18s ease',
-      flexShrink: 0,
-   });
-   const modalSwitchKnobStyle = (isOn: boolean): React.CSSProperties => ({
-      width: '18px',
-      height: '18px',
-      borderRadius: '999px',
-      background: isOn ? '#4ade80' : '#94a3b8',
-      boxShadow: '0 2px 8px rgba(0,0,0,0.24)',
-   });
-   const renderSwitchControl = (
-      label: string,
-      value: boolean,
-      onChange: (value: boolean) => void,
-      detail?: string,
-      tone: 'green' | 'red' | 'blue' = 'green',
-      compact = false,
-   ) => (
-      <button
-         type="button"
-         onClick={() => onChange(!value)}
-         style={{
-            ...modalCardStyle,
-            minHeight: compact ? '72px' : '88px',
-            padding: compact ? '12px 14px' : modalCardStyle.padding,
-            textAlign: 'left',
-            cursor: 'pointer',
-            border: value
-               ? tone === 'red' ? '1px solid rgba(248,113,113,0.30)' : tone === 'blue' ? '1px solid rgba(59,130,246,0.30)' : '1px solid rgba(34,197,94,0.30)'
-               : modalCardStyle.border,
-         }}
-      >
-         <span style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '14px' }}>
-            <span>
-               <strong style={{ color: modalTextColor, display: 'block', marginBottom: '4px' }}>{label}</strong>
-               {detail && <small style={{ color: modalMutedColor, lineHeight: 1.35 }}>{detail}</small>}
-            </span>
-            <span style={modalSwitchStyle(value)} aria-hidden="true"><span style={modalSwitchKnobStyle(value)} /></span>
-         </span>
-      </button>
-   );
-   const renderAppearanceSettings = () => (
-      <>
-         {renderSettingsHeader('Interface GUI', 'Tune the shell, brand, accent, avatars, and display mode.')}
-         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 1.2fr) minmax(260px, 0.8fr)', gap: '12px', alignItems: 'start' }}>
-            <div style={{ ...modalCardStyle, minHeight: 'auto', padding: '14px' }}>
-               <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center' }}>
-                  <strong style={{ color: modalTextColor }}>Display Mode</strong>
-                  <span style={{ color: 'var(--accent-blue)', fontWeight: 900, fontSize: '0.68rem', textTransform: 'uppercase' }}>{interfaceMode}</span>
-               </div>
-               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: '8px' }}>
-                  {['dark', 'light', 'grey', 'night', 'white'].map(mode => {
-                     const selected = interfaceMode === mode;
-                     return (
-                        <button
-                           key={mode}
-                           style={{
-                              ...modalButtonStyle,
-                              minHeight: '44px',
-                              padding: '7px 6px',
-                              color: selected ? '#ffffff' : modalTextColor,
-                              background: selected ? 'var(--accent-blue)' : modalButtonStyle.background,
-                              border: selected ? '1px solid var(--accent-blue)' : modalButtonStyle.border,
-                           }}
-                           onClick={() => setInterfaceMode(mode)}
-                        >
-                           {formatCardName(mode)}
-                        </button>
-                     );
-                  })}
-               </div>
-            </div>
-            <div style={{ ...modalCardStyle, minHeight: 'auto', padding: '14px' }}>
-               <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center' }}>
-                  <strong style={{ color: modalTextColor }}>Brand</strong>
-                  <span style={{ color: accentColor, fontWeight: 900, fontSize: '0.72rem', letterSpacing: '0.18em' }}>{brandMark || 'N'} {brandName || 'NEXUS'}</span>
-               </div>
-               <label style={{ color: modalMutedColor, fontSize: '0.7rem', fontWeight: 800 }}>
-                  Name
-                  <input value={brandName} onChange={(event) => setBrandName(event.target.value)} style={{ ...modalInputStyle, height: '34px', marginTop: '6px' }} aria-label="Brand name" />
-               </label>
-               <label style={{ color: modalMutedColor, fontSize: '0.7rem', fontWeight: 800 }}>
-                  Mark
-                  <input value={brandMark} onChange={(event) => setBrandMark(event.target.value)} style={{ ...modalInputStyle, height: '34px', marginTop: '6px' }} aria-label="Brand mark" />
-               </label>
-            </div>
-            <div style={{ ...modalCardStyle, minHeight: 'auto', padding: '14px' }}>
-               <strong style={{ color: modalTextColor }}>Accent</strong>
-               <div style={{ display: 'grid', gridTemplateColumns: '1fr 56px', gap: '10px', alignItems: 'center' }}>
-                  <input value={accentColor} onChange={(event) => setAccentColor(event.target.value)} style={{ ...modalInputStyle, height: '34px' }} aria-label="Accent hex" />
-                  <input type="color" value={accentColor} onChange={(event) => setAccentColor(event.target.value)} style={{ ...modalInputStyle, height: '38px', padding: '5px' }} aria-label="Accent color" />
-               </div>
-               <div style={{ height: '10px', borderRadius: '999px', background: accentColor, boxShadow: `0 0 18px ${accentColor}55` }} />
-            </div>
-            <div style={{ ...modalCardStyle, minHeight: 'auto', padding: '14px' }}>
-               <strong style={{ color: modalTextColor }}>Avatars</strong>
-               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                  <label style={{ color: modalMutedColor, fontSize: '0.7rem', fontWeight: 800 }}>
-                     Assistant
-                     <input value={assistantAvatar} onChange={(event) => setAssistantAvatar(event.target.value)} style={{ ...modalInputStyle, height: '34px', marginTop: '6px' }} aria-label="Assistant avatar" />
-                  </label>
-                  <label style={{ color: modalMutedColor, fontSize: '0.7rem', fontWeight: 800 }}>
-                     Operator
-                     <input value={userAvatar} onChange={(event) => setUserAvatar(event.target.value)} style={{ ...modalInputStyle, height: '34px', marginTop: '6px' }} aria-label="User avatar" />
-                  </label>
-               </div>
-            </div>
-            <div style={{ gridColumn: '1 / -1', display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '12px' }}>
-               {renderSwitchControl('Chat avatars', showChatAvatars, setShowChatAvatars, 'Show icons beside chat turns.', 'blue', true)}
-               {renderSwitchControl('Header logo', showLogoInHeader, setShowLogoInHeader, 'Keep brand in top shell.', 'blue', true)}
-               {renderSwitchControl('Sidebar mark', showLogoMark, setShowLogoMark, 'Show mark by wordmark.', 'blue', true)}
-            </div>
-         </div>
-      </>
-   );
-   const renderSecuritySettings = () => (
-      <>
-         {renderSettingsHeader('Security & Gates', 'Local safety switches for autonomous work and risky actions.')}
-         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '14px' }}>
-            {renderSwitchControl(
-               'Safety shield',
-               securityStates.shield,
-               (value) => setSecurityStates(prev => ({ ...prev, shield: value })),
-               'Risk scoring and local safeguards stay active for autonomous actions.',
-            )}
-            {renderSwitchControl(
-               'Command handshake',
-               securityStates.handshake,
-               (value) => setSecurityStates(prev => ({ ...prev, handshake: value })),
-               'Commands keep their safety gate before high-risk execution.',
-            )}
-            {renderSwitchControl(
-               'Emergency killswitch',
-               securityStates.killswitch,
-               (value) => setSecurityStates(prev => ({ ...prev, killswitch: value })),
-               'Stop autonomous execution immediately when enabled.',
-               'red',
-            )}
-            <div style={{ ...modalCardStyle, gridColumn: '1 / -1', minHeight: '96px' }}>
-               <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center' }}>
-                  <strong style={{ color: modalTextColor }}>Gate Status</strong>
-                  <span style={{
-                     color: securityStates.killswitch ? '#f87171' : '#4ade80',
-                     background: securityStates.killswitch ? 'rgba(248,113,113,0.12)' : 'rgba(34,197,94,0.12)',
-                     border: securityStates.killswitch ? '1px solid rgba(248,113,113,0.22)' : '1px solid rgba(34,197,94,0.22)',
-                     borderRadius: '999px',
-                     padding: '6px 10px',
-                     fontWeight: 900,
-                     fontSize: '0.68rem',
-                     textTransform: 'uppercase',
-                  }}>
-                     {securityStates.killswitch ? 'Stopped' : 'Operational'}
-                  </span>
-               </div>
-               <p style={{ color: modalMutedColor, margin: 0, lineHeight: 1.5, fontSize: '0.8rem' }}>
-                  {securityStates.killswitch
-                     ? 'Autonomous actions should remain paused while the emergency switch is enabled.'
-                     : 'Current gates allow autonomous work while preserving shield and command safeguards.'}
-               </p>
-            </div>
-         </div>
-      </>
-   );
-   const renderSettingsContent = () => {
-      if (settingsTab === 'appearance') return renderAppearanceSettings();
-      if (settingsTab === 'providers') return renderProviderSettings();
-      if (settingsTab === 'mcp') return renderMcpSettings();
-      if (settingsTab === 'skills') return (
-         <>
-            {renderSettingsHeader('Skills', `${filteredSkills.length} shown / ${state?.skills?.length || 0} available.`, <button style={modalButtonStyle} onClick={() => addAsset('skills')}>+ Add Skill</button>)}
-            {renderSettingsSearch(skillsSearch, setSkillsSearch, 'Search skills...', 'skills')}
-            {renderAssetSettingsCards('skills')}
-         </>
-      );
-      if (settingsTab === 'tools') return (
-         <>
-            {renderSettingsHeader('Tools', `${filteredTools.length} shown / ${state?.tools?.length || 0} available.`, <button style={modalButtonStyle} onClick={() => addAsset('tools')}>+ Add Tool</button>)}
-            {renderSettingsSearch(toolsSearch, setToolsSearch, 'Search tools...', 'tools')}
-            {renderAssetSettingsCards('tools')}
-         </>
-      );
-      if (settingsTab === 'plugins') return renderPluginSettings();
-      if (settingsTab === 'security') return renderSecuritySettings();
-      return null;
-   };
 
    return (
       <>
@@ -5082,7 +4387,7 @@ if __name__ == "__main__":
                   </div>
                ) : (
                   <div className="drawer-header">
-                     <span>{drawerType === 'health' ? 'NEXUS HEALTH' : drawerType === 'reminders' ? 'REMINDERS' : 'HIVE INTELLIGENCE'}</span>
+                     <span>{drawerType === 'health' ? 'NEXUS HEALTH' : drawerType === 'reminders' ? 'REMINDERS' : drawerType === 'files' ? 'WORKSPACE FILES' : drawerType === 'terminal' ? 'INTEGRATED TERMINAL' : 'HIVE INTELLIGENCE'}</span>
                      <X size={18} style={{ cursor: 'pointer' }} onClick={() => setDrawerType('none')} />
                   </div>
                )}
@@ -5132,17 +4437,24 @@ if __name__ == "__main__":
 
                   {drawerType === 'reminders' && (
                      <RemindersDrawer
-                        createReminder={createReminder}
-                        deleteReminder={deleteReminder}
+                        reminders={state?.reminders}
                         newReminderDue={newReminderDue}
                         newReminderText={newReminderText}
                         notificationPermission={notificationPermission}
                         nowSeconds={Date.now() / 1000}
-                        reminders={state.reminders}
+                        createReminder={createReminder}
+                        deleteReminder={deleteReminder}
                         requestReminderNotifications={requestReminderNotifications}
                         setNewReminderDue={setNewReminderDue}
                         setNewReminderText={setNewReminderText}
                      />
+                  )}
+
+                  {drawerType === 'files' && (
+                     <FilesDrawer />
+                  )}
+                  {drawerType === 'terminal' && (
+                     <TerminalDrawer />
                   )}
                </div>
             </div>
@@ -5677,57 +4989,59 @@ if __name__ == "__main__":
                        )}
 
                      <div className="messages-container" style={{
-                        flex: '1 1 auto',
+                        flex: messages.length === 0 ? '0 0 auto' : '1 1 auto',
                         overflowY: 'auto',
-                        padding: '24px 28px 24px',
+                        padding: messages.length === 0 ? '24px 28px 8px' : '24px 28px 24px',
                         display: 'flex',
                         flexDirection: 'column',
                         gap: '20px',
-                        minHeight: 0
+                        minHeight: messages.length === 0 ? 'auto' : 0
                      }}>
-{messages.length === 0 ? (
+                     {messages.length === 0 ? (
                         <div className="chat-welcome-screen" style={{
                            display: 'flex',
                            flexDirection: 'column',
                            alignItems: 'center',
-                           justifyContent: 'center',
-                           flex: '1 1 auto',
-                           minHeight: '100%',
+                           justifyContent: 'flex-start',
+                           flex: '0 0 auto',
+                           minHeight: 'auto',
                            textAlign: 'center',
-                           padding: '24px 20px',
+                           padding: '168px 20px 24px',
                            color: agentLite ? '#374151' : '#cbd5e1'
                         }}>
-                           {showLogoInHeader && (
-                              <div style={{
-                                 fontSize: '4rem',
-                                 marginBottom: '18px',
-                                 filter: 'drop-shadow(0 4px 24px rgba(59,130,246,0.18))',
-                                 animation: 'nexus-breathe 4s ease-in-out infinite'
-                              }}>
-                                 {brandMark}
-                              </div>
-                           )}
+                           <div style={{
+                              marginBottom: '16px',
+                              padding: '7px 12px',
+                              borderRadius: '999px',
+                              border: agentLite ? '1px solid #dbe1ea' : '1px solid #292c35',
+                              background: agentLite ? '#ffffff' : '#13151b',
+                              color: agentLite ? '#475569' : '#8b93a4',
+                              fontSize: '0.68rem',
+                              fontWeight: 800,
+                              letterSpacing: '0.16em',
+                              textTransform: 'uppercase'
+                           }}>
+                              Local agent workspace
+                           </div>
                            <h2 style={{
-                              fontSize: '2.2rem',
+                              fontSize: 'clamp(2.7rem, 6vw, 4rem)',
                               fontWeight: 900,
                               textTransform: 'uppercase',
-                              letterSpacing: '6px',
-                              marginBottom: '12px',
-                              background: 'linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)',
-                              WebkitBackgroundClip: 'text',
-                              WebkitTextFillColor: 'transparent',
-                              backgroundClip: 'text'
+                              letterSpacing: '0.16em',
+                              marginBottom: '14px',
+                              color: agentLite ? '#111827' : '#f8fafc',
+                              lineHeight: 0.94
                            }}>
                               {brandName}
                            </h2>
                            <p style={{
-                              fontSize: '0.95rem',
-                              maxWidth: '420px',
-                              lineHeight: '1.7',
+                              fontSize: '1.04rem',
+                              maxWidth: '620px',
+                              lineHeight: '1.8',
                               color: agentLite ? '#64748b' : '#94a3b8',
-                              margin: '0 auto 32px'
+                              margin: '0 auto 0'
                            }}>
-                              Autonomous agent kernel active. Type a command or request assistance below.
+                              Autonomous agent kernel active. Search the codebase, inspect providers, or start a new engineering task below.
                            </p>
                         </div>
                      ) : (
@@ -5735,167 +5049,37 @@ if __name__ == "__main__":
                            const isUser = m.role === 'user';
                            const msgEvents = getWorkEventsForMessage(i, i === latestAssistantIndex);
                            return (
-                              <div
+                              <MessageBubble
                                  key={i}
-                                 className={`message-row ${isUser ? 'user' : 'assistant'}`}
-                                 onMouseEnter={() => setHoveredMsgId(i)}
-                                 onMouseLeave={() => setHoveredMsgId(null)}
-                                 style={{
-                                    display: 'flex',
-                                    flexDirection: 'row',
-                                    alignItems: 'flex-start',
-                                    gap: '14px',
-                                    width: '100%',
-                                    alignSelf: 'flex-start',
-                                    animation: 'fadeIn 0.3s ease-out'
+                                 message={m}
+                                 index={i}
+                                 isUser={isUser}
+                                 showChatAvatars={showChatAvatars}
+                                 userAvatar={userAvatar}
+                                 assistantAvatar={assistantAvatar}
+                                 hoveredMsgId={hoveredMsgId}
+                                 setHoveredMsgId={setHoveredMsgId}
+                                 copiedMsgId={copiedMsgId}
+                                 setCopiedMsgId={setCopiedMsgId}
+                                 renderMessageMarkdown={renderMessageMarkdown}
+                                 cleanUserMessage={cleanUserMessage}
+                                 cleanAssistantText={cleanAssistantText}
+                                 msgEvents={msgEvents}
+                                 isStreaming={!isUser && Boolean(m.isStreaming)}
+                                 onWorkEventClick={openWorkEvent}
+                                 renderWorkActivityTimeline={renderWorkActivityTimeline}
+                                 onRegenerate={() => {
+                                    const lastUser = [...messages].reverse().find(x => x.role === 'user');
+                                    if (lastUser) {
+                                       setMessages(prev => prev.slice(0, -1));
+                                       void handleSend(lastUser.content);
+                                    }
                                  }}
-                              >
-                                 {showChatAvatars && (
-                                    <div className="avatar" style={{
-                                       width: '34px',
-                                       height: '34px',
-                                       borderRadius: '50%',
-                                       display: 'flex',
-                                       alignItems: 'center',
-                                       justifyContent: 'center',
-                                       fontSize: '1.25rem',
-                                       background: isUser ? 'var(--avatar-user-bg)' : 'var(--avatar-assistant-bg)',
-                                       border: '1px solid ' + (isUser ? 'var(--avatar-user-border)' : 'var(--avatar-assistant-border)'),
-                                       flexShrink: 0,
-                                       boxShadow: '0 2px 4px rgba(0,0,0,0.05)'
-                                    }}>
-                                       {isUser ? userAvatar : assistantAvatar}
-                                    </div>
-                                 )}
-
-                                 <div style={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minWidth: 0, alignItems: 'flex-start' }}>
-                                    <div className={`message-bubble ${isUser ? 'user-bubble' : 'assistant-bubble'}`} style={{
-                                       padding: '12px 18px',
-                                       borderRadius: '16px',
-                                       background: isUser ? 'var(--user-bubble-bg)' : 'var(--assistant-bubble-bg)',
-                                       border: '1px solid ' + (isUser ? 'var(--user-bubble-border)' : 'var(--assistant-bubble-border)'),
-                                       color: isUser ? 'var(--user-bubble-text)' : 'var(--assistant-bubble-text)',
-                                       width: 'fit-content',
-                                       maxWidth: '88%',
-                                       boxShadow: '0 1px 3px rgba(0,0,0,0.02)',
-                                       wordBreak: 'break-word',
-                                       fontSize: '0.96rem',
-                                       lineHeight: '1.6'
-                                    }}>
-                                       {isUser ? renderMessageMarkdown(cleanUserMessage(m.content), isUser) : renderMessageMarkdown(m.content, isUser)}
-                                    </div>
-
-                                    {!isUser && m.content && (
-                                       <div style={{
-                                          display: 'flex',
-                                          alignItems: 'center',
-                                          gap: '8px',
-                                          marginTop: '6px',
-                                          opacity: hoveredMsgId === i ? 0.8 : 0,
-                                          transition: 'opacity 0.2s ease',
-                                          minHeight: '20px'
-                                       }}>
-                                          <button
-                                             title="Copy"
-                                             onClick={() => { navigator.clipboard.writeText(cleanAssistantText(m.content)); setCopiedMsgId(i); setTimeout(() => setCopiedMsgId(null), 2000); }}
-                                             style={{ background: 'transparent', border: 'none', borderRadius: '4px', cursor: 'pointer', padding: '2px 6px', display: 'inline-flex', alignItems: 'center', color: copiedMsgId === i ? '#10b981' : '#888', transition: 'all 0.2s', outline: 'none' }}
-                                          >
-                                             {copiedMsgId === i ? (
-                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
-                                             ) : (
-                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-                                             )}
-                                          </button>
-                                          <button title="Good response" style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 4px', display: 'inline-flex', alignItems: 'center', color: '#888', outline: 'none' }} onMouseEnter={e => (e.currentTarget.style.color='#10b981')} onMouseLeave={e => (e.currentTarget.style.color='#888')}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 9V5a3 3 0 00-3-3l-4 9v11h11.28a2 2 0 002-1.7l1.38-9a2 2 0 00-2-2.3H14z"/><path d="M7 22H4a2 2 0 01-2-2v-7a2 2 0 012-2h3"/></svg></button>
-                                          <button title="Bad response" style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 4px', display: 'inline-flex', alignItems: 'center', color: '#888', outline: 'none' }} onMouseEnter={e => (e.currentTarget.style.color='#ef4444')} onMouseLeave={e => (e.currentTarget.style.color='#888')}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 15v4a3 3 0 003 3l4-9V2H5.72a2 2 0 00-2 1.7l-1.38 9a2 2 0 002 2.3H10z"/><path d="M17 2h2.67A2.31 2.31 0 0122 4v7a2.31 2.31 0 01-2.33 2H17"/></svg></button>
-                                          {!isStreaming && (
-                                             <button
-                                                title="Regenerate"
-                                                onClick={() => {
-                                                   const lastUser = [...messages].reverse().find(x => x.role === 'user');
-                                                   if (lastUser) {
-                                                      setMessages(prev => prev.slice(0, -1));
-                                                      setInputValue(lastUser.content);
-                                                      setTimeout(handleSend, 50);
-                                                   }
-                                                }}
-                                                style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 4px', display: 'inline-flex', alignItems: 'center', color: '#888', outline: 'none' }}
-                                                onMouseEnter={e => (e.currentTarget.style.color='#3b82f6')}
-                                                onMouseLeave={e => (e.currentTarget.style.color='#888')}
-                                             >
-                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
-                                             </button>
-                                          )}
-                                       </div>
-                                    )}
-
-                                    {isUser && m.content && (
-                                       <div style={{
-                                          display: 'flex',
-                                          alignItems: 'center',
-                                          gap: '8px',
-                                          marginTop: '6px',
-                                          opacity: hoveredMsgId === i ? 0.8 : 0,
-                                          transition: 'opacity 0.2s ease',
-                                          minHeight: '20px'
-                                       }}>
-                                          <button
-                                             title="Copy"
-                                             onClick={() => { navigator.clipboard.writeText(cleanUserMessage(m.content)); setCopiedMsgId(i); setTimeout(() => setCopiedMsgId(null), 2000); }}
-                                             style={{ background: 'transparent', border: 'none', borderRadius: '4px', cursor: 'pointer', padding: '2px 6px', display: 'inline-flex', alignItems: 'center', color: copiedMsgId === i ? '#10b981' : '#888', transition: 'all 0.2s', outline: 'none' }}
-                                          >
-                                             {copiedMsgId === i ? (
-                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
-                                             ) : (
-                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-                                             )}
-                                          </button>
-                                       </div>
-                                    )}
-
-                                    {!isUser && msgEvents.length > 0 && (
-                                       <div className="work-timeline-wrapper" style={{ marginTop: '14px', width: '100%', maxWidth: '760px' }}>
-                                          {renderWorkActivityTimeline(msgEvents)}
-                                       </div>
-                                    )}
-                                 </div>
-                              </div>
+                              />
                            );
                         })
                      )}
-                      {isStreaming && (
-                         <div style={{
-                            display: 'flex', flexDirection: 'row', alignItems: 'flex-start',
-                            gap: '14px', width: '100%', animation: 'msg-rise 0.28s ease both'
-                         }}>
-                            <div style={{
-                               width: '34px', height: '34px', borderRadius: '50%', flexShrink: 0,
-                               display: 'flex', alignItems: 'center', justifyContent: 'center',
-                               fontSize: '0.85rem', fontWeight: 800,
-                               background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.2)', color: '#10b981'
-                            }}>N</div>
-                            <div style={{ paddingTop: '4px' }}>
-                               <div style={{
-                                  display: 'flex', alignItems: 'center', gap: '8px',
-                                  padding: '10px 16px', borderRadius: '6px 18px 18px 18px',
-                                  background: agentLite ? '#ffffff' : 'rgba(255,255,255,0.03)',
-                                  border: '1px solid ' + (agentLite ? 'rgba(0,0,0,0.07)' : 'rgba(255,255,255,0.07)'),
-                                  boxShadow: '0 1px 4px rgba(0,0,0,0.04)'
-                               }}>
-                                  <span style={{ display: 'flex', gap: '5px', color: '#3b82f6' }}>
-                                     <span className="chat-typing-dot" />
-                                     <span className="chat-typing-dot" />
-                                     <span className="chat-typing-dot" />
-                                  </span>
-                                  {latestWorkActivity && (
-                                     <span style={{ fontSize: '0.75rem', color: agentLite ? '#6b7280' : '#9ca3af', fontStyle: 'italic' }}>
-                                        {getWorkActivityLabel(latestWorkActivity)}{getWorkActivityTarget(latestWorkActivity) ? ` \u2192 ${getWorkActivityTarget(latestWorkActivity).split("/").pop()}` : ""}
-                                     </span>
-                                  )}
-                               </div>
-                            </div>
-                         </div>
-                      )}
+
                       
                      <div ref={messagesEndRef} />
                   </div>
@@ -6023,210 +5207,64 @@ if __name__ == "__main__":
                         font-size: 0.9em;
                      }
                   `}</style>
-            <div className={`search-container composer-dock ${messages.length === 0 ? 'empty-composer' : ''}`}
-               onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-               onDragLeave={() => setIsDragging(false)}
-               onDrop={(e) => {
-                  e.preventDefault();
-                  setIsDragging(false);
-                  if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-                     setUploadedFiles(prev => [...prev, ...Array.from(e.dataTransfer.files)]);
-                  }
-               }}
-            >
-               <div className={`search-bar-wrap ${isDragging ? 'dragging' : ''}`} style={isDragging ? { border: '1px dashed var(--accent-blue)', background: 'rgba(59, 130, 246, 0.05)' } : {}}>
-                         {uploadedFiles.length > 0 && (
-                             <div style={{ display: 'flex', gap: '10px', padding: '15px 15px 0 15px', flexWrap: 'wrap' }}>
-                               {uploadedFiles.map((f, i) => (
-                                 <div key={i} style={{ background: 'rgba(255,255,255,0.1)', padding: '5px 10px', borderRadius: '8px', fontSize: '0.7rem', display: 'flex', alignItems: 'center', gap: '5px', color: '#fff' }}>
-                                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100px' }}>{f.name}</span>
-                                    <X size={12} style={{ cursor: 'pointer' }} onClick={() => setUploadedFiles(prev => prev.filter((_, idx) => idx !== i))} />
-                                 </div>
-                               ))}
-                             </div>
-                         )}
-
-                         {(screenSharing || screenShareError) && (
-                            <div className={`screen-share-status ${screenSharing ? 'active' : 'error'}`}>
-                               <Monitor size={14} />
-                               <span>{screenSharing ? 'Screen sharing active' : screenShareError}</span>
-                               {screenSharing && (
-                                  <button type="button" onClick={stopScreenShare}>Stop</button>
-                               )}
-                            </div>
-                         )}
-
-                         {(voiceListening || voiceError) && (
-                            <div className={`voice-status ${voiceListening ? 'active' : 'error'}`}>
-                               <Mic size={14} />
-                               <span>{voiceListening ? (voiceTranscript || 'Listening...') : voiceError}</span>
-                               {voiceListening && (
-                                  <button type="button" onClick={stopVoiceConversation}>Stop</button>
-                               )}
-                            </div>
-                         )}
-
-                        <div className="composer-main-row">
-                           <textarea
-                              ref={composerInputRef}
-                              className="main-input"
-                              placeholder={`Type to ${brandName.trim() || 'NEXUS'}...`}
-                              rows={1}
-                              value={inputValue}
-                              onChange={(e) => {
-                                 setInputValue(e.target.value);
-                                 e.target.style.height = 'auto';
-                                 e.target.style.height = e.target.scrollHeight + 'px';
-                              }}
-                              onKeyDown={(e) => {
-                                 if (e.key === 'Enter' && !e.shiftKey) {
-                                    e.preventDefault();
-                                    handleSend();
-                                    (e.target as any).style.height = 'auto';
-                                 }
-                              }}
-                              onPaste={(e) => {
-                                 if (e.clipboardData.files && e.clipboardData.files.length > 0) {
-                                    setUploadedFiles(prev => [...prev, ...Array.from(e.clipboardData.files)]);
-                                 }
-                              }}
-                              style={{ resize: 'none', overflowY: 'hidden', minHeight: '28px', maxHeight: '160px', lineHeight: '1.5' }}
-                           />
-                           <div
-                              className={`send-arrow ${(inputValue || uploadedFiles.length > 0) ? 'active' : ''}`}
-                              style={{ cursor: (inputValue || uploadedFiles.length > 0) ? 'pointer' : 'default' }}
-                              onClick={() => handleSend()}
-                           >
-                              <Send size={18} />
-                           </div>
-                        </div>
-
-                        <div className="input-footer">
-                           <div className="action-icons">
-                              <label className="icon-btn" style={{ cursor: 'pointer', color: '#888', transition: 'all 0.2s' }}>
-                                 <input type="file" multiple style={{ display: 'none' }} onChange={(e) => {
-                                    if (e.target.files && e.target.files.length > 0) {
-                                       setUploadedFiles(prev => [...prev, ...Array.from(e.target.files!)]);
-                                    }
-                                 }} />
-                                 <PlusCircle size={20} className="hover-white" />
-                              </label>
-                              <button
-                                 type="button"
-                                 className={`icon-btn voice-btn ${voiceListening ? 'voice-active' : ''}`}
-                                 title={voiceListening ? 'Stop listening' : 'Start voice conversation'}
-                                 aria-label={voiceListening ? 'Stop voice conversation' : 'Start voice conversation'}
-                                 onClick={startVoiceConversation}
-                              >
-                                 <Mic size={20} className="hover-white" />
-                              </button>
-                              <button
-                                 type="button"
-                                 className={`icon-btn screen-share-btn ${screenSharing ? 'screen-active' : ''}`}
-                                 title={screenSharing ? 'Screen share is active. Double-click to stop.' : 'Share entire screen'}
-                                 aria-label={screenSharing ? 'Screen share active' : 'Share entire screen'}
-                                 onClick={ensureScreenShare}
-                                 onDoubleClick={stopScreenShare}
-                              >
-                                 <Monitor size={20} className="hover-white" />
-                              </button>
-                              <div className="model-selector-wrap" style={{ position: 'relative' }} ref={modelMenuRef}>
-                               <div 
-                                  onClick={() => setShowModelMenu(!showModelMenu)}
-                                  className="model-selector hover-bright"
-                               >
-                                  <span style={{ opacity: selectedSessionProvider ? 1 : 0.5 }}>
-                                     {selectedSessionProvider || 'Select Model'}
-                                  </span>
-                                  <ChevronDown size={14} style={{ opacity: 0.4, transform: showModelMenu ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }} />
-                               </div>
-
-                               {showModelMenu && (
-                                  <div style={{
-                                     position: 'absolute',
-                                     bottom: 'calc(100% + 12px)',
-                                     left: 0,
-                                     width: '100%',
-                                     background: 'rgba(13, 13, 13, 0.98)',
-                                     backdropFilter: 'blur(20px)',
-                                     border: '1px solid rgba(255, 255, 255, 0.1)',
-                                     borderRadius: '14px',
-                                     padding: '6px',
-                                     zIndex: 9000,
-                                     boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.7)',
-                                     maxHeight: '280px',
-                                     overflowY: 'auto'
-                                  }} className="custom-scrollbar fade-in">
-                                     {state?.provider_instances?.length === 0 ? (
-                                        <div style={{ padding: '20px', fontSize: '0.7rem', color: '#444', textAlign: 'center', fontWeight: 800, letterSpacing: '1px' }}>
-                                           NO MODELS ACTIVE
-                                        </div>
-                                     ) : (
-                                        state?.provider_instances?.map((inst, idx) => (
-                                           <div 
-                                              key={idx}
-                                              onClick={() => {
-                                                 setSelectedSessionProvider(inst.id);
-                                                 setShowModelMenu(false);
-                                              }}
-                                              style={{
-                                                 padding: '10px 14px',
-                                                 borderRadius: '10px',
-                                                 fontSize: '0.8rem',
-                                                 cursor: 'pointer',
-                                                 transition: 'all 0.2s',
-                                                 marginBottom: '2px',
-                                                 background: selectedSessionProvider === inst.id ? 'rgba(59, 130, 246, 0.15)' : 'transparent',
-                                                 color: selectedSessionProvider === inst.id ? 'var(--accent-blue)' : '#999',
-                                                 fontWeight: selectedSessionProvider === inst.id ? 700 : 500
-                                              }}
-                                              className="dropdown-item-hover"
-                                           >
-                                              {inst.id}
-                                           </div>
-                                        ))
-                                     )}
-                                  </div>
-                               )}
-                            </div>
-                           </div>
-                        </div>
-                     </div>
-
-                     {messages.length === 0 && (
-                        <div className="empty-prompt-row">
-                           {[
-                              'Summarize this code',
-                              'Find bugs',
-                              'Run diagnostics',
-                              'Explain the project',
-                              'Review recent changes',
-                              'Search the codebase',
-                              'Improve the UI',
-                              'Write tests',
-                              'Check providers',
-                              'Plan next steps',
-                              'Refactor safely',
-                              'Open system report'
-                           ].map(prompt => (
-                              <button
-                                 key={prompt}
-                                 className="empty-prompt-chip"
-                                 onClick={() => setInputValue(prompt)}
-                              >
-                                 {prompt}
-                              </button>
-                           ))}
-                        </div>
-                     )}
-                  </div>
-               </div>
+            <ChatInput
+               messages={messages}
+               isDragging={isDragging}
+               setIsDragging={setIsDragging}
+               uploadedFiles={uploadedFiles}
+               setUploadedFiles={setUploadedFiles}
+               screenSharing={screenSharing}
+               screenShareError={screenShareError}
+               stopScreenShare={stopScreenShare}
+               ensureScreenShare={ensureScreenShare}
+               voiceListening={voiceListening}
+               voiceError={voiceError}
+               voiceTranscript={voiceTranscript}
+               stopVoiceConversation={stopVoiceConversation}
+               startVoiceConversation={startVoiceConversation}
+               composerInputRef={composerInputRef}
+               brandName={brandName}
+               inputValue={inputValue}
+               setInputValue={setInputValue}
+               handleSend={handleSend}
+               isStreaming={isStreaming}
+               stopCurrentTurn={stopCurrentTurn}
+               modelMenuRef={modelMenuRef}
+               showModelMenu={showModelMenu}
+               setShowModelMenu={setShowModelMenu}
+               selectedSessionProvider={selectedSessionProvider}
+               setSelectedSessionProvider={setSelectedSessionProvider}
+               state={state}
+            />
             </div>
-            ) : (
-               <div className="tab-view" style={{ padding: '80px 40px', maxWidth: '1200px', margin: '0 auto', width: '100%', height: 'auto', overflowY: 'auto', overflowX: 'hidden' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '30px', height: 'auto' }}>
-                     <h1 style={{ display: 'block', fontSize: '2.2rem', textTransform: 'uppercase', letterSpacing: '3px', fontWeight: 900, color: '#fff', margin: 0 }}>{activeTabTitle}</h1>
-                     {activeTab === 'mcp' && (
+         </div>
+            ) : null}
+
+            {showProviderPanel && (
+               <ProviderPanel
+                  name={providerFamilyName}
+                  endpoint={providerEndpoint}
+                  apiKey={apiKey}
+                  model={targetModel}
+                  instanceName={instanceName}
+                  editingInstanceId={editingInstanceId}
+                  providerCheck={providerCheck}
+                  onSave={saveProviderPanel}
+                  onClose={() => setShowProviderPanel(false)}
+                  onCheck={() => runProviderCheck('test')}
+                  setProviderEndpoint={setProviderEndpoint}
+                  setApiKey={setApiKey}
+                  setTargetModel={setTargetModel}
+                  setInstanceName={setInstanceName}
+               />
+            )}
+         </div>
+         <SettingsModal
+            renderExtraTabs={(tab) => (
+               <div style={{ padding: '0px', width: '100%', height: '100%' }}>
+
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', marginBottom: '30px', height: 'auto' }}>
+                     {tab === 'mcp' && (
                         <button
                            onClick={openAddMcpPanel}
                            style={{ background: 'rgba(59, 130, 246, 0.1)', border: '1px solid var(--accent-blue)', color: 'var(--accent-blue)', padding: '8px 16px', borderRadius: '8px', fontSize: '0.7rem', fontWeight: 900, cursor: 'pointer', letterSpacing: '1px' }}
@@ -6234,7 +5272,7 @@ if __name__ == "__main__":
                            + ADD MCP
                         </button>
                      )}
-                     {activeTab === 'skills' && (
+                     {tab === 'skills' && (
                         <button
                            onClick={() => addAsset('skills')}
                            style={{ background: 'rgba(59, 130, 246, 0.1)', border: '1px solid var(--accent-blue)', color: 'var(--accent-blue)', padding: '8px 16px', borderRadius: '8px', fontSize: '0.7rem', fontWeight: 900, cursor: 'pointer', letterSpacing: '1px' }}
@@ -6242,7 +5280,7 @@ if __name__ == "__main__":
                            + ADD SKILL
                         </button>
                      )}
-                     {activeTab === 'tools' && (
+                     {tab === 'tools' && (
                         <button
                            onClick={() => addAsset('tools')}
                            style={{ background: 'rgba(59, 130, 246, 0.1)', border: '1px solid var(--accent-blue)', color: 'var(--accent-blue)', padding: '8px 16px', borderRadius: '8px', fontSize: '0.7rem', fontWeight: 900, cursor: 'pointer', letterSpacing: '1px' }}
@@ -6250,7 +5288,7 @@ if __name__ == "__main__":
                            + ADD TOOL
                         </button>
                      )}
-                     {activeTab === 'providers' && (
+                     {tab === 'providers' && (
                         <button
                            onClick={addProvider}
                            style={{ background: 'rgba(59, 130, 246, 0.1)', border: '1px solid var(--accent-blue)', color: 'var(--accent-blue)', padding: '8px 16px', borderRadius: '8px', fontSize: '0.7rem', fontWeight: 900, cursor: 'pointer', letterSpacing: '1px' }}
@@ -6260,30 +5298,30 @@ if __name__ == "__main__":
                      )}
                   </div>
 
-                  {['mcp', 'skills', 'tools'].includes(activeTab) && (
+                  {['mcp', 'skills', 'tools'].includes(tab) && (
                      <div style={{ display: 'flex', gap: '12px', alignItems: 'center', marginBottom: '24px', flexWrap: 'wrap' }}>
                         <div style={{ position: 'relative', flex: '1 1 280px', maxWidth: '520px' }}>
                            <Search size={15} style={{ position: 'absolute', left: '14px', top: '50%', transform: 'translateY(-50%)', color: '#5f636d' }} />
                            <input
                               type="text"
-                              placeholder={`Search ${activeTab}...`}
-                              value={activeTab === 'mcp' ? mcpSearch : activeTab === 'skills' ? skillsSearch : toolsSearch}
+                              placeholder={`Search ${tab}...`}
+                              value={tab === 'mcp' ? mcpSearch : tab === 'skills' ? skillsSearch : toolsSearch}
                               onChange={(e) => {
-                                 if (activeTab === 'mcp') setMcpSearch(e.target.value);
-                                 if (activeTab === 'skills') setSkillsSearch(e.target.value);
-                                 if (activeTab === 'tools') setToolsSearch(e.target.value);
+                                 if (tab === 'mcp') setMcpSearch(e.target.value);
+                                 if (tab === 'skills') setSkillsSearch(e.target.value);
+                                 if (tab === 'tools') setToolsSearch(e.target.value);
                               }}
                               style={{ width: '100%', height: '40px', background: 'rgba(255,255,255,0.035)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '10px', padding: '0 14px 0 40px', color: '#fff', fontSize: '0.82rem', outline: 'none', fontWeight: 600 }}
                            />
                         </div>
                         <button
                            disabled={bulkUpdating}
-                           title={`Click to turn ${allFilteredCurrentOn ? 'off' : 'on'} all shown ${activeTab}`}
+                           title={`Click to turn ${allFilteredCurrentOn ? 'off' : 'on'} all shown ${tab}`}
                            onClick={() => {
                               const targetActive = !allFilteredCurrentOn;
-                              if (activeTab === 'mcp') bulkToggleMcp(filteredMcpServers, targetActive);
-                              if (activeTab === 'skills') bulkToggleAssets('skills', filteredSkills, targetActive);
-                              if (activeTab === 'tools') bulkToggleAssets('tools', filteredTools, targetActive);
+                              if (tab === 'mcp') bulkToggleMcp(filteredMcpServers, targetActive);
+                              if (tab === 'skills') bulkToggleAssets('skills', filteredSkills, targetActive);
+                              if (tab === 'tools') bulkToggleAssets('tools', filteredTools, targetActive);
                            }}
                            style={{ height: '40px', display: 'inline-flex', alignItems: 'center', gap: '9px', ...bulkPowerStyle, opacity: bulkUpdating ? 0.55 : 1, padding: '0 14px', borderRadius: '10px', fontSize: '0.68rem', fontWeight: 900, cursor: bulkUpdating ? 'wait' : 'pointer', letterSpacing: '1px', textTransform: 'uppercase' }}
                         >
@@ -6293,450 +5331,179 @@ if __name__ == "__main__":
                      </div>
                   )}
 
-                  {activeTab === 'skills' && (
-                     <div className="grid-list" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '25px' }}>
-                        {filteredSkills.map((s, i) => (
-                           <div key={i} className="asset-card" style={{ background: 'linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.015))', border: '1px solid rgba(255,255,255,0.075)', padding: '26px', borderRadius: '10px', display: 'flex', flexDirection: 'column', gap: '16px', minHeight: '210px', boxShadow: '0 18px 45px rgba(0,0,0,0.18)' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'flex-start' }}>
-                                 <div style={{ minWidth: 0, fontSize: '1.2rem', fontWeight: '800', color: '#fff', letterSpacing: '-0.5px', lineHeight: '1.15', overflowWrap: 'anywhere' }}>{formatCardName(s.name)}</div>
-                                 <div style={{ display: 'flex', alignItems: 'center', gap: '7px', flexShrink: 0 }}>
-                                    <span title="Version" style={{ width: '30px', height: '30px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.68rem', fontWeight: 900, color: '#b8c7ff', background: 'rgba(59,130,246,0.10)', border: '1px solid rgba(59,130,246,0.22)', borderRadius: '8px', whiteSpace: 'nowrap' }}>{cardVersion(s)}</span>
-                                    <button title="Configure summary" onClick={() => configureAsset('skills', s)} style={{ width: '30px', height: '30px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(59,130,246,0.10)', border: '1px solid rgba(59,130,246,0.25)', color: 'var(--accent-blue)', borderRadius: '8px', cursor: 'pointer' }}><Settings2 size={14} /></button>
-                                    <button title={s.active === false ? 'Off - click to turn on' : 'On - click to turn off'} onClick={() => toggleAsset('skills', s.name, s.active, s.description, s.config)} style={powerButtonStyle(s.active !== false)}><Power size={14} /></button>
-                                    <button title="Delete" onClick={() => deleteAsset('skills', s.name)} style={{ width: '30px', height: '30px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.18)', color: '#f87171', borderRadius: '8px', cursor: 'pointer' }}><Trash2 size={14} /></button>
-                                 </div>
-                              </div>
-                              <div style={{ fontSize: '0.86rem', color: '#8a8d96', lineHeight: '1.6', flex: 1, marginTop: '4px' }}>{cleanAssetDescription(s.description, s.name)}</div>
-                           </div>
-                        ))}
-                     </div>
-                  )}
-
-                  {activeTab === 'tools' && (
-                     <div className="grid-list" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '25px' }}>
-                        {filteredTools.map((t, i) => (
-                           <div key={i} className="asset-card" style={{ background: 'linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.015))', border: '1px solid rgba(255,255,255,0.075)', padding: '26px', borderRadius: '10px', display: 'flex', flexDirection: 'column', gap: '16px', minHeight: '210px', boxShadow: '0 18px 45px rgba(0,0,0,0.18)' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'flex-start' }}>
-                                 <div style={{ minWidth: 0, fontSize: '1.2rem', fontWeight: '800', color: '#fff', lineHeight: '1.15', overflowWrap: 'anywhere' }}>{formatCardName(t.name)}</div>
-                                 <div style={{ display: 'flex', alignItems: 'center', gap: '7px', flexShrink: 0 }}>
-                                    <span title="Version" style={{ width: '30px', height: '30px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.68rem', fontWeight: 900, color: '#b8c7ff', background: 'rgba(59,130,246,0.10)', border: '1px solid rgba(59,130,246,0.22)', borderRadius: '8px', whiteSpace: 'nowrap' }}>{cardVersion(t)}</span>
-                                    <button title="Configure summary" onClick={() => configureAsset('tools', t)} style={{ width: '30px', height: '30px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(59,130,246,0.10)', border: '1px solid rgba(59,130,246,0.25)', color: 'var(--accent-blue)', borderRadius: '8px', cursor: 'pointer' }}><Settings2 size={14} /></button>
-                                    <button title={t.active === false ? 'Off - click to turn on' : 'On - click to turn off'} onClick={() => toggleAsset('tools', t.name, t.active, t.description, t.config)} style={powerButtonStyle(t.active !== false)}><Power size={14} /></button>
-                                    <button title="Delete" onClick={() => deleteAsset('tools', t.name)} style={{ width: '30px', height: '30px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.18)', color: '#f87171', borderRadius: '8px', cursor: 'pointer' }}><Trash2 size={14} /></button>
-                                 </div>
-                              </div>
-                              <div style={{ fontSize: '0.86rem', color: '#8a8d96', lineHeight: '1.6', flex: 1, marginTop: '4px' }}>{cleanAssetDescription(t.description, t.name)}</div>
-                           </div>
-                        ))}
-                     </div>
-                  )}
-
-                  {activeTab === 'mcp' && (
-                     <div className="grid-list" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '25px' }}>
-                        {filteredMcpServers.map((srv: any, i: number) => (
-                           <div key={i} className="asset-card" style={{ background: 'linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.015))', border: '1px solid rgba(255,255,255,0.075)', padding: '26px', borderRadius: '10px', display: 'flex', flexDirection: 'column', gap: '16px', minHeight: '210px', boxShadow: '0 18px 45px rgba(0,0,0,0.18)' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'flex-start' }}>
-                                 <div style={{ minWidth: 0, fontSize: '1.2rem', fontWeight: '800', color: '#fff', letterSpacing: '-0.5px', lineHeight: '1.15', overflowWrap: 'anywhere' }}>{formatCardName(srv.name)}</div>
-                                 <div style={{ display: 'flex', alignItems: 'center', gap: '7px', flexShrink: 0 }}>
-                                    <span title="Version" style={{ width: '30px', height: '30px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.68rem', fontWeight: 900, color: '#b8c7ff', background: 'rgba(59,130,246,0.10)', border: '1px solid rgba(59,130,246,0.22)', borderRadius: '8px', whiteSpace: 'nowrap' }}>{cardVersion(srv)}</span>
-                                    <button title="Configure MCP" onClick={() => configureMcp(srv)} style={{ width: '30px', height: '30px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(59,130,246,0.10)', border: '1px solid rgba(59,130,246,0.25)', color: 'var(--accent-blue)', borderRadius: '8px', cursor: 'pointer' }}><Settings2 size={14} /></button>
-                                    <button title={srv.active === false ? 'Off - click to turn on' : 'On - click to turn off'} onClick={() => toggleMcp(srv)} style={powerButtonStyle(srv.active !== false)}><Power size={14} /></button>
-                                    <button title="Delete" onClick={() => deleteMcp(srv.name)} style={{ width: '30px', height: '30px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.18)', color: '#f87171', borderRadius: '8px', cursor: 'pointer' }}><Trash2 size={14} /></button>
-                                 </div>
-                              </div>
-                              <div style={{ fontSize: '0.86rem', color: '#8a8d96', lineHeight: '1.6', flex: 1, marginTop: '4px' }}>{cleanAssetDescription(srv.description, srv.name)}</div>
-                           </div>
-                        ))}
-                     </div>
-                  )}
-
-                  {activeTab === 'audit' && (
-                     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: '18px', alignItems: 'start' }}>
-                        <div className="asset-card" style={{ background: agentLite ? 'linear-gradient(180deg, #fbfaf8, #f5f3ef)' : 'linear-gradient(180deg, rgba(18,28,38,0.96), rgba(12,14,18,0.98))', border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(120,144,180,0.16)', padding: '22px', borderRadius: '8px', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: '20px', alignItems: 'start', boxShadow: '0 18px 55px rgba(0,0,0,0.06)' }}>
-                           <div style={{ minWidth: 0 }}>
-                              <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '14px' }}>
-                                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '7px', color: evolutionRefreshing ? '#facc15' : evolutionHasAuditData ? '#10b981' : '#ef4444', fontSize: '0.68rem', fontWeight: 900, letterSpacing: '1px', textTransform: 'uppercase' }}>
-                                    <span style={{ width: '7px', height: '7px', borderRadius: '999px', background: evolutionRefreshing ? '#facc15' : evolutionHasAuditData ? '#10b981' : '#ef4444' }} />
-                                    {evolutionRefreshing ? 'Refreshing Audit' : evolutionHasAuditData ? 'Audit Online' : 'No Audit Data'}
-                                 </span>
-                                 <span style={{ color: agentLite ? '#64748b' : '#7d8490', fontSize: '0.72rem', fontWeight: 750 }}>{evolutionUpdatedAt ? `updated ${evolutionUpdatedAt}` : 'using latest state snapshot'}</span>
-                              </div>
-                              <div style={{ color: agentLite ? '#1f2937' : '#fff', fontSize: '1.15rem', lineHeight: 1.35, fontWeight: 850, maxWidth: '720px' }}>
-                                 Real evolution status from roadmap audits, evidence ledger, mission replay, and tool economy.
-                              </div>
-                              <div style={{ marginTop: '18px', height: '8px', width: '100%', maxWidth: '720px', background: agentLite ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.06)', borderRadius: '999px', overflow: 'hidden', border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.07)' }}>
-                                 <div style={{ height: '100%', width: `${Math.min(100, Math.max(0, evolutionProgress))}%`, background: 'linear-gradient(90deg, #3b82f6, #22c55e)', borderRadius: '999px' }} />
-                              </div>
-                           </div>
-                           <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                              <button onClick={refreshEvolutionAudit} disabled={evolutionRefreshing} style={{ height: '36px', background: agentLite ? '#ffffff' : 'rgba(255,255,255,0.05)', border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.12)', color: agentLite ? '#4b5563' : '#e5e7eb', padding: '0 12px', borderRadius: '8px', fontSize: '0.66rem', fontWeight: 900, cursor: evolutionRefreshing ? 'wait' : 'pointer', letterSpacing: '0.8px', textTransform: 'uppercase' }}>{evolutionRefreshing ? 'Refreshing' : 'Refresh'}</button>
-                              <button onClick={() => runEvolutionControl('plan')} disabled={Boolean(evolutionWorking)} style={{ height: '36px', background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.30)', color: '#2563eb', padding: '0 12px', borderRadius: '8px', fontSize: '0.66rem', fontWeight: 900, cursor: evolutionWorking ? 'wait' : 'pointer', letterSpacing: '0.8px', textTransform: 'uppercase', opacity: evolutionWorking ? 0.65 : 1 }}>{evolutionWorking === 'plan' ? 'Planning' : 'Plan'}</button>
-                              <button onClick={() => runEvolutionControl('verify')} disabled={Boolean(evolutionWorking)} style={{ height: '36px', background: 'rgba(34,197,94,0.10)', border: '1px solid rgba(34,197,94,0.24)', color: '#16a34a', padding: '0 12px', borderRadius: '8px', fontSize: '0.66rem', fontWeight: 900, cursor: evolutionWorking ? 'wait' : 'pointer', letterSpacing: '0.8px', textTransform: 'uppercase', opacity: evolutionWorking ? 0.65 : 1 }}>{evolutionWorking === 'verify' ? 'Verifying' : 'Verify'}</button>
-                           </div>
-                        </div>
-
-                        {evolutionAction.kind !== 'idle' && (
-                           <div className="asset-card" style={{ background: agentLite ? '#fbfaf8' : 'rgba(255,255,255,0.024)', border: `1px solid ${evolutionAction.kind === 'error' ? '#fca5a5' : (agentLite ? '#cbd5e1' : 'rgba(59,130,246,0.16)')}`, borderRadius: '8px', padding: '18px', display: 'grid', gap: '12px' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center' }}>
-                                 <div style={{ color: agentLite ? '#1f2937' : '#fff', fontSize: '0.82rem', fontWeight: 900, letterSpacing: '1.2px', textTransform: 'uppercase' }}>
-                                    {evolutionAction.kind === 'plan' ? 'Real Evolution Plan' : evolutionAction.kind === 'verify' ? 'Real Verification Result' : 'Evolution Error'}
-                                 </div>
-                                 <button onClick={() => setEvolutionAction({ kind: 'idle', message: '' })} style={{ height: '28px', padding: '0 10px', borderRadius: '7px', border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.10)', background: agentLite ? '#ffffff' : 'rgba(255,255,255,0.04)', color: agentLite ? '#4b5563' : '#a8adb7', cursor: 'pointer', fontSize: '0.62rem', fontWeight: 900 }}>Clear</button>
-                              </div>
-                              <div style={{ color: evolutionAction.kind === 'error' ? '#f87171' : (agentLite ? '#4b5563' : '#a8adb7'), fontSize: '0.8rem', lineHeight: 1.55 }}>{evolutionAction.message}</div>
-                              {evolutionAction.data?.plan?.steps && (
-                                 <div style={{ display: 'grid', gap: '8px' }}>
-                                    {evolutionAction.data.plan.steps.slice(0, 5).map((step: any) => (
-                                       <div key={step.step} style={{ display: 'grid', gridTemplateColumns: '28px minmax(0, 1fr)', gap: '10px', padding: '10px', borderRadius: '8px', background: agentLite ? '#ffffff' : 'rgba(8,10,14,0.62)', border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.065)' }}>
-                                          <span style={{ color: '#2563eb', fontWeight: 900 }}>{step.step}</span>
-                                          <div>
-                                             <div style={{ color: agentLite ? '#1f2937' : '#fff', fontWeight: 850, fontSize: '0.8rem' }}>{step.title}</div>
-                                             <div style={{ color: agentLite ? '#64748b' : '#7f8794', fontSize: '0.7rem', marginTop: '4px' }}>{step.next_action}</div>
-                                          </div>
-                                       </div>
-                                    ))}
-                                    <code style={{ color: '#2563eb', fontSize: '0.68rem', overflowWrap: 'anywhere' }}>workspace/evolution_plan.json</code>
-                                 </div>
-                              )}
-                              {evolutionAction.data?.result?.checks && (
-                                 <div style={{ display: 'grid', gap: '8px' }}>
-                                    {evolutionAction.data.result.checks.map((check: any, idx: number) => (
-                                       <div key={idx} style={{ display: 'grid', gridTemplateColumns: '28px minmax(0, 1fr)', gap: '10px', padding: '10px', borderRadius: '8px', background: agentLite ? '#ffffff' : 'rgba(8,10,14,0.62)', border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.065)' }}>
-                                          <span style={{ color: check.status === 'pass' ? '#10b981' : '#ef4444', fontWeight: 900 }}>{check.status === 'pass' ? '✓' : '✗'}</span>
-                                          <div>
-                                             <div style={{ color: agentLite ? '#1f2937' : '#fff', fontWeight: 850, fontSize: '0.8rem' }}>{check.title}</div>
-                                             <div style={{ color: agentLite ? '#64748b' : '#7f8794', fontSize: '0.7rem', marginTop: '4px' }}>{check.message}</div>
-                                          </div>
-                                       </div>
-                                    ))}
-                                    <code style={{ color: '#2563eb', fontSize: '0.68rem', overflowWrap: 'anywhere' }}>{evolutionAction.data.result.roadmap_path} · {evolutionAction.data.result.evidence_record?.id}</code>
-                                 </div>
-                              )}
-                           </div>
-                        )}
-
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '12px' }}>
-                           {[
-                              ['Roadmap maturity', `${evolutionProgress}%`, `${evolutionCounts.done || 0}/${state.audit?.roadmap?.total || 0} complete`, '#10b981'],
-                              ['Open gaps', compactNumber((evolutionCounts.partial || 0) + (evolutionCounts.missing || 0)), `${evolutionCounts.missing || 0} missing`, '#ef4444'],
-                              ['Evidence records', compactNumber(state.audit?.evidence?.total || 0), `${evolutionEvidenceEntries.length || 0} statuses`, '#2563eb'],
-                              ['Graph signals', compactNumber((state.audit?.unified_graph?.nodes || 0) + (state.audit?.unified_graph?.edges || 0)), `${compactNumber(evolutionSourceTotal)} source items`, '#06b6d4'],
-                              ['Tool reliability', evolutionTools.length ? `${evolutionReliability}%` : 'No data', `${evolutionTools.length} tracked tools`, '#f59e0b']
-                           ].map(([label, value, detail, color]) => (
-                              <div key={label as string} className="asset-card" style={{ minHeight: '118px', background: agentLite ? '#fbfaf8' : 'rgba(255,255,255,0.026)', border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.075)', borderRadius: '8px', padding: '18px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-                                 <div style={{ color: agentLite ? '#64748b' : '#8d94a0', fontSize: '0.68rem', fontWeight: 900, letterSpacing: '1px', textTransform: 'uppercase' }}>{label}</div>
-                                 <div>
-                                    <div style={{ color: color as string, fontSize: '1.65rem', fontWeight: 900, lineHeight: 1 }}>{value as string}</div>
-                                    <div style={{ color: agentLite ? '#4b5563' : '#a8adb7', fontSize: '0.76rem', marginTop: '7px', fontWeight: 700 }}>{detail as string}</div>
-                                 </div>
-                              </div>
-                           ))}
-                        </div>
-
-                        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.45fr) minmax(300px, 0.75fr)', gap: '18px', alignItems: 'start' }}>
-                           <div className="asset-card" style={{ background: agentLite ? '#fbfaf8' : 'rgba(255,255,255,0.024)', border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.075)', borderRadius: '8px', padding: '20px' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center', marginBottom: '14px' }}>
-                                 <div style={{ fontSize: '0.72rem', color: agentLite ? '#64748b' : '#9aa2af', fontWeight: 900, letterSpacing: '1.5px', textTransform: 'uppercase' }}>Backlog With Proof</div>
-                                 <span style={{ color: agentLite ? '#4b5563' : '#6f7784', fontSize: '0.72rem', fontWeight: 800 }}>{evolutionNext.length} open</span>
-                              </div>
-                              <div style={{ display: 'grid', gap: '12px' }}>
-                                 {evolutionNext.slice(0, 7).map((item: any, i: number) => (
-                                    <button key={i} onClick={() => startEvolutionPrompt(`Work on this NEXUS evolution item: ${item.item}. Evidence: ${(item.evidence || []).join(', ')}. Remaining: ${(item.remaining || []).join('; ')}`)} style={{ width: '100%', textAlign: 'left', background: agentLite ? '#ffffff' : 'rgba(8,10,14,0.70)', border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.075)', borderRadius: '8px', padding: '15px', cursor: 'pointer' }}>
-                                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'flex-start' }}>
-                                          <div style={{ minWidth: 0 }}>
-                                             <div style={{ color: agentLite ? '#1f2937' : '#fff', fontSize: '0.9rem', fontWeight: 850, lineHeight: 1.35, overflowWrap: 'anywhere' }}>{item.item}</div>
-                                             <div style={{ color: agentLite ? '#64748b' : '#7f8794', fontSize: '0.72rem', marginTop: '6px', fontWeight: 750 }}>{item.phase || 'Roadmap'} · {(item.remaining || [])[0] || 'No remaining gap recorded.'}</div>
-                                          </div>
-                                          <span style={{ color: evolutionStatusColor(item.status), background: agentLite ? '#f1f5f9' : 'rgba(255,255,255,0.035)', border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.08)', borderRadius: '999px', padding: '4px 8px', fontSize: '0.58rem', fontWeight: 900, textTransform: 'uppercase', flexShrink: 0 }}>{item.status || 'unknown'}</span>
-                                       </div>
-                                       <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '10px' }}>
-                                          {(item.evidence || []).slice(0, 3).map((ev: string) => (
-                                             <span key={ev} style={{ color: '#2563eb', background: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.14)', borderRadius: '7px', padding: '4px 7px', fontSize: '0.64rem', fontWeight: 800, maxWidth: '100%', overflowWrap: 'anywhere' }}>{ev}</span>
-                                          ))}
-                                       </div>
-                                    </button>
-                                 ))}
-                                 {evolutionNext.length === 0 && (
-                                    <div style={{ color: agentLite ? '#64748b' : '#8a8d96', fontSize: '0.82rem', padding: '14px', border: agentLite ? '1px dashed #cbd5e1' : '1px dashed rgba(255,255,255,0.10)', borderRadius: '8px' }}>No unfinished roadmap items returned by the audit.</div>
-                                 )}
-                              </div>
-                           </div>
-
-                           <div style={{ display: 'grid', gap: '14px' }}>
-                              <div className="asset-card" style={{ background: agentLite ? '#fbfaf8' : 'rgba(255,255,255,0.024)', border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.075)', borderRadius: '8px', padding: '18px' }}>
-                                 <div style={{ fontSize: '0.72rem', color: agentLite ? '#64748b' : '#9aa2af', fontWeight: 900, letterSpacing: '1.5px', textTransform: 'uppercase', marginBottom: '14px' }}>Roadmap State</div>
-                                 {[
-                                    ['Done', evolutionCounts.done || 0, '#10b981'],
-                                    ['Partial', evolutionCounts.partial || 0, '#3b82f6'],
-                                    ['Missing', evolutionCounts.missing || 0, '#ef4444']
-                                 ].map(([label, value, color]) => (
-                                    <div key={label as string} style={{ display: 'grid', gridTemplateColumns: '72px 1fr 34px', gap: '10px', alignItems: 'center', marginBottom: '12px' }}>
-                                       <span style={{ color: agentLite ? '#4b5563' : '#b8bdc7', fontSize: '0.76rem', fontWeight: 800 }}>{label}</span>
-                                       <div style={{ height: '7px', background: agentLite ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.07)', borderRadius: '999px', overflow: 'hidden' }}>
-                                          <div style={{ height: '100%', width: `${Math.max(3, Math.round(((Number(value) || 0) / Math.max(1, state.audit?.roadmap?.total || 1)) * 100))}%`, background: color as string }} />
-                                       </div>
-                                       <span style={{ color: color as string, fontSize: '0.78rem', fontWeight: 900, textAlign: 'right' }}>{value as number}</span>
-                                    </div>
-                                 ))}
-                              </div>
-
-                              <div className="asset-card" style={{ background: agentLite ? '#fbfaf8' : 'rgba(255,255,255,0.024)', border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.075)', borderRadius: '8px', padding: '18px' }}>
-                                 <div style={{ fontSize: '0.72rem', color: agentLite ? '#64748b' : '#9aa2af', fontWeight: 900, letterSpacing: '1.5px', textTransform: 'uppercase', marginBottom: '14px' }}>Evidence Ledger</div>
-                                 {evolutionEvidenceEntries.map(([key, value]) => (
-                                    <div key={key} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', color: agentLite ? '#4b5563' : '#a8adb7', fontSize: '0.78rem', marginBottom: '10px' }}>
-                                       <span>{formatCardName(key)}</span>
-                                       <span style={{ color: key === 'supported' ? (agentLite ? '#16a34a' : '#10b981') : key === 'contradicted' ? (agentLite ? '#ef4444' : '#ef4444') : (agentLite ? '#1f2937' : '#fff'), fontWeight: 900 }}>{value as number}</span>
-                                    </div>
-                                 ))}
-                                 {evolutionEvidenceEntries.length === 0 && <div style={{ color: '#777', fontSize: '0.78rem' }}>No evidence ledger summary returned.</div>}
-                              </div>
-                           </div>
-                        </div>
-
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '18px' }}>
-                           <div className="asset-card" style={{ background: agentLite ? '#fbfaf8' : 'rgba(255,255,255,0.024)', border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.075)', borderRadius: '8px', padding: '20px' }}>
-                              <div style={{ fontSize: '0.72rem', color: agentLite ? '#64748b' : '#9aa2af', fontWeight: 900, letterSpacing: '1.5px', textTransform: 'uppercase', marginBottom: '16px' }}>Tool Economy</div>
-                              <div style={{ display: 'grid', gap: '13px' }}>
-                                 {evolutionTools.map((tool: any) => {
-                                    const rate = Math.round((tool.success_rate || 0) * 100);
-                                    return (
-                                       <div key={tool.tool}>
-                                          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto auto', gap: '10px', alignItems: 'center', fontSize: '0.74rem', marginBottom: '6px' }}>
-                                             <span style={{ color: agentLite ? '#1f2937' : '#e5e7eb', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 800 }}>{formatCardName(tool.tool)}</span>
-                                             <span style={{ color: agentLite ? '#64748b' : '#8d94a0', fontWeight: 800 }}>{compactNumber(tool.calls)} calls</span>
-                                             <span style={{ color: rate >= 90 ? (agentLite ? '#16a34a' : '#10b981') : rate >= 70 ? '#d97706' : (agentLite ? '#ef4444' : '#ef4444'), fontWeight: 900 }}>{rate}%</span>
-                                          </div>
-                                          <div style={{ height: '6px', background: agentLite ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.07)', borderRadius: '999px', overflow: 'hidden' }}>
-                                             <div style={{ width: `${Math.max(3, rate)}%`, height: '100%', background: rate >= 90 ? '#22c55e' : rate >= 70 ? '#f59e0b' : '#ef4444', borderRadius: '999px' }} />
-                                          </div>
-                                          <div style={{ color: agentLite ? '#64748b' : '#6f7784', fontSize: '0.66rem', marginTop: '5px' }}>{Math.round(tool.avg_latency_ms || 0)} ms avg · {tool.risk_hint || 'risk unknown'}</div>
-                                       </div>
-                                    );
-                                 })}
-                                 {evolutionTools.length === 0 && <div style={{ color: '#777', fontSize: '0.8rem' }}>No tool economy metrics recorded yet.</div>}
-                              </div>
-                           </div>
-
-                           <div className="asset-card" style={{ background: agentLite ? '#fbfaf8' : 'rgba(255,255,255,0.024)', border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.075)', borderRadius: '8px', padding: '20px' }}>
-                              <div style={{ fontSize: '0.72rem', color: agentLite ? '#64748b' : '#9aa2af', fontWeight: 900, letterSpacing: '1.5px', textTransform: 'uppercase', marginBottom: '16px' }}>Signal Sources</div>
-                              <div style={{ display: 'grid', gap: '13px' }}>
-                                 {evolutionSources.map(([key, value]) => {
-                                    const amount = Number(value) || 0;
-                                    return (
-                                       <div key={key}>
-                                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '0.75rem', marginBottom: '6px' }}>
-                                             <span style={{ color: agentLite ? '#1f2937' : '#e5e7eb', overflowWrap: 'anywhere', fontWeight: 800 }}>{formatCardName(key)}</span>
-                                             <span style={{ color: agentLite ? '#1f2937' : '#fff', fontWeight: 900 }}>{compactNumber(amount)}</span>
-                                          </div>
-                                          <div style={{ height: '6px', background: agentLite ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.07)', borderRadius: '999px', overflow: 'hidden' }}>
-                                             <div style={{ width: `${Math.max(3, Math.round((amount / evolutionMaxSource) * 100))}%`, height: '100%', background: '#3b82f6', borderRadius: '999px' }} />
-                                          </div>
-                                       </div>
-                                    );
-                                 })}
-                                 {evolutionSources.length === 0 && <div style={{ color: '#777', fontSize: '0.8rem' }}>No unified graph source counts returned.</div>}
-                              </div>
-                           </div>
-                        </div>
-
-                        <div className="asset-card" style={{ background: agentLite ? '#fbfaf8' : 'rgba(255,255,255,0.024)', border: agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.075)', borderRadius: '8px', padding: '20px' }}>
-                           <div style={{ fontSize: '0.72rem', color: agentLite ? '#64748b' : '#9aa2af', fontWeight: 900, letterSpacing: '1.5px', textTransform: 'uppercase', marginBottom: '12px' }}>Mission Replay</div>
-                           <div style={{ display: 'grid' }}>
-                              {evolutionEvents.map((event: any, i: number) => (
-                                 <div key={`${event.timestamp || i}-${event.event_type || 'event'}`} style={{ display: 'grid', gridTemplateColumns: '74px 150px minmax(0, 1fr)', gap: '14px', alignItems: 'center', fontSize: '0.75rem', color: agentLite ? '#4b5563' : '#8d94a0', borderTop: i === 0 ? 'none' : (agentLite ? '1px solid #cbd5e1' : '1px solid rgba(255,255,255,0.06)'), padding: '11px 0' }}>
-                                    <span style={{ color: agentLite ? '#64748b' : '#6f7784', fontWeight: 800 }}>{formatEventTime(event.timestamp)}</span>
-                                    <span style={{ color: agentLite ? '#1f2937' : '#fff', fontWeight: 850, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{formatCardName(event.event_type)}</span>
-                                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{event.data?.tool || event.data?.task || event.data?.note || event.mission_id || 'system signal'}</span>
-                                 </div>
-                              ))}
-                              {evolutionEvents.length === 0 && <div style={{ color: '#777', fontSize: '0.8rem', padding: '10px 0' }}>No mission replay events recorded.</div>}
-                           </div>
-                        </div>
-                     </div>
-                  )}
-
-                  {activeTab === 'config' && (
-                     <ConfigPanel
-                        configDirty={configDirty}
-                        configDraft={configDraft}
-                        configJsonText={configJsonText}
-                        configMode={configMode}
-                        configSearch={configSearch}
-                        configSection={configSection}
-                        configStatus={configStatus}
-                        filteredConfigSections={filteredConfigSections}
+                  {tab === 'skills' && (
+                     <SkillsTab
+                        filteredSkills={filteredSkills}
                         formatCardName={formatCardName}
-                        loadConfig={loadConfig}
-                        resetConfigDraft={() => {
-                           const reset = cloneConfig(configData || {});
-                           setConfigDraft(reset);
-                           setConfigJsonText(JSON.stringify(reset, null, 2));
-                           setConfigStatus({ kind: 'valid', message: 'Draft reset to last loaded config.' });
-                        }}
-                        saveConfigDraft={saveConfigDraft}
-                        selectedConfigValue={selectedConfigValue}
-                        setConfigDraft={setConfigDraft}
-                        setConfigJsonText={setConfigJsonText}
-                        setConfigMode={setConfigMode}
-                        setConfigSearch={setConfigSearch}
-                        setConfigSection={setConfigSection}
-                        setConfigStatus={setConfigStatus}
-                        updateConfigPath={updateConfigPath}
-                        validateConfigDraft={validateConfigDraft}
+                        cardVersion={cardVersion}
+                        configureAsset={configureAsset}
+                        toggleAsset={toggleAsset}
+                        deleteAsset={deleteAsset}
+                        powerButtonStyle={powerButtonStyle}
                      />
                   )}
 
-                  {activeTab === 'plugins' && (
-                     <div className="plugins-page">
-                        <div className="plugin-install-card">
-                           <div className="plugin-install-head">
-                              <div>
-                                 <h2>Install From Source</h2>
-                                 <p>Download GitHub or marketplace source into the local plugin library.</p>
-                              </div>
-                              <button onClick={refreshPlugins} disabled={pluginBusy === 'install'}><Activity size={14} /> Rescan</button>
-                           </div>
-                           <div className="plugin-install-row">
-                              <input
-                                 value={pluginInstallUrl}
-                                 onChange={(e) => setPluginInstallUrl(e.target.value)}
-                                 placeholder="owner/repo, Git URL, or marketplace source URL"
-                              />
-                              <button className="primary" onClick={installPlugin} disabled={pluginBusy === 'install'}>
-                                 {pluginBusy === 'install' ? 'Installing...' : 'Install'}
-                              </button>
-                           </div>
-                           <div className="plugin-flags">
-                              <label><input type="checkbox" checked={pluginForceInstall} onChange={(e) => setPluginForceInstall(e.target.checked)} /> Force reinstall</label>
-                              <label><input type="checkbox" checked={pluginEnableAfterInstall} onChange={(e) => setPluginEnableAfterInstall(e.target.checked)} /> Enable after install</label>
-                           </div>
-                           <div className={`plugin-message ${pluginStatus.kind}`}>{pluginStatus.message}</div>
-                        </div>
-
-                        <div className="plugin-list-head">
-                           <div>
-                              <h2>Plugin Bundles</h2>
-                              <p>{filteredPlugins.length} shown / {(state.plugins || []).length} installed or available.</p>
-                           </div>
-                           <div className="plugin-search">
-                              <Search size={15} />
-                              <input value={pluginSearch} onChange={(e) => setPluginSearch(e.target.value)} placeholder="Search plugins..." />
-                           </div>
-                        </div>
-
-                        <div className="plugin-grid">
-                           {filteredPlugins.map((plugin: any) => (
-                              <div key={plugin.id} className="asset-card plugin-card-unified">
-                                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'flex-start' }}>
-                                   <div style={{ minWidth: 0 }}>
-                                      <div className="plugin-title">{formatCardName(plugin.name)}</div>
-                                       <div className="plugin-subline">{plugin.installed === false ? 'Available plugin' : 'External plugin'}</div>
-                                    </div>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '7px', flexShrink: 0 }}>
-                                       <span title="Version" style={{ width: '30px', height: '30px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.68rem', fontWeight: 900, color: '#b8c7ff', background: 'rgba(59,130,246,0.10)', border: '1px solid rgba(59,130,246,0.22)', borderRadius: '8px', whiteSpace: 'nowrap' }}>
-                                          1
-                                       </span>
-                                       {plugin.installed === false ? (
-                                          <button title="Install plugin" onClick={() => installPluginFromCard(plugin)} disabled={pluginBusy === plugin.id} style={{ minWidth: '78px', height: '30px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '7px', padding: '0 10px', background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.28)', color: '#93c5fd', borderRadius: '8px', cursor: 'pointer', opacity: pluginBusy === plugin.id ? 0.55 : 1, fontSize: '0.66rem', fontWeight: 900, textTransform: 'uppercase' }}><PlusCircle size={14} /> Install</button>
-                                       ) : (
-                                          <>
-                                             <button title="Configure plugin" onClick={() => configurePlugin(plugin)} disabled={pluginBusy === plugin.id} style={{ width: '30px', height: '30px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(59,130,246,0.10)', border: '1px solid rgba(59,130,246,0.25)', color: 'var(--accent-blue)', borderRadius: '8px', cursor: 'pointer', opacity: pluginBusy === plugin.id ? 0.55 : 1 }}><Settings2 size={14} /></button>
-                                             <button title={plugin.active === false ? 'Off - click to turn on' : 'On - click to turn off'} onClick={() => togglePlugin(plugin)} disabled={pluginBusy === plugin.id} style={powerButtonStyle(plugin.active !== false)}><Power size={14} /></button>
-                                             <button title={plugin.disk_removable ? 'Delete plugin files' : 'Hide plugin'} onClick={() => removePlugin(plugin)} disabled={pluginBusy === plugin.id} style={{ width: '30px', height: '30px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.18)', color: '#f87171', borderRadius: '8px', cursor: 'pointer', opacity: pluginBusy === plugin.id ? 0.55 : 1 }}><Trash2 size={14} /></button>
-                                          </>
-                                       )}
-                                    </div>
-                                 </div>
-                                 <div className="plugin-summary">{cleanAssetDescription(plugin.description, plugin.name)}</div>
-                              </div>
-                           ))}
-                           {filteredPlugins.length === 0 && (
-                              <div className="config-empty big">
-                                 <Puzzle size={24} />
-                                 <b>No plugin bundles found</b>
-                                 <button onClick={refreshPlugins}>Rescan Plugins</button>
-                              </div>
-                           )}
-                        </div>
-                     </div>
+                  {tab === 'tools' && (
+                     <ToolsTab
+                        filteredTools={filteredTools}
+                        formatCardName={formatCardName}
+                        cardVersion={cardVersion}
+                        configureAsset={configureAsset}
+                        toggleAsset={toggleAsset}
+                        deleteAsset={deleteAsset}
+                        powerButtonStyle={powerButtonStyle}
+                     />
                   )}
 
-                  {activeTab === 'providers' && (
-                     <div className="grid-list" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '25px', alignItems: 'stretch' }}>
-                        {state.providers?.map((p, i) => {
-                           const instances = state.provider_instances?.filter(pi => pi.parent === p.name) || [];
+                  {tab === 'mcp' && (
+                     <McpTab
+                        filteredMcpServers={filteredMcpServers}
+                        formatCardName={formatCardName}
+                        cardVersion={cardVersion}
+                        configureMcp={configureMcp}
+                        toggleMcp={toggleMcp}
+                        deleteMcp={deleteMcp}
+                        powerButtonStyle={powerButtonStyle}
+                     />
+                  )}
 
-                           return (
-                              <div
-                                 key={i}
-                                 className="asset-card"
-                                 onClick={(e) => {
-                                    // If they clicked an instance box, let that edit flow handle it.
-                                    if ((e.target as any).closest('.instance-box')) return;
-                                    const firstRoute = instances[0];
-                                    setSelectedProv(p);
-                                    setProviderFamilyName(p.name);
-                                    setShowProviderPanel(true);
-                                    setProviderCheck(null);
-                                    setApiKey(firstRoute?.api_key || '');
-                                    setTargetModel(firstRoute?.model || '');
-                                    setProviderEndpoint(firstRoute?.endpoint || p.endpoint || '');
-                                    setInstanceName(firstRoute?.id || '');
-                                    setEditingInstanceId(firstRoute?.id || null);
-                                 }}
-                                 style={{ background: 'linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.015))', border: '1px solid rgba(255,255,255,0.075)', padding: '26px', borderRadius: '10px', cursor: 'pointer', transition: 'all 0.3s ease', display: 'flex', flexDirection: 'column', gap: '16px', minHeight: '210px', height: '100%', boxShadow: '0 18px 45px rgba(0,0,0,0.35)' }}
-                              >
-                                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                                    <b style={{ fontSize: '1rem', fontWeight: 700 }}>{formatProviderName(p.name)}</b>
-                                    <span style={{ fontSize: '0.65rem', letterSpacing: '1px', color: p.status === 'ok' ? '#4ade80' : '#f87171', textTransform: 'uppercase', fontWeight: 800 }}>{p.status || 'unknown'}</span>
-                                 </div>
-                                 <div style={{ fontSize: '0.75rem', color: '#94a3b8', lineHeight: 1.5 }}>
-                                    {instances.length > 0 ? (
-                                       <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px' }}>
-                                          {instances.map((inst: any) => (
-                                             <div key={inst.id} className="instance-box" onClick={(e) => { e.stopPropagation(); configureProviderRoute(inst, p); }} style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px', padding: '10px 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
-                                                <span style={{ fontSize: '0.7rem', fontWeight: 600, color: '#cbd5e1' }}>{inst.model || 'default'}</span>
-                                                <span style={{ fontSize: '0.6rem', color: inst.status === 'ok' ? '#86efac' : '#fca5a5' }}>{inst.status}</span>
-                                             </div>
-                                          ))}
-                                       </div>
-                                    ) : (
-                                       <span>No instances configured</span>
-                                    )}
-                                 </div>
-                                 <div style={{ marginTop: 'auto', fontSize: '0.68rem', color: '#64748b' }}>
-                                    Endpoint: {p.endpoint || 'default'}
-                                 </div>
-                              </div>
-                           )})}
-                        {state.providers?.length === 0 && (
-                           <div className="config-empty big">
-                              <Cpu size={24} />
-                              <b>No providers configured</b>
-                           </div>
-                        )}
-                     </div>
+                  {tab === 'audit' && (
+                     <AuditTab
+                        agentLite={agentLite}
+                        evolutionRefreshing={evolutionRefreshing}
+                        evolutionHasAuditData={evolutionHasAuditData}
+                        evolutionUpdatedAt={evolutionUpdatedAt}
+                        evolutionProgress={evolutionProgress}
+                        evolutionAction={evolutionAction}
+                        evolutionWorking={evolutionWorking}
+                        evolutionCounts={evolutionCounts}
+                        evolutionEvidenceEntries={evolutionEvidenceEntries}
+                        evolutionSourceTotal={evolutionSourceTotal}
+                        evolutionTools={evolutionTools}
+                        evolutionReliability={evolutionReliability}
+                        evolutionNext={evolutionNext}
+                        evolutionSources={evolutionSources}
+                        evolutionEvents={evolutionEvents}
+                        evolutionMaxSource={evolutionMaxSource}
+                        state={state}
+                        refreshEvolutionAudit={refreshEvolutionAudit}
+                        runEvolutionControl={runEvolutionControl}
+                        setEvolutionAction={setEvolutionAction}
+                        startEvolutionPrompt={startEvolutionPrompt}
+                        evolutionStatusColor={evolutionStatusColor}
+                        formatCardName={formatCardName}
+                        compactNumber={compactNumber}
+                        formatEventTime={formatEventTime}
+                     />
+                  )}
+
+                  {tab === 'config' && (
+                     <ConfigPanel
+                        {...{
+                           configDirty,
+                           configDraft,
+                           configJsonText,
+                           configMode,
+                           configSearch,
+                           configSection,
+                           configStatus,
+                           filteredConfigSections,
+                           formatCardName,
+                           loadConfig,
+                           resetConfigDraft: () => {
+                              const reset = cloneConfig(configData || {});
+                              setConfigDraft(reset);
+                              setConfigJsonText(JSON.stringify(reset, null, 2));
+                              setConfigStatus({ kind: 'valid', message: 'Draft reset to last loaded config.' });
+                           },
+                           saveConfigDraft,
+                           selectedConfigValue,
+                           setConfigDraft,
+                           setConfigJsonText,
+                           setConfigMode,
+                           setConfigSearch,
+                           setConfigSection,
+                           setConfigStatus,
+                           updateConfigPath,
+                           validateConfigDraft
+                        } as any}
+                     />
+                  )}
+
+                  {tab === 'plugins' && (
+                     <PluginsTab
+                        filteredPlugins={filteredPlugins}
+                        state={state}
+                        pluginBusy={pluginBusy}
+                        pluginInstallUrl={pluginInstallUrl}
+                        setPluginInstallUrl={setPluginInstallUrl}
+                        pluginForceInstall={pluginForceInstall}
+                        setPluginForceInstall={setPluginForceInstall}
+                        pluginEnableAfterInstall={pluginEnableAfterInstall}
+                        setPluginEnableAfterInstall={setPluginEnableAfterInstall}
+                        pluginStatus={pluginStatus}
+                        pluginSearch={pluginSearch}
+                        setPluginSearch={setPluginSearch}
+                        refreshPlugins={refreshPlugins}
+                        installPlugin={installPlugin}
+                        installPluginFromCard={installPluginFromCard}
+                        configurePlugin={configurePlugin}
+                        togglePlugin={togglePlugin}
+                        removePlugin={removePlugin}
+                        formatCardName={formatCardName}
+                        powerButtonStyle={powerButtonStyle}
+                     />
+                  )}
+
+                  {tab === 'providers' && (
+                     <ProvidersTab
+                        state={state}
+                        setSelectedProv={setSelectedProv}
+                        setProviderFamilyName={setProviderFamilyName}
+                        setShowProviderPanel={setShowProviderPanel}
+                        setProviderCheck={setProviderCheck}
+                        setApiKey={setApiKey}
+                        setTargetModel={setTargetModel}
+                        setProviderEndpoint={setProviderEndpoint}
+                        setInstanceName={setInstanceName}
+                        setEditingInstanceId={setEditingInstanceId}
+                        formatProviderName={formatProviderName}
+                        configureProviderRoute={configureProviderRoute}
+                     />
                   )}
                </div>
-
             )}
-
-            {showProviderPanel && (
-               <ConfigPanel
-                  kind="provider"
-                  name={providerFamilyName}
-                  endpoint={providerEndpoint}
-                  apiKey={apiKey}
-                  model={targetModel}
-                  instanceName={instanceName}
-                  editingInstanceId={editingInstanceId}
-                  providerCheck={providerCheck}
-                  onSave={saveProvider}
-                  onClose={() => setShowProviderPanel(false)}
-                  onCheck={() => checkProvider(providerFamilyName)}
-               />
-            )}
-         </div>
+            isOpen={settingsOpen}
+            onClose={() => setSettingsOpen(false)}
+            switchMainTab={(tab) => {
+               setActiveTab(tab);
+               setActiveActivityTab('settings');
+            }}
+            settingsTab={settingsTab}
+            setSettingsTab={setSettingsTab}
+            agentLite={agentLite}
+            interfaceMode={interfaceMode}
+            setInterfaceMode={setInterfaceMode}
+            brandName={brandName}
+            setBrandName={setBrandName}
+            brandMark={brandMark}
+            setBrandMark={setBrandMark}
+            accentColor={accentColor}
+            setAccentColor={setAccentColor}
+            assistantAvatar={assistantAvatar}
+            setAssistantAvatar={setAssistantAvatar}
+            userAvatar={userAvatar}
+            setUserAvatar={setUserAvatar}
+            showChatAvatars={showChatAvatars}
+            setShowChatAvatars={setShowChatAvatars}
+            showLogoInHeader={showLogoInHeader}
+            setShowLogoInHeader={setShowLogoInHeader}
+            showLogoMark={showLogoMark}
+            setShowLogoMark={setShowLogoMark}
+            securityStates={securityStates}
+            setSecurityStates={setSecurityStates}
+            formatCardName={formatCardName}
+         />
       </>
    );
 }

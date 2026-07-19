@@ -3,6 +3,7 @@ import os
 import sys
 from datetime import datetime
 
+
 class NexusLogger:
     """
     NEXUS SOVEREIGN LOGGING 1.0

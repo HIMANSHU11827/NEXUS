@@ -1,6 +1,6 @@
-# Shell
+# Shell (Legacy Rich Shell)
 
-NexusShell — interactive terminal with streaming responses, slash commands, session management, and system stats.
+NexusShell — legacy Rich-based interactive shell (not the Ink TUI). Provides streaming responses, slash commands, session management, and system stats.
 
 **Version:** 1.0.0
 
@@ -10,4 +10,4 @@ NexusShell — interactive terminal with streaming responses, slash commands, se
 ## Features
 - Colorized streaming response with markers
 - Task tracking and status bar
-- Session management shared across all four surfaces
+- Session management shared across all three interfaces

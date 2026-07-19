@@ -1,5 +1,7 @@
 # Ensemble Manager
 
+**Stub/Placeholder** — not yet implemented
+
 EnsembleManager — multi-strategy reasoning for improved decision making.
 
 **Version:** 1.0.0

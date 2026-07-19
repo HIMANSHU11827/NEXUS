@@ -1,9 +1,11 @@
-import os
 import asyncio
 import logging
+import os
 from typing import Optional
+
 from telebot.async_telebot import AsyncTeleBot
 from telebot.types import Message
+
 from gateway.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 
 logger = logging.getLogger(__name__)
@@ -14,9 +16,9 @@ class TelegramAdapter(BasePlatformAdapter):
     Uses telebot (AsyncTeleBot) to interface with the Telegram Bot API.
     """
     
-    def __init__(self, token: str):
+    def __init__(self, token: str = ""):
         super().__init__("telegram")
-        self.token = token
+        self.token = token or os.getenv("TELEGRAM_BOT_TOKEN", "") or os.getenv("TELEGRAM_TOKEN", "")
         self.bot: Optional[AsyncTeleBot] = None
 
     async def connect(self) -> bool:

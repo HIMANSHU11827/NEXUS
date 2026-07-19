@@ -1,22 +1,37 @@
 """
 Standalone HTTP API server for NEXUS AI.
-Designed for the Ink CLI and external clients.
+Designed for the GUI and external clients.
 No vision models, no dashboard bloat — just the chat API.
 """
 
 import asyncio
+import inspect
 import json
+import logging
 import os
 import re
+import threading
 import time
+import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
+logger = logging.getLogger(__name__)
+
 from dotenv import load_dotenv
+
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", ".env"))
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
+from nexus.events import CanonicalEvent
+from nexus.run_context import list_run_contexts, load_run_context
+from nexus.runtime import (
+    build_chat_request,
+    safe_session_id as runtime_safe_session_id,
+    session_file_path as runtime_session_file_path,
+)
 from orchestrators.loop import NexusLoop
 
 try:
@@ -28,14 +43,19 @@ _ROOT = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_ROOT)  # One level up from server/ to project root
 _LOOPS: Dict[str, NexusLoop] = {}
 _MAX_LOOPS = 20  # Prevent unbounded memory growth
-_SESSION_DIR = os.path.join(_ROOT, "logs", "sessions")
+_SESSION_DIR = os.path.join(_PROJECT_ROOT, "logs", "sessions")
+_WORK_EVENTS_DIR = os.path.join(_PROJECT_ROOT, "workspace", "work_events")
+_WORK_EVENT_SEQUENCE_LOCK = threading.Lock()
+_WORK_EVENT_SEQUENCES: Dict[str, int] = {}
 _TASKS_PATH = os.path.join(_ROOT, "logs", "tasks.json")
-_CONFIG_PATH = os.path.join(_PROJECT_ROOT, "configs", "nexus_config.yaml")
+_CONFIG_PATH = os.path.join(_PROJECT_ROOT, "config", "nexus_config.yaml")
 _CLAUDE_SETTINGS_PATH = os.path.join(_PROJECT_ROOT, ".claude", "settings.json")
 _RUNTIME_SETTINGS = {
     "model": "",
     "provider": "",
     "mode": "auto",
+    "sandbox_tier": "normal",
+    "permission_allowlist": [],
     "agent": "",
     "goal": "",
     "additional_dirs": [],
@@ -55,7 +75,211 @@ _VOICE_MODE = "off"
 _VOICE_STARTED_AT = 0.0
 _VOICE_LOG_PATH = os.path.join(_PROJECT_ROOT, "logs", "voice-runtime.log")
 
-app = FastAPI(title="NEXUS AI API", version="2.1.0")
+@asynccontextmanager
+async def _app_lifespan(_app: FastAPI):
+    """Join response-detached learning tasks before asyncio tears down."""
+    yield
+    await _drain_loop_finalizers(tuple(_LOOPS.values()))
+
+
+async def _drain_loop_finalizers(loops) -> None:
+    """Await async loop closers while tolerating synchronous test/legacy doubles."""
+    pending = []
+    for loop in loops:
+        close = getattr(loop, "aclose", None)
+        if not callable(close):
+            continue
+        result = close()
+        if inspect.isawaitable(result):
+            pending.append(result)
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+async def _close_loop(loop: NexusLoop) -> None:
+    """Close an evicted loop without assuming every legacy loop is async."""
+    close = getattr(loop, "aclose", None)
+    if not callable(close):
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
+
+
+def _log_close_failure(task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except Exception:
+        logger.warning("Failed to close evicted loop", exc_info=True)
+
+
+def _schedule_loop_close(loop: NexusLoop) -> None:
+    """Schedule async cleanup from async routes, with a sync-route fallback."""
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            asyncio.run(_close_loop(loop))
+        except Exception:
+            logger.warning("Failed to close evicted loop", exc_info=True)
+        return
+
+    task = running_loop.create_task(_close_loop(loop))
+    task.add_done_callback(_log_close_failure)
+
+
+app = FastAPI(title="NEXUS AI API", version="2.1.0", lifespan=_app_lifespan)
+
+# ── Session middleware (signed cookies) ─────────────────────────────
+from starlette.middleware.sessions import SessionMiddleware
+
+from authentication import _SESSION_SECRET as _session_secret
+
+app.add_middleware(SessionMiddleware, secret_key=_session_secret, max_age=86400)
+
+# ── CORS middleware ─────────────────────────────────────────────────
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Auth middleware ─────────────────────────────────────────────────
+from authentication import AuthUser, check_auth
+
+_WINDOWS_RESERVED = frozenset({"con", "prn", "aux", "nul", "com1", "com2", "com3", "com4",
+    "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
+    "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"})
+
+_AUTH_SKIP_PATHS = frozenset({
+    "/api/health", "/api/files/list", "/api/auth/login", "/api/auth/callback",
+    "/api/auth/token", "/api/logout", "/api/auth/status",
+    "/api/state", "/api/version",
+    "/docs", "/openapi.json", "/redoc",
+    "/api/features",
+})
+
+if os.environ.get("NEXUS_PUBLIC_OPENAI_COMPAT", "false").lower() == "true":
+    _AUTH_SKIP_PATHS = frozenset((*_AUTH_SKIP_PATHS, "/v1/models", "/v1/chat/completions"))
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if path in _AUTH_SKIP_PATHS or path.startswith(("/docs/", "/openapi/", "/redoc/")):
+        return await call_next(request)
+
+    user = check_auth(request)
+    if user is None:
+        return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+
+    request.state.user = user
+    return await call_next(request)
+
+
+# ── Auth routes ─────────────────────────────────────────────────────
+
+@app.get("/api/auth/login")
+async def auth_login(provider: str = "token", redirect: str = ""):
+    """Initiate login.
+
+    - ``provider=token``: Returns auth status (use ``Authorization`` header).
+    - ``provider=google|github``: Redirects to OAuth provider.
+    """
+    if provider == "token":
+        return {"status": "ok", "message": "Use Authorization: Bearer <token> header"}
+
+    from authentication import OAUTH_PROVIDERS, get_oauth_authorize_url
+
+    oauth = OAUTH_PROVIDERS.get(provider)
+    if not oauth:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
+
+    base_redirect = redirect or f"{os.environ.get('NEXUS_API_BASE', 'http://127.0.0.1:8000')}/api/auth/callback"
+    redirect_uri = f"{base_redirect}?provider={provider}"
+    url, state = get_oauth_authorize_url(provider, redirect_uri)
+    return RedirectResponse(url=url)
+
+
+@app.get("/api/auth/callback")
+async def auth_callback(request: Request, code: str = "", state: str = "", provider: str = ""):
+    """OAuth callback handler — exchange code for user info."""
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="Missing code or state")
+
+    _provider = provider or (state.split(":", 1)[0] if ":" in state else "")
+    if not _provider or _provider not in ("google", "github"):
+        raise HTTPException(status_code=400, detail="Invalid provider")
+
+    base_redirect = f"{os.environ.get('NEXUS_API_BASE', 'http://127.0.0.1:8000')}/api/auth/callback"
+    redirect_uri = f"{base_redirect}?provider={_provider}"
+
+    from authentication import handle_oauth_callback
+    result = await handle_oauth_callback(_provider, code, state, redirect_uri)
+    if not result.success or not result.user:
+        raise HTTPException(status_code=401, detail=result.error)
+
+    request.session["user"] = result.user.to_dict()
+    return RedirectResponse(url=os.environ.get("NEXUS_DASHBOARD_URL", "http://127.0.0.1:5173"))
+
+
+@app.post("/api/auth/token")
+async def auth_token(request: Request):
+    """Exchange a token for a session cookie (for non-OAuth login).
+
+    Body: ``{"token": "..."}`` or use ``Authorization: Bearer <token>`` header.
+    """
+    from authentication import validate_dashboard_token
+
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    token = body.get("token", "") or request.headers.get("Authorization", "").replace("Bearer ", "")
+
+    if not token:
+        raise HTTPException(status_code=400, detail="Missing token")
+
+    if not validate_dashboard_token(token):
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user = AuthUser(provider="token", sub="dashboard", name="Token User")
+    request.session["user"] = user.to_dict()
+    return {"status": "ok", "user": user.to_dict()}
+
+
+@app.get("/api/auth/status")
+async def auth_status(request: Request):
+    """Return current auth status and user info."""
+
+    user_data = None
+    session = getattr(request, "session", None)
+    if session and "user" in session:
+        user_data = session["user"]
+
+    if not user_data:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            from authentication import validate_dashboard_token
+            token = auth[7:]
+            if validate_dashboard_token(token):
+                user_data = {"provider": "token", "sub": "dashboard", "name": "Token User"}
+
+    return {
+        "authenticated": user_data is not None,
+        "user": user_data,
+        "token_configured": bool(os.environ.get("NEXUS_DASHBOARD_TOKEN", "")),
+        "oauth_providers": list(os.environ.get("NEXUS_GOOGLE_CLIENT_ID", "") and ["google"] or [])
+        + list(os.environ.get("NEXUS_GITHUB_CLIENT_ID", "") and ["github"] or []),
+    }
+
+
+@app.post("/api/logout")
+async def auth_logout(request: Request):
+    """Logout — clear the session."""
+    request.session.clear()
+    return {"status": "ok", "message": "Logged out"}
 
 
 @app.exception_handler(Exception)
@@ -67,17 +291,6 @@ async def global_exception_handler(request: Request, exc: Exception):
         content={"detail": f"Internal server error: {str(exc)}" if str(exc) else "Internal server error"}
     )
 
-# Allow CORS for local GUI
-from fastapi.middleware.cors import CORSMiddleware
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 
 def _trim_loops():
     """Evict oldest loop sessions if over limit."""
@@ -86,25 +299,122 @@ def _trim_loops():
         keys = list(_LOOPS.keys())
         for k in keys[:len(keys) - _MAX_LOOPS]:
             try:
-                del _LOOPS[k]
+                evicted = _LOOPS.pop(k)
             except KeyError:
-                pass
+                logger.warning("server/__init__.py:255 suppressed error", exc_info=True)
+            else:
+                _schedule_loop_close(evicted)
 
 
 def safe_session_id(session_id: str) -> str:
-    raw = os.path.basename(str(session_id or "default")).replace(".json", "")
-    cleaned = re.sub(r"[^A-Za-z0-9_.-]", "_", raw).strip("._")
-    return cleaned or "default"
+    return runtime_safe_session_id(session_id)
 
 
 def session_file_path(session_id: str, suffix: str = ".json") -> str:
-    os.makedirs(_SESSION_DIR, exist_ok=True)
-    safe_id = safe_session_id(session_id)
-    path = os.path.abspath(os.path.join(_SESSION_DIR, f"{safe_id}{suffix}"))
-    root = os.path.abspath(_SESSION_DIR)
-    if os.path.commonpath([root, path]) != root:
+    try:
+        return runtime_session_file_path(_SESSION_DIR, session_id, suffix)
+    except ValueError:
         raise HTTPException(status_code=400, detail="Invalid session id")
-    return path
+
+
+def work_events_path(session_id: str) -> str:
+    sid = safe_session_id(session_id)
+    os.makedirs(_WORK_EVENTS_DIR, exist_ok=True)
+    return os.path.join(_WORK_EVENTS_DIR, f"{sid}.jsonl")
+
+
+def _next_work_event_sequence(path: str) -> int:
+    """Return a restart-safe monotonic sequence for one persisted work stream."""
+    with _WORK_EVENT_SEQUENCE_LOCK:
+        if path not in _WORK_EVENT_SEQUENCES:
+            last = 0
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        try:
+                            event = json.loads(line)
+                            last = max(last, int(event.get("sequence") or 0))
+                        except (AttributeError, json.JSONDecodeError, TypeError, ValueError):
+                            continue
+            except FileNotFoundError:
+                pass
+            _WORK_EVENT_SEQUENCES[path] = last
+        _WORK_EVENT_SEQUENCES[path] += 1
+        return _WORK_EVENT_SEQUENCES[path]
+
+
+def _append_work_event(session_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
+    sid = safe_session_id(session_id)
+    payload = dict(event)
+    payload.setdefault("session_id", sid)
+    path = work_events_path(sid)
+    if not payload.get("sequence"):
+        payload["sequence"] = _next_work_event_sequence(path)
+    else:
+        try:
+            sequence = int(payload.get("sequence") or 0)
+            with _WORK_EVENT_SEQUENCE_LOCK:
+                _WORK_EVENT_SEQUENCES[path] = max(_WORK_EVENT_SEQUENCES.get(path, 0), sequence)
+        except (TypeError, ValueError):
+            payload["sequence"] = _next_work_event_sequence(path)
+    with open(path, "a", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    return payload
+
+
+def list_work_events(session_id: str, limit: int = 200, turn_id: str = "", after_sequence: int = 0):
+    path = work_events_path(session_id)
+    events = []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if str(event.get("visibility") or "public").lower() == "internal":
+                    continue
+                try:
+                    sequence = int(event.get("sequence") or 0)
+                except (TypeError, ValueError):
+                    sequence = 0
+                if sequence <= after_sequence:
+                    continue
+                if turn_id and str(event.get("turn_id") or event.get("run_id") or "") != str(turn_id):
+                    continue
+                events.append(event)
+    except FileNotFoundError:
+        return []
+    return events[-max(1, min(int(limit or 200), 1000)):]
+
+
+def work_event_run_summary(session_id: str, run_id: str) -> Dict[str, Any]:
+    events = list_work_events(session_id, limit=1000, turn_id=run_id)
+    statuses: Dict[str, int] = {}
+    kinds: Dict[str, int] = {}
+    last_sequence = 0
+    terminal_event = ""
+    for event in events:
+        status = str(event.get("status") or "unknown")
+        kind = str(event.get("kind") or "unknown")
+        statuses[status] = statuses.get(status, 0) + 1
+        kinds[kind] = kinds.get(kind, 0) + 1
+        try:
+            last_sequence = max(last_sequence, int(event.get("sequence") or 0))
+        except (TypeError, ValueError):
+            pass
+        event_type = str(event.get("event_type") or event.get("type") or "")
+        if event_type.startswith("run.") and status in {"success", "failed", "cancelled"}:
+            terminal_event = event_type
+    return {
+        "event_count": len(events),
+        "last_sequence": last_sequence,
+        "statuses": statuses,
+        "kinds": kinds,
+        "terminal_event": terminal_event,
+    }
 
 
 def get_loop(session_id: str = "default") -> NexusLoop:
@@ -113,8 +423,8 @@ def get_loop(session_id: str = "default") -> NexusLoop:
         loop = NexusLoop(root_dir=_PROJECT_ROOT)
         try:
             loop.load_memory(sid)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("get_loop: failed to load memory for session %s: %s", sid, e)
         apply_runtime_settings(loop)
         _LOOPS[sid] = loop
         _trim_loops()
@@ -123,20 +433,71 @@ def get_loop(session_id: str = "default") -> NexusLoop:
 
 def set_active_session(session_id: str, source: str = "cli-api") -> None:
     try:
-        from session_bus import set_active_session_id
+        from utils.session_bus import set_active_session_id
         set_active_session_id(_PROJECT_ROOT, session_id, source=source)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("set_active_session: failed for %s: %s", session_id, e)
+
+
+def _normalize_permission_mode(mode: str) -> str:
+    aliases = {
+        "": "auto",
+        "default": "ask",
+        "approve": "ask",
+        "approval": "ask",
+        "askall": "ask",
+        "ask_all": "ask",
+        "ask-once": "ask",
+        "ask_once": "ask",
+        "once": "ask",
+        "bypass": "all",
+        "dontask": "all",
+        "dont_ask": "all",
+        "noask": "all",
+        "allow": "allowlist",
+        "allowed": "allowlist",
+        "allow-list": "allowlist",
+        "whitelist": "allowlist",
+        "preauth": "allowlist",
+        "pre_authorized": "allowlist",
+        "checklist": "allowlist",
+        "acceptedits": "auto",
+        "accept": "auto",
+        "auto_pilot": "auto",
+        "autopilot": "auto",
+    }
+    normalized = str(mode or "").strip().lower().replace(" ", "_")
+    return aliases.get(normalized, normalized)
+
+
+def _normalize_sandbox_tier(tier: str) -> str:
+    aliases = {
+        "": "no_sandbox",
+        "none": "no_sandbox",
+        "off": "no_sandbox",
+        "no": "no_sandbox",
+        "no-sandbox": "no_sandbox",
+        "nosandbox": "no_sandbox",
+        "bypass": "no_sandbox",
+        "simple": "normal",
+        "safe": "normal",
+        "on": "normal",
+        "advanced": "docker",
+    }
+    normalized = str(tier or "").strip().lower().replace(" ", "_")
+    return aliases.get(normalized, normalized)
 
 
 def apply_runtime_settings(loop: NexusLoop) -> None:
     """Apply CLI-selected runtime settings to a loop instance."""
     model = str(_RUNTIME_SETTINGS.get("model") or "").strip()
     provider = str(_RUNTIME_SETTINGS.get("provider") or "").strip()
-    mode = str(_RUNTIME_SETTINGS.get("mode") or "auto").strip().lower()
+    mode = _normalize_permission_mode(str(_RUNTIME_SETTINGS.get("mode") or "auto"))
+    sandbox_tier = _normalize_sandbox_tier(str(_RUNTIME_SETTINGS.get("sandbox_tier") or "normal"))
     agent = str(_RUNTIME_SETTINGS.get("agent") or "").strip()
     goal = str(_RUNTIME_SETTINGS.get("goal") or "").strip()
     additional_dirs = _RUNTIME_SETTINGS.get("additional_dirs") or []
+    allowlist = [str(item).strip() for item in (_RUNTIME_SETTINGS.get("permission_allowlist") or []) if str(item).strip()]
 
     loop.model = model
     loop.provider_override = provider
@@ -144,36 +505,63 @@ def apply_runtime_settings(loop: NexusLoop) -> None:
     loop.active_agent = agent
     loop.active_goal = goal
     loop.additional_dirs = [str(item) for item in additional_dirs if str(item).strip()]
+    loop.checklist = set(allowlist) or getattr(loop, "checklist", set())
 
     if provider:
         try:
             loop.brain.set_override(provider)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("apply_runtime_settings: provider override %s failed: %s", provider, e)
 
     if model:
         try:
             active_provider = getattr(loop.brain.base_router, "provider", None)
             if active_provider is not None and hasattr(active_provider, "model"):
                 active_provider.model = model
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("apply_runtime_settings: model %s failed: %s", model, e)
 
     try:
         from permissions import PermissionMode
+        from orchestrators.loop import PermissionPolicy
+        from sandbox.sandbox_manager import SandboxTier
         mode_map = {
-            "auto": PermissionMode.AUTO,
+            "auto": PermissionMode.AUTO_PILOT,
+            "all": PermissionMode.BYPASS,
+            "ask": PermissionMode.APPROVE,
+            "allowlist": PermissionMode.PRE_AUTHORIZED,
             "plan": PermissionMode.PLAN,
             "acceptedits": PermissionMode.AUTO_PILOT,
             "accept": PermissionMode.AUTO_PILOT,
             "dontask": PermissionMode.BYPASS,
             "bypass": PermissionMode.BYPASS,
             "approve": PermissionMode.APPROVE,
+            "pre_authorized": PermissionMode.PRE_AUTHORIZED,
+            "checklist": PermissionMode.PRE_AUTHORIZED,
             "default": PermissionMode.DEFAULT,
         }
+        policy_map = {
+            "auto": PermissionPolicy.AI_DECIDE,
+            "all": PermissionPolicy.AUTO,
+            "ask": PermissionPolicy.ASK_ALL,
+            "allowlist": PermissionPolicy.CHECKLIST,
+            "plan": PermissionPolicy.CHECKLIST,
+            "acceptedits": PermissionPolicy.AI_DECIDE,
+            "accept": PermissionPolicy.AI_DECIDE,
+            "dontask": PermissionPolicy.AUTO,
+            "bypass": PermissionPolicy.AUTO,
+            "approve": PermissionPolicy.ASK_ALL,
+            "pre_authorized": PermissionPolicy.CHECKLIST,
+            "checklist": PermissionPolicy.CHECKLIST,
+            "default": PermissionPolicy.ASK_ALL,
+        }
+        loop.policy = policy_map.get(mode, PermissionPolicy.AI_DECIDE)
         loop.permissions.set_mode(mode_map.get(mode, PermissionMode.AUTO))
-    except Exception:
-        pass
+        loop.permissions._pre_authorized_list = allowlist
+        loop.sandbox_tier = SandboxTier(sandbox_tier)
+        loop.sandbox.tier = loop.sandbox_tier
+    except Exception as e:
+        logger.warning("apply_runtime_settings: permission mode %s failed: %s", mode, e)
 
 
 def apply_runtime_to_all_loops() -> None:
@@ -197,6 +585,7 @@ def _clear_session_files(session_id: str) -> bool:
         try:
             loop.save_memory()
         except Exception:
+            logger.warning("server:364 _clear_session_files: suppressed error", exc_info=True)
             pass
 
     return existed
@@ -225,6 +614,40 @@ def _save_nexus_config(config: Dict[str, Any]) -> None:
     with open(tmp_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True, width=100)
     os.replace(tmp_path, _CONFIG_PATH)
+
+
+def _load_runtime_preferences() -> None:
+    try:
+        config = _load_nexus_config()
+        runtime = config.get("runtime") if isinstance(config.get("runtime"), dict) else {}
+        if "permission_mode" in runtime:
+            _RUNTIME_SETTINGS["mode"] = _normalize_permission_mode(str(runtime.get("permission_mode") or "auto"))
+        if "sandbox_tier" in runtime:
+            _RUNTIME_SETTINGS["sandbox_tier"] = _normalize_sandbox_tier(str(runtime.get("sandbox_tier") or "normal"))
+            os.environ["NEXUS_SANDBOX_TIER"] = str(_RUNTIME_SETTINGS["sandbox_tier"])
+        allowlist = runtime.get("permission_allowlist")
+        if isinstance(allowlist, list):
+            _RUNTIME_SETTINGS["permission_allowlist"] = [str(item).strip() for item in allowlist if str(item).strip()]
+    except Exception:
+        logger.warning("load_runtime_preferences: failed", exc_info=True)
+
+
+def _save_runtime_preferences() -> None:
+    try:
+        config = _load_nexus_config()
+        runtime = config.setdefault("runtime", {})
+        if not isinstance(runtime, dict):
+            runtime = {}
+            config["runtime"] = runtime
+        runtime["permission_mode"] = _normalize_permission_mode(_RUNTIME_SETTINGS.get("mode") or "auto")
+        runtime["permission_allowlist"] = _RUNTIME_SETTINGS.get("permission_allowlist") or []
+        runtime["sandbox_tier"] = _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier") or "normal")
+        _save_nexus_config(config)
+    except Exception:
+        logger.warning("save_runtime_preferences: failed", exc_info=True)
+
+
+_load_runtime_preferences()
 
 
 def _load_claude_settings(strict: bool = False) -> Dict[str, Any]:
@@ -316,8 +739,8 @@ def _load_tasks() -> Dict[str, dict]:
             with open(_TASKS_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
             return data if isinstance(data, dict) else {}
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("_load_tasks: corrupt tasks file (%s), starting fresh", e)
     return {}
 
 
@@ -420,6 +843,12 @@ def health():
     return {"status": "ok", "service": "nexus-api"}
 
 
+@app.get("/api/state")
+def get_state():
+    """Alias for /api/status — runtime state."""
+    return get_status()
+
+
 @app.get("/api/version")
 def get_version():
     return {"version": app.version, "service": "nexus-api"}
@@ -443,8 +872,8 @@ def list_sessions():
                 with open(meta_path, "r", encoding="utf-8") as mf:
                     meta = json.load(mf)
                     title = meta.get("title")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("list_sessions: corrupt meta for %s: %s", sid, e)
 
         if not title:
             try:
@@ -530,6 +959,12 @@ async def rename_session(request: Request):
 
 _SENTINEL = object()
 
+
+def _sse_data(value: Any) -> str:
+    """Encode every physical line as SSE data so multiline content is preserved."""
+    lines = str(value if value is not None else "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return "\n".join(f"data: {line}" for line in lines) + "\n\n"
+
 @app.post("/api/chat")
 async def chat(request: Request):
     try:
@@ -537,19 +972,28 @@ async def chat(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    prompt = str(data.get("prompt", "")).strip()[:50000]
-    if not prompt:
-        raise HTTPException(status_code=400, detail="prompt is required and cannot be empty")
-
-    sid = safe_session_id(data.get("session_id", "default"))
-    provider = str(data.get("provider", "")).lower().replace(" ", "_")
-    model = str(data.get("model", "")).strip()
+    try:
+        chat_request = build_chat_request(
+            data,
+            default_source="cli-api:chat",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    prompt = chat_request.prompt
+    sid = chat_request.session_id
+    provider = chat_request.provider
+    model = chat_request.model
+    turn_id = chat_request.turn_id
+    max_tokens = chat_request.max_tokens
     stream = bool(data.get("stream", False))
+    canonical_events = bool(data.get("canonical_events", False))
 
     try:
         nexus_loop = get_loop(sid)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to initialize session: {str(e)}")
+    if bool(getattr(nexus_loop, "is_running", False)):
+        raise HTTPException(status_code=409, detail="A run is already active for this session")
 
     set_active_session(sid, source="cli-api:chat")
 
@@ -577,26 +1021,285 @@ async def chat(request: Request):
         return "".join(parts)
 
     async def async_generator():
+        event_sequence = 0
+        previous_sink = nexus_loop.work_event_sink
+        event_queue: asyncio.Queue = asyncio.Queue()
+        chunk_queue: asyncio.Queue = asyncio.Queue()
+        owner_loop = asyncio.get_running_loop()
+
+        def stream_event_sink(payload):
+            nonlocal event_sequence
+            event_sequence += 1
+            event = CanonicalEvent.from_work_event(dict(payload), sid, event_sequence).to_dict()
+            _append_work_event(sid, event)
+            owner_loop.call_soon_threadsafe(event_queue.put_nowait, event)
+            return event
+
+        async def pump_run():
+            try:
+                async for chunk in nexus_loop.stream_run(
+                    prompt,
+                    provider=safe_provider,
+                    model=safe_model,
+                    max_tokens=max_tokens,
+                    turn_id=turn_id,
+                ):
+                    await chunk_queue.put(("chunk", chunk))
+            except asyncio.TimeoutError:
+                await chunk_queue.put(("error", "Response timed out after 30 seconds"))
+            except Exception as exc:
+                await chunk_queue.put(("error", str(exc)))
+            finally:
+                await chunk_queue.put(("done", None))
+
+        if canonical_events:
+            nexus_loop.work_event_sink = stream_event_sink
+        producer = asyncio.create_task(pump_run())
         try:
-            async for chunk in nexus_loop.stream_run(prompt, provider=safe_provider, model=safe_model):
-                if chunk.get("type") == "content":
-                    yield f"data: {chunk['data']}\n\n"
-        except asyncio.TimeoutError:
-            yield "event: error\ndata: [NEXUS_SYSTEM_ERROR]: Response timed out after 30 seconds\n\n"
+            finished = False
+            while not finished or not event_queue.empty():
+                if not event_queue.empty():
+                    event = event_queue.get_nowait()
+                    yield f"event: nexus.event\nid: {event['sequence']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    continue
+
+                event_wait = asyncio.create_task(event_queue.get()) if canonical_events else None
+                chunk_wait = asyncio.create_task(chunk_queue.get())
+                waits = {chunk_wait}
+                if event_wait is not None:
+                    waits.add(event_wait)
+                completed, pending = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+                for task in pending:
+                    task.cancel()
+
+                if event_wait is not None and event_wait in completed:
+                    event = event_wait.result()
+                    yield f"event: nexus.event\nid: {event['sequence']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+                if chunk_wait in completed:
+                    kind, value = chunk_wait.result()
+                    if kind == "done":
+                        finished = True
+                    elif kind == "error":
+                        safe_err = str(value).replace('\n', ' ').replace('\r', '')
+                        yield "event: error\n" + _sse_data(f"[NEXUS_SYSTEM_ERROR]: {safe_err}")
+                    elif value.get("type") == "content":
+                        yield _sse_data(value['data'])
         except GeneratorExit:
             return
         except Exception as e:
             import traceback
             traceback.print_exc()
             safe_err = str(e).replace('\n', ' ').replace('\r', '')
-            yield f"event: error\ndata: [NEXUS_SYSTEM_ERROR]: {safe_err}\n\n"
+            yield "event: error\n" + _sse_data(f"[NEXUS_SYSTEM_ERROR]: {safe_err}")
+        finally:
+            if not producer.done():
+                producer.cancel()
+            await asyncio.gather(producer, return_exceptions=True)
+            if canonical_events and nexus_loop.work_event_sink is stream_event_sink:
+                nexus_loop.work_event_sink = previous_sink
 
     if stream:
         return StreamingResponse(async_generator(), media_type="text/event-stream")
     else:
-        gen = nexus_loop.stream_run(prompt, provider=safe_provider, model=safe_model)
+        gen = nexus_loop.stream_run(
+            prompt,
+            provider=safe_provider,
+            model=safe_model,
+            max_tokens=max_tokens,
+            turn_id=turn_id,
+        )
         text = await _collect_all(gen)
         return {"response": text}
+
+
+@app.post("/api/chat/{session_id}/cancel")
+def cancel_chat(session_id: str, turn_id: str = ""):
+    """Cancel the active run for a server-owned session."""
+    sid = safe_session_id(session_id)
+    nexus_loop = _LOOPS.get(sid)
+    if nexus_loop is None:
+        raise HTTPException(status_code=404, detail="Active session not found")
+    nexus_loop.abort()
+    run_id = str(turn_id or getattr(nexus_loop, "_current_turn_id", "") or sid)
+    return {
+        "status": "cancelled",
+        "run_id": run_id,
+        "event": {
+            "id": f"run_{run_id}",
+            "type": "run.cancelled",
+            "event_type": "run.cancelled",
+            "run_id": run_id,
+            "turn_id": run_id,
+            "kind": "run",
+            "title": "Run cancelled",
+            "status": "cancelled",
+            "visibility": "public",
+        },
+    }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# OPENAI-COMPATIBLE ENDPOINTS (OpenClaw-inspired)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _get_available_models() -> list:
+    """Return list of known models from provider config."""
+    models = []
+    try:
+        prov_path = os.path.join(_PROJECT_ROOT, "config", "provider.yml")
+        if os.path.isfile(prov_path) and yaml:
+            with open(prov_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            for name, cfg in data.items():
+                if isinstance(cfg, dict) and cfg.get("model"):
+                    models.append({
+                        "id": cfg["model"],
+                        "object": "model",
+                        "created": int(os.path.getmtime(prov_path)),
+                        "owned_by": name,
+                    })
+    except Exception:
+        logger.warning("server:816 _get_available_models: suppressed error", exc_info=True)
+        pass
+    if not models:
+        models.append({
+            "id": "deepseek-chat",
+            "object": "model",
+            "created": 0,
+            "owned_by": "nexus",
+        })
+    return models
+
+
+@app.get("/v1/models")
+async def list_models():
+    """OpenAI-compatible model listing."""
+    return {"object": "list", "data": _get_available_models()}
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat(request: Request):
+    """OpenAI-compatible chat completions endpoint.
+
+    Accepts standard OpenAI request body, streams or returns
+    OpenAI-formatted response. Any OpenAI-compatible client can use this.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    messages: list = body.get("messages", [])
+    if not messages:
+        raise HTTPException(status_code=400, detail="messages is required")
+
+    model: str = str(body.get("model", "deepseek-chat"))
+    stream: bool = bool(body.get("stream", False))
+    try:
+        max_tokens = int(body.get("max_tokens", body.get("max_completion_tokens", 4096)))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="max_tokens must be an integer")
+    if not 1 <= max_tokens <= 1_000_000:
+        raise HTTPException(status_code=400, detail="max_tokens must be between 1 and 1000000")
+
+    # Extract user prompt from messages
+    prompt_parts = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if role == "system":
+            prompt_parts.append(f"[System]: {content}")
+        elif role == "user":
+            prompt_parts.append(f"{content}")
+        elif role == "assistant":
+            prompt_parts.append(f"[Assistant]: {content}")
+    prompt = "\n".join(prompt_parts).strip()[:50000]
+
+    if not prompt:
+        raise HTTPException(status_code=400, detail="No user message found")
+
+    # Map model name to provider
+    provider_map = {
+        "deepseek": ("deepseek", model),
+        "gpt": ("openai", model),
+        "claude": ("anthropic", model),
+        "gemini": ("gemini", model),
+    }
+    provider_name = "deepseek"
+    resolved_model = model
+    for key, (prov, _) in provider_map.items():
+        if model.lower().startswith(key):
+            provider_name = prov
+            break
+
+    sid = f"openai_{uuid.uuid4().hex}"
+    try:
+        nexus_loop = get_loop(sid)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Session init failed: {e}")
+
+    request_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+
+    async def _stream_openai():
+        try:
+            async for chunk in nexus_loop.stream_run(
+                prompt,
+                provider=provider_name,
+                model=resolved_model,
+                max_tokens=max_tokens,
+            ):
+                if chunk.get("type") == "content":
+                    data = chunk["data"]
+                    sse = {
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {"content": data}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(sse)}\n\n"
+            # Final [DONE] chunk
+            done = {
+                "id": request_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+            yield f"data: {json.dumps(done)}\n\n"
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    if stream:
+        return StreamingResponse(_stream_openai(), media_type="text/event-stream")
+
+    # Non-streaming: collect all content
+    full_text = ""
+    async for chunk in nexus_loop.stream_run(
+        prompt,
+        provider=provider_name,
+        model=resolved_model,
+        max_tokens=max_tokens,
+    ):
+        if chunk.get("type") == "content":
+            full_text += chunk["data"]
+
+    return {
+        "id": request_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": full_text},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": len(prompt), "completion_tokens": len(full_text), "total_tokens": len(prompt) + len(full_text)},
+    }
 
 
 @app.get("/api/history")
@@ -609,6 +1312,54 @@ def get_history(session_id: str = "default"):
         raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
 
 
+@app.get("/api/runs")
+def list_runs(session_id: str = "", limit: int = 100):
+    """List recent durable run contexts for inspector and replay surfaces."""
+    runs = []
+    for item in list_run_contexts(_PROJECT_ROOT, session_id=session_id, limit=limit):
+        public_item = dict(item)
+        public_item.pop("_path", None)
+        public_item["work_events"] = work_event_run_summary(
+            str(public_item.get("session_id") or session_id or "default"),
+            str(public_item.get("run_id") or ""),
+        )
+        runs.append(public_item)
+    return {"status": "success", "runs": runs}
+
+
+@app.get("/api/runs/{session_id}/{run_id}")
+def get_run_context(session_id: str, run_id: str, include_events: bool = True, limit: int = 1000):
+    """Return one durable run context plus public work-event replay."""
+    sid = safe_session_id(session_id)
+    context = load_run_context(_PROJECT_ROOT, sid, run_id)
+    if context is None:
+        raise HTTPException(status_code=404, detail="Run context not found")
+    resolved_run_id = str(context.get("run_id") or run_id)
+    response: Dict[str, Any] = {
+        "status": "success",
+        "run": context,
+        "work_events": work_event_run_summary(sid, resolved_run_id),
+    }
+    if include_events:
+        events = list_work_events(sid, limit=limit, turn_id=resolved_run_id)
+        response["events"] = events
+        response["next_sequence"] = max((int(event.get("sequence") or 0) for event in events), default=0)
+    return response
+
+
+@app.get("/api/work-events")
+def get_work_events(request: Request, session_id: str = "default", limit: int = 200, turn_id: str = "", after_sequence: int = 0):
+    header_cursor = request.headers.get("Last-Event-ID", "").strip()
+    if header_cursor:
+        try:
+            after_sequence = max(after_sequence, int(header_cursor))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Last-Event-ID must be an integer sequence")
+    events = list_work_events(session_id, limit=limit, turn_id=turn_id, after_sequence=after_sequence)
+    next_sequence = max((int(event.get("sequence") or 0) for event in events), default=after_sequence)
+    return {"events": events, "after_sequence": after_sequence, "next_sequence": next_sequence}
+
+
 # ── New CLI Backend Endpoints ────────────────────────────────────────────────
 
 _TASKS: Dict[str, dict] = _load_tasks()
@@ -617,10 +1368,10 @@ _TASK_COUNTER = max([int(k.split("_")[1]) for k in _TASKS if "_" in k] or [0])
 
 @app.get("/api/skills")
 def list_skills():
-    """List available skills from project config and .commandcode/skills."""
+    """List available skills from project config and .opencode/skills."""
     summary = _config_summary()
     by_name = {skill["name"]: skill for skill in summary["skills"]}
-    skills_dir = os.path.join(_PROJECT_ROOT, ".commandcode", "skills")
+    skills_dir = os.path.join(_PROJECT_ROOT, ".opencode", "skills")
     if os.path.isdir(skills_dir):
         for name in sorted(os.listdir(skills_dir)):
             skill_path = os.path.join(skills_dir, name, "SKILL.md")
@@ -630,6 +1381,7 @@ def list_skills():
                     with open(skill_path, "r", encoding="utf-8") as f:
                         desc = f.readline().strip().lstrip("# ")[:80]
                 except Exception:
+                    logger.warning("server:974 list_skills: suppressed error", exc_info=True)
                     pass
             by_name.setdefault(name, {"name": name, "description": desc or "NEXUS skill", "enabled": True})
     return {"skills": sorted(by_name.values(), key=lambda item: item["name"])}
@@ -642,18 +1394,25 @@ def list_tools():
     config_tools = {tool["name"]: tool for tool in summary["tools"]}
     try:
         from tools.nexus_tools.registry import ToolRegistry
-        registry = ToolRegistry()
+        registry = ToolRegistry(_PROJECT_ROOT)
         tools = []
-        for name in sorted(registry.list_tools()):
+        registry_summary = registry.list_tools(include_unavailable=True)
+        for name in sorted(registry_summary):
             tool = registry.get(name)
             if tool:
                 cfg = config_tools.get(name, {})
+                active = bool(cfg.get("enabled", True))
+                status = tool.availability()
                 tools.append({
                     "name": name,
-                    "description": cfg.get("description") or getattr(tool, "description", "")[:80],
+                    "description": cfg.get("description") or str(tool.schema.get("description", ""))[:120],
                     "read_only": getattr(tool, "is_read_only", lambda: False)(),
                     "safe": getattr(tool, "is_concurrency_safe", lambda: False)(),
-                    "enabled": bool(cfg.get("enabled", True))
+                    "enabled": active,
+                    "available": bool(status.get("available")) and active,
+                    "availability_reason": "disabled_by_config" if not active else status.get("reason", "unknown"),
+                    "missing_env": status.get("missing_env", []),
+                    "has_handler": tool.instance is not None,
                 })
         seen = {tool["name"] for tool in tools}
         for name, cfg in config_tools.items():
@@ -663,7 +1422,11 @@ def list_tools():
                     "description": cfg.get("description", ""),
                     "read_only": False,
                     "safe": False,
-                    "enabled": bool(cfg.get("enabled", True))
+                    "enabled": bool(cfg.get("enabled", True)),
+                    "available": False,
+                    "availability_reason": "custom_config_only",
+                    "missing_env": [],
+                    "has_handler": False,
                 })
         return {"tools": tools}
     except Exception as e:
@@ -672,11 +1435,11 @@ def list_tools():
 
 @app.get("/api/agents")
 def list_agents():
-    """List available agents from .commandcode/agents and hive personas."""
+    """List available agents from .opencode/agents and hive personas."""
     agents = []
     seen = set()
 
-    agents_dir = os.path.join(_PROJECT_ROOT, ".commandcode", "agents")
+    agents_dir = os.path.join(_PROJECT_ROOT, ".opencode", "agents")
     if os.path.isdir(agents_dir):
         for fname in sorted(os.listdir(agents_dir)):
             if fname.endswith((".yaml", ".yml")):
@@ -690,6 +1453,7 @@ def list_agents():
                                 desc = line.split(":", 1)[1].strip()[:80]
                                 break
                 except Exception:
+                    logger.warning("server:1034 list_agents: suppressed error", exc_info=True)
                     pass
                 agents.append({
                     "id": name,
@@ -714,22 +1478,24 @@ def list_agents():
                 })
                 seen.add(key)
     except Exception:
+        logger.warning("server:1058 : suppressed error", exc_info=True)
         pass
 
     try:
-        from config_loader import get_config
-        pm = get_config()
-        for profile in pm.list_profiles():
-            key = profile.lower()
+        from providers.profiles import load_profile_store
+        store = load_profile_store()
+        for profile in store.list_profiles():
+            key = profile.name.lower()
             if key not in seen:
                 agents.append({
-                    "id": profile,
-                    "name": profile.replace("-", " ").title(),
+                    "id": profile.name,
+                    "name": profile.name.replace("-", " ").title(),
                     "status": "idle",
-                    "description": f"NEXUS profile: {profile}"
+                    "description": f"NEXUS profile: {profile.name}"
                 })
                 seen.add(key)
     except Exception:
+        logger.warning("server:1074 : suppressed error", exc_info=True)
         pass
 
     return {"agents": agents}
@@ -761,11 +1527,12 @@ def list_provider_config():
     active_providers_from_kernel = set()
     if factory:
         try:
-            from config_loader import get_config
-            pm = get_config()
-            for p in pm.get_active_providers():
-                active_providers_from_kernel.add(p.lower())
+            from providers.profiles import load_profile_store
+            store = load_profile_store()
+            for prov in store.providers():
+                active_providers_from_kernel.add(prov.lower())
         except Exception:
+            logger.warning("server:1110 list_provider_config: suppressed error", exc_info=True)
             pass
 
     for p in providers:
@@ -785,6 +1552,52 @@ def list_provider_config():
 def list_features():
     """List runtime feature flags from nexus_config.yaml."""
     return {"features": _config_summary()["features"]}
+
+
+@app.post("/api/files/list")
+async def list_files(request: Request):
+    """List directory contents relative to project root."""
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    relative_path = str(data.get("path", ".")).strip()
+
+    target = os.path.abspath(os.path.join(_PROJECT_ROOT, relative_path))
+    if os.path.commonpath([_PROJECT_ROOT, target]) != _PROJECT_ROOT:
+        raise HTTPException(status_code=403, detail="Path is outside project root")
+
+    if not os.path.exists(target):
+        raise HTTPException(status_code=404, detail=f"Path not found: {relative_path}")
+
+    if not os.path.isdir(target):
+        raise HTTPException(status_code=400, detail=f"Path is not a directory: {relative_path}")
+
+    try:
+        entries = sorted(os.listdir(target))
+    except PermissionError:
+        raise HTTPException(status_code=403, detail=f"Permission denied: {relative_path}")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read directory: {str(e)}")
+
+    files = []
+    for name in entries:
+        if name.lower() in _WINDOWS_RESERVED or name.endswith("."):
+            continue
+        full_path = os.path.join(target, name)
+        try:
+            rel_path = os.path.relpath(full_path, _PROJECT_ROOT).replace("\\", "/")
+        except ValueError:
+            rel_path = name
+        files.append({
+            "name": name,
+            "path": rel_path,
+            "isDirectory": os.path.isdir(full_path),
+            "children": [],
+        })
+
+    return {"files": files}
 
 
 @app.post("/api/manage")
@@ -818,6 +1631,7 @@ async def manage_runtime(request: Request):
                 from tools.nexus_tools.registry import ToolRegistry
                 ToolRegistry._reset_instance()
             except Exception:
+                logger.warning("server:1208 : suppressed error", exc_info=True)
                 pass
             _clear_runtime("tools reloaded")
 
@@ -826,6 +1640,7 @@ async def manage_runtime(request: Request):
                 from skills import NexusSkillMaster
                 NexusSkillMaster._reset_instance()
             except Exception:
+                logger.warning("server:1216 : suppressed error", exc_info=True)
                 pass
             _clear_runtime("skills reloaded")
 
@@ -837,21 +1652,33 @@ async def manage_runtime(request: Request):
                 from providers.factory import NexusProviderFactory
                 NexusProviderFactory._reset_instance()
             except Exception:
+                logger.warning("server:1227 : suppressed error", exc_info=True)
                 pass
             _clear_runtime("providers reloaded")
 
         elif target_type == "config":
             try:
-                from config_loader import get_config
-                get_config().reload()
+                from config.config_loader import NexusConfigLoader
+                NexusConfigLoader().reload()
             except Exception:
+                logger.warning("server:1235 : suppressed error", exc_info=True)
                 pass
 
         return {"status": "success", "target": target_type, "summary": _config_summary()}
 
     if action == "reset":
         if target_type in {"nexus", "runtime", "loops", "all", ""}:
-            _RUNTIME_SETTINGS.update({"model": "", "provider": "", "mode": "auto", "agent": "", "goal": "", "additional_dirs": []})
+            _RUNTIME_SETTINGS.update({
+                "model": "",
+                "provider": "",
+                "mode": "auto",
+                "sandbox_tier": "normal",
+                "permission_allowlist": [],
+                "agent": "",
+                "goal": "",
+                "additional_dirs": [],
+            })
+            _save_runtime_preferences()
             reset = _clear_runtime("reset requested")
             return {"status": "success", "target": target_type or "runtime", **reset}
         if target_type == "tasks":
@@ -1073,11 +1900,13 @@ def get_status():
 
     status = {
         "model": _RUNTIME_SETTINGS.get("model") or getattr(active_provider, "model", "") or "auto",
-        "mode": _RUNTIME_SETTINGS.get("mode") or "auto",
+        "mode": _normalize_permission_mode(_RUNTIME_SETTINGS.get("mode") or "auto"),
         "provider": _RUNTIME_SETTINGS.get("provider") or getattr(active_provider, "provider_name", "") or "auto",
         "agent": _RUNTIME_SETTINGS.get("agent") or "",
         "goal": _RUNTIME_SETTINGS.get("goal") or "",
-        "sandbox_tier": _RUNTIME_SETTINGS.get("sandbox_tier", "no_sandbox"),
+        "sandbox_tier": _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier", "normal")),
+        "permission_modes": ["auto", "all", "allowlist", "ask"],
+        "permission_allowlist": _RUNTIME_SETTINGS.get("permission_allowlist") or [],
         "additional_dirs": _RUNTIME_SETTINGS.get("additional_dirs") or [],
         "health": "ok",
         "uptime": 0,
@@ -1093,13 +1922,64 @@ def get_status():
 async def set_mode(request: Request):
     """Switch permission mode."""
     data = await request.json()
-    mode = str(data.get("mode", "auto")).lower()
-    allowed = {"auto", "plan", "acceptedits", "accept", "dontask", "bypass", "approve", "default"}
+    mode = _normalize_permission_mode(str(data.get("mode", "auto")))
+    allowed = {"auto", "all", "allowlist", "ask", "plan", "acceptedits", "accept", "dontask", "bypass", "approve", "default", "pre_authorized", "checklist"}
     if mode not in allowed:
         raise HTTPException(status_code=400, detail=f"Invalid mode. Choose from: {', '.join(allowed)}")
     _RUNTIME_SETTINGS["mode"] = mode
     apply_runtime_to_all_loops()
+    _save_runtime_preferences()
     return {"status": "success", "mode": mode}
+
+
+@app.get("/api/permissions")
+def get_permissions():
+    """Return permission mode and saved allow-list."""
+    from permissions import PermissionSystem
+
+    return {
+        "status": "success",
+        "mode": _normalize_permission_mode(_RUNTIME_SETTINGS.get("mode") or "auto"),
+        "available": ["auto", "all", "allowlist", "ask"],
+        "allowlist": _RUNTIME_SETTINGS.get("permission_allowlist") or [],
+        "recent_decisions": PermissionSystem().get_decision_log(limit=20),
+    }
+
+
+@app.get("/api/permissions/decisions")
+def get_permission_decisions(limit: int = 50):
+    """Return recent permission decisions with scrubbed action previews."""
+    from permissions import PermissionSystem
+
+    return {
+        "status": "success",
+        "decisions": PermissionSystem().get_decision_log(limit=limit),
+    }
+
+
+@app.post("/api/permissions")
+async def set_permissions(request: Request):
+    """Set permission mode and optionally update saved allow-list entries."""
+    data = await request.json()
+    mode = _normalize_permission_mode(str(data.get("mode", _RUNTIME_SETTINGS.get("mode") or "auto")))
+    if mode not in {"auto", "all", "allowlist", "ask"}:
+        raise HTTPException(status_code=400, detail="Invalid permission mode. Choose from: auto, all, allowlist, ask")
+    _RUNTIME_SETTINGS["mode"] = mode
+
+    add = str(data.get("add") or "").strip()
+    remove = str(data.get("remove") or "").strip()
+    allowlist = [str(item).strip() for item in (_RUNTIME_SETTINGS.get("permission_allowlist") or []) if str(item).strip()]
+    if add and add not in allowlist:
+        allowlist.append(add)
+    if remove:
+        allowlist = [item for item in allowlist if item != remove]
+    if isinstance(data.get("allowlist"), list):
+        allowlist = [str(item).strip() for item in data["allowlist"] if str(item).strip()]
+    _RUNTIME_SETTINGS["permission_allowlist"] = allowlist
+
+    apply_runtime_to_all_loops()
+    _save_runtime_preferences()
+    return {"status": "success", "mode": mode, "allowlist": allowlist}
 
 
 @app.get("/api/model")
@@ -1146,6 +2026,46 @@ async def set_agent(request: Request):
     return {"status": "success", "agent": agent}
 
 
+@app.post("/api/command")
+async def run_command(request: Request):
+    """Execute a slash command — shared across TUI, GUI, and gateways.
+
+    Request body:
+        {"command": "/status", "args": ["/status"]}
+
+    Returns CommandResult with formatted output for Rich rendering.
+    """
+    from nexus.commands import get_registry, CommandContext
+
+    data = await request.json()
+    raw = str(data.get("command", "")).strip()
+    args_raw = data.get("args", raw)
+
+    registry = get_registry()
+    cmd = registry.get(raw)
+    if not cmd:
+        raise HTTPException(status_code=404, detail=f"Unknown command: {raw}")
+
+    ctx = CommandContext(
+        session_id=_RUNTIME_SETTINGS.get("session_id", "default"),
+        mode=_RUNTIME_SETTINGS.get("mode", "auto"),
+        provider=_RUNTIME_SETTINGS.get("provider", ""),
+        model=_RUNTIME_SETTINGS.get("model", ""),
+        thinking=_RUNTIME_SETTINGS.get("thinking", True),
+        extra={"args": args_raw},
+    )
+    result = await cmd.execute(ctx)
+    return {
+        "status": "success" if result.success else "error",
+        "output": result.output,
+        "formatted": result.formatted,
+        "content_type": result.content_type,
+        "data": result.data,
+        "error": result.error if not result.success else "",
+    }
+    return {"status": "success", "agent": agent}
+
+
 @app.get("/api/goal")
 def get_goal_state():
     """Return the active Nexus goal."""
@@ -1174,8 +2094,9 @@ def get_sandbox():
     """Return the current sandbox tier."""
     return {
         "status": "success",
-        "tier": _RUNTIME_SETTINGS.get("sandbox_tier", "no_sandbox"),
+        "tier": _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier", "normal")),
         "available": ["no_sandbox", "normal", "docker"],
+        "labels": {"no_sandbox": "none", "normal": "simple", "docker": "docker"},
     }
 
 
@@ -1183,12 +2104,14 @@ def get_sandbox():
 async def set_sandbox(request: Request):
     """Set the sandbox tier: no_sandbox, normal, or docker."""
     data = await request.json()
-    tier = str(data.get("tier", "")).strip().lower()
+    tier = _normalize_sandbox_tier(str(data.get("tier", "")))
     valid = {"no_sandbox", "normal", "docker"}
     if tier not in valid:
         raise HTTPException(status_code=400, detail=f"Invalid sandbox tier. Choose from: {', '.join(sorted(valid))}")
     _RUNTIME_SETTINGS["sandbox_tier"] = tier
     os.environ["NEXUS_SANDBOX_TIER"] = tier
+    apply_runtime_to_all_loops()
+    _save_runtime_preferences()
     return {"status": "success", "tier": tier}
 
 
@@ -1217,18 +2140,19 @@ async def run_command(request: Request):
     if not command:
         raise HTTPException(status_code=400, detail="No command provided")
 
-    # Reject dangerous commands
-    dangerous = {"rm -rf", "sudo", "mkfs", "dd if=", "> /dev", ":(){"}
+    # Reject dangerous commands (uses word-boundary checks)
     lowered = command.lower()
-    for d in dangerous:
+    if re.search(r'\bsudo\b', lowered) or (re.search(r'\brm\b', lowered) and '-rf' in lowered):
+        raise HTTPException(status_code=403, detail="Dangerous command blocked")
+    for d in ("mkfs", "dd if=", "> /dev", ":(){"):
         if d in lowered:
             raise HTTPException(status_code=403, detail=f"Dangerous command blocked: {d}")
 
     import subprocess
     try:
         result = subprocess.run(
-            command,
-            shell=True,
+            command if os.name == "nt" else ["sh", "-c", command],
+            shell=(os.name == "nt"),
             capture_output=True,
             text=True,
             timeout=30,
@@ -1270,6 +2194,7 @@ def search_files(q: str = ""):
             if len(files) >= 10:
                 break
     except Exception:
+        logger.warning("server:1661 : suppressed error", exc_info=True)
         pass
     return {"files": files[:10]}
 
@@ -1463,6 +2388,7 @@ def _stop_voice_process() -> Dict[str, Any]:
             try:
                 _VOICE_PROCESS.kill()
             except Exception:
+                logger.warning("server:1854 _stop_voice_process: suppressed error", exc_info=True)
                 pass
         finally:
             _VOICE_PROCESS = None
@@ -1495,6 +2421,7 @@ async def start_voice(request: Request):
         with open(_VOICE_LOG_PATH, "w", encoding="utf-8") as f:
             f.write("")
     except Exception:
+        logger.warning("server:1886 async start_voice: suppressed error", exc_info=True)
         pass
     command = _voice_command_for_mode(mode, session_id, owner_pid=owner_pid)
     launch = _voice_launch_options(mode)
@@ -1517,7 +2444,7 @@ async def start_voice(request: Request):
             launch["log_handle"].close()
         raise HTTPException(status_code=500, detail=f"Unable to start voice mode: {exc}") from exc
 
-    time.sleep(1.0)
+    await asyncio.sleep(1.0)
     if _VOICE_PROCESS.poll() is not None:
         tail = ""
         if os.path.exists(_VOICE_LOG_PATH):
@@ -1561,18 +2488,23 @@ async def multi_agent(request: Request):
 
 @app.get("/api/engine/status")
 def engine_status():
-    from utils.engine_manager import get_engine_status, load_or_create_config
     try:
+        from utils.engine_manager import get_engine_status, load_or_create_config
         return {
             "status": get_engine_status(),
             "config": load_or_create_config()
         }
+    except ImportError:
+        return {"status": "unavailable", "config": {}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/engine/config")
 async def update_engine_config(request: Request):
-    from utils.engine_manager import load_or_create_config, save_config
+    try:
+        from utils.engine_manager import load_or_create_config, save_config
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Engine manager not available")
     try:
         updates = await request.json()
         config = load_or_create_config()
@@ -1594,16 +2526,21 @@ async def update_engine_config(request: Request):
 
 @app.post("/api/engine/compile")
 async def compile_engine():
-    from utils.engine_compiler import compile_llama_cpp
     try:
+        from utils.engine_compiler import compile_llama_cpp
         res = compile_llama_cpp()
         return res
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Engine compiler not available")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/engine/reload")
 async def reload_local_engine(request: Request):
-    from utils.engine_manager import reload_engine
+    try:
+        from utils.engine_manager import reload_engine
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Engine manager not available")
     try:
         data = await request.json()
         model_name = data.get("model")
@@ -1637,9 +2574,9 @@ async def train_local_engine(request: Request):
     steps = data.get("steps", 50)
     
     # Launch background training process to avoid blocking
-    import sys
     import platform
     import subprocess
+    import sys
     
     train_script = os.path.join(_PROJECT_ROOT, "evolution", "self_improvement.py")
     cmd = [sys.executable, train_script, str(steps)]
@@ -1662,7 +2599,7 @@ async def train_local_engine(request: Request):
 def train_status():
     global _active_train_process
     
-    status_file = os.path.join(_PROJECT_ROOT, "configs", "self_improvement_status.json")
+    status_file = os.path.join(_PROJECT_ROOT, "config", "self_improvement_status.json")
     status = {"status": "idle", "message": "No training has been run yet."}
     
     if os.path.exists(status_file):
@@ -1670,6 +2607,7 @@ def train_status():
             with open(status_file, "r") as f:
                 status = json.load(f)
         except Exception:
+            logger.warning("server:2071 train_status: suppressed error", exc_info=True)
             pass
             
     # Check if process is actively running

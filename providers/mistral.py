@@ -1,6 +1,9 @@
-from typing import Dict, Any, Optional, List, Iterator
-from providers.base import NexusBaseProvider
+import os
 import json
+from typing import Dict, Iterator, List, Optional
+
+from providers.base import NexusBaseProvider
+
 
 class MistralProvider(NexusBaseProvider):
     """
@@ -12,13 +15,13 @@ class MistralProvider(NexusBaseProvider):
     def __init__(self):
         super().__init__("mistral", "https://api.mistral.ai/v1/chat/completions")
         if not self.model:
-            self.model = "mistral-large-latest"
+            self.model = os.environ.get("NEXUS_PROVIDER_MISTRAL_MODEL", "mistral-large-latest")
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
         
-    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> str:
+    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs}
         try:
@@ -29,7 +32,7 @@ class MistralProvider(NexusBaseProvider):
         except Exception as e:
             return f"Error: Failed to reach Mistral. {str(e)}"
 
-    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> Iterator[str]:
+    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs, "stream": True}
         try:
@@ -54,3 +57,5 @@ class MistralProvider(NexusBaseProvider):
 if __name__ == "__main__":
     p = MistralProvider()
     # print(p.generate("Reason this out."))
+
+

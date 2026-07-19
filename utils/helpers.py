@@ -1,30 +1,31 @@
-import re
+import ast
 import datetime
-from typing import List, Dict, Any, Optional
+import json
+import logging
+import re
+from typing import Any, Dict
+
+logger = logging.getLogger("nexus.helpers")
 
 
 class NexusHelpers:
-    """
-    NEXUS HELPER UTILS 1.0 (SWISS-ARMY-KNIFE)
-    Shared utility functions for all NEXUS modules.
-
-    Features:
-    - Text Cleaning & Sanitization.
-    - JSON-Proof Parsing.
-    - Semantic Similarity Scorers.
-    """
-
     @staticmethod
     def get_timestamp() -> str:
-        """Universal timestamp for logs and checkpoints."""
         return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
     def clean_llm_json(raw_text: str) -> Dict[str, Any]:
-        """Strips out markdown code blocks and returns clean JSON."""
         match = re.search(r"\{.*\}", raw_text, re.DOTALL)
         if match:
-            return eval(match.group())
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                try:
+                    result = ast.literal_eval(match.group())
+                    if isinstance(result, dict):
+                        return result
+                except (ValueError, SyntaxError) as e:
+                    logger.debug("clean_llm_json parse failed: %s", e)
         return {}
 
 

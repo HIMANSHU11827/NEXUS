@@ -4,6 +4,7 @@ import queue
 import threading
 from collections import deque
 from typing import Any, Optional
+
 import numpy as np
 
 
@@ -345,11 +346,10 @@ class AudioIO:
         if self._vad_model is not None:
             return
         try:
-            import torch
             from silero_vad import load_silero_vad
             self._vad_model = load_silero_vad()
             # print("[voice] Neural VAD Engine Online.")
-        except Exception as e:
+        except Exception:
             # print(f"[voice-warning] Neural VAD failed to load, using RMS fallback: {e}")
             self._vad_model = False
 

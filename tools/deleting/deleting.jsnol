@@ -1,0 +1,11 @@
+{
+  "name": "deleting",
+  "version": "1.0.0",
+  "description": "Delete a file",
+  "entry": "scripts/deleting.py",
+  "class": "DeletingTool",
+  "params": {
+    "path": {"type": "string", "description": "File path to delete", "required": true}
+  },
+  "category": "filesystem"
+}

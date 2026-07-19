@@ -1,6 +1,4 @@
-"""StrategicHorizons stub."""
+"""StrategicHorizons — long-term roadmap and strategic planning."""
+from evolution.horizons.scripts.horizons import StrategicHorizons
 
-
-class StrategicHorizons:
-    def __init__(self, root: str):
-        self.root = root
+__all__ = ["StrategicHorizons"]

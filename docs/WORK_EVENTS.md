@@ -62,9 +62,9 @@ When an event is appended without an explicit `kind`, it's inferred from:
 
 Response: full event with defaults applied.
 
-## CLI Integration
+## TUI Integration
 
-The CLI `/work` command reads the JSONL file directly:
+The TUI `/work` command reads the JSONL file directly:
 
 ```
 /workspace/work_events/<session_id>.jsonl

@@ -1,6 +1,7 @@
-from typing import Dict, Any, Optional, List, Iterator
+from typing import Dict, Iterator, List, Optional
+
 from providers.base import NexusBaseProvider
-import json
+
 
 class VLMProvider(NexusBaseProvider):
     """
@@ -11,13 +12,17 @@ class VLMProvider(NexusBaseProvider):
     def __init__(self):
         super().__init__("vlm", "https://api.openai.com/v1/chat/completions") # Default to OpenAI-compatible
         if not self.model:
-            self.model = "gpt-4o"
+            self.model = os.environ.get("NEXUS_PROVIDER_VLM_MODEL", "gpt-4o")
 
     def analyze_image(self, image_path: str, prompt: str = "Describe this image.") -> str:
         """Standard interface for VLM tasks."""
         import base64
+        import os
+        resolved = os.path.normpath(os.path.abspath(image_path))
+        if not resolved.startswith(os.path.abspath(os.curdir)) and not os.path.isabs(resolved):
+            return f"Error: path traversal detected in {image_path}"
         try:
-            with open(image_path, "rb") as image_file:
+            with open(resolved, "rb") as image_file:
                 base64_image = base64.b64encode(image_file.read()).decode('utf-8')
             
             messages = [
@@ -38,7 +43,7 @@ class VLMProvider(NexusBaseProvider):
         except Exception as e:
             return f"Error in VLM analysis: {e}"
 
-    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> str:
+    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs}
         try:
@@ -49,6 +54,8 @@ class VLMProvider(NexusBaseProvider):
         except Exception as e:
             return f"Error: {e}"
 
-    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> Iterator[str]:
+    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
         # Basic implementation
         yield self.generate(prompt, system_prompt, messages)
+
+

@@ -3,11 +3,11 @@ NEXUS PROMPT ENGINE — Token-efficient dynamic prompts.
 Generates tool lists from registry. No hardcoded fluff.
 """
 
-import os
 import json
+import os
 import platform
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Any, Dict, List
 
 
 class NexusPromptEngine:
@@ -48,7 +48,7 @@ class NexusPromptEngine:
         posture = "companion"
         if needs_tools:
             posture = "worker"
-        if intent in {"code", "debug", "test", "file_ops", "git"}:
+        if intent in {"code", "debug", "test", "files", "reading", "creating", "modifying", "deleting", "git"}:
             posture = "engineer"
         elif intent in {"research"}:
             posture = "researcher"
@@ -90,40 +90,33 @@ class NexusPromptEngine:
 
     @staticmethod
     def get_tool_segment(intent_hints: List[str] = None) -> str:
-        """Dynamic intent-driven tool pruning. Reduces language waste by 60%."""
+        """Expose the real available tool list to the model."""
         try:
             from tools.nexus_tools.registry import ToolRegistry
             registry = ToolRegistry()
             tools: List[str] = []
             seen: set = set()
-            core_tools = {"bash", "file_edit", "glob", "grep", "nexus_switch_brain", "nexus_comms"}
             
-            for name in registry.list_tools():
+            for name in registry.list_tools(include_unavailable=False):
                 tool = registry.get(name)
-                if not tool or tool.name in seen: continue
-                
-                # PRUNING: Core tools + Intent matches
-                keep = (tool.name in core_tools)
-                if intent_hints:
-                    if any(hint.lower() in tool.name.lower() or hint.lower() in str(tool.description).lower() for hint in intent_hints):
-                        keep = True
-                else:
-                    keep = True
-                
-                if keep:
-                    seen.add(tool.name)
-                    desc = tool.description[:60]
-                    tools.append(f"{tool.name}: {desc}")
+                if not tool or tool.name in seen:
+                    continue
+                seen.add(tool.name)
+                desc = str(tool.description or "").strip()[:80]
+                tools.append(f"{tool.name}: {desc}")
 
             tool_list = "\n".join(f"  {i + 1}. {t}" for i, t in enumerate(tools))
             return (
                 "# 🧰_TOOLS (JSON ONLY):\n"
                 f"{tool_list}\n"
                 '# FMT: {"action": "tool_name", "params": {...}}\n'
-                '# NOTE: For file ops, use action: "file_edit" params: {"command": "view|str_replace", "path": "..."}'
+                '# Use the exact tool names shown above. Prefer tools over guessing.'
             )
         except Exception:
-            return "# 🧰_TOOLS: bash, file_edit, glob, grep"
+            return (
+                "# 🧰_TOOLS: bash, code_search, reading, creating, modifying, deleting, "
+                "git_ops, hive, memory, system, task, terminal, test_runner, web_search"
+            )
 
     @staticmethod
     def get_rules_segment(root_dir: str) -> str:

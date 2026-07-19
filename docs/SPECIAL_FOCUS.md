@@ -1,3 +1,5 @@
+> _(Historical planning document — may not reflect current status or completed work)_
+
 # Special Focus: Repair Weak Systems
 
 Fix all fake, weak, shallow, or broken systems from the previous audit.
@@ -87,7 +89,7 @@ Required capabilities:
 - remove stale tests
 - add real unit tests
 - add integration tests
-- add CLI/backend/gui tests
+- add TUI/backend/gui tests
 - add regression tests
 - make pytest reliable
 - create CI test pipeline

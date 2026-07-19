@@ -1,10 +1,12 @@
-import requests
+import os
 import time
-import json
+
+import requests
+
 
 def test_remote_speed():
-    url = "https://esurient-brushable-kalel.ngrok-free.dev/api/generate"
-    model = "huihui_ai/qwen3.5-abliterated:0.8b"
+    url = os.environ.get("NEXUS_SPEED_TEST_URL", "http://127.0.0.1:11434/api/generate")
+    model = os.environ.get("NEXUS_SPEED_TEST_MODEL", "llama3.2")
     prompt = "Tell me a short story about an AI living in a cloud in 50 words."
     
     payload = {

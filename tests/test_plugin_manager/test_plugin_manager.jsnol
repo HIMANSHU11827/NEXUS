@@ -1,0 +1,8 @@
+{
+  "name": "test_plugin_manager",
+  "version": "1.0.0",
+  "description": "Tests for PluginManager — HookRegistry, PluginContext, PluginToolAdapter, plugin lifecycle",
+  "category": "test",
+  "entry": "scripts/test_plugin_manager.py",
+  "class": "TestHookRegistry"
+}

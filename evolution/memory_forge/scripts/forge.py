@@ -5,8 +5,10 @@ import logging
 import os
 import time
 from typing import Any, Dict, List, Optional
+
 from evolution.version.scripts.version import VersionManager
 from providers.router import ModelRouter
+
 logger = logging.getLogger(__name__)
 _ROUTER: Optional[ModelRouter] = None
 

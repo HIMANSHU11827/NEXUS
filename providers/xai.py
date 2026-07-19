@@ -1,7 +1,10 @@
+import os
 import json
 import logging
-from typing import Dict, Any, Optional, List, Iterator
+from typing import Dict, Iterator, List, Optional
+
 from providers.base import NexusBaseProvider
+
 
 class XAIProvider(NexusBaseProvider):
     """
@@ -12,13 +15,13 @@ class XAIProvider(NexusBaseProvider):
     def __init__(self):
         super().__init__("xai", "https://api.x.ai/v1/chat/completions")
         if not self.model:
-            self.model = "grok-beta"
+            self.model = os.environ.get("NEXUS_PROVIDER_XAI_MODEL", "grok-beta")
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
 
-    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> str:
+    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs}
         try:
@@ -32,7 +35,7 @@ class XAIProvider(NexusBaseProvider):
         except Exception as e:
             return f"Error: Failed to reach xAI. {str(e)}"
 
-    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> Iterator[str]:
+    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs, "stream": True}
         try:
@@ -53,3 +56,5 @@ class XAIProvider(NexusBaseProvider):
                 yield f"Error: {response.status_code}. {response.text}"
         except Exception as e:
             yield f"Error in xAI stream: {str(e)}"
+
+

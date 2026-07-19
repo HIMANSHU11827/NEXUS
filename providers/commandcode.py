@@ -1,16 +1,18 @@
-from typing import Dict, Any, Optional, List, Iterator
+import os
 import json
-import shutil
-import subprocess
 import logging
 import os
+import shutil
+import subprocess
 import time
+from typing import Dict, Iterator, List, Optional
+
 from providers.base import NexusBaseProvider
 
 logger = logging.getLogger("NEXUS_COMMANDCODE")
 
 DEFAULT_ENDPOINT = "https://api.commandcode.ai/provider/v1/chat/completions"
-DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
+DEFAULT_MODEL = os.environ.get("NEXUS_PROVIDER_COMMANDCODE_MODEL", "deepseek/deepseek-v4-flash")
 
 
 def _find_cmd() -> Optional[str]:
@@ -204,3 +206,5 @@ class CommandCodeProvider(NexusBaseProvider):
             yield f"\nError: Command Code CLI timed out after {timeout}s."
         except Exception as e:
             yield f"\nError in Command Code stream: {str(e)}"
+
+

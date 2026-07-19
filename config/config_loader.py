@@ -5,11 +5,14 @@ Supports YAML and JSON formats.
 """
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 _ROOT = Path(__file__).resolve().parent
 _CONFIG_DIR = _ROOT  # YAML/JSON config files live alongside config_loader.py
@@ -49,8 +52,8 @@ class NexusConfigLoader:
             if isinstance(data, dict):
                 key = path.stem
                 self._cache[key] = data
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to load YAML %s: %s", path, e)
 
     def _load_json(self, path: Path):
         try:
@@ -59,8 +62,8 @@ class NexusConfigLoader:
             if isinstance(data, dict):
                 key = path.stem
                 self._cache[key] = data
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to load JSON %s: %s", path, e)
 
     def get(self, key: str, default: Any = None) -> Any:
         return self._cache.get(key, default)
@@ -99,23 +102,24 @@ class NexusConfigLoader:
     def get_root() -> Path:
         return _ROOT
 
-    def get_provider_config(self, provider_name: str, sub_provider: Optional[str] = None) -> Dict[str, Any]:
-        """Get configuration for a specific provider from provider.yml."""
-        provider_cfg = self.get("provider", {})
-        if isinstance(provider_cfg, dict):
-            providers = provider_cfg.get("providers", {})
-            if sub_provider:
-                sub = providers.get(provider_name, {})
-                if isinstance(sub, dict):
-                    return sub.get(sub_provider, {})
-                return {}
-            return providers.get(provider_name, {})
-        return {}
+    def get_provider_config(self, name: str) -> dict:
+        provider_cfg = self._cache.get("provider", {})
+        providers = provider_cfg.get("providers", {}) if isinstance(provider_cfg, dict) else {}
+        raw = providers.get(name, {})
+        if not raw:
+            return {}
+        result = dict(raw)
+        parent = result.pop("parent_provider", None)
+        if parent:
+            parent_config = self.get_provider_config(parent)
+            parent_config.update(result)
+            result = parent_config
+        return result
 
     @staticmethod
-    def get_memory_dir() -> Path:
-        return _ROOT / "memory"
+    def get_memory_dir() -> str:
+        return os.path.join(_ROOT.parent, "memory")
 
     @staticmethod
-    def get_knowledge_dir() -> Path:
-        return _ROOT / "knowledge"
+    def get_knowledge_dir() -> str:
+        return os.path.join(_ROOT.parent, "knowledge")

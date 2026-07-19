@@ -35,7 +35,7 @@
   --work-bubble-icon-bg: rgba(96, 165, 250, 0.12);
   --work-bubble-icon-border: rgba(96, 165, 250, 0.26);
   --work-bubble-icon-text: #bfdbfe;
-  --work-bubble-shadow: 0 8px 24px rgba(2, 6, 23, 0.18);
+  --work-bubble-shadow: none;
   --border-radius: 12px;
   --input-radius: 12px;
   --font-family: 'Outfit', -apple-system, system-ui, sans-serif;
@@ -100,11 +100,11 @@ body::after {
 .sidebar {
   width: var(--sidebar-width);
   min-width: var(--sidebar-width);
-  background: var(--sidebar-bg);
-  border-right: 1px solid var(--border-dim);
+  background: #121318;
+  border-right: 1px solid #1f2128;
   display: flex;
   flex-direction: column;
-  padding: 20px 16px;
+  padding: 18px 14px;
   transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
   overflow: hidden;
   z-index: 1000;
@@ -152,9 +152,8 @@ body::after {
 .sidebar-resize-handle:hover::before,
 body.sidebar-resizing .sidebar-resize-handle::before {
   opacity: 1;
-  transform: scaleX(2.4);
-  background: rgba(59, 130, 246, 0.76);
-  box-shadow: 0 0 18px rgba(59, 130, 246, 0.55);
+  transform: scaleX(2);
+  background: rgba(96, 165, 250, 0.72);
 }
 
 body.sidebar-resizing,
@@ -241,7 +240,9 @@ body.sidebar-resizing * {
   position: relative;
   overflow: hidden;
   height: 100vh;
-  background-color: var(--bg-dark);
+  background:
+    radial-gradient(circle at top left, rgba(31, 41, 55, 0.22), transparent 30%),
+    linear-gradient(180deg, #09090b 0%, #0d0d11 52%, #111217 100%);
   transition: padding-right 0.28s cubic-bezier(0.16, 1, 0.3, 1);
   animation: nexus-fade-rise 0.55s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
@@ -267,6 +268,26 @@ body.sidebar-resizing * {
   max-width: 930px !important;
   padding-top: 92px !important;
   color: #111827;
+}
+
+.main-content.lemon-lite .welcome-stat-card {
+  background: #ffffff;
+  border-color: #e5e7eb;
+}
+
+.main-content.lemon-lite .welcome-stat-icon {
+  background: #f8fafc;
+  border-color: #e5e7eb;
+  color: #2563eb;
+}
+
+.main-content.lemon-lite .welcome-stat-copy strong {
+  color: #111827;
+}
+
+.main-content.lemon-lite .welcome-stat-copy span,
+.main-content.lemon-lite .empty-prompt-label {
+  color: #64748b;
 }
 
 .main-content .messages-container {
@@ -390,53 +411,140 @@ body.sidebar-resizing * {
 
 .empty-nexus-title {
   margin: 0;
-  font-size: 5rem;
-  line-height: 0.9;
+  font-size: clamp(3.1rem, 8vw, 4.9rem);
+  line-height: 0.92;
   font-weight: 900;
-  letter-spacing: 0.08em;
-  text-indent: 0.08em;
-  background: linear-gradient(180deg, #ffffff 10%, #c7c9d0 52%, #5f626d 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  text-shadow: 0 26px 70px rgba(255, 255, 255, 0.08);
-  animation: nexus-title-float 4.8s ease-in-out infinite;
+  letter-spacing: 0.14em;
+  text-indent: 0.14em;
+  color: #f4f4f5;
 }
 
 .empty-session-copy {
-  margin-top: 28px;
-  color: #f4f4f5;
-  font-size: 1.26rem;
-  font-weight: 800;
+  margin-top: 18px;
+  color: #9ca3af;
+  font-size: 1rem;
+  font-weight: 600;
   letter-spacing: 0.01em;
 }
 
-.empty-prompt-row {
-  width: min(980px, 100%);
-  margin: 16px auto 0;
+.welcome-stats-grid {
+  width: min(780px, 100%);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.welcome-stat-card {
+  min-height: 124px;
+  border-radius: 18px;
+  border: 1px solid #24262e;
+  background: #121318;
+  padding: 16px;
+  text-align: left;
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.welcome-stat-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid #2e313b;
+  background: #181a20;
+  color: #93c5fd;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.welcome-stat-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.welcome-stat-copy strong {
+  color: #f4f4f5;
+  font-size: 0.92rem;
+  line-height: 1.35;
+}
+
+.welcome-stat-copy span {
+  color: #8b93a4;
+  font-size: 0.78rem;
+  line-height: 1.6;
+}
+
+@media (max-width: 1100px) {
+  .welcome-stats-grid {
+    grid-template-columns: 1fr;
+    width: min(560px, 100%);
+  }
+
+  .task-action-cluster-floating {
+    right: 320px;
+  }
+
+  .task-more-menu {
+    right: 320px;
+  }
+}
+
+@media (max-width: 820px) {
+  .empty-prompt-row-wrap,
+  .empty-prompt-row {
+    width: 100%;
+  }
+
+  .task-action-cluster-floating,
+  .task-more-menu {
+    right: 20px;
+  }
+}
+
+.empty-prompt-row {
+  width: min(1020px, 100%);
+  margin: 14px auto 0;
+  display: flex;
+  gap: 10px;
   flex-wrap: wrap;
   justify-content: center;
 }
 
-.empty-prompt-chip {
-  min-height: 34px;
-  padding: 0 13px;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.035);
-  color: #b7bac4;
-  font: inherit;
-  font-size: 0.72rem;
+.empty-prompt-row-wrap {
+  width: min(1020px, 100%);
+  margin: 0 auto 0;
+}
+
+.empty-prompt-label {
+  margin-bottom: 12px;
+  text-align: center;
+  color: #7b8394;
+  font-size: 0.7rem;
   font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.empty-prompt-chip {
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: 999px;
+  border: 1px solid #2a2b31;
+  background: #15161a;
+  color: #b4b8c3;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 700;
   cursor: pointer;
+  transition: all 0.15s ease;
 }
 
 .empty-prompt-chip:hover {
-  color: #fff;
-  border-color: rgba(59, 130, 246, 0.35);
-  background: rgba(59, 130, 246, 0.08);
-  transform: translateY(-2px);
+  color: #f4f4f5;
+  border-color: #3d414a;
+  background: #1c1d22;
 }
 
 /* PREMIUM SEARCH & CHAT CONTAINER */
@@ -455,93 +563,67 @@ body.sidebar-resizing * {
 .chat-pane .search-container {
   flex: 0 0 auto;
   width: min(100%, 1280px);
-  padding: 0 28px 28px;
+  padding: 0 28px 18px;
 }
 
 .chat-pane .composer-dock.empty-composer {
-  width: min(100%, 1120px);
+  width: min(100%, 1080px);
 }
 
 .composer-dock {
-  filter: drop-shadow(0 22px 46px rgba(0, 0, 0, 0.45));
-  animation: nexus-composer-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: nexus-composer-in 0.3s ease-out both;
 }
 
 .composer-dock.empty-composer {
-  max-width: 1120px;
-  filter: drop-shadow(0 22px 42px rgba(0, 0, 0, 0.38));
+  max-width: 1080px;
 }
 
 .composer-dock.empty-composer .search-bar-wrap {
-  min-height: 72px;
-  border-radius: 20px;
-  border-color: rgba(255, 255, 255, 0.13);
-  background:
-    linear-gradient(180deg, rgba(31, 31, 38, 0.96), rgba(17, 17, 22, 0.98));
-  box-shadow:
-    inset 0 1px 0 rgba(255,255,255,0.05),
-    0 22px 58px rgba(0, 0, 0, 0.42);
+  min-height: 76px;
+  border-radius: 22px;
+  border-color: #2a2b31;
+  background: #15171d;
+  box-shadow: none;
 }
 
 .composer-dock.empty-composer .search-bar-wrap:focus-within {
-  border-color: rgba(59, 130, 246, 0.48);
-  box-shadow:
-    inset 0 1px 0 rgba(255,255,255,0.06),
-    0 24px 64px rgba(0, 0, 0, 0.46),
-    0 0 0 1px rgba(59, 130, 246, 0.12);
+  border-color: #3f3f46;
+  box-shadow: none;
 }
 
 .composer-dock.empty-composer .main-input {
-  font-size: 1.08rem;
-}
-
-.composer-dock.empty-composer .send-arrow {
-  width: 44px;
-  height: 44px;
+  font-size: 1rem;
 }
 
 .search-bar-wrap {
-  background:
-    linear-gradient(180deg, rgba(30, 30, 35, 0.98), rgba(18, 18, 22, 0.98));
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #15171d;
+  border: 1px solid #2a2b31;
   border-radius: 22px;
-  padding: 12px 14px;
+  padding: 14px 16px;
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 12px;
-  transition: all 0.2s ease;
-  min-height: 66px;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 18px 50px rgba(0, 0, 0, 0.38);
-  backdrop-filter: blur(16px);
+  gap: 16px;
+  transition: all 0.15s ease;
+  min-height: 68px;
+  box-shadow: none;
   position: relative;
   overflow: hidden;
 }
 
 .search-bar-wrap::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: linear-gradient(100deg, transparent 0%, rgba(59, 130, 246, 0.10) 48%, transparent 72%);
-  transform: translateX(-130%);
+  display: none;
 }
 
 .search-bar-wrap:focus-within {
-  background: rgba(23, 23, 27, 0.99);
-  border-color: rgba(59, 130, 246, 0.42);
-  box-shadow: 0 18px 54px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(59, 130, 246, 0.08);
-  transform: translateY(-2px);
-}
-
-.search-bar-wrap:focus-within::before {
-  animation: nexus-card-sheen 1.05s cubic-bezier(0.16, 1, 0.3, 1);
+  background: #181a21;
+  border-color: #3a3e48;
 }
 
 .composer-main-row {
   flex: 1;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 44px;
+  grid-template-columns: minmax(0, 1fr) 50px;
   align-items: center;
   gap: 12px;
   min-height: 40px;
@@ -554,16 +636,34 @@ body.sidebar-resizing * {
   color: #fff;
   font-family: inherit;
   font-size: 1rem;
-  font-weight: 400;
+  font-weight: 500;
   outline: none;
   width: 100%;
   min-width: 0;
-  padding: 8px 10px;
+  padding: 7px 10px;
   letter-spacing: -0.01em;
 }
 
 .main-input::placeholder {
-  color: #696974;
+  color: #737783;
+}
+
+.message-actions:focus-within {
+  opacity: 0.9 !important;
+}
+
+.message-actions button:focus-visible,
+.canvas-editor-actions button:focus-visible,
+.canvas-playback-btn:focus-visible,
+.canvas-floating-jump:focus-visible {
+  outline: 2px solid var(--accent, #60a5fa) !important;
+  outline-offset: 2px;
+}
+
+.live-agent-elapsed {
+  color: var(--muted-text, #94a3b8);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.78;
 }
 
 .input-footer {
@@ -571,9 +671,10 @@ body.sidebar-resizing * {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  padding: 0;
+  padding: 0 16px 0 4px;
   border-top: none;
   flex-shrink: 0;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .action-icons {
@@ -583,19 +684,19 @@ body.sidebar-resizing * {
 }
 
 .model-selector {
-  min-width: 150px;
-  max-width: 190px;
-  padding: 10px 14px;
+  min-width: 140px;
+  max-width: 176px;
+  padding: 8px 12px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid #2e313b;
+  background: #1a1c22;
   color: #fff;
-  font-size: 0.8rem;
-  font-weight: 600;
+  font-size: 0.78rem;
+  font-weight: 700;
   cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   justify-content: space-between;
   transition: all 0.3s;
 }
@@ -617,7 +718,7 @@ body.sidebar-resizing * {
   background: #fff;
   border: 1px solid #e5e7eb;
   border-radius: 18px;
-  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
 }
 
 .main-content.lemon-lite .search-bar-wrap::before {
@@ -627,8 +728,8 @@ body.sidebar-resizing * {
 .main-content.lemon-lite .search-bar-wrap:focus-within,
 .main-content.lemon-lite .composer-dock.empty-composer .search-bar-wrap:focus-within {
   background: #fff;
-  border-color: #bfdbfe;
-  box-shadow: 0 14px 36px rgba(59, 130, 246, 0.12);
+  border-color: #cbd5e1;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
   transform: none;
 }
 
@@ -704,18 +805,16 @@ body.sidebar-resizing * {
   justify-content: center;
   font-size: 1.2rem;
   transition: all 0.2s ease;
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   border-radius: 999px;
-  opacity: 0.62;
-  filter: grayscale(1);
+  opacity: 0.72;
+  filter: none;
 }
 
 .icon-btn:hover {
-  background: rgba(255,255,255,0.06);
-  opacity: 0.95;
-  filter: grayscale(0);
-  transform: translateY(-1px);
+  background: #1b1d23;
+  opacity: 1;
   color: #fff;
 }
 
@@ -734,19 +833,17 @@ body.sidebar-resizing * {
 }
 
 .screen-share-btn.screen-active {
-  background: rgba(59, 130, 246, 0.16);
+  background: #1a2231;
   color: #93c5fd;
   opacity: 1;
-  filter: grayscale(0);
-  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.35), 0 0 18px rgba(59, 130, 246, 0.18);
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.22);
 }
 
 .voice-btn.voice-active {
-  background: rgba(34, 197, 94, 0.16);
+  background: #18261d;
   color: #86efac;
   opacity: 1;
-  filter: grayscale(0);
-  box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.35), 0 0 18px rgba(34, 197, 94, 0.18);
+  box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.22);
 }
 
 .screen-share-status,
@@ -853,36 +950,36 @@ body.sidebar-resizing * {
 
 /* SEND ARROW SYSTEM */
 .send-arrow {
-  background: rgba(255, 255, 255, 0.1);
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
+  background: #1d1f25;
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--text-muted);
   cursor: pointer;
   transition: all 0.2s ease;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid #31343d;
   flex-shrink: 0;
 }
 
 .send-arrow:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: #23262e;
   color: #fff;
 }
 
 .send-arrow.active {
-  background: linear-gradient(135deg, var(--accent-blue), var(--accent-indigo));
+  background: #2563eb;
   color: #fff;
-  border-color: transparent;
-  box-shadow: 0 10px 22px rgba(59, 130, 246, 0.32);
-  animation: nexus-send-ready 1.8s ease-in-out infinite;
+  border-color: #2563eb;
+  box-shadow: none;
+  animation: none;
 }
 
 .send-arrow.active:hover {
-  background: #2563eb;
-  transform: translateY(-2px) scale(1.05);
+  background: #1d4ed8;
+  transform: none;
 }
 
 /* CHIPS */
@@ -921,11 +1018,10 @@ body.sidebar-resizing * {
   align-items: center;
   gap: 10px;
   z-index: 9500;
-  padding: 4px;
-  border-radius: 10px;
-  background: rgba(9, 9, 11, 0.52);
-  border: 1px solid rgba(255, 255, 255, 0.04);
-  backdrop-filter: blur(14px);
+  padding: 6px;
+  border-radius: 16px;
+  background: #111216;
+  border: 1px solid #23252d;
   animation: nexus-fade-down 0.48s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
@@ -934,35 +1030,34 @@ body.sidebar-resizing * {
   align-items: center;
   gap: 6px;
   padding: 4px 8px 4px 4px;
-  border-radius: 10px;
-  background: rgba(9, 9, 11, 0.52);
-  border: 1px solid rgba(255, 255, 255, 0.04);
-  backdrop-filter: blur(14px);
+  border-radius: 16px;
+  background: #111216;
+  border: 1px solid #23252d;
   transition: opacity 0.18s ease, transform 0.18s ease;
 }
 
 .task-action-cluster-floating {
   position: fixed;
   top: 20px;
-  right: 432px;
+  right: 404px;
   z-index: 9500;
   animation: nexus-fade-down 0.48s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .task-action-btn {
-  height: 30px;
+  height: 34px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 10px;
   background: transparent;
-  color: #d8dce3;
+  color: #c5cad3;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 7px;
-  padding: 0 9px;
+  padding: 0 11px;
   font: inherit;
-  font-size: 0.76rem;
-  font-weight: 780;
+  font-size: 0.75rem;
+  font-weight: 750;
   cursor: pointer;
   position: relative;
 }
@@ -975,9 +1070,8 @@ body.sidebar-resizing * {
 .task-action-btn:hover,
 .task-action-btn:focus-visible {
   color: #ffffff;
-  background: rgba(255, 255, 255, 0.075);
+  background: #1a1c22;
   outline: none;
-  transform: translateY(-1px);
 }
 
 .task-action-btn.icon {
@@ -986,7 +1080,7 @@ body.sidebar-resizing * {
 }
 
 .task-action-btn.more {
-  background: rgba(255, 255, 255, 0.06);
+  background: #17191e;
 }
 
 .task-file-count {
@@ -1008,15 +1102,14 @@ body.sidebar-resizing * {
 .task-more-menu {
   position: fixed;
   top: 62px;
-  right: 432px;
+  right: 404px;
   z-index: 12050;
   width: 238px;
   padding: 10px;
-  border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(31, 31, 32, 0.98);
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.46);
-  backdrop-filter: blur(18px);
+  border-radius: 16px;
+  border: 1px solid #2b2d35;
+  background: #141519;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.34);
   animation: nexus-fade-down 0.16s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
@@ -1041,7 +1134,7 @@ body.sidebar-resizing * {
 
 .task-more-menu button:hover,
 .task-more-menu button:focus-visible {
-  background: rgba(255, 255, 255, 0.075);
+  background: #1c1e24;
   outline: none;
 }
 
@@ -1430,11 +1523,11 @@ body.sidebar-resizing * {
 }
 
 .status-indicator {
-  padding: 6px 12px;
-  border-radius: 6px;
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.5px;
+  padding: 8px 13px;
+  border-radius: 11px;
+  font-size: 0.69rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
   white-space: nowrap;
   transition: all 0.2s ease;
   border: 1px solid transparent;
@@ -1443,23 +1536,15 @@ body.sidebar-resizing * {
 }
 
 .status-indicator::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(100deg, transparent, rgba(255,255,255,0.12), transparent);
-  transform: translateX(-120%);
+  display: none;
 }
 
 .status-indicator:hover {
-  transform: translateY(-2px);
-}
-
-.status-indicator:hover::after {
-  animation: nexus-card-sheen 0.75s cubic-bezier(0.16, 1, 0.3, 1);
+  filter: brightness(1.06);
 }
 
 .status-indicator.active {
-  box-shadow: 0 0 0 1px rgba(255,255,255,0.22), 0 10px 26px rgba(0,0,0,0.28);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12);
   color: #fff !important;
 }
 
@@ -5001,35 +5086,231 @@ body.drawer-resizing * {
 
 .main-content .messages-container .work-row.lemon-row,
 .main-content .messages-container .work-row.lemon-row.done {
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--border-dim);
+  border-radius: 10px;
+}
+
+.dropdown-item-hover:hover {
+  background: var(--card-hover-bg) !important;
+  color: #fff !important;
+}
+
+.fade-in {
+  animation: dropdownFadeIn 0.2s ease;
+}
+
+@keyframes dropdownFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.hover-bright:hover {
+  background: var(--card-hover-bg) !important;
+  border-color: var(--border-focus) !important;
+}
+
+* {
+  -ms-overflow-style: none;  /* IE/Edge */
+}
+
+/* NEXUS workflow timeline: todo phases only, direct actions otherwise. */
+.main-content .messages-container .work-timeline {
+  width: min(860px, 100%);
+  margin: 10px 0 4px;
+}
+
+.main-content .messages-container .direct-work-timeline::before {
+  display: none;
+}
+
+.main-content .messages-container .phase-work-timeline::before {
+  left: 9px;
+  top: 42px;
+  bottom: 16px;
+  background: linear-gradient(180deg, rgba(96, 165, 250, 0.44), rgba(96, 165, 250, 0.05));
+}
+
+.main-content .messages-container .phase-work-timeline.collapsed::before {
+  display: none;
+}
+
+.main-content .messages-container .work-direct-head,
+.main-content .messages-container .phase-work-timeline > .work-phase {
+  width: min(760px, 100%);
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  color: #ffffff;
+  font-size: 0.94rem;
+  font-weight: 900;
+}
+
+.main-content .messages-container .work-direct-head {
+  padding: 6px 10px 6px 0;
+}
+
+.main-content .messages-container .work-counts {
+  justify-self: end;
+  margin-left: 0;
+}
+
+.main-content .messages-container .work-counts span {
+  background: rgba(15, 23, 42, 0.72);
+  border-color: rgba(96, 165, 250, 0.18);
+  color: #9fb7d8;
+}
+
+.main-content .messages-container .workflow-heading-title {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-weight: 900;
+  line-height: 1.18;
+}
+
+.main-content .messages-container .workflow-kicker {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  background: rgba(59, 130, 246, 0.11);
+  color: #2563eb;
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.main-content .messages-container .work-rows {
+  width: min(760px, 100%);
+  margin-left: 11px;
+  padding-left: 18px;
+  border-left: 1px solid rgba(96, 165, 250, 0.28);
+  gap: 7px;
+}
+
+.main-content .messages-container .direct-work-rows {
+  margin-left: 0;
+  padding-left: 0;
+  border-left: 0;
+}
+
+.main-content .messages-container .work-phase-group {
+  width: min(790px, 100%);
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.main-content .messages-container .lemon-phase-header {
+  width: min(790px, 100%);
+  min-height: 36px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 4px 6px 0;
+  color: #dbeafe;
+  border-radius: 0;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+.main-content .messages-container .lemon-phase-header:hover,
+.main-content .messages-container .lemon-phase-header:focus-visible {
+  color: #ffffff;
+  outline: none;
+  background: transparent !important;
+}
+
+.main-content .messages-container .lemon-phase-header.collapsed svg {
+  transform: rotate(-90deg);
+}
+
+.main-content .messages-container .lemon-phase-status,
+.main-content .messages-container .work-phase-dot {
+  width: 22px;
+  height: 22px;
+  background: #111827;
+  border: 1px solid rgba(147, 197, 253, 0.26);
+  color: #bfdbfe;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.08);
+}
+
+.main-content .messages-container .lemon-phase-header.done .lemon-phase-status {
+  background: rgba(34, 197, 94, 0.16);
+  border-color: rgba(74, 222, 128, 0.36);
+  color: #86efac;
+}
+
+.main-content .messages-container .lemon-phase-header.running .lemon-phase-status {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(250, 204, 21, 0.34);
+  color: #fde68a;
+}
+
+.main-content .messages-container .lemon-phase-text {
+  font-size: 0.88rem;
+  font-weight: 820;
+  color: inherit;
+}
+
+.main-content .messages-container .lemon-phase-meta,
+.main-content .messages-container .work-direct-subhead {
+  color: #8ea6c8;
+  font-size: 0.64rem;
+  font-weight: 900;
+  letter-spacing: 0.55px;
+  text-transform: uppercase;
+}
+
+.main-content .messages-container .work-direct-subhead {
+  width: min(760px, 100%);
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0 3px 30px;
+}
+
+.main-content .messages-container .work-row.lemon-row,
+.main-content .messages-container .work-row.lemon-row.done {
   width: min(720px, 100%);
   min-height: 38px;
   grid-template-columns: 24px minmax(0, 1fr);
-  padding: 6px 10px;
+  padding: 8px 12px;
   border-radius: 12px;
   background: var(--work-bubble-bg);
   border: 1px solid var(--work-bubble-border);
   color: var(--work-bubble-text);
-  box-shadow: var(--work-bubble-shadow);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+  transition: all 0.25s ease;
 }
 
 .main-content .messages-container .work-row.lemon-row:hover,
 .main-content .messages-container .work-row.lemon-row:focus-visible {
   transform: translateY(-1px);
   background: var(--work-bubble-bg-hover);
-  border-color: var(--work-bubble-border-hover);
-  box-shadow: 0 12px 30px rgba(37, 99, 235, 0.18);
+  border-color: rgba(96, 165, 250, 0.4);
+  box-shadow: 0 6px 16px rgba(0,0,0,0.4), 0 0 12px rgba(96, 165, 250, 0.15);
 }
 
 .main-content .messages-container .work-row.lemon-row.running {
-  border-color: rgba(250, 204, 21, 0.34);
+  border-color: var(--work-bubble-border);
 }
 
 .main-content .messages-container .work-row.lemon-row.error {
-  border-color: rgba(248, 113, 113, 0.38);
+  border-color: var(--work-bubble-border);
 }
 
 .main-content .messages-container .work-row.lemon-row.plan-file {
-  border-color: var(--work-bubble-border-hover);
+  border-color: var(--work-bubble-border);
   background: var(--work-bubble-plan-bg);
 }
 
@@ -5047,15 +5328,15 @@ body.drawer-resizing * {
 }
 
 .main-content .messages-container .work-row.lemon-row.running .work-row-icon {
-  background: rgba(245, 158, 11, 0.12);
-  border-color: rgba(250, 204, 21, 0.30);
-  color: #facc15;
+  background: var(--work-bubble-icon-bg);
+  border-color: var(--work-bubble-icon-border);
+  color: var(--work-bubble-icon-text);
 }
 
 .main-content .messages-container .work-row.lemon-row.error .work-row-icon {
-  background: rgba(248, 113, 113, 0.12);
-  border-color: rgba(248, 113, 113, 0.30);
-  color: #fca5a5;
+  background: var(--work-bubble-icon-bg);
+  border-color: var(--work-bubble-icon-border);
+  color: var(--work-bubble-icon-text);
 }
 
 .main-content .messages-container .work-row.lemon-row .work-row-action {
@@ -5235,6 +5516,183 @@ body.drawer-resizing * {
   border-color: rgba(59, 130, 246, 0.15);
   color: #3b82f6;
 }
+.main-content .messages-container .work-row.lemon-row .work-row-action {
+  color: var(--work-bubble-text);
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
+.main-content .messages-container .work-row.lemon-row code {
+  background: var(--work-bubble-code-bg);
+  border-color: var(--work-bubble-code-border);
+  color: var(--work-bubble-code-text);
+}
+
+.main-content .messages-container .work-subtask {
+  color: var(--work-bubble-muted);
+}
+
+.canvas-step-counter {
+  min-width: 44px;
+  text-align: right;
+  color: #94a3b8;
+  font-size: 0.68rem;
+  font-weight: 900;
+}
+
+.canvas-realtime:not(.active) {
+  min-width: 126px;
+  padding-inline: 10px;
+  color: #1d4ed8;
+  background: rgba(59, 130, 246, 0.08);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PREMIUM CHAT AREA — works in both dark (default) and light (lemon-lite)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Typing / streaming dots indicator */
+@keyframes chat-dot-bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+  40% { transform: translateY(-6px); opacity: 1; }
+}
+.chat-typing-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: chat-dot-bounce 1.2s infinite ease-in-out;
+}
+.chat-typing-dot:nth-child(2) { animation-delay: 0.18s; }
+.chat-typing-dot:nth-child(3) { animation-delay: 0.36s; }
+
+/* Message fade-in */
+@keyframes msg-rise {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.message-row { animation: msg-rise 0.28s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+/* ── LIGHT MODE (agentLite = true → body has class .lemon-lite via main-content) ── */
+.main-content.lemon-lite .messages-container {
+  background: #f8fafc;
+}
+
+/* Light-mode timeline rows override dark background */
+.main-content.lemon-lite .messages-container .work-row.lemon-row,
+.main-content.lemon-lite .messages-container .work-row.lemon-row.done {
+  background: var(--work-bubble-bg);
+  border-color: var(--work-bubble-border);
+  color: var(--work-bubble-text);
+  box-shadow: var(--work-bubble-shadow);
+}
+
+.main-content.lemon-lite .messages-container .work-row.lemon-row:hover,
+.main-content.lemon-lite .messages-container .work-row.lemon-row:focus-visible {
+  background: var(--work-bubble-bg-hover);
+  border-color: var(--work-bubble-border-hover);
+  box-shadow: none;
+  transform: translateY(-1px);
+}
+
+.main-content.lemon-lite .messages-container .work-row.lemon-row .work-row-icon {
+  background: var(--work-bubble-icon-bg);
+  border-color: var(--work-bubble-icon-border);
+  color: var(--work-bubble-icon-text);
+}
+
+.main-content.lemon-lite .messages-container .work-row.lemon-row .work-row-action {
+  color: var(--work-bubble-text);
+}
+
+.main-content.lemon-lite .messages-container .work-row.lemon-row code {
+  background: var(--work-bubble-code-bg);
+  border-color: var(--work-bubble-code-border);
+  color: var(--work-bubble-code-text);
+}
+
+.main-content.lemon-lite .messages-container .work-row.lemon-row.running {
+  border-color: rgba(245, 158, 11, 0.30);
+  background: #fffbf0;
+}
+
+.main-content.lemon-lite .messages-container .work-row.lemon-row.running .work-row-icon {
+  background: rgba(245, 158, 11, 0.10);
+  border-color: rgba(245, 158, 11, 0.25);
+  color: #d97706;
+}
+
+.main-content.lemon-lite .messages-container .work-row.lemon-row.error {
+  border-color: rgba(239, 68, 68, 0.28);
+  background: #fff5f5;
+}
+
+.main-content.lemon-lite .messages-container .work-row.lemon-row.plan-file {
+  background: var(--work-bubble-plan-bg);
+  border-color: var(--work-bubble-border-hover);
+}
+
+.main-content.lemon-lite .messages-container .work-subtask {
+  color: var(--work-bubble-muted);
+}
+
+/* Light-mode phase header — flat, no box */
+.main-content.lemon-lite .messages-container .lemon-phase-header {
+  color: #1e293b;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+
+.main-content.lemon-lite .messages-container .lemon-phase-header:hover,
+.main-content.lemon-lite .messages-container .lemon-phase-header:focus-visible {
+  color: #0f172a;
+  background: transparent !important;
+}
+
+.main-content.lemon-lite .messages-container .lemon-phase-status,
+.main-content.lemon-lite .messages-container .work-phase-dot {
+  background: #e0eaff;
+  border-color: rgba(59, 130, 246, 0.28);
+  color: #1d4ed8;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.06);
+}
+
+.main-content.lemon-lite .messages-container .lemon-phase-header.done .lemon-phase-status {
+  background: #dcfce7;
+  border-color: rgba(34, 197, 94, 0.28);
+  color: #16a34a;
+}
+
+.main-content.lemon-lite .messages-container .lemon-phase-header.running .lemon-phase-status {
+  background: #fef3c7;
+  border-color: rgba(245, 158, 11, 0.30);
+  color: #d97706;
+}
+
+.main-content.lemon-lite .messages-container .work-rows {
+  border-left-color: rgba(59, 130, 246, 0.20);
+}
+
+.main-content.lemon-lite .messages-container .phase-work-timeline::before {
+  background: linear-gradient(180deg, rgba(59, 130, 246, 0.36), rgba(59, 130, 246, 0.04));
+}
+
+.main-content.lemon-lite .messages-container .phase-work-timeline.collapsed::before {
+  display: none;
+}
+
+.main-content.lemon-lite .messages-container .work-direct-head,
+.main-content.lemon-lite .messages-container .phase-work-timeline > .work-phase {
+  color: #0f172a;
+}
+
+.main-content.lemon-lite .messages-container .work-counts span {
+  background: rgba(239, 246, 255, 0.9);
+  border-color: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+}
 
 .main-content.lemon-lite .messages-container .lemon-phase-meta,
 .main-content.lemon-lite .messages-container .work-direct-subhead {
@@ -5248,13 +5706,45 @@ body.drawer-resizing * {
   -ms-overflow-style: none;
 }
 
-/* ── USER BUBBLE ── */
+/* 🤖 USER BUBBLE 🤖 */
 .user-bubble {
-  border-radius: 18px 18px 6px 18px !important;
+  border-radius: 14px 14px 4px 14px !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  background: rgba(40, 40, 48, 0.7) !important;
+  backdrop-filter: blur(8px) !important;
+  padding: 12px 16px !important;
 }
-/* ── ASSISTANT BUBBLE ── */
+/* 🤖 ASSISTANT BUBBLE 🤖 */
 .assistant-bubble {
-  border-radius: 6px 18px 18px 18px !important;
+  border-radius: 4px 14px 14px 14px !important;
+  box-shadow: none !important;
+  border: none !important;
+  background: transparent !important;
+  line-height: 1.6 !important;
+}
+
+/* Fix markdown spacing inside bubbles */
+.user-bubble > *:first-child,
+.assistant-bubble > *:first-child {
+  margin-top: 0;
+}
+.user-bubble > *:last-child,
+.assistant-bubble > *:last-child {
+  margin-bottom: 0;
+}
+.user-bubble p, .assistant-bubble p {
+  margin-bottom: 8px;
+}
+.user-bubble pre, .assistant-bubble pre {
+  margin-top: 10px;
+  margin-bottom: 10px;
+}
+.user-bubble ul, .assistant-bubble ul,
+.user-bubble ol, .assistant-bubble ol {
+  margin-top: 8px;
+  margin-bottom: 8px;
+  padding-left: 20px;
 }
 
 /* Code block inside bubbles */
@@ -5264,8 +5754,6 @@ body.drawer-resizing * {
 }
 .code-block-card::-webkit-scrollbar { height: 4px; }
 .code-block-card::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.3); border-radius: 4px; }
-
-/* Welcome screen */
 .chat-welcome-screen h2 {
   background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
   -webkit-background-clip: text;
@@ -6963,4 +7451,395 @@ body.canvas-resizing .main-content.lemon-lite .canvas-resize-handle {
 .main-content.lemon-lite .messages-container .work-row.lemon-row.settings:hover,
 .main-content.lemon-lite .messages-container .work-row.lemon-row.location:hover {
   background: var(--work-bubble-bg-hover) !important;
+}
+
+.main-content .messages-container .work-row.lemon-row .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.running .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.error .work-row-icon,
+.main-content.lemon-lite .messages-container .work-row.lemon-row .work-row-icon,
+.main-content.lemon-lite .messages-container .work-row.lemon-row.running .work-row-icon,
+.main-content.lemon-lite .messages-container .work-row.lemon-row.error .work-row-icon {
+  background: var(--work-bubble-icon-bg) !important;
+  border-color: var(--work-bubble-icon-border) !important;
+  color: var(--work-bubble-icon-text) !important;
+  box-shadow: none !important;
+}
+
+.main-content .messages-container .work-row.lemon-row .work-row-action,
+.main-content .messages-container .work-row.lemon-row code,
+.main-content.lemon-lite .messages-container .work-row.lemon-row .work-row-action,
+.main-content.lemon-lite .messages-container .work-row.lemon-row code {
+  color: var(--work-bubble-text) !important;
+}
+
+.main-content .messages-container .work-row.lemon-row code,
+.main-content.lemon-lite .messages-container .work-row.lemon-row code {
+  background: var(--work-bubble-code-bg) !important;
+  border-color: var(--work-bubble-code-border) !important;
+}
+
+/* Final hard reset: every workflow row type must look identical */
+.work-row.lemon-row,
+.work-row.lemon-row.done,
+.work-row.lemon-row.running,
+.work-row.lemon-row.error,
+.work-row.lemon-row.plan-file,
+.work-row.lemon-row.command,
+.work-row.lemon-row.bash,
+.work-row.lemon-row.exec,
+.work-row.lemon-row.terminal,
+.work-row.lemon-row.shell,
+.work-row.lemon-row.health,
+.work-row.lemon-row.file-edit,
+.work-row.lemon-row.file-replace,
+.work-row.lemon-row.file-read,
+.work-row.lemon-row.file-delete,
+.work-row.lemon-row.file-create,
+.work-row.lemon-row.search,
+.work-row.lemon-row.browser,
+.work-row.lemon-row.rag,
+.work-row.lemon-row.mcp,
+.work-row.lemon-row.skill,
+.work-row.lemon-row.plugin,
+.work-row.lemon-row.reflection,
+.work-row.lemon-row.thinking-row,
+.work-row.lemon-row.hive,
+.work-row.lemon-row.todo,
+.work-row.lemon-row.config,
+.work-row.lemon-row.settings,
+.work-row.lemon-row.location,
+.work-row.lemon-row:hover,
+.work-row.lemon-row:focus-visible {
+  background: #0b0b0d !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.work-row.lemon-row .work-row-icon,
+.work-row.lemon-row.running .work-row-icon,
+.work-row.lemon-row.error .work-row-icon,
+.work-row.lemon-row.plan-file .work-row-icon,
+.work-row.lemon-row.command .work-row-icon,
+.work-row.lemon-row.bash .work-row-icon,
+.work-row.lemon-row.exec .work-row-icon,
+.work-row.lemon-row.terminal .work-row-icon,
+.work-row.lemon-row.shell .work-row-icon,
+.work-row.lemon-row.health .work-row-icon,
+.work-row.lemon-row.file-edit .work-row-icon,
+.work-row.lemon-row.file-replace .work-row-icon,
+.work-row.lemon-row.file-read .work-row-icon,
+.work-row.lemon-row.file-delete .work-row-icon,
+.work-row.lemon-row.file-create .work-row-icon,
+.work-row.lemon-row.search .work-row-icon,
+.work-row.lemon-row.browser .work-row-icon,
+.work-row.lemon-row.rag .work-row-icon,
+.work-row.lemon-row.mcp .work-row-icon,
+.work-row.lemon-row.skill .work-row-icon,
+.work-row.lemon-row.plugin .work-row-icon,
+.work-row.lemon-row.reflection .work-row-icon,
+.work-row.lemon-row.thinking-row .work-row-icon,
+.work-row.lemon-row.hive .work-row-icon,
+.work-row.lemon-row.todo .work-row-icon,
+.work-row.lemon-row.config .work-row-icon,
+.work-row.lemon-row.settings .work-row-icon,
+.work-row.lemon-row.location .work-row-icon {
+  background: #18181b !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+  color: #f5f5f5 !important;
+}
+
+.work-row.lemon-row .work-row-action,
+.work-row.lemon-row code,
+.work-row.lemon-row.command .work-row-action,
+.work-row.lemon-row.bash .work-row-action,
+.work-row.lemon-row.exec .work-row-action,
+.work-row.lemon-row.terminal .work-row-action,
+.work-row.lemon-row.shell .work-row-action,
+.work-row.lemon-row.health .work-row-action,
+.work-row.lemon-row.file-edit .work-row-action,
+.work-row.lemon-row.file-replace .work-row-action,
+.work-row.lemon-row.file-read .work-row-action,
+.work-row.lemon-row.file-delete .work-row-action,
+.work-row.lemon-row.file-create .work-row-action,
+.work-row.lemon-row.search .work-row-action,
+.work-row.lemon-row.browser .work-row-action,
+.work-row.lemon-row.rag .work-row-action,
+.work-row.lemon-row.mcp .work-row-action,
+.work-row.lemon-row.skill .work-row-action,
+.work-row.lemon-row.plugin .work-row-action,
+.work-row.lemon-row.reflection .work-row-action,
+.work-row.lemon-row.thinking-row .work-row-action,
+.work-row.lemon-row.hive .work-row-action,
+.work-row.lemon-row.todo .work-row-action,
+.work-row.lemon-row.plan-file .work-row-action,
+.work-row.lemon-row.config .work-row-action,
+.work-row.lemon-row.settings .work-row-action,
+.work-row.lemon-row.location .work-row-action,
+.work-row.lemon-row.command code,
+.work-row.lemon-row.bash code,
+.work-row.lemon-row.exec code,
+.work-row.lemon-row.terminal code,
+.work-row.lemon-row.shell code,
+.work-row.lemon-row.health code,
+.work-row.lemon-row.file-edit code,
+.work-row.lemon-row.file-replace code,
+.work-row.lemon-row.file-read code,
+.work-row.lemon-row.file-delete code,
+.work-row.lemon-row.file-create code,
+.work-row.lemon-row.search code,
+.work-row.lemon-row.browser code,
+.work-row.lemon-row.rag code,
+.work-row.lemon-row.mcp code,
+.work-row.lemon-row.skill code,
+.work-row.lemon-row.plugin code,
+.work-row.lemon-row.reflection code,
+.work-row.lemon-row.thinking-row code,
+.work-row.lemon-row.hive code,
+.work-row.lemon-row.todo code,
+.work-row.lemon-row.plan-file code,
+.work-row.lemon-row.config code,
+.work-row.lemon-row.settings code,
+.work-row.lemon-row.location code {
+  color: #f5f5f5 !important;
+}
+
+.work-row.lemon-row code,
+.work-row.lemon-row.command code,
+.work-row.lemon-row.bash code,
+.work-row.lemon-row.exec code,
+.work-row.lemon-row.terminal code,
+.work-row.lemon-row.shell code,
+.work-row.lemon-row.health code,
+.work-row.lemon-row.file-edit code,
+.work-row.lemon-row.file-replace code,
+.work-row.lemon-row.file-read code,
+.work-row.lemon-row.file-delete code,
+.work-row.lemon-row.file-create code,
+.work-row.lemon-row.search code,
+.work-row.lemon-row.browser code,
+.work-row.lemon-row.rag code,
+.work-row.lemon-row.mcp code,
+.work-row.lemon-row.skill code,
+.work-row.lemon-row.plugin code,
+.work-row.lemon-row.reflection code,
+.work-row.lemon-row.thinking-row code,
+.work-row.lemon-row.hive code,
+.work-row.lemon-row.todo code,
+.work-row.lemon-row.plan-file code,
+.work-row.lemon-row.config code,
+.work-row.lemon-row.settings code,
+.work-row.lemon-row.location code {
+  background: #111214 !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* FINAL MONOCHROME OVERRIDE - keep every workflow item same dark style */
+.main-content .messages-container .work-row.lemon-row,
+.main-content .messages-container .work-row.lemon-row.done,
+.main-content .messages-container .work-row.lemon-row.running,
+.main-content .messages-container .work-row.lemon-row.error,
+.main-content .messages-container .work-row.lemon-row.plan-file,
+.main-content .messages-container .work-row.lemon-row.command,
+.main-content .messages-container .work-row.lemon-row.bash,
+.main-content .messages-container .work-row.lemon-row.exec,
+.main-content .messages-container .work-row.lemon-row.terminal,
+.main-content .messages-container .work-row.lemon-row.shell,
+.main-content .messages-container .work-row.lemon-row.health,
+.main-content .messages-container .work-row.lemon-row.file-edit,
+.main-content .messages-container .work-row.lemon-row.file-replace,
+.main-content .messages-container .work-row.lemon-row.file-read,
+.main-content .messages-container .work-row.lemon-row.file-delete,
+.main-content .messages-container .work-row.lemon-row.file-create,
+.main-content .messages-container .work-row.lemon-row.search,
+.main-content .messages-container .work-row.lemon-row.browser,
+.main-content .messages-container .work-row.lemon-row.rag,
+.main-content .messages-container .work-row.lemon-row.mcp,
+.main-content .messages-container .work-row.lemon-row.skill,
+.main-content .messages-container .work-row.lemon-row.plugin,
+.main-content .messages-container .work-row.lemon-row.reflection,
+.main-content .messages-container .work-row.lemon-row.thinking-row,
+.main-content .messages-container .work-row.lemon-row.hive,
+.main-content .messages-container .work-row.lemon-row.todo,
+.main-content .messages-container .work-row.lemon-row.config,
+.main-content .messages-container .work-row.lemon-row.settings,
+.main-content .messages-container .work-row.lemon-row.location,
+.main-content .messages-container .work-row.lemon-row:hover,
+.main-content .messages-container .work-row.lemon-row:focus-visible {
+  background: #0b0b0d !important;
+  border: 1px solid #2a2a2f !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.main-content .messages-container .work-row.lemon-row .work-row-icon,
+.main-content .messages-container .work-row.lemon-row .work-row-action,
+.main-content .messages-container .work-row.lemon-row code,
+.main-content .messages-container .work-row.lemon-row.command .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.command .work-row-action,
+.main-content .messages-container .work-row.lemon-row.command code,
+.main-content .messages-container .work-row.lemon-row.bash .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.bash .work-row-action,
+.main-content .messages-container .work-row.lemon-row.bash code,
+.main-content .messages-container .work-row.lemon-row.exec .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.exec .work-row-action,
+.main-content .messages-container .work-row.lemon-row.exec code,
+.main-content .messages-container .work-row.lemon-row.terminal .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.terminal .work-row-action,
+.main-content .messages-container .work-row.lemon-row.terminal code,
+.main-content .messages-container .work-row.lemon-row.shell .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.shell .work-row-action,
+.main-content .messages-container .work-row.lemon-row.shell code,
+.main-content .messages-container .work-row.lemon-row.health .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.health .work-row-action,
+.main-content .messages-container .work-row.lemon-row.health code,
+.main-content .messages-container .work-row.lemon-row.file-edit .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.file-edit .work-row-action,
+.main-content .messages-container .work-row.lemon-row.file-edit code,
+.main-content .messages-container .work-row.lemon-row.file-replace .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.file-replace .work-row-action,
+.main-content .messages-container .work-row.lemon-row.file-replace code,
+.main-content .messages-container .work-row.lemon-row.file-read .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.file-read .work-row-action,
+.main-content .messages-container .work-row.lemon-row.file-read code,
+.main-content .messages-container .work-row.lemon-row.file-delete .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.file-delete .work-row-action,
+.main-content .messages-container .work-row.lemon-row.file-delete code,
+.main-content .messages-container .work-row.lemon-row.file-create .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.file-create .work-row-action,
+.main-content .messages-container .work-row.lemon-row.file-create code,
+.main-content .messages-container .work-row.lemon-row.search .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.search .work-row-action,
+.main-content .messages-container .work-row.lemon-row.search code,
+.main-content .messages-container .work-row.lemon-row.browser .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.browser .work-row-action,
+.main-content .messages-container .work-row.lemon-row.browser code,
+.main-content .messages-container .work-row.lemon-row.rag .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.rag .work-row-action,
+.main-content .messages-container .work-row.lemon-row.rag code,
+.main-content .messages-container .work-row.lemon-row.mcp .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.mcp .work-row-action,
+.main-content .messages-container .work-row.lemon-row.mcp code,
+.main-content .messages-container .work-row.lemon-row.skill .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.skill .work-row-action,
+.main-content .messages-container .work-row.lemon-row.skill code,
+.main-content .messages-container .work-row.lemon-row.plugin .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.plugin .work-row-action,
+.main-content .messages-container .work-row.lemon-row.plugin code,
+.main-content .messages-container .work-row.lemon-row.reflection .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.reflection .work-row-action,
+.main-content .messages-container .work-row.lemon-row.reflection code,
+.main-content .messages-container .work-row.lemon-row.thinking-row .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.thinking-row .work-row-action,
+.main-content .messages-container .work-row.lemon-row.thinking-row code,
+.main-content .messages-container .work-row.lemon-row.hive .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.hive .work-row-action,
+.main-content .messages-container .work-row.lemon-row.hive code,
+.main-content .messages-container .work-row.lemon-row.todo .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.todo .work-row-action,
+.main-content .messages-container .work-row.lemon-row.todo code,
+.main-content .messages-container .work-row.lemon-row.plan-file .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.plan-file .work-row-action,
+.main-content .messages-container .work-row.lemon-row.plan-file code,
+.main-content .messages-container .work-row.lemon-row.config .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.config .work-row-action,
+.main-content .messages-container .work-row.lemon-row.config code,
+.main-content .messages-container .work-row.lemon-row.settings .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.settings .work-row-action,
+.main-content .messages-container .work-row.lemon-row.settings code,
+.main-content .messages-container .work-row.lemon-row.location .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.location .work-row-action,
+.main-content .messages-container .work-row.lemon-row.location code {
+  color: #f5f5f5 !important;
+}
+
+.main-content .messages-container .work-row.lemon-row .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.command .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.bash .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.exec .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.terminal .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.shell .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.health .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.file-edit .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.file-replace .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.file-read .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.file-delete .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.file-create .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.search .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.browser .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.rag .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.mcp .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.skill .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.plugin .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.reflection .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.thinking-row .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.hive .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.todo .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.plan-file .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.config .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.settings .work-row-icon,
+.main-content .messages-container .work-row.lemon-row.location .work-row-icon {
+  background: #17171b !important;
+  border: 1px solid #2a2a2f !important;
+}
+
+.main-content .messages-container .work-row.lemon-row code,
+.main-content .messages-container .work-row.lemon-row.command code,
+.main-content .messages-container .work-row.lemon-row.bash code,
+.main-content .messages-container .work-row.lemon-row.exec code,
+.main-content .messages-container .work-row.lemon-row.terminal code,
+.main-content .messages-container .work-row.lemon-row.shell code,
+.main-content .messages-container .work-row.lemon-row.health code,
+.main-content .messages-container .work-row.lemon-row.file-edit code,
+.main-content .messages-container .work-row.lemon-row.file-replace code,
+.main-content .messages-container .work-row.lemon-row.file-read code,
+.main-content .messages-container .work-row.lemon-row.file-delete code,
+.main-content .messages-container .work-row.lemon-row.file-create code,
+.main-content .messages-container .work-row.lemon-row.search code,
+.main-content .messages-container .work-row.lemon-row.browser code,
+.main-content .messages-container .work-row.lemon-row.rag code,
+.main-content .messages-container .work-row.lemon-row.mcp code,
+.main-content .messages-container .work-row.lemon-row.skill code,
+.main-content .messages-container .work-row.lemon-row.plugin code,
+.main-content .messages-container .work-row.lemon-row.reflection code,
+.main-content .messages-container .work-row.lemon-row.thinking-row code,
+.main-content .messages-container .work-row.lemon-row.hive code,
+.main-content .messages-container .work-row.lemon-row.todo code,
+.main-content .messages-container .work-row.lemon-row.plan-file code,
+.main-content .messages-container .work-row.lemon-row.config code,
+.main-content .messages-container .work-row.lemon-row.settings code,
+.main-content .messages-container .work-row.lemon-row.location code {
+  background: #111214 !important;
+  border: 1px solid #2a2a2f !important;
+}
+.work-retry-button {
+  margin-top: 8px;
+  padding: 7px 11px;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.08);
+  color: #ef4444;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.work-retry-button:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }

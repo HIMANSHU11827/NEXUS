@@ -3,10 +3,10 @@ __version__ = "1.0.0"
 
 import logging
 import os
-import time
 from typing import Any, Dict, List, Optional
 
 import requests as req
+
 from gateway.base import BasePlatformAdapter
 
 logger = logging.getLogger(__name__)
@@ -83,5 +83,6 @@ class TelegramAdapter(BasePlatformAdapter):
                         })
                 return messages
         except Exception:
+            logger.warning("gateway/telegram/scripts/telegram.py:85 : suppressed error", exc_info=True)
             pass
         return []

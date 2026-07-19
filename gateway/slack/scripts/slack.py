@@ -6,6 +6,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 import requests as req
+
 from gateway.base import BasePlatformAdapter
 
 logger = logging.getLogger(__name__)

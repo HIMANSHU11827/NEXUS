@@ -1,6 +1,9 @@
 __version__ = "1.0.0"
 import pytest
-from evolution.self_improvement.scripts.engine import SelfImprovementEngine, ImprovementRecord
+
+from evolution.self_improvement.scripts.engine import (
+    SelfImprovementEngine,
+)
 
 
 @pytest.fixture

@@ -1,7 +1,9 @@
-from typing import Dict, Any, Optional, List, Iterator
-from providers.base import NexusBaseProvider
 import json
 import os
+from typing import Dict, Iterator, List, Optional
+
+from providers.base import NexusBaseProvider
+
 
 class AzureOpenAIProvider(NexusBaseProvider):
     """
@@ -19,7 +21,7 @@ class AzureOpenAIProvider(NexusBaseProvider):
             "Content-Type": "application/json"
         }
         
-    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> str:
+    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         target_url = f"{self.endpoint}/openai/deployments/{self.deployment}/chat/completions?api-version=2024-02-15-preview"
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"messages": msgs}
@@ -31,7 +33,7 @@ class AzureOpenAIProvider(NexusBaseProvider):
         except Exception as e:
             return f"Error: Failed to reach Azure. {str(e)}"
 
-    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> Iterator[str]:
+    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
         target_url = f"{self.endpoint}/openai/deployments/{self.deployment}/chat/completions?api-version=2024-02-15-preview"
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"messages": msgs, "stream": True}

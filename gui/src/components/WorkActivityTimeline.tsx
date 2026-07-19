@@ -3,11 +3,12 @@ import {
    TerminalSquare, Edit2, RefreshCw, Eye, Trash2, PlusCircle,
    Search, BrainCircuit, Database, Brain, CheckCircle2,
    FolderOpen, ShieldAlert, RotateCcw, GraduationCap, Puzzle,
-   Users, HeartPulse
+   Users, HeartPulse, CirclePause, XCircle
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import type { ComponentType } from 'react'
 import type { ChatMessage, WorkEvent } from '../types'
+import { isDisplayableWorkActivity } from '../utils/workActivityUtils'
 
 type WorkActivityTimelineProps = {
    allWorkActivities: WorkEvent[]
@@ -26,8 +27,8 @@ type WorkActivityTimelineProps = {
 const rowKind = (row: WorkEvent) => String(row.kind || row.type || 'tool').toLowerCase();
 const rowStatus = (row: WorkEvent) => String(row.status || '').toLowerCase();
 const isDoneStatus = (status: string) => status === 'done' || status === 'completed' || status === 'success';
-const isRunningStatus = (status: string) => status === 'running' || status === 'working';
-const isErrorStatus = (status: string) => status === 'error' || status === 'failed' || status === 'failure';
+const isRunningStatus = (status: string) => ['running', 'working', 'pending', 'queued', 'retrying'].includes(status);
+const isErrorStatus = (status: string) => ['error', 'failed', 'failure', 'blocked', 'aborted', 'cancelled', 'canceled'].includes(status);
 
 export function WorkActivityTimeline({
    allWorkActivities,
@@ -37,7 +38,6 @@ export function WorkActivityTimeline({
    getWorkActivityLabel,
    getWorkActivityTarget,
    isPlanningArtifact,
-   messages,
    openWorkEvent,
    phaseLabel,
    rows,
@@ -45,7 +45,7 @@ export function WorkActivityTimeline({
    const [collapsedTimeline, setCollapsedTimeline] = useState(false);
 
    const timeline = useMemo(() => {
-      const collapsedRows = collapseWorkActivities(rows);
+      const collapsedRows = collapseWorkActivities(rows).filter(isDisplayableWorkActivity);
       const compactLimit = compact ? 8 : 18;
       const planRows = collapsedRows
          .filter(row => rowKind(row) === 'todo' && Number(row.phase_index))
@@ -73,11 +73,10 @@ export function WorkActivityTimeline({
    }, [allWorkActivities, collapseWorkActivities, compact, getWorkActivityTarget, rows]);
 
    const { chronologicalRows, compactRows, planRows } = timeline;
-   if (compactRows.length === 0) return null;
 
    const hasPlannedPhases = planRows.length > 0;
    // Bubbles in same order as canvas slider — position in allWorkActivities is the source of truth
-   const visibleRowsWithoutPlanning = chronologicalRows.filter(row => !isPlanningArtifact(row));
+   const visibleRows = chronologicalRows;
    const hasRunning = compactRows.some(row => isRunningStatus(rowStatus(row)));
 
    const headingLabel = phaseLabel || (hasRunning ? 'Realtime work' : 'Completed work');
@@ -119,39 +118,10 @@ export function WorkActivityTimeline({
       return Math.max(0, byShape);
    };
 
-   const openThinking = () => {
-      const latestAssistant = [...messages].reverse().find(message => message.role === 'assistant');
-      let thinkingText = 'No captured reasoning yet.';
-      if (latestAssistant && latestAssistant.content) {
-         const thinkingLines = latestAssistant.content.split('\n')
-            .filter(line => {
-               const trim = line.trim();
-               return trim.startsWith('[THINKING:') || trim.startsWith('[NEXUS_BOOT]');
-            })
-            .map(line => {
-               const match = line.match(/^\[(?:THINKING:[^\]]*|NEXUS_BOOT)\](.*)/i);
-               return match ? match[1].trim() : line;
-            })
-            .filter(Boolean);
-         if (thinkingLines.length > 0) thinkingText = thinkingLines.join('\n');
-      }
-      openWorkEvent({
-         id: 'evt_thinking_virtual',
-         kind: 'reflection',
-         type: 'reflection',
-         action: 'Thinking',
-         title: 'Thinking',
-         target: 'Reasoning Log',
-         name: 'thinking',
-         lang: 'thinking',
-         status: 'running',
-         preview: thinkingText,
-      });
-   };
-
    const renderActionRow = (row: WorkEvent, index: number, extraClass = '') => {
       const kind = rowKind(row);
       const targetLabel = getWorkActivityTarget(row);
+      const toolName = String(row.tool || row.name || '').trim();
       const planningFile = isPlanningArtifact(row);
       const subItems = Array.isArray(row.items)
          ? row.items.map(item => String(item || '').trim()).filter(Boolean)
@@ -194,6 +164,10 @@ export function WorkActivityTimeline({
          if (k === 'test' || k === 'pytest' || k === 'diagnostic' || act.includes('test') || act.includes('pytest') || act.includes('diagnostic')) return 'test';
          
          if (k === 'rollback' || k === 'patch' || act.includes('rollback') || act.includes('patch')) return 'rollback';
+
+         if (k === 'approval') return 'approval';
+
+         if (k === 'error') return 'error';
          
          if (k === 'skill' || k === 'plugin' || act.includes('skill') || act.includes('plugin')) return 'skill';
          
@@ -218,6 +192,8 @@ export function WorkActivityTimeline({
             case 'location': return FolderOpen;
             case 'test': return ShieldAlert;
             case 'rollback': return RotateCcw;
+            case 'approval': return CirclePause;
+            case 'error': return XCircle;
             case 'skill': return GraduationCap;
             case 'plugin': return Puzzle;
             case 'hive': return Users;
@@ -232,12 +208,16 @@ export function WorkActivityTimeline({
             className={`work-row lemon-row ${resolvedActivityClass} ${kind === 'todo' ? 'phase-action' : 'child-action'} ${row.status || 'done'} ${rowDeleted ? 'deleted' : ''} ${rowRunning ? 'running' : ''} ${planningFile ? 'plan-file' : ''} ${extraClass}`}
             key={row.id || `${row.tool || row.action || row.title}-${targetLabel}-${index}`}
             onClick={() => openWorkEvent(row, findPlaybackIndex(row))}
+            aria-label={`${getWorkActivityLabel(row)}: ${targetLabel || 'Open details'} (${status || 'done'})`}
          >
             <span className="work-row-icon"><ActivityIcon size={14} /></span>
             <span className="work-row-main">
                <span className="work-row-headline">
                   <span className="work-row-action">{getWorkActivityLabel(row)}</span>
                   <code title={targetLabel}>{targetLabel}</code>
+                  {toolName && !['skill', 'mcp'].includes(kind) && (
+                     <span className="work-row-tool">via <code>{toolName}</code></span>
+                  )}
                </span>
                {visibleSubItems.length > 0 && (
                   <span className="work-subtasks">
@@ -249,39 +229,28 @@ export function WorkActivityTimeline({
                      ))}
                   </span>
                )}
+               {kind === 'approval' && (
+                  <span className="work-subtasks">
+                     <span className="work-subtask">Approval actions unavailable: this server exposes no approve/deny endpoint.</span>
+                  </span>
+               )}
             </span>
          </button>
       );
    };
 
-   const renderThinkingRow = (label = 'Thinking', planRow?: WorkEvent) => {
-      const ActivityIcon = label === 'Planning' ? CheckCircle2 : Brain;
-      return (
-         <button
-            type="button"
-            className={`work-row lemon-row child-action running ${label === 'Planning' ? 'todo plan-file' : 'reflection thinking-row'}`}
-            onClick={label === 'Planning' && planRow ? () => openWorkEvent(planRow, findPlaybackIndex(planRow)) : openThinking}
-         >
-            <span className="work-row-icon"><ActivityIcon size={14} /></span>
-            <span className="work-row-main">
-               <span className="work-row-headline">
-                  <span className="work-row-action">{label}</span>
-                  <code>next action</code>
-               </span>
-            </span>
-         </button>
-      );
-   };
-
+   if (compactRows.length === 0) return null;
 
    if (!hasPlannedPhases) {
-      if (visibleRowsWithoutPlanning.length === 0 && !hasRunning) return null;
+      if (visibleRows.length === 0) return null;
       return (
          <div className={`work-timeline direct-work-timeline ${collapsedTimeline ? 'collapsed' : ''} ${compact ? 'canvas-work-timeline' : ''}`}>
             <button
                type="button"
                className="work-direct-head"
                onClick={() => setCollapsedTimeline(!collapsedTimeline)}
+               aria-expanded={!collapsedTimeline}
+               aria-label={`${headingLabel}. ${collapsedTimeline ? 'Expand' : 'Collapse'} activity`}
                style={{
                   cursor: 'pointer',
                   width: '100%',
@@ -296,10 +265,8 @@ export function WorkActivityTimeline({
                {collapsedTimeline ? <ChevronRight size={13} style={{ opacity: 0.6 }} /> : <ChevronDown size={13} style={{ opacity: 0.6 }} />}
             </button>
             {!collapsedTimeline && (
-               <div className="work-rows direct-work-rows">
-                  {visibleRowsWithoutPlanning.length > 0
-                     ? visibleRowsWithoutPlanning.map((row, index) => renderActionRow(row, index, 'direct-action'))
-                     : renderThinkingRow()}
+               <div className="work-rows direct-work-rows" role="status" aria-live="polite" aria-atomic="false">
+                  {visibleRows.map((row, index) => renderActionRow(row, index, 'direct-action'))}
                </div>
             )}
          </div>
@@ -312,6 +279,8 @@ export function WorkActivityTimeline({
             type="button"
             className="work-direct-head"
             onClick={() => setCollapsedTimeline(!collapsedTimeline)}
+            aria-expanded={!collapsedTimeline}
+            aria-label={`${headingLabel}. ${collapsedTimeline ? 'Expand' : 'Collapse'} activity`}
             style={{
                cursor: 'pointer',
                width: '100%',
@@ -326,10 +295,8 @@ export function WorkActivityTimeline({
             {collapsedTimeline ? <ChevronRight size={13} style={{ opacity: 0.6 }} /> : <ChevronDown size={13} style={{ opacity: 0.6 }} />}
          </button>
          {!collapsedTimeline && (
-            <div className="work-rows direct-work-rows">
-               {visibleRowsWithoutPlanning.length > 0
-                  ? visibleRowsWithoutPlanning.map((row, index) => renderActionRow(row, index, 'direct-action'))
-                  : renderThinkingRow()}
+            <div className="work-rows direct-work-rows" role="status" aria-live="polite" aria-atomic="false">
+               {visibleRows.map((row, index) => renderActionRow(row, index, 'direct-action'))}
             </div>
          )}
       </div>

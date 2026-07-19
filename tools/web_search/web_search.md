@@ -1,8 +1,13 @@
 # Web Search Tool
-**Version:** 1.0.0 — auto-bumped via `VersionManager` on refine.
+**Version:** 1.2.0
 
-Searches the web using configured search providers. Supports caching and result deduplication.
+Search the web by query or fetch a URL.
 
 ## Parameters
-- `query` (string, required): The search query
-- `max_results` (int, optional, default=5): Maximum number of results
+- `query` (string, required): Search query, or URL starting with http:// or https://
+- `max_results` (int, optional, default=5): Max search results, or page chars limit for URL fetch
+- `timeout` (int, optional, default=20): Timeout in seconds
+
+## Returns
+- Search: numbered results with title, URL, snippet
+- URL fetch: page content with HTML/script/style stripped

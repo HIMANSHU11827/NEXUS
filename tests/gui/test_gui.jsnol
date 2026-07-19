@@ -1,0 +1,8 @@
+{
+  "name": "test_gui",
+  "version": "1.0.0",
+  "description": "Tests for the GUI backend API — command execution, session endpoints, work event streaming",
+  "category": "test",
+  "entry": "scripts/test_command_execution.py",
+  "class": "TestGUI"
+}

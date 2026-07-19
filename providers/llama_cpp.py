@@ -1,7 +1,8 @@
-from typing import Dict, Any, Optional, List, Iterator
-from providers.base import NexusBaseProvider
-import os
 import logging
+import os
+from typing import Dict, Iterator, List, Optional
+
+from providers.base import NexusBaseProvider
 
 logger = logging.getLogger("NEXUS_LLAMA_CPP")
 
@@ -19,6 +20,7 @@ class LlamaCPPProvider(NexusBaseProvider):
             loader = NexusConfigLoader()
             self.config_data = loader.get_provider_config("llama_cpp")
         except Exception: 
+            logger.warning("providers/llama_cpp.py:22 __init__: suppressed error", exc_info=True)
             pass
             
         super().__init__("llama_cpp", "")

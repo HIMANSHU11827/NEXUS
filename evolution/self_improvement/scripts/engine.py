@@ -3,10 +3,11 @@ __version__ = "1.0.0"
 import json
 import logging
 import os
-import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
+
 from providers.router import ModelRouter
+
 logger = logging.getLogger(__name__)
 _ROUTER: Optional[ModelRouter] = None
 
@@ -77,4 +78,5 @@ Return JSON with:
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(asdict(record)) + "\n")
         except Exception:
+            logger.warning("evolution/self_improvement/scripts/engine.py:80 _log: suppressed error", exc_info=True)
             pass

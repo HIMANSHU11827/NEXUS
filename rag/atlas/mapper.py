@@ -1,6 +1,6 @@
-import os
 import ast
-from typing import List, Dict, Any, Optional
+import os
+
 
 class AtlasCognitiveMapper:
     """
@@ -47,7 +47,7 @@ class AtlasCognitiveMapper:
                         
                         if file_logic:
                             logic_map.append(f"### [File: {rel_p}]\n" + "\n".join(file_logic))
-                    except Exception as e:
+                    except Exception:
                         # logic_map.append(f"### [File: {rel_p}] - Parse Error: {e}")
                         continue
 

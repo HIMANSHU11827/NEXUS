@@ -1,0 +1,14 @@
+{
+  "name": "git_ops",
+  "version": "1.0.0",
+  "description": "Inspect repository state, branches, diffs, logs, and tracked files",
+  "entry": "scripts/git_ops.py",
+  "class": "GitOpsTool",
+  "params": {
+    "action": {"type": "string", "description": "status|diff|log|branch|show|files", "required": true},
+    "ref": {"type": "string", "description": "Optional git ref, branch, commit, or diff target"},
+    "path": {"type": "string", "description": "Optional file path filter"},
+    "limit": {"type": "integer", "description": "Optional max row count", "default": 20}
+  },
+  "category": "development"
+}

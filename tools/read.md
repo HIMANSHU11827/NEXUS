@@ -12,13 +12,22 @@ NEXUS AI tool system. Each tool in its own folder with \.jsnol\ definition, \scr
     <toolname>.md       - Documentation
 \
 ## Available Tools
-- \ash\ — Shell execution
-- \code_search\ — Glob/grep code search
-- \ile_ops\ — File read/write/edit
-- \knowledge\ — Knowledge base queries
-- \mcp\ — MCP server management
-- \memory\ — Memory store/retrieve
-- easoning\ — Chain-of-thought
-- \system\ — System monitoring
-- \	ask\ — Task management
-- \web_search\ — Web search/fetch
+- `bash` — Execute shell commands in a sandboxed environment
+- `code_search` — Search code with glob patterns and regex, analyze code structure
+- `creating` — Create a new file with content
+- `deep_research` — Spawn dedicated research sub-agents to investigate a topic
+- `deleting` — Delete a file
+- `git_ops` — Inspect repository state, branches, diffs, logs, and tracked files
+- `hive` — Spawn dedicated sub-agents for complex multi-step tasks
+- `knowledge` — Query the NEXUS knowledge base with semantic search
+- `memory` — Store, retrieve, search, and manage short and long-term memories
+- `modifying` — Edit text in an existing file
+- `planning` — Write a TODO LIST plan to todo.md
+- `reading` — Read file contents
+- `reasoning` — Deep chain-of-thought reasoning and problem decomposition
+- `shortcuts` — Quick utility helpers: list, pwd, tree, info, find
+- `system` — Monitor system resources, audit configuration, and run diagnostics
+- `task` — Create, track, manage, and complete tasks with dependencies
+- `terminal` — Run shell commands through the sandboxed command path
+- `test_runner` — Run targeted test commands for Python, Node, or generic checks
+- `web_search` — Search the web by query or fetch a URL

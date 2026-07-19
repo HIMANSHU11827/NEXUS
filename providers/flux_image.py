@@ -1,6 +1,11 @@
-import requests
+import logging
 import os
-from typing import List, Dict, Any, Optional
+from typing import Optional
+
+import requests
+
+logger = logging.getLogger(__name__)
+
 
 class FluxImageProvider:
     """
@@ -34,7 +39,7 @@ class FluxImageProvider:
                 return response.json().get("urls", {}).get("get", "")
             return None
         except Exception as e:
-            print(f"Image Gen Error: {str(e)}")
+            logger.warning("Image Gen Error: %s", str(e))
             return None
 
 if __name__ == "__main__":

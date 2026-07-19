@@ -14,6 +14,11 @@ This status is generated from real repository files and implemented systems.
 
 | Phase | Status | Item | Evidence | Remaining |
 | --- | --- | --- | --- | --- |
+| Phase 5 | done | NATE-Route embedding tool router | intelligence/nate/adaptive_schema.py (NATE_Route class), docs/NATE.md | none — 88% schema reduction, 67% token savings, 100% accuracy |
+| Phase 5 | done | Self-Improving Lifecycle | evolution/local_trainer/lifecycle.py, embedding_trainer.py, llm_trainer.py | GGUF export requires llama.cpp in vendor/ |
+| Phase 5 | done | Zupra-50M local offline brain | providers/zupra.py, registered in factory.py | 50M model, CPU only, no API key |
+| Phase 5 | done | 12 Skill Alignment Problems Solved | intelligence/nate/adaptive_schema.py, docs/NATE.md | All 12 solved via embedding routing layer |
+| Phase 5 | partial | Local fine-tuning from agent experience | evolution/local_trainer/ | PEFT + datasets installed; needs automated scheduling |
 | Phase 1 | partial | Git-aware patch ledger with automatic revert points | evolution/ledger/ | Git integration is limited because this workspace is not a Git repo. |
 | Phase 1 | partial | Repo map cache with incremental updates | tools/code_search/ | Incremental graph invalidation is still coarse; refresh is mostly full rebuild. |
 | Phase 1 | partial | LSP diagnostics integration | evolution/logs/ | Diagnostics are compile/schema/build based; no live LSP server adapter yet. |

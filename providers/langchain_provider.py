@@ -1,9 +1,11 @@
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import utils.nexus_path as nexus_path  # noqa: F401
+import os
+import sys
 
-from langchain_openai import ChatOpenAI
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+
+import utils.nexus_path as nexus_path  # noqa: F401
 from config.config_loader import NexusConfigLoader
 
 

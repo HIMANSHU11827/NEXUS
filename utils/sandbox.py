@@ -2,7 +2,8 @@ import os
 import shutil
 import subprocess
 import tempfile
-from typing import Dict, Any, Optional, Tuple
+from typing import Optional, Tuple
+
 
 class NexusSandbox:
     """
@@ -35,14 +36,13 @@ class NexusSandbox:
 
             # 2. Execution Phase
             try:
-                # Basic isolation: No network, restricted env if possible
                 env = os.environ.copy()
                 env["NEXUS_SANDBOX"] = "1"
                 
-                # Command execution
+                cmd_list = command if isinstance(command, list) else ["cmd.exe", "/c", command]
                 proc = subprocess.run(
-                    command,
-                    shell=True,
+                    cmd_list,
+                    shell=False,
                     cwd=tmp_dir,
                     capture_output=True,
                     text=True,

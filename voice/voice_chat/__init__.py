@@ -6,37 +6,40 @@ import argparse
 import logging
 import os
 import sys
+
+logger = logging.getLogger("nexus.voice.chat")
+
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
+        logger.warning("voice/voice_chat/__init__.py:14 : suppressed error", exc_info=True)
         pass
 import time
 import warnings
 
 from dotenv import load_dotenv
+
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "config", ".env"))
 
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-import logging
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
-import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*You are sending unauthenticated requests to the HF Hub.*")
 warnings.filterwarnings("ignore", message=".*TypedStorage is deprecated.*")
 
+import signal
+import subprocess
+import threading
+
 from config.config_loader import NexusConfigLoader
 from voice import VoiceAssistant, VoiceSettings
-
-import subprocess
-import signal
-import threading
 
 
 def _safe_console_text(value: str) -> str:
@@ -60,7 +63,7 @@ def cleanup_voice_processes():
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
     except ImportError:
-        pass
+        logger.warning("voice/voice_chat/__init__.py:65 suppressed error", exc_info=True)
 
 
 def wait_for_push_to_talk(key: str) -> None:
@@ -240,6 +243,7 @@ def check_system_health() -> None:
         if len(java_procs) > 2:
             print(f"[voice-info] Detected {len(java_procs)} Java processes. Consider closing the Java Language Server if you experience hangs.")
     except Exception:
+        logger.warning("voice/voice_chat/__init__.py:242 check_system_health: suppressed error", exc_info=True)
         pass
 
 

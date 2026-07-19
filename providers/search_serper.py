@@ -1,6 +1,11 @@
-import requests
+import logging
 import os
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List
+
+import requests
+
+logger = logging.getLogger(__name__)
+
 
 class SerperSearchProvider:
     """
@@ -31,7 +36,7 @@ class SerperSearchProvider:
                 return response.json().get("organic", [])
             return []
         except Exception as e:
-            print(f"Search Error: {str(e)}")
+            logger.warning("Search Error: %s", str(e))
             return []
 
 if __name__ == "__main__":

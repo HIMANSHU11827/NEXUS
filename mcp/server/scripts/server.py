@@ -7,13 +7,17 @@ Two-way MCP:
 """
 
 from __future__ import annotations
+
 __version__ = "1.0.0"
 
 import json
 import logging
 import os
 import sys
+import asyncio
 from typing import Any, Dict, List, Optional
+
+from mcp.security import read_bounded_line
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +36,7 @@ class NEXUSMCPServer:
     def tool_registry(self):
         if self._tool_registry is None:
             from tools.nexus_tools.registry import ToolRegistry
-            self._tool_registry = ToolRegistry()
+            self._tool_registry = ToolRegistry(self.root_dir)
         return self._tool_registry
 
     def list_tools(self) -> List[Dict[str, Any]]:
@@ -42,24 +46,35 @@ class NEXUSMCPServer:
             tool = self.tool_registry.get(name)
             if not tool:
                 continue
-            schema = tool.get_schema()
+            schema = tool.schema
+            input_schema = schema.get("parameters")
+            if not isinstance(input_schema, dict):
+                params = schema.get("params") if isinstance(schema.get("params"), dict) else {}
+                required = [
+                    param_name
+                    for param_name, param_schema in params.items()
+                    if isinstance(param_schema, dict) and param_schema.get("required")
+                ]
+                input_schema = {
+                    "type": "object",
+                    "properties": params,
+                }
+                if required:
+                    input_schema["required"] = required
             mcp_tools.append({
                 "name": schema.get("name", name),
                 "description": schema.get("description", ""),
-                "inputSchema": schema.get("parameters", {
-                    "type": "object",
-                    "properties": {}
-                }),
+                "inputSchema": input_schema,
             })
         return mcp_tools
 
-    def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         tool = self.tool_registry.get(name)
         if not tool:
             raise ValueError(f"Unknown tool: {name}")
         try:
-            result = tool.call(**arguments)
-            text = str(result.data) if result.data else ""
+            result = await tool.instance.execute(**arguments)
+            text = str(result.output) if result.output else ""
             if result.error:
                 return {
                     "content": [{"type": "text", "text": f"Error: {result.error}"}],
@@ -75,7 +90,7 @@ class NEXUSMCPServer:
                 "isError": True,
             }
 
-    def handle_request(self, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def handle_request(self, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         method = request.get("method")
         req_id = request.get("id")
         try:
@@ -89,7 +104,7 @@ class NEXUSMCPServer:
                 result = {"tools": self.list_tools()}
             elif method == "tools/call":
                 params = request.get("params") or {}
-                result = self.call_tool(
+                result = await self.call_tool(
                     str(params.get("name", "")),
                     params.get("arguments") or {},
                 )
@@ -112,7 +127,19 @@ class NEXUSMCPServer:
 
     def serve_stdio(self):
         """Read JSON-RPC requests from stdin, write responses to stdout."""
-        for line in sys.stdin:
+        while True:
+            line, oversized = read_bounded_line(sys.stdin)
+            if not line and not oversized:
+                break
+            if oversized:
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32600, "message": "MCP message too large"},
+                }
+                sys.stdout.write(json.dumps(response) + "\n")
+                sys.stdout.flush()
+                continue
             line = line.strip()
             if not line:
                 continue
@@ -125,7 +152,7 @@ class NEXUSMCPServer:
                     "error": {"code": -32700, "message": str(exc)},
                 }
             else:
-                response = self.handle_request(request)
+                response = asyncio.run(self.handle_request(request))
             if response is not None:
                 sys.stdout.write(json.dumps(response) + "\n")
                 sys.stdout.flush()

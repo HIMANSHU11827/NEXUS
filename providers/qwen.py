@@ -1,6 +1,12 @@
-from typing import Dict, Any, Optional, List, Iterator
-from providers.base import NexusBaseProvider
+import os
 import json
+import logging
+from typing import Dict, Iterator, List, Optional
+
+from providers.base import NexusBaseProvider
+
+logger = logging.getLogger("NEXUS_QWEN")
+
 
 class QwenProvider(NexusBaseProvider):
     """
@@ -11,7 +17,7 @@ class QwenProvider(NexusBaseProvider):
     def __init__(self):
         super().__init__("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
         if not self.model:
-            self.model = "qwen-turbo"
+            self.model = os.environ.get("NEXUS_PROVIDER_QWEN_MODEL", "qwen-turbo")
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -47,8 +53,11 @@ class QwenProvider(NexusBaseProvider):
                                 chunk = json.loads(data_str)
                                 content = chunk["choices"][0]["delta"].get("content", "")
                                 if content: yield content
-                            except Exception: pass
+                            except Exception as e:
+                                logger.warning(f"Qwen stream parse error: {e}")
             else:
                 yield f"Error: {response.status_code}"
         except Exception as e:
             yield f"Error in Qwen stream: {e}"
+
+

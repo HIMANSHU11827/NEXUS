@@ -2,9 +2,19 @@
 __version__ = "1.0.0"
 
 from evolution import (
-    EvolutionLog, EvolutionLedger, EvolutionStatus, LogAnalyzer,
-    ToolForge, SkillForge, PluginForge, MemoryForge, KnowledgeForge,
-    NudgeEngine, SelfImprovementEngine, ImprovementRecord, NexusIntentEngine,
+    EvolutionLedger,
+    EvolutionLog,
+    EvolutionStatus,
+    ImprovementRecord,
+    KnowledgeForge,
+    LogAnalyzer,
+    MemoryForge,
+    NexusIntentEngine,
+    NudgeEngine,
+    PluginForge,
+    SelfImprovementEngine,
+    SkillForge,
+    ToolForge,
 )
 
 

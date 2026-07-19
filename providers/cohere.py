@@ -1,7 +1,10 @@
+import os
 import json
 import logging
-from typing import Dict, Any, Optional, List, Iterator
+from typing import Dict, Iterator, List, Optional
+
 from providers.base import NexusBaseProvider
+
 
 class CohereProvider(NexusBaseProvider):
     """
@@ -12,14 +15,14 @@ class CohereProvider(NexusBaseProvider):
     def __init__(self):
         super().__init__("cohere", "https://api.cohere.ai/v1/chat")
         if not self.model:
-            self.model = "command-r-plus"
+            self.model = os.environ.get("NEXUS_PROVIDER_COHERE_MODEL", "command-r-plus")
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "accept": "application/json"
         }
 
-    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> str:
+    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         # Cohere uses a slightly different message structure for its native API
         # but Command R+ supports chat-history style
         if messages:
@@ -46,7 +49,7 @@ class CohereProvider(NexusBaseProvider):
         except Exception as e:
             return f"Error: Failed to reach Cohere. {str(e)}"
 
-    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> Iterator[str]:
+    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
         if messages:
             chat_history = [{"role": m["role"].upper(), "message": m["content"]} for m in messages[:-1]]
             message = messages[-1]["content"]
@@ -76,3 +79,5 @@ class CohereProvider(NexusBaseProvider):
                 yield f"Error: {response.status_code}. {response.text}"
         except Exception as e:
             yield f"Error in Cohere stream: {str(e)}"
+
+

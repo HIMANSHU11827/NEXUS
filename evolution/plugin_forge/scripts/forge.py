@@ -3,11 +3,12 @@ __version__ = "1.0.0"
 import json
 import logging
 import os
-import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
+
 from evolution.version.scripts.version import VersionManager
 from providers.router import ModelRouter
+
 logger = logging.getLogger(__name__)
 _ROUTER: Optional[ModelRouter] = None
 

@@ -46,7 +46,7 @@ help:
 setup:
 	python -m pip install -e "$(ROOT)/config[voice,dev]"
 	cd $(ROOT)/gui && $(NPM_CMD) install
-	cd $(ROOT)/cli && $(NPM_CMD) install
+	cd $(ROOT)/tui && $(NPM_CMD) install
 
 api:
 	$(VENV_PY) -m uvicorn gui.api:app --host 127.0.0.1 --port 8000 --reload
@@ -69,7 +69,7 @@ test:
 	$(PYTEST) $(ROOT)/tests/ -q
 
 tsc:
-	cd $(ROOT)/cli && npx tsc --noEmit
+	cd $(ROOT)/tui && npx tsc --noEmit
 	cd $(ROOT)/gui && npx tsc --noEmit
 
 lint:

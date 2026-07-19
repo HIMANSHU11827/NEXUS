@@ -1,6 +1,9 @@
-from typing import Dict, Any, Optional, List, Iterator
-from providers.base import NexusBaseProvider
+import os
 import json
+from typing import Dict, Iterator, List, Optional
+
+from providers.base import NexusBaseProvider
+
 
 class AnthropicProvider(NexusBaseProvider):
     """
@@ -12,14 +15,14 @@ class AnthropicProvider(NexusBaseProvider):
     def __init__(self):
         super().__init__("anthropic", "https://api.anthropic.com/v1/messages")
         if not self.model:
-            self.model = "claude-3-5-sonnet-20240620"
+            self.model = os.environ.get("NEXUS_PROVIDER_ANTHROPIC_MODEL", "claude-3-5-sonnet-20240620")
         self.headers = {
             "x-api-key": self.api_key,
-            "anthropic-version": "2023-06-01",
+            "anthropic-version": os.environ.get("NEXUS_ANTHROPIC_VERSION", "2023-06-01"),
             "content-type": "application/json"
         }
         
-    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> str:
+    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         # Anthropic separate system prompt from messages
         payload = {
@@ -34,12 +37,12 @@ class AnthropicProvider(NexusBaseProvider):
                 data = response.json()
                 if "content" in data and len(data["content"]) > 0:
                     return data["content"][0].get("text", "")
-                return f"Error: Anthropic response missing 'content'."
+                return "Error: Anthropic response missing 'content'."
             return f"Error: Anthropic API returned {response.status_code} - {response.text}"
         except Exception as e:
             return f"Error: Failed to reach Anthropic. {str(e)}"
 
-    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> Iterator[str]:
+    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {
             "model": self.model,
@@ -71,3 +74,5 @@ class AnthropicProvider(NexusBaseProvider):
 if __name__ == "__main__":
     p = AnthropicProvider()
     # print(p.generate("Tell me your name."))
+
+

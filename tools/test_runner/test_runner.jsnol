@@ -1,0 +1,14 @@
+{
+  "name": "test_runner",
+  "version": "1.0.0",
+  "description": "Run targeted test commands for Python, Node, or generic project checks",
+  "entry": "scripts/test_runner.py",
+  "class": "TestRunnerTool",
+  "params": {
+    "command": {"type": "string", "description": "Optional explicit test command"},
+    "target": {"type": "string", "description": "Optional test file, folder, or expression"},
+    "framework": {"type": "string", "description": "auto|pytest|npm|vitest|jest"},
+    "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 120}
+  },
+  "category": "development"
+}

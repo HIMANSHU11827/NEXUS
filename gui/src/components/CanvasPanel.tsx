@@ -49,13 +49,6 @@ export function CanvasPanel({
   setCanvasViewMode,
   setSelectedWorkEvent,
 }: CanvasPanelProps) {
-  const formatTime = (seconds: number) => {
-    if (!isFinite(seconds) || seconds < 0) return '0:00';
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
-  };
-
   const returnToRealtime = () => {
     setSelectedWorkEvent(null);
     setCanvasPlaybackTime(null);
@@ -85,9 +78,9 @@ export function CanvasPanel({
         <div className="canvas-editor-titlebar">
           <span>{canvasFileName}</span>
           <div className="canvas-editor-actions">
-            <button onClick={() => navigator.clipboard.writeText(canvasEditorCode)} title="Copy visible file"><Copy size={14} /></button>
+            <button type="button" onClick={() => navigator.clipboard.writeText(canvasEditorCode)} title="Copy visible file" aria-label="Copy visible file"><Copy size={14} /></button>
             {canvasCanRunHtml && (
-              <button onClick={() => {
+              <button type="button" aria-label="Open HTML preview in browser" onClick={() => {
                 const blob = new Blob([canvasEditorCode], { type: 'text/html' });
                 const url = URL.createObjectURL(blob);
                 window.open(url, '_blank', 'noopener,noreferrer');
@@ -99,9 +92,11 @@ export function CanvasPanel({
         {renderCanvasMain()}
         {canvasPlaybackTime !== null && (
           <button
+            type="button"
             className="canvas-floating-jump"
             onClick={returnToRealtime}
             title="Jump back to live activity"
+            aria-label="Jump back to live activity"
           >
             Jump to Realtime
           </button>
@@ -109,20 +104,24 @@ export function CanvasPanel({
         <div className="canvas-editor-footer" data-lang={canvasEditorLang} data-lines={canvasEditorLineCount}>
           <div className="canvas-playback-controls">
             <button
+              type="button"
               className="canvas-playback-btn"
               title="Previous activity"
+              aria-label="Previous activity"
               disabled={allWorkActivities.length === 0}
               onClick={() => {
                 setSelectedWorkEvent(null);
                 const prevIndex = Math.max(0, activePlaybackIndex - 1);
-                setCanvasPlaybackTime(prevIndex * 5);
+                setCanvasPlaybackTime(prevIndex);
               }}
             >
               <SkipBack size={15} />
             </button>
             <button
+              type="button"
               className="canvas-playback-btn"
               title={isPlaying ? "Pause" : "Play"}
+              aria-label={isPlaying ? "Pause activity replay" : "Play activity replay"}
               disabled={allWorkActivities.length === 0}
               onClick={() => {
                 if (!isPlaying) {
@@ -134,13 +133,15 @@ export function CanvasPanel({
               {isPlaying ? <Pause size={15} /> : <Play size={15} />}
             </button>
             <button
+              type="button"
               className="canvas-playback-btn"
               title="Next activity"
+              aria-label="Next activity"
               disabled={allWorkActivities.length === 0 || activePlaybackIndex >= allWorkActivities.length - 1}
               onClick={() => {
                 setSelectedWorkEvent(null);
                 const nextIndex = Math.min(allWorkActivities.length - 1, activePlaybackIndex + 1);
-                setCanvasPlaybackTime(nextIndex * 5);
+                setCanvasPlaybackTime(nextIndex);
               }}
             >
               <SkipForward size={15} />
@@ -150,9 +151,9 @@ export function CanvasPanel({
             className="canvas-track"
             type="range"
             min={0}
-            max={Math.max(1, (allWorkActivities.length - 1) * 5)}
-            step={0.1}
-            value={canvasPlaybackTime !== null ? canvasPlaybackTime : (allWorkActivities.length - 1) * 5}
+            max={Math.max(1, allWorkActivities.length - 1)}
+            step={1}
+            value={canvasPlaybackTime !== null ? canvasPlaybackTime : Math.max(0, allWorkActivities.length - 1)}
             disabled={allWorkActivities.length === 0}
             onChange={(event) => {
               setSelectedWorkEvent(null);
@@ -167,7 +168,7 @@ export function CanvasPanel({
             <span className="status-text">
               {isCanvasRealtime 
                 ? 'Realtime' 
-                : `Playback (${formatTime(canvasPlaybackTime ?? (allWorkActivities.length - 1) * 5)} / ${formatTime((allWorkActivities.length - 1) * 5)})`}
+                : `Event ${Math.min(allWorkActivities.length, Math.floor(canvasPlaybackTime ?? 0) + 1)} of ${allWorkActivities.length}`}
             </span>
           </div>
         </div>

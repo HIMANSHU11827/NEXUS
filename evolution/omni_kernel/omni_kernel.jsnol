@@ -1,0 +1,7 @@
+{
+  "name": "omni_kernel",
+  "version": "1.0.0",
+  "description": "OmniEvolutionKernel — unified evolution orchestration layer",
+  "entry": "scripts/omni_kernel.py",
+  "class": "OmniEvolutionKernel"
+}

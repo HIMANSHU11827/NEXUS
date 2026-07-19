@@ -1,6 +1,12 @@
-from typing import Dict, Any, Optional, List, Iterator
-from providers.base import NexusBaseProvider
+import os
 import json
+import logging
+from typing import Dict, Iterator, List, Optional
+
+from providers.base import NexusBaseProvider
+
+logger = logging.getLogger(__name__)
+
 
 class OpenAIProvider(NexusBaseProvider):
     """
@@ -12,13 +18,13 @@ class OpenAIProvider(NexusBaseProvider):
     def __init__(self):
         super().__init__("openai", "https://api.openai.com/v1/chat/completions")
         if not self.model:
-            self.model = "gpt-4o"
+            self.model = os.environ.get("NEXUS_PROVIDER_OPENAI_MODEL", "gpt-4o")
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
         
-    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> str:
+    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs}
         try:
@@ -31,7 +37,7 @@ class OpenAIProvider(NexusBaseProvider):
         except Exception as e:
             return f"Error: Failed to reach OpenAI. {str(e)}"
 
-    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> Iterator[str]:
+    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs, "stream": True}
         try:
@@ -56,3 +62,5 @@ class OpenAIProvider(NexusBaseProvider):
 if __name__ == "__main__":
     p = OpenAIProvider()
     # print(p.generate("Solve this puzzle."))
+
+

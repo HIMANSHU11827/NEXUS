@@ -1,8 +1,10 @@
 """NEXUS compatibility shim for legacy imports."""
 
-import math
 import json
+import logging
 from typing import Any, Iterator
+
+logger = logging.getLogger("nexus.compat")
 
 
 def import_requests():
@@ -43,8 +45,8 @@ def safe_del(obj: Any, key: str) -> None:
     """Safely delete a key from a dict-like object."""
     try:
         del obj[key]
-    except (KeyError, TypeError, AttributeError):
-        pass
+    except (KeyError, TypeError, AttributeError) as e:
+        logger.debug("safe_del: key '%s' not deletable: %s", key, e)
 
 
 def sx(obj: Any) -> str:

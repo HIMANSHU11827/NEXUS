@@ -1,0 +1,13 @@
+{
+  "name": "modifying",
+  "version": "1.0.0",
+  "description": "Edit text in an existing file",
+  "entry": "scripts/modifying.py",
+  "class": "ModifyingTool",
+  "params": {
+    "path": {"type": "string", "description": "File path to edit", "required": true},
+    "old_string": {"type": "string", "description": "Text to replace", "required": true},
+    "new_string": {"type": "string", "description": "Replacement text", "required": true}
+  },
+  "category": "filesystem"
+}

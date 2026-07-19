@@ -1,0 +1,8 @@
+{
+  "name": "test_tool_registry",
+  "version": "1.0.0",
+  "description": "Tests for ToolEntry and tool registry — availability checks, constraints, discovery",
+  "category": "test",
+  "entry": "scripts/test_tool_registry.py",
+  "class": "TestToolEntry"
+}

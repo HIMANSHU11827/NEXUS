@@ -1,0 +1,8 @@
+{
+  "name": "test_context_scrubber",
+  "version": "1.0.0",
+  "description": "Tests for StreamingContextScrubber — sanitizes thinking tags, memory context, scratchpad from LLM output",
+  "category": "test",
+  "entry": "scripts/test_context_scrubber.py",
+  "class": "TestStreamingContextScrubber"
+}

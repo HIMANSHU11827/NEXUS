@@ -1,20 +1,44 @@
 {
   "name": "web_search",
-  "version": "1.0.0",
-  "description": "Search the web and fetch page content with caching",
+  "version": "1.2.0",
+  "description": "Search the web by query or fetch a URL",
   "entry": "scripts/web_search.py",
   "class": "WebSearchTool",
-  "params": {
-    "query": {
-      "type": "string",
-      "description": "Search query",
-      "required": true
-    },
-    "max_results": {
-      "type": "integer",
-      "description": "Max results to return",
-      "default": 5
+  "constitution": {
+    "intent": "web research with source capture",
+    "rules": [
+      "Use for current, latest, live, or source-backed questions.",
+      "Keep raw source URLs hidden in chat unless sources are enabled.",
+      "Prefer concise previews and preserve full source detail for the expanded activity panel."
+    ],
+    "conditions": [
+      "Run search mode for natural language queries.",
+      "Run fetch mode when the query starts with http:// or https://.",
+      "Respect caller limits for result count and timeout."
+    ],
+    "one_time_use": false,
+    "max_per_task": 10
+  },
+  "activity": {
+    "show_sources": false,
+    "show_input": true,
+    "show_output": true,
+    "max_preview_lines": 5,
+    "max_preview_chars": 520,
+    "description": "Expanded TUI activity hides raw source URLs unless /sources on is enabled."
+  },
+  "execution": {
+    "parallel": true,
+    "max_parallel": 10,
+    "cooldown_ms": 250,
+    "defaults": {
+      "max_results": 10
     }
+  },
+  "params": {
+    "query": {"type": "string", "description": "Search query or URL to fetch", "required": true},
+    "max_results": {"type": "integer", "description": "Max search results or page chars", "default": 10},
+    "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 20}
   },
   "category": "web"
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Revert: remove ensureFreshVoiceSession helper, just clear history on voice start."""
-FILE = 'cli/nexus-cli.tsx'
+FILE = 'tui/nexus-tui.tsx'
 
 with open(FILE, 'r', encoding='utf-8') as f:
     content = f.read()

@@ -1,0 +1,23 @@
+{
+  "name": "shortcuts",
+  "version": "1.0.0",
+  "description": "Quick utility helpers: list, pwd, tree, info, find",
+  "entry": "scripts/shortcuts.py",
+  "class": "ShortcutsTool",
+  "params": {
+    "action": {
+      "type": "string",
+      "description": "Action: list, pwd, tree, info, find",
+      "required": true
+    },
+    "path": {
+      "type": "string",
+      "description": "Directory or file path (for list, tree, info)"
+    },
+    "pattern": {
+      "type": "string",
+      "description": "Glob pattern (for find)"
+    }
+  },
+  "category": "utility"
+}

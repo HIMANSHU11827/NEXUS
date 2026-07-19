@@ -1,5 +1,6 @@
 import re
 
+
 def clean_model_output(text: str) -> str:
     """
     Cleans reasoning-distilled model output by removing the 'Thinking Process' block.

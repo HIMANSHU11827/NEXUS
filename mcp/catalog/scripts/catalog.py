@@ -4,6 +4,7 @@ __version__ = "1.0.0"
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -14,6 +15,59 @@ logger = logging.getLogger(__name__)
 
 MCP_CATALOG_DIR = "mcp_servers"
 MCP_CONFIG_FILE = "mcp_config.json"
+_ENV_REFERENCE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+_SECRET_ENV_KEY = re.compile(r"(?i)(api[_-]?key|token|secret|password|credential)")
+_SECRET_VALUE = re.compile(
+    r"(?i)(?:"
+    r"sk-[A-Za-z0-9_-]{12,}|"
+    r"sk-or-[A-Za-z0-9_-]{12,}|"
+    r"github_pat_[A-Za-z0-9_]{12,}|"
+    r"ghp_[A-Za-z0-9_]{12,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{12,}|"
+    r"bearer\s+[A-Za-z0-9._-]{12,}"
+    r")"
+)
+
+
+def _is_env_reference(value: str) -> bool:
+    return bool(_ENV_REFERENCE.match(str(value or "").strip()))
+
+
+def _env_reference_name(value: str) -> str:
+    return str(value).strip()[2:-1]
+
+
+def _validate_env(name: str, env: Dict[str, str]) -> Dict[str, str]:
+    validated: Dict[str, str] = {}
+    for key, value in (env or {}).items():
+        env_key = str(key or "").strip()
+        env_value = str(value or "").strip()
+        if not env_key:
+            raise ValueError(f"MCP server '{name}' has an empty env key")
+        if not env_value:
+            continue
+        if _is_env_reference(env_value):
+            validated[env_key] = env_value
+            continue
+        if _SECRET_ENV_KEY.search(env_key) or _SECRET_VALUE.search(env_value):
+            raise ValueError(
+                f"MCP server '{name}' env '{env_key}' looks like a secret; "
+                f"store it in the process environment and use ${{{env_key}}}"
+            )
+        validated[env_key] = env_value
+    return validated
+
+
+def _resolve_env_references(env: Dict[str, str]) -> Dict[str, str]:
+    resolved: Dict[str, str] = {}
+    for key, value in (env or {}).items():
+        if _is_env_reference(value):
+            env_name = _env_reference_name(value)
+            if env_name in os.environ:
+                resolved[key] = os.environ[env_name]
+            continue
+        resolved[key] = value
+    return resolved
 
 
 @dataclass
@@ -73,6 +127,7 @@ class MCPServerCatalog:
 
     def register(self, server: MCPServerDef):
         """Register or update an MCP server."""
+        server.env = _validate_env(server.name, server.env)
         self.servers[server.name] = server
         self._save()
         logger.info(f"MCP server '{server.name}' registered.")
@@ -106,7 +161,7 @@ class MCPServerCatalog:
 
         try:
             env = os.environ.copy()
-            env.update(server.env)
+            env.update(_resolve_env_references(server.env))
             proc = subprocess.Popen(
                 [server.command] + server.args,
                 env=env,

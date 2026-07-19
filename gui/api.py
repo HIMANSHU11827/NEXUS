@@ -1,6 +1,8 @@
 import os
+import inspect
 import asyncio
 import json
+import logging
 import yaml
 import re
 import shutil
@@ -13,9 +15,12 @@ import sys
 import uuid
 import zipfile
 import urllib.request
+from collections import deque
 from io import BytesIO
 from urllib.parse import urlparse
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
+
+logger = logging.getLogger("NEXUS_API")
 from fastapi import FastAPI, Request, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -24,6 +29,13 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(_ROOT, "config", ".env"))
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, Response
 from orchestrators.loop import NexusLoop
+from nexus.events import CanonicalEvent
+from nexus.run_context import list_run_contexts, load_run_context
+from nexus.runtime import (
+    build_chat_request,
+    safe_session_id as runtime_safe_session_id,
+    session_file_path as runtime_session_file_path,
+)
 _UPLOAD_DIR = os.path.join(_ROOT, "workspace", "uploads")
 os.makedirs(_UPLOAD_DIR, exist_ok=True)
 _WORK_EVENTS_DIR = os.path.join(_ROOT, "workspace", "work_events")
@@ -57,6 +69,134 @@ app.add_middleware(
 # 🧠 Cognitive Pool: Track loops by session ID
 _LOOPS: Dict[str, NexusLoop] = {}
 _THREAD_LOCAL = threading.local()
+_WORK_EVENT_LOCK = threading.Lock()
+_WORK_EVENT_SEQUENCES: Dict[str, int] = {}
+_WORK_EVENT_MAX_RECORDS = max(100, int(os.environ.get("NEXUS_WORK_EVENT_MAX_RECORDS", "10000")))
+_WORK_EVENT_MAX_BYTES = max(1024 * 1024, int(os.environ.get("NEXUS_WORK_EVENT_MAX_BYTES", str(50 * 1024 * 1024))))
+_WORK_EVENT_CACHE: Dict[str, Tuple[Tuple[int, int], List[Dict[str, Any]], int]] = {}
+_WORK_EVENT_CACHE_LOCK = threading.RLock()
+
+
+def refresh_provider_runtime() -> str:
+    """Reload provider.yml and return the canonical default provider."""
+    try:
+        from config.config_loader import NexusConfigLoader
+        loader = NexusConfigLoader()
+        loader.reload()
+        provider_cfg = loader.get("provider", {})
+        default_provider = ""
+        if isinstance(provider_cfg, dict):
+            default_provider = str(provider_cfg.get("default_provider") or "").strip()
+        try:
+            from providers.factory import NexusProviderFactory
+            factory = NexusProviderFactory()
+            if hasattr(factory, "loader") and hasattr(factory.loader, "reload"):
+                factory.loader.reload()
+            factory._provider = None
+            if default_provider:
+                factory.name = default_provider
+        except Exception:
+            logger.debug("Provider factory refresh skipped", exc_info=True)
+        return default_provider or loader.get_system("provider_name", "openrouter")
+    except Exception:
+        logger.warning("Provider runtime refresh failed", exc_info=True)
+        return "openrouter"
+
+
+def _work_event_log_signature(path: str) -> Tuple[int, int]:
+    try:
+        stat = os.stat(path)
+        return stat.st_mtime_ns, stat.st_size
+    except FileNotFoundError:
+        return 0, 0
+
+
+def _scan_work_event_log(path: str) -> Tuple[List[Dict[str, Any]], int]:
+    """Scan with bounded memory, retaining the tail plus older active lifecycles."""
+    tail = deque(maxlen=_WORK_EVENT_MAX_RECORDS)
+    active: Dict[str, Dict[str, Any]] = {}
+    record_count = 0
+    if not os.path.exists(path):
+        return [], 0
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                event = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            record_count += 1
+            tail.append(event)
+            event_id = str(event.get("event_id") or event.get("id") or "")
+            if not event_id:
+                continue
+            status = str(event.get("status") or "").lower()
+            if status in {"pending", "running", "queued", "started", "in_progress"}:
+                active[event_id] = event
+            else:
+                active.pop(event_id, None)
+    retained = list(tail)
+    retained_ids = {str(event.get("event_id") or event.get("id") or "") for event in retained}
+    retained.extend(event for event_id, event in active.items() if event_id not in retained_ids)
+    retained.sort(key=lambda event: int(event.get("sequence") or 0))
+    return retained, record_count
+
+
+def _cached_work_events(path: str) -> Tuple[List[Dict[str, Any]], int]:
+    signature = _work_event_log_signature(path)
+    with _WORK_EVENT_CACHE_LOCK:
+        cached = _WORK_EVENT_CACHE.get(path)
+        if cached and cached[0] == signature:
+            return cached[1], cached[2]
+    events, count = _scan_work_event_log(path)
+    with _WORK_EVENT_CACHE_LOCK:
+        _WORK_EVENT_CACHE[path] = (signature, events, count)
+    return events, count
+
+
+def _invalidate_work_event_cache(path: str) -> None:
+    with _WORK_EVENT_CACHE_LOCK:
+        _WORK_EVENT_CACHE.pop(path, None)
+
+
+def _compact_work_event_log_if_needed(path: str) -> None:
+    """Atomically compact oversized JSONL while keeping sequence cursors monotonic."""
+    events, record_count = _cached_work_events(path)
+    current_size = _work_event_log_signature(path)[1]
+    if record_count <= _WORK_EVENT_MAX_RECORDS and current_size <= _WORK_EVENT_MAX_BYTES:
+        return
+    encoded = [json.dumps(event, ensure_ascii=False) + "\n" for event in events]
+    # Active lifecycle evidence is lossless even if it alone exceeds a soft
+    # retention limit; avoid rewriting the same irreducible log every append.
+    if sum(len(line.encode("utf-8")) for line in encoded) >= current_size:
+        return
+    temporary = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
+            handle.writelines(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+    _invalidate_work_event_cache(path)
+
+
+def _next_work_event_sequence(path: str) -> int:
+    """Return a process-safe, restart-safe sequence for one persisted stream."""
+    if path not in _WORK_EVENT_SEQUENCES:
+        last = 0
+        events, _ = _cached_work_events(path)
+        for event in events:
+            try:
+                last = max(last, int(event.get("sequence") or 0))
+            except (ValueError, TypeError):
+                continue
+        _WORK_EVENT_SEQUENCES[path] = last
+    _WORK_EVENT_SEQUENCES[path] += 1
+    return _WORK_EVENT_SEQUENCES[path]
 
 
 def audit_event(request: Request, status: str, detail: str = "") -> None:
@@ -85,6 +225,44 @@ def require_config_write_allowed(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Dashboard config writes are local-only")
 
 
+def _check_gui_terminal_permission(sid: str, turn_id: str, command: str):
+    from permissions import PermissionMode, PermissionSystem
+
+    loop = _LOOPS.get(sid)
+    mode_name = str(getattr(loop, "permission_mode", "") if loop else "auto").strip().lower() or "auto"
+    mode_map = {
+        "all": PermissionMode.BYPASS,
+        "bypass": PermissionMode.BYPASS,
+        "dontask": PermissionMode.BYPASS,
+        "accept": PermissionMode.AUTO_PILOT,
+        "acceptedits": PermissionMode.AUTO_PILOT,
+        "auto": PermissionMode.AUTO_PILOT,
+        "auto_pilot": PermissionMode.AUTO_PILOT,
+        "allowlist": PermissionMode.PRE_AUTHORIZED,
+        "pre_authorized": PermissionMode.PRE_AUTHORIZED,
+        "checklist": PermissionMode.PRE_AUTHORIZED,
+        "ask": PermissionMode.APPROVE,
+        "approve": PermissionMode.APPROVE,
+        "default": PermissionMode.DEFAULT,
+        "plan": PermissionMode.PLAN,
+    }
+    permissions = PermissionSystem()
+    previous_mode = permissions.mode
+    try:
+        permissions.set_mode(mode_map.get(mode_name, PermissionMode.AUTO_PILOT))
+        return permissions.check(
+            "terminal",
+            command,
+            context={
+                "session_id": sid,
+                "turn_id": turn_id,
+                "surface": "gui",
+            },
+        )
+    finally:
+        permissions.set_mode(previous_mode)
+
+
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     client = request.client.host if request.client else "unknown"
@@ -107,20 +285,15 @@ async def security_middleware(request: Request, call_next):
 
 def safe_session_id(session_id: str) -> str:
     """Return a filesystem-safe session id."""
-    raw = os.path.basename(str(session_id or "default")).replace(".json", "")
-    cleaned = re.sub(r"[^A-Za-z0-9_.-]", "_", raw).strip("._")
-    return cleaned or "default"
+    return runtime_safe_session_id(session_id)
 
 
 def session_file_path(session_id: str, suffix: str = ".json") -> str:
     sessions_dir = os.path.join(_ROOT, "logs", "sessions")
-    os.makedirs(sessions_dir, exist_ok=True)
-    safe_id = safe_session_id(session_id)
-    path = os.path.abspath(os.path.join(sessions_dir, f"{safe_id}{suffix}"))
-    root = os.path.abspath(sessions_dir)
-    if os.path.commonpath([root, path]) != root:
+    try:
+        return runtime_session_file_path(sessions_dir, session_id, suffix)
+    except ValueError:
         raise HTTPException(status_code=400, detail="Invalid session id")
-    return path
 
 
 def safe_upload_path(filename: str) -> str:
@@ -249,6 +422,10 @@ def update_todo_file_and_states(session_id: str, new_event: Dict[str, Any], turn
     
     kind = str(new_event.get("kind") or "").lower()
     status = str(new_event.get("status") or "").lower()
+    if status == "success":
+        status = "done"
+    elif status == "failed":
+        status = "error"
     target = str(new_event.get("target") or "").lower()
     
     # Find phase indexes by checking title keywords
@@ -407,7 +584,14 @@ def normalize_work_event_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         kind = "search"
     elif any(token in raw_kind for token in ("command", "bash", "terminal", "shell", "exec")) or event.get("command"):
         kind = "command"
-    elif "file" in raw_kind or "file" in raw_action or "file" in raw_tool or event.get("path"):
+    elif (
+        "file" in raw_kind
+        or "file" in raw_action
+        or "file" in raw_tool
+        or raw_kind in {"reading", "creating", "modifying", "deleting"}
+        or raw_tool in {"reading", "creating", "modifying", "deleting"}
+        or event.get("path")
+    ):
         kind = "file"
     elif "skill" in raw_kind:
         kind = "skill"
@@ -415,7 +599,7 @@ def normalize_work_event_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         kind = "plugin"
     elif "provider" in raw_kind:
         kind = "provider"
-    elif any(token in raw_kind for token in ("hive", "agent", "worker")):
+    elif any(token in raw_kind for token in ("hive", "subagent", "agent", "worker")):
         kind = "hive"
     elif "todo" in raw_kind:
         kind = "todo"
@@ -425,7 +609,16 @@ def normalize_work_event_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     action = str(event.get("action") or event.get("title") or "").strip()
     if not action:
         if kind == "file":
-            if any(token in raw_action for token in ("delete", "remove")):
+            file_tool = raw_tool or raw_kind
+            if file_tool == "reading":
+                action = "Read file"
+            elif file_tool == "creating":
+                action = "Create file"
+            elif file_tool == "modifying":
+                action = "Edit file"
+            elif file_tool == "deleting":
+                action = "Delete file"
+            elif any(token in raw_action for token in ("delete", "remove")):
                 action = "Delete file"
             elif any(token in raw_action for token in ("create", "write")):
                 action = "Create file"
@@ -495,8 +688,24 @@ def append_work_event(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any
         except Exception as exc:
             event["preview_error"] = str(exc)
     os.makedirs(_WORK_EVENTS_DIR, exist_ok=True)
-    with open(work_events_path(session_id), "a", encoding="utf-8") as f:
-        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    path = work_events_path(session_id)
+    with _WORK_EVENT_LOCK:
+        if event.get("sequence") is not None:
+            event["source_sequence"] = event["sequence"]
+        sequence = _next_work_event_sequence(path)
+        canonical = CanonicalEvent.from_work_event(event, event["session_id"], sequence).to_dict()
+        event["legacy_type"] = event.get("type")
+        event["legacy_status"] = event.get("status")
+        event.update(canonical)
+        # Compatibility aliases remain during the adapter migration; all new
+        # records still persist the complete canonical envelope above.
+        event["id"] = event["event_id"]
+        event["session_id"] = event["conversation_id"]
+        event["created_at"] = event["timestamp"]
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        _invalidate_work_event_cache(path)
+        _compact_work_event_log_if_needed(path)
         
     if hasattr(_THREAD_LOCAL, "appended_events"):
         _THREAD_LOCAL.appended_events.append(event)
@@ -943,25 +1152,21 @@ def complete_chat_workflow(session_id: str, prompt: str, turn_id: str = "", stat
 
 def list_work_events(session_id: str, limit: int = 200, active_turn_id: str = "") -> List[Dict[str, Any]]:
     path = work_events_path(session_id)
-    raw_events: List[Dict[str, Any]] = []
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        event = json.loads(line)
-                        if isinstance(event, dict):
-                            raw_events.append(event)
-                    except Exception:
-                        continue
-        except Exception:
-            pass
+    raw_events, _ = _cached_work_events(path)
 
-    # Keep persisted todo/planning events. They are the durable record that lets
-    # an interrupted task display again later without inventing fake phases.
+    _HIDDEN_TARGETS = {
+        "prompt_files",
+        "CRITICAL PREVENTIVE VACCINE: internal",
+    }
     filtered_events = []
     latest_turn_id = str(active_turn_id or "")
     for evt in raw_events:
+        if str(evt.get("visibility", "")).lower() == "internal":
+            continue
+        if evt.get("target") in _HIDDEN_TARGETS:
+            continue
+        if evt.get("kind") == "test" and evt.get("target") == "CRITICAL PREVENTIVE VACCINE: internal":
+            continue
         filtered_events.append(evt)
         if evt.get("turn_id"):
             latest_turn_id = str(evt.get("turn_id"))
@@ -1039,8 +1244,11 @@ def list_work_events(session_id: str, limit: int = 200, active_turn_id: str = ""
         except Exception as e:
             print(f"[API_ERROR]: Failed to dynamically parse todo.md: {e}")
 
-    deduped: List[Dict[str, Any]] = []
-    seen = set()
+    # Event IDs are lifecycle records: keep the newest payload while retaining
+    # the position where the event first appeared. Sorting opaque IDs here used
+    # to scramble the real execution timeline on every replay.
+    dedupe_order: List[str] = []
+    latest_by_key: Dict[str, Dict[str, Any]] = {}
     for event in filtered_events:
         key = (
             str(event.get("turn_id", "")),
@@ -1051,12 +1259,61 @@ def list_work_events(session_id: str, limit: int = 200, active_turn_id: str = ""
         )
         event_id = str(event.get("id") or "")
         dedupe_key = event_id or "|".join(key)
-        if dedupe_key in seen:
-            continue
-        seen.add(dedupe_key)
-        deduped.append(event)
+        if dedupe_key not in latest_by_key:
+            dedupe_order.append(dedupe_key)
+        latest_by_key[dedupe_key] = event
+    deduped = [latest_by_key[k] for k in dedupe_order]
 
     return deduped[-max(1, min(limit, 1000)):]
+
+
+def replay_work_events_after(session_id: str, after_sequence: int, limit: int = 200) -> List[Dict[str, Any]]:
+    """Replay the append-only canonical log without lifecycle-state dedupe."""
+    events: List[Dict[str, Any]] = []
+    path = work_events_path(session_id)
+    raw_events, _ = _cached_work_events(path)
+    for event in raw_events:
+        if str(event.get("visibility", "")).lower() == "internal":
+            continue
+        if int(event.get("sequence") or 0) > after_sequence:
+            events.append(event)
+            if len(events) >= max(1, min(limit, 1000)):
+                break
+    return events[:max(1, min(limit, 1000))]
+
+
+def work_event_run_summary(session_id: str, run_id: str) -> Dict[str, Any]:
+    """Small replay index for a durable run without sending the whole log."""
+    raw_events, _ = _cached_work_events(work_events_path(session_id))
+    statuses: Dict[str, int] = {}
+    kinds: Dict[str, int] = {}
+    event_count = 0
+    last_sequence = 0
+    terminal_event = ""
+    for event in raw_events:
+        if str(event.get("turn_id") or event.get("run_id") or "") != str(run_id):
+            continue
+        if str(event.get("visibility") or "public").lower() == "internal":
+            continue
+        event_count += 1
+        status = str(event.get("status") or "unknown")
+        kind = str(event.get("kind") or "unknown")
+        statuses[status] = statuses.get(status, 0) + 1
+        kinds[kind] = kinds.get(kind, 0) + 1
+        try:
+            last_sequence = max(last_sequence, int(event.get("sequence") or 0))
+        except (TypeError, ValueError):
+            pass
+        event_type = str(event.get("event_type") or event.get("type") or "")
+        if event_type.startswith("run.") and status in {"success", "failed", "cancelled"}:
+            terminal_event = event_type
+    return {
+        "event_count": event_count,
+        "last_sequence": last_sequence,
+        "statuses": statuses,
+        "kinds": kinds,
+        "terminal_event": terminal_event,
+    }
 
 
 def attach_work_events_to_chunk(session_id: str, chunk: str, turn_id: str = "") -> str:
@@ -1131,14 +1388,48 @@ def get_loop(session_id: str = "default") -> NexusLoop:
     if session_id not in _LOOPS:
         loop = NexusLoop(root_dir=_ROOT)
         loop.load_memory(session_id)
+        # The loop publishes structured lifecycle/tool records through this
+        # adapter. Without the sink, only brittle text-marker parsing reached
+        # persistence and real tool events were silently lost.
+        loop.work_event_sink = lambda payload, sid=session_id: append_work_event(sid, payload)
         _LOOPS[session_id] = loop
     else:
         sync_loop_from_disk(_LOOPS[session_id])
     return _LOOPS[session_id]
 
+
+def bind_live_work_event_sink(loop: NexusLoop, session_id: str, turn_id: str, out_queue) -> tuple[Any, Any]:
+    """Multiplex structured loop events into persistence and the active stream."""
+    previous = loop.work_event_sink
+
+    def live_sink(payload: Dict[str, Any]) -> Dict[str, Any]:
+        enriched = dict(payload)
+        if turn_id:
+            enriched.setdefault("turn_id", turn_id)
+        event = append_work_event(session_id, enriched)
+        if str(event.get("visibility") or "public").lower() == "public":
+            out_queue.put(("event", event))
+        return event
+
+    loop.work_event_sink = live_sink
+    return previous, live_sink
+
+
+def encode_chat_stream_frame(event: str, payload: Any, *, legacy: bool = False) -> str:
+    """Serialize one chat transport record as valid SSE (or explicit legacy raw)."""
+    if legacy:
+        if event == "message":
+            return str(payload.get("content", "")) if isinstance(payload, dict) else str(payload)
+        if event == "work_event":
+            item = payload.get("event", payload) if isinstance(payload, dict) else payload
+            return f"[NEXUS_ACTIVITY]: {json.dumps(item, ensure_ascii=False)}\n"
+        return ""
+    body = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+    return f"event: {event}\ndata: {body}\n\n"
+
 @app.get("/api/sessions/active")
 def get_active_session():
-    from utils.session_bus import get_active_session, load_session_history
+    from utils.session_bus import get_active_session
 
     active = get_active_session(_ROOT)
     sid = safe_session_id(active.get("session_id", "default"))
@@ -1187,7 +1478,8 @@ def list_sessions():
                 with open(path, "r", encoding='utf-8') as sf:
                     data = json.load(sf)
                     title = data[0]["content"][:50] if data and len(data) > 0 else "New Chat"
-            except:
+            except Exception as e:
+                logger.warning(f"Failed to read session file {path}: {e}")
                 title = "Untitled Session"
             
         results.append({
@@ -1294,22 +1586,33 @@ async def chat(request: Request):
         return JSONResponse(
             {"status": "error", "message": f"Invalid chat JSON: {exc}"},
             status_code=400,
-        )
+    )
     from utils.session_bus import set_active_session_id
 
-    prompt = str(data.get("prompt", ""))[:50000]
-    sid = safe_session_id(data.get("session_id", "default"))
-    turn_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(data.get("turn_id", "")).strip())[:120]
-    set_active_session_id(_ROOT, sid, source=str(data.get("source", "gui")))
+    default_p = refresh_provider_runtime()
+    try:
+        chat_request = build_chat_request(data, default_provider=default_p, default_source="gui")
+    except ValueError as exc:
+        return JSONResponse(
+            {"status": "error", "message": str(exc)},
+            status_code=400,
+        )
+    prompt = chat_request.prompt
+    sid = chat_request.session_id
+    turn_id = chat_request.turn_id
+    set_active_session_id(_ROOT, sid, source=chat_request.source or "gui")
     loop = get_loop(sid)
+    if bool(getattr(loop, "is_running", False)):
+        return JSONResponse(
+            {"status": "error", "message": "A run is already active for this session"},
+            status_code=409,
+    )
     loop.reset()
     
     # Normalize provider
-    from kernel import get_nexus_kernel
-    kernel = get_nexus_kernel(_ROOT)
-    default_p = kernel.config.get_system("provider_name", "openrouter")
-    raw_provider = data.get("provider") or default_p
-    provider = str(raw_provider).lower().replace(" ", "_")
+    provider = chat_request.provider
+    model = chat_request.model or str(getattr(loop, "model", "") or "").strip()
+    max_tokens = chat_request.max_tokens
     show_thinking = bool(data.get("show_thinking", _SHOW_CHAT_THINKING))
     
     # Auto-title session if new
@@ -1323,9 +1626,8 @@ async def chat(request: Request):
                 meta = json.load(f)
                 if meta.get("title") == "New Chat":
                     should_write = True
-        except:
+        except Exception:
             should_write = True
-
     if should_write:
         os.makedirs(os.path.dirname(meta_path), exist_ok=True)
         try:
@@ -1356,12 +1658,40 @@ async def chat(request: Request):
         completed = False
         partial_response = []
         idle_timeout = max(5, int(os.environ.get("NEXUS_CHAT_IDLE_TIMEOUT", "90")))
-        stream_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
+        legacy_raw_stream = str(data.get("stream_format") or "").lower() in {"raw", "legacy"}
+        stream_queue: "queue.Queue[tuple[str, Any]]" = queue.Queue()
+        previous_work_event_sink, active_work_event_sink = bind_live_work_event_sink(loop, sid, turn_id, stream_queue)
+        last_activity_at = time.monotonic()
+
+        def stream_frame(event: str, payload: Any) -> str:
+            return encode_chat_stream_frame(event, payload, legacy=legacy_raw_stream)
+
+        def _run_async_stream(async_gen, out_queue: "queue.Queue[tuple[str, str]]") -> None:
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                async def _consume() -> None:
+                    async for chunk in async_gen:
+                        out_queue.put(("chunk", chunk or ""))
+                loop.run_until_complete(_consume())
+                out_queue.put(("done", ""))
+            except Exception as exc:
+                out_queue.put(("error", str(exc)))
 
         def run_loop_stream() -> None:
             try:
-                for stream_chunk in loop.stream_run(effective_prompt, provider=provider):
-                    stream_queue.put(("chunk", stream_chunk))
+                result = loop.stream_run(
+                    effective_prompt,
+                    provider=provider,
+                    model=model,
+                    max_tokens=max_tokens,
+                    turn_id=turn_id,
+                )
+                if inspect.isasyncgen(result):
+                    _run_async_stream(result, stream_queue)
+                elif inspect.isgenerator(result) or hasattr(result, "__next__"):
+                    for stream_chunk in result:
+                        stream_queue.put(("chunk", stream_chunk or ""))
                 stream_queue.put(("done", ""))
             except Exception as stream_error:
                 stream_queue.put(("error", str(stream_error)))
@@ -1371,8 +1701,12 @@ async def chat(request: Request):
         try:
             while True:
                 try:
-                    kind, chunk = await asyncio.to_thread(stream_queue.get, True, idle_timeout)
+                    kind, chunk = await asyncio.to_thread(stream_queue.get, True, min(15, idle_timeout))
+                    last_activity_at = time.monotonic()
                 except queue.Empty:
+                    if time.monotonic() - last_activity_at < idle_timeout:
+                        yield stream_frame("heartbeat", {"timestamp": time.time()})
+                        continue
                     chunk = (
                         "\nNEXUS chat timed out while waiting for the model/provider. "
                         "Check provider configuration or switch to a healthy local model."
@@ -1382,7 +1716,7 @@ async def chat(request: Request):
                         loop.abort()
                     except Exception:
                         pass
-                    yield chunk
+                    yield stream_frame("error", {"message": chunk})
                     break
 
                 if kind == "done":
@@ -1390,12 +1724,20 @@ async def chat(request: Request):
                     break
                 if kind == "error":
                     raise RuntimeError(chunk)
+                if kind == "event":
+                    yield stream_frame("work_event", {"event": chunk})
+                    continue
+
+                if isinstance(chunk, dict):
+                    if chunk.get("type") != "content":
+                        continue
+                    chunk = str(chunk.get("data") or "")
 
                 partial_response.append(chunk)
                 visible_chunk = filter_chat_chunk(chunk, show_thinking=show_thinking)
                 visible_chunk = attach_work_events_to_chunk(sid, visible_chunk, turn_id=turn_id)
                 if visible_chunk:
-                    yield visible_chunk
+                    yield stream_frame("message", {"content": visible_chunk})
         except Exception as e:
             print(f"[CHAT_ERROR]: {e}")
             error_text = f"\nNEXUS chat error: {str(e)}"
@@ -1404,8 +1746,10 @@ async def chat(request: Request):
                 complete_chat_workflow(sid, prompt, turn_id=turn_id, status="error")
             except Exception:
                 pass
-            yield error_text
+            yield stream_frame("error", {"message": error_text})
         finally:
+            if loop.work_event_sink is active_work_event_sink:
+                loop.work_event_sink = previous_work_event_sink
             if completed:
                 try:
                     complete_chat_workflow(sid, prompt, turn_id=turn_id, status="done")
@@ -1427,8 +1771,29 @@ async def chat(request: Request):
                         loop.save_memory()
                 except Exception as save_error:
                     print(f"[API_ERROR]: Failed to save interrupted chat stream: {save_error}")
-            
+            if completed:
+                yield stream_frame("done", "[DONE]")
+
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post("/api/chat/{session_id}/cancel")
+def cancel_chat(session_id: str, turn_id: str = ""):
+    """Propagate cancellation into the active loop and canonical event log."""
+    sid = safe_session_id(session_id)
+    loop = _LOOPS.get(sid)
+    if loop is None:
+        raise HTTPException(status_code=404, detail="Active session not found")
+    loop.abort()
+    run_id = str(turn_id or getattr(loop, "_current_turn_id", "") or sid)
+    # The active loop owns canonical lifecycle persistence. Returning the
+    # immediate acknowledgement here avoids appending a duplicate run terminal.
+    event = {
+        "id": f"run_{run_id}", "type": "run.cancelled", "event_type": "run.cancelled", "run_id": run_id,
+        "turn_id": run_id, "kind": "run", "title": "Run cancelled", "status": "cancelled",
+        "visibility": "public",
+    }
+    return {"status": "cancelled", "run_id": run_id, "event": event}
 
 @app.post("/api/upload")
 async def upload_files(files: List[UploadFile] = File(...)):
@@ -1483,6 +1848,13 @@ async def import_website_source(request: Request):
     parsed = urlparse(raw_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(status_code=400, detail="Enter a valid http(s) URL")
+    import socket as _socket
+    try:
+        _ip = _socket.gethostbyname(parsed.hostname)
+        if _ip.startswith(("10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.", "192.168.", "127.", "0.")) or _ip == "::1":
+            raise HTTPException(status_code=403, detail="Private/internal URLs not allowed")
+    except _socket.gaierror:
+        raise HTTPException(status_code=400, detail="Could not resolve URL")
 
     try:
         req = urllib.request.Request(raw_url, headers={"User-Agent": "NEXUS-AI-Source-Importer/1.0"})
@@ -1551,15 +1923,58 @@ def get_history(session_id: str = "default"):
     return loop.memory
 
 
-@app.get("/api/work-events")
-def get_work_events(session_id: str = "default", limit: int = 200, turn_id: str = ""):
-    events = list_work_events(session_id, limit=limit, active_turn_id=turn_id)
-    if turn_id:
+@app.get("/api/runs")
+def list_runs(session_id: str = "", limit: int = 100):
+    """List durable run contexts with lightweight GUI replay metadata."""
+    runs = []
+    for item in list_run_contexts(_ROOT, session_id=session_id, limit=limit):
+        public_item = dict(item)
+        public_item.pop("_path", None)
+        public_item["work_events"] = work_event_run_summary(
+            str(public_item.get("session_id") or session_id or "default"),
+            str(public_item.get("run_id") or ""),
+        )
+        runs.append(public_item)
+    return {"status": "success", "runs": runs}
+
+
+@app.get("/api/runs/{session_id}/{run_id}")
+def get_run_context(session_id: str, run_id: str, include_events: bool = True, limit: int = 1000):
+    """Return one durable run context plus its persisted public event replay."""
+    sid = safe_session_id(session_id)
+    context = load_run_context(_ROOT, sid, run_id)
+    if context is None:
+        raise HTTPException(status_code=404, detail="Run context not found")
+    summary = work_event_run_summary(sid, str(context.get("run_id") or run_id))
+    response: Dict[str, Any] = {"status": "success", "run": context, "work_events": summary}
+    if include_events:
         events = [
-            event for event in events
-            if str(event.get("turn_id", "")) == turn_id
+            event
+            for event in replay_work_events_after(sid, 0, limit=limit)
+            if str(event.get("turn_id") or event.get("run_id") or "") == str(context.get("run_id") or run_id)
         ]
-    return {"events": events}
+        response["events"] = events
+        response["next_sequence"] = max((int(event.get("sequence") or 0) for event in events), default=0)
+    return response
+
+
+@app.get("/api/work-events")
+def get_work_events(request: Request, session_id: str = "default", limit: int = 200, turn_id: str = "", after_sequence: int = 0):
+    header_cursor = request.headers.get("Last-Event-ID", "").strip()
+    if header_cursor:
+        try:
+            after_sequence = max(after_sequence, int(header_cursor))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Last-Event-ID must be an integer sequence")
+    events = (
+        replay_work_events_after(session_id, after_sequence, limit=limit)
+        if after_sequence > 0
+        else list_work_events(session_id, limit=limit, active_turn_id=turn_id)
+    )
+    if turn_id:
+        events = [event for event in events if str(event.get("turn_id", "")) == turn_id]
+    next_sequence = max((int(event.get("sequence") or 0) for event in events), default=after_sequence)
+    return {"events": events, "after_sequence": after_sequence, "next_sequence": next_sequence}
 
 
 @app.get("/api/work-events/{event_id}")
@@ -1621,7 +2036,10 @@ async def run_work_command(request: Request):
     except Exception:
         timeout = 90
 
-    from tools.nexus_tools.bash_tool import BashTool
+    try:
+        from tools.nexus_tools.bash_tool import BashTool
+    except ModuleNotFoundError:
+        from tools.bash.scripts.bash import BashTool
 
     parent_event = None
     parent_event_id = str(data.get("event_id") or "").strip()
@@ -1646,6 +2064,20 @@ async def run_work_command(request: Request):
     if parent_event and parent_event.get("phase_index") is not None:
         started_payload["phase_index"] = parent_event.get("phase_index")
     started = append_work_event(sid, started_payload)
+    permission = _check_gui_terminal_permission(sid, turn_id, command)
+    if not permission.granted:
+        blocked = f"Command blocked by permission policy: {permission.reason}"
+        completed = append_work_event(sid, {
+            **started,
+            "id": f"{started.get('id')}_result",
+            "status": "error",
+            "stdout": "",
+            "stderr": blocked,
+            "output": blocked,
+            "result": blocked,
+            "completed_at": time.time(),
+        })
+        return {"status": "error", "event": completed, "stdout": "", "stderr": blocked, "output": blocked, "command": command}
     result = BashTool(_ROOT).call(command=command, timeout=timeout)
     stdout = str(result.data or "")
     stderr = str(result.error or "")
@@ -1714,10 +2146,30 @@ async def run_work_command_stream(request: Request):
 
         yield sse({"type": "start", "event": started, "command": command})
         try:
-            from tools.nexus_tools.bash_tool import BashTool
-            tool = BashTool(_ROOT)
-            assessment = tool.risk_scorer.assess(command)
-            if os.environ.get("NEXUS_ALLOW_DANGEROUS_SHELL", "false").lower() != "true" and assessment.blocked:
+            permission = _check_gui_terminal_permission(sid, turn_id, command)
+            if not permission.granted:
+                blocked = f"Command blocked by permission policy: {permission.reason}"
+                chunks_list.append([time.time() - started_time, blocked])
+                completed = append_work_event(sid, {
+                    **started,
+                    "id": f"{started.get('id')}_result",
+                    "status": "error",
+                    "stdout": "",
+                    "stderr": blocked,
+                    "output": blocked,
+                    "result": blocked,
+                    "completed_at": time.time(),
+                    "chunks": chunks_list,
+                })
+                yield sse({"type": "chunk", "stream": "stderr", "text": blocked})
+                yield sse({"type": "done", "status": "error", "event": completed, "stdout": "", "stderr": blocked, "output": blocked})
+                return
+
+            from sandbox.risk import CommandRiskScorer
+            from sandbox.sandbox_manager import SovereignSandbox
+
+            assessment = CommandRiskScorer().assess(command)
+            if os.environ.get("NEXUS_ALLOW_DANGEROUS_SHELL", "false").lower() != "true" and assessment and assessment.blocked:
                 blocked = f"Command blocked by risk policy: {assessment.summary()}"
                 chunks_list.append([time.time() - started_time, blocked])
                 completed = append_work_event(sid, {
@@ -1735,50 +2187,17 @@ async def run_work_command_stream(request: Request):
                 yield sse({"type": "done", "status": "error", "event": completed, "stdout": "", "stderr": blocked, "output": blocked})
                 return
 
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                cwd=_ROOT,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            deadline = time.time() + timeout
-            assert proc.stdout is not None
-            while True:
-                remaining = max(0.1, deadline - time.time())
-                try:
-                    chunk = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
-                except asyncio.TimeoutError:
-                    try:
-                        proc.kill()
-                    except ProcessLookupError:
-                        pass
-                    text = f"Command timed out after {timeout}s"
-                    output_parts.append(text)
-                    chunks_list.append([time.time() - started_time, text])
-                    completed = append_work_event(sid, {
-                        **started,
-                        "id": f"{started.get('id')}_result",
-                        "status": "error",
-                        "stdout": "".join(output_parts),
-                        "stderr": text,
-                        "output": "".join(output_parts),
-                        "result": text,
-                        "completed_at": time.time(),
-                        "chunks": chunks_list,
-                    })
-                    yield sse({"type": "chunk", "stream": "stderr", "text": text})
-                    yield sse({"type": "done", "status": "error", "event": completed, "stdout": "".join(output_parts), "stderr": text, "output": "".join(output_parts)})
-                    return
-                if not chunk:
-                    break
-                text = chunk.decode(errors="replace")
+            sandbox = SovereignSandbox(_ROOT)
+            async for text in sandbox.stream_execute(command, _ROOT):
                 output_parts.append(text)
                 chunks_list.append([time.time() - started_time, text])
                 yield sse({"type": "chunk", "stream": "stdout", "text": text})
 
-            return_code = await proc.wait()
+            return_code = sandbox.last_exit_code if sandbox.last_exit_code is not None else 0
             output = "".join(output_parts)
             status = "done" if return_code == 0 else "error"
+            if output.startswith("[SANDBOX_BLOCK]") or "[SANDBOX_TIMEOUT]" in output:
+                status = "error"
             completed = append_work_event(sid, {
                 **started,
                 "id": f"{started.get('id')}_result",
@@ -1828,10 +2247,71 @@ def file_preview(path: str):
     }
 
 
+@app.post("/api/run")
+def api_run_sync(data: dict, request: Request):
+    """Minimal non-stream runner for CLI/tests compatibility."""
+    require_config_write_allowed(request)
+    command = str(data.get("command") or data.get("target") or "").strip()
+    if not command:
+        raise HTTPException(status_code=400, detail="command is required")
+    try:
+        import os as _os
+        proc = subprocess.run(
+            command if _os.name == "nt" else ["sh", "-c", command],
+            shell=(_os.name == "nt"),
+            cwd=_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=90,
+        )
+        return {
+            "command": command,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": "",
+            "output": proc.stdout,
+        }
+    except subprocess.TimeoutExpired:
+        return {"command": command, "returncode": -1, "stdout": "", "stderr": "timeout", "output": "Command timed out"}
+    except Exception as exc:
+        return {"command": command, "returncode": 1, "stdout": "", "stderr": str(exc), "output": str(exc)}
+
+
 @app.get("/api/file-download")
 def file_download(path: str):
     file_path = safe_workspace_read_path(path)
     return FileResponse(file_path, filename=os.path.basename(file_path))
+
+
+@app.post("/api/files/list")
+def api_files_list(data: dict):
+    target = str(data.get("path", "") or "").strip() or "."
+    if not os.path.isabs(target):
+        target = os.path.join(_ROOT, target)
+    target = os.path.abspath(target)
+    if os.path.commonpath([os.path.abspath(_ROOT), target]) != os.path.abspath(_ROOT):
+        raise HTTPException(status_code=400, detail="Path outside workspace")
+    if os.path.isfile(target):
+        return {
+            "path": target,
+            "files": [
+                {
+                    "name": os.path.basename(target),
+                    "path": target,
+                    "isDirectory": False,
+                }
+            ],
+        }
+    if not os.path.isdir(target):
+        raise HTTPException(status_code=404, detail="Path not found")
+    files = []
+    for name in os.listdir(target):
+        full = os.path.join(target, name)
+        files.append({"name": name, "path": full, "isDirectory": os.path.isdir(full)})
+    return {"path": target, "files": files}
 
 
 @app.get("/api/session-files.zip")
@@ -2413,7 +2893,8 @@ def build_tool_state(kernel) -> List[Dict[str, Any]]:
     disabled = _config_disabled_set(cfg, "disabled_tools")
     deleted = _config_disabled_set(cfg, "deleted_tools")
     tools = []
-    for t_name in kernel.tools.list_tools():
+    registry_summary = kernel.tools.list_tools(include_unavailable=True)
+    for t_name, summary in registry_summary.items():
         if t_name in deleted:
             continue
         tool = kernel.tools.get(t_name)
@@ -2421,14 +2902,41 @@ def build_tool_state(kernel) -> List[Dict[str, Any]]:
         if not isinstance(cfg_item, dict):
             cfg_item = {}
         if tool:
-            tools.append({"name": t_name, "description": cfg_item.get("description") or tool.description, "active": cfg_item.get("active", t_name not in disabled), "config": cfg_item})
+            active = cfg_item.get("active", t_name not in disabled)
+            available = bool(summary.get("available", tool.is_available())) and bool(active)
+            reason = "disabled_by_config" if not active else str(summary.get("availability_reason") or "ready")
+            description = cfg_item.get("description") or getattr(tool, "description", "") or tool.schema.get("description", "")
+            tools.append(
+                {
+                    "name": t_name,
+                    "description": description,
+                    "active": active,
+                    "available": available,
+                    "availability_reason": reason,
+                    "missing_env": summary.get("missing_env", []),
+                    "has_handler": bool(summary.get("has_handler", tool.instance is not None)),
+                    "config": cfg_item,
+                }
+            )
     for name, cfg_item in custom_cfg.items():
         if name in deleted:
             continue
         if any(item["name"] == name for item in tools):
             continue
         if isinstance(cfg_item, dict):
-            tools.append({"name": name, "description": cfg_item.get("description", ""), "active": cfg_item.get("active", True), "config": cfg_item})
+            active = cfg_item.get("active", True)
+            tools.append(
+                {
+                    "name": name,
+                    "description": cfg_item.get("description", ""),
+                    "active": active,
+                    "available": False,
+                    "availability_reason": "custom_config_only",
+                    "missing_env": [],
+                    "has_handler": False,
+                    "config": cfg_item,
+                }
+            )
     return tools
 
 
@@ -2665,6 +3173,12 @@ def _download_github_zip(repo_url: str, target_dir: str) -> None:
 
 
 def install_plugin_from_source(raw_url: str, kind: str = "plugin", force: bool = False, enable: bool = True) -> Dict[str, Any]:
+    from plugins.trust import PluginInstallDisabled, require_unverified_install_opt_in
+
+    try:
+        require_unverified_install_opt_in()
+    except PluginInstallDisabled as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     repo_url, slug = _normalize_repo_url(raw_url)
     kind = str(kind or "plugin").lower()
     install_root = os.path.abspath(os.path.join(_ROOT, "plugins"))
@@ -2976,79 +3490,86 @@ def run_evolution_verification() -> Dict[str, Any]:
 @app.get("/api/health")
 def api_health():
     """Fast liveness probe for the Vite GUI (no kernel boot)."""
-    return {"status": "ok", "service": "nexus-gui-api"}
+    return {"status": "ok", "service": "nexus-api"}
+
+
+@app.post("/api/model")
+async def set_model(data: dict, request: Request):
+    require_config_write_allowed(request)
+    model = str(data.get("model", "") or "").strip()
+    sid = safe_session_id(data.get("session_id", "default") or "default")
+    loop = get_loop(sid)
+    if model:
+        loop.model = model
+    return {"status": "success", "sid": sid, "model": loop.model}
+
+
+@app.post("/api/mode")
+async def set_mode(data: dict, request: Request):
+    require_config_write_allowed(request)
+    mode = str(data.get("mode", "") or "").strip().lower()
+    sid = safe_session_id(data.get("session_id", "default") or "default")
+    loop = get_loop(sid)
+    loop.permission_mode = mode or loop.permission_mode
+    return {"status": "success", "sid": sid, "mode": loop.permission_mode}
+
+
+@app.post("/api/provider")
+async def set_provider(data: dict, request: Request):
+    require_config_write_allowed(request)
+    provider = str(data.get("provider", "") or "").strip().lower()
+    sid = safe_session_id(data.get("session_id", "default") or "default")
+    loop = get_loop(sid)
+    loop.provider_override = provider or loop.provider_override
+    return {"status": "success", "sid": sid, "provider": loop.provider_override}
 
 
 @app.get("/api/state")
 def get_state():
-    now = time.time()
-    if _CACHE["state"] and (now - _CACHE["last_update"]) < _STATE_TTL_SECONDS:
-        return _CACHE["state"]
-    if not _STATE_LOCK.acquire(blocking=False):
-        if _CACHE["state"]:
-            return _CACHE["state"]
-        return {
-            "hive": [],
-            "skills": [],
-            "tools": [],
-            "plugins": [],
-            "providers": [],
-            "provider_instances": [],
-            "mcp": {"connected": 0, "total": 0, "servers": []},
-            "health": {"cpu": "0%", "ram": "0%", "status": "STARTING"},
-            "session": {"active": True, "turns": 0},
-            "reminders": load_reminders(),
-            "audit": get_async_audit_state(),
-        }
-
+    from kernel import get_nexus_kernel
+    kernel = get_nexus_kernel(_ROOT)
+    default_provider = refresh_provider_runtime()
+    sessions_root = os.path.join(_ROOT, "workspace", "sessions")
+    session_titles = {}
+    if os.path.isdir(sessions_root):
+        for fname in os.listdir(sessions_root):
+            if not fname.endswith(".json"):
+                continue
+            sid = fname[:-5]
+            meta_path = os.path.join(sessions_root, f"{sid}.meta")
+            title = "Untitled"
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as mf:
+                        meta = json.load(mf)
+                        title = str(meta.get("title") or title)
+                except Exception:
+                    pass
+            session_titles[sid] = title
+    loop = None
     try:
-        try:
-            from kernel import get_nexus_kernel
-            kernel = get_nexus_kernel(_ROOT)
-
-            tools = _cached_component("tools", _METADATA_TTL_SECONDS, lambda: build_tool_state(kernel), [])
-            skills = _cached_component("skills", _METADATA_TTL_SECONDS, build_skill_state, [])
-            mcp = _cached_component(
-                "mcp",
-                _METADATA_TTL_SECONDS,
-                lambda: build_mcp_state(kernel),
-                {"connected": 0, "total": 0, "servers": []},
-            )
-            providers_list, provider_instances = _cached_component(
-                "providers",
-                _METADATA_TTL_SECONDS,
-                lambda: build_provider_state(kernel),
-                ([], []),
-            )
-            stats = kernel.get_stats()
-            health = {"cpu": stats["load"]["cpu"], "ram": stats["load"]["ram"], "status": stats["status"]}
-        except Exception as exc:
-            print(f"[API_WARN] kernel init failed: {exc}")
-            tools = _CACHE.get("tools") or []
-            skills = _cached_component("skills", _METADATA_TTL_SECONDS, build_skill_state, [])
-            mcp = _CACHE.get("mcp") or {"connected": 0, "total": 0, "servers": []}
-            providers_list, provider_instances = _CACHE.get("providers") or ([], [])
-            health = {"cpu": "0%", "ram": "0%", "status": "DEGRADED"}
-
-        result = {
-            "hive": load_hive_state(),
-            "skills": skills,
-            "tools": tools,
-            "plugins": discover_plugins(),
-            "providers": providers_list,
-            "provider_instances": provider_instances,
-            "mcp": mcp,
-            "health": health,
-            "session": {"active": True, "turns": 0},
-            "reminders": load_reminders(),
-            "audit": get_async_audit_state(),
-        }
-
-        _CACHE["state"] = result
-        _CACHE["last_update"] = time.time()
-        return result
-    finally:
-        _STATE_LOCK.release()
+        from utils.session_bus import get_active_session_id
+        active_sid = get_active_session_id(_ROOT, "default")
+        from orchestrators.loop import NexusLoop as _NexusLoop
+        loop = get_loop(active_sid)
+    except Exception:
+        loop = None
+    provider_name = ""
+    model_name = ""
+    mode_name = ""
+    if loop is not None:
+        provider_name = str(getattr(loop, "provider_override", "") or getattr(loop, "provider", "") or default_provider)
+        model_name = str(getattr(loop, "model", "") or "")
+        mode_name = str(getattr(loop, "permission_mode", "") or getattr(loop, "mode", "") or "")
+    return {
+        "status": "ok",
+        "timestamp": time.time(),
+        "root": _ROOT,
+        "sessions": session_titles,
+        "provider": provider_name,
+        "model": model_name,
+        "mode": mode_name,
+    }
 
 
 @app.post("/api/reminders")
@@ -3127,6 +3648,87 @@ async def save_config(data: dict, request: Request):
 @app.get("/api/plugins")
 def list_plugins():
     return {"plugins": discover_plugins()}
+
+
+@app.get("/api/skills")
+def api_skills():
+    try:
+        from skills import NexusSkillMaster
+        try:
+            NexusSkillMaster(_ROOT)._load_all()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return {"skills": build_skill_state()}
+
+
+@app.get("/api/tools")
+def api_tools():
+    kernel = None
+    try:
+        from kernel import get_nexus_kernel
+        kernel = get_nexus_kernel(_ROOT)
+    except Exception:
+        pass
+    tools = build_tool_state(kernel) if kernel else []
+    try:
+        from tools.nexus_tools.registry import ToolRegistry
+        reg = ToolRegistry(_ROOT)
+        availability = {name: entry.availability() for name, entry in reg._tools.items()}
+    except Exception:
+        availability = {}
+    for tool in tools:
+        status = availability.get(tool.get("name"))
+        if isinstance(status, dict):
+            if tool.get("active", True) is False:
+                tool["available"] = False
+                tool["availability_reason"] = "disabled_by_config"
+            else:
+                tool["available"] = bool(status.get("available"))
+                tool["availability_reason"] = status.get("reason") or tool.get("availability_reason") or "unknown"
+            tool["missing_env"] = status.get("missing_env", tool.get("missing_env", []))
+        else:
+            tool["available"] = bool(tool.get("available", tool.get("active", False)))
+    return {"tools": tools}
+
+
+@app.post("/api/tools/{name}/invoke")
+async def api_tool_invoke(name: str, data: dict, request: Request):
+    require_config_write_allowed(request)
+    try:
+        from tools.nexus_tools.registry import ToolRegistry
+        reg = ToolRegistry(_ROOT)
+        entry = reg.get(name)
+        if not entry:
+            raise HTTPException(status_code=404, detail=f"Tool '{name}' not found")
+        if entry.instance is None:
+            raise HTTPException(status_code=501, detail=f"Tool '{name}' has no executable handler")
+        params = dict(data.get("params", {}))
+        params.update({k: v for k, v in data.items() if k != "params"})
+        stream = bool(data.get("stream", True))
+        if stream:
+            async def event_stream():
+                try:
+                    async for item in reg.stream_execute(name, **params):
+                        if isinstance(item, Exception):
+                            yield f"data: {json.dumps({'event':'error','error':str(item)}, ensure_ascii=False)}\n\n"
+                            return
+                        text = "" if item is None else str(item)
+                        yield f"data: {json.dumps({'event':'chunk','text':text}, ensure_ascii=False)}\n\n"
+                except Exception as exc:
+                    yield f"data: {json.dumps({'event':'error','error':str(exc)}, ensure_ascii=False)}\n\n"
+            return StreamingResponse(event_stream(), media_type="text/event-stream")
+        try:
+            result = await reg.execute(name, **params)
+            payload = {"success": bool(result.success), "output": result.output, "error": result.error}
+        except Exception as exc:
+            payload = {"success": False, "output": "", "error": str(exc)}
+        return JSONResponse(content=payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/api/plugins/install")
@@ -3547,19 +4149,29 @@ async def delete_mcp_server(name: str, request: Request):
 
 @app.get("/api/vision/accelerator")
 def get_vision_accelerator_state():
-    from tools.nexus_tools.vision.vision_accelerator_tool import VisionAccelerator
-
-    return VisionAccelerator().status()
+    try:
+        from tools.nexus_tools.vision.vision_accelerator_tool import VisionAccelerator
+        return VisionAccelerator().status()
+    except ImportError:
+        return {"status": "unavailable", "error": "Vision accelerator not installed"}
 
 
 def _provider_config_path() -> str:
-    return os.path.join(_ROOT, "configs", "nexus_config.yaml")
+    return os.path.join(_ROOT, "config", "nexus_config.yaml")
+
+
+def _is_masked_secret_placeholder(value: str) -> bool:
+    compact = str(value or "").strip()
+    if not compact:
+        return False
+    mask_chars = {"*", "•", "●", "x", "X"}
+    return len(compact) >= 6 and all(char in mask_chars for char in compact)
 
 
 def _load_provider_config() -> Dict[str, Any]:
     config_path = _provider_config_path()
     if not os.path.exists(config_path):
-        raise HTTPException(status_code=500, detail="Global configuration file (nexus_config.yaml) is missing.")
+        return {"providers": {"cloud": {}, "local": {}}}
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     if not isinstance(cfg, dict):
@@ -3570,6 +4182,7 @@ def _load_provider_config() -> Dict[str, Any]:
 
 
 def _save_provider_config(cfg: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(_provider_config_path()), exist_ok=True)
     with open(_provider_config_path(), "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
     _invalidate_dashboard_cache("state", "providers")
@@ -3640,38 +4253,29 @@ async def configure_provider(data: dict, request: Request):
     if not provider_type_name or not instance_id:
         raise HTTPException(status_code=400, detail="Provider name and instance id are required")
     
-    config_path = _provider_config_path()
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, "r") as f:
-                cfg = yaml.safe_load(f)
-            
-            if "providers" not in cfg: cfg["providers"] = {"cloud": {}, "local": {}}
-            if "cloud" not in cfg["providers"]: cfg["providers"]["cloud"] = {}
-            if "local" not in cfg["providers"]: cfg["providers"]["local"] = {}
-            
-            target_section = "cloud"
-            if provider_type_name in ["ollama", "lm_studio", "llama_cpp"]:
-                target_section = "local"
-            
-            if instance_id not in cfg["providers"][target_section]:
-                cfg["providers"][target_section][instance_id] = {"active": True}
-            
-            conf = cfg["providers"][target_section][instance_id]
-            conf["active"] = True
-            conf["parent_provider"] = provider_type_name
-            if api_key: conf["api_key"] = api_key
-            if model: conf["model"] = model
-            if endpoint: conf["endpoint"] = endpoint
-            
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
-            _invalidate_dashboard_cache("state", "providers")
-            
-            return {"status": "success", "message": f"Configuration '{instance_id}' saved."}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-    return {"status": "error", "message": "Config file not found."}
+    try:
+        cfg = _load_provider_config()
+        cfg.setdefault("providers", {}).setdefault("cloud", {})
+        cfg.setdefault("providers", {}).setdefault("local", {})
+
+        target_section = "local" if provider_type_name in ["ollama", "lm_studio", "llama_cpp"] else "cloud"
+        if instance_id not in cfg["providers"][target_section]:
+            cfg["providers"][target_section][instance_id] = {"active": True}
+
+        conf = cfg["providers"][target_section][instance_id]
+        conf["active"] = True
+        conf["parent_provider"] = provider_type_name
+        if api_key and not _is_masked_secret_placeholder(api_key):
+            conf["api_key"] = api_key
+        if model:
+            conf["model"] = model
+        if endpoint:
+            conf["endpoint"] = endpoint
+
+        _save_provider_config(cfg)
+        return {"status": "success", "message": f"Configuration '{instance_id}' saved."}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.delete("/api/providers/instance/{instance_id}")
 async def delete_provider_instance(instance_id: str, request: Request):
@@ -3679,31 +4283,23 @@ async def delete_provider_instance(instance_id: str, request: Request):
     instance_id = re.sub(r"[^a-z0-9_-]", "-", str(instance_id).lower()).strip("-")
     if not instance_id:
         raise HTTPException(status_code=400, detail="Invalid instance id")
-    config_path = _provider_config_path()
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, "r") as f:
-                cfg = yaml.safe_load(f)
-            
-            # Search in local and cloud
-            deleted = False
-            prov_root = cfg.get("providers", {})
-            for p_type in ["local", "cloud"]:
-                section = prov_root.get(p_type, {})
-                if instance_id in section:
-                    del section[instance_id]
-                    deleted = True
-                    break
-            
-            if deleted:
-                with open(config_path, "w", encoding="utf-8") as f:
-                    yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
-                _invalidate_dashboard_cache("state", "providers")
-                return {"status": "success", "message": f"Instance {instance_id} deleted."}
-            return {"status": "error", "message": f"Instance {instance_id} not found."}
-        except Exception as e:
-            return {"status": "error", "message": f"Configuration deletion failure: {str(e)}"}
-    return {"status": "error", "message": "Global configuration file (nexus_config.yaml) is missing."}
+    try:
+        cfg = _load_provider_config()
+        deleted = False
+        prov_root = cfg.get("providers", {})
+        for p_type in ["local", "cloud"]:
+            section = prov_root.get(p_type, {})
+            if instance_id in section:
+                del section[instance_id]
+                deleted = True
+                break
+
+        if deleted:
+            _save_provider_config(cfg)
+            return {"status": "success", "message": f"Instance {instance_id} deleted."}
+        return {"status": "error", "message": f"Instance {instance_id} not found."}
+    except Exception as e:
+        return {"status": "error", "message": f"Configuration deletion failure: {str(e)}"}
 
 # -- Vision streaming state ---------------------------------------------------
 _VISION_MODEL      = None        # yolo11n detect (cached)

@@ -1,8 +1,10 @@
-import yaml
 import os
 import re
-from typing import List, Dict, Any, Optional
 from pathlib import Path
+from typing import Any, Dict, List
+
+import yaml
+
 
 class NexusLawKernel:
     """
@@ -12,14 +14,12 @@ class NexusLawKernel:
     
     def __init__(self, laws_path: str = None):
         if laws_path is None:
-            laws_path = str(Path(__file__).parent.parent.parent / "core" / "safety" / "sovereign_laws.yaml")
-        
+            laws_path = str(Path(__file__).parent / "sovereign_laws.yaml")
         self.laws_path = laws_path
         self.laws = self._load_laws()
 
     def _load_laws(self) -> List[Dict[str, Any]]:
-        if not os.path.exists(self.laws_path):
-            # Default internal laws if file is missing
+        if not os.path.isfile(self.laws_path):
             return [
                 {
                     "name": "data_sovereignty",

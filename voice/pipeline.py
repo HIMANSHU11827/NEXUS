@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import concurrent.futures
+import logging
 import re
 import sys
 from typing import Optional
+
+logger = logging.getLogger("nexus.voice.pipeline")
 
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
+        logger.warning("voice/pipeline.py:12 : suppressed error", exc_info=True)
         pass
 
 from voice.audio_io import AudioIO, AudioUnavailable
@@ -145,6 +149,7 @@ class VoiceAssistant:
                 try:
                     self.loop.abort()
                 except Exception:
+                    logger.warning("voice/pipeline.py:147 _run_coroutine: suppressed error", exc_info=True)
                     pass
                 raise TimeoutError(
                     f"NEXUS took longer than {timeout:.0f}s to answer. "
@@ -158,6 +163,7 @@ class VoiceAssistant:
                     self.loop.memory[-1]["content"] = cleaned
                     self.loop.save_memory()
             except Exception:
+                logger.warning("voice/pipeline.py:160 : suppressed error", exc_info=True)
                 pass
         return cleaned
 
@@ -218,6 +224,7 @@ class VoiceAssistant:
             try:
                 on_transcript_callback(user_text)
             except Exception:
+                logger.warning("voice/pipeline.py:220 : suppressed error", exc_info=True)
                 pass
         if not status_callback:
             print("[voice] thinking...")
@@ -227,6 +234,7 @@ class VoiceAssistant:
             try:
                 before_speak_callback(user_text, reply)
             except Exception:
+                logger.warning("voice/pipeline.py:229 : suppressed error", exc_info=True)
                 pass
         
         if reply:

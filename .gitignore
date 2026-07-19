@@ -19,6 +19,7 @@ replay_pid*.log
 
 .env
 .nexus/
+.opencode/
 logs/
 workspace/
 scratch/
@@ -30,22 +31,24 @@ models/local/
 data/
 training_data/
 temp_gemini_cli/
-dashboard/dist/
-dashboard/node_modules/
-dashboard/scratch/
-dashboard/src/*.patch_ui.py
-dashboard/**/__pycache__/
 gui/src/App.tsx.found_*.txt
+gui/vite_dev.log
+gui/workspace/
 gui/src/App.tsx.original_log_*.txt
 gui/src/*.patch_ui.py
-cli/node_modules/
+tui/node_modules/
 
 knowledge/*.db
 knowledge/*.enc
 knowledge/_rag_index*.json
 knowledge/atlas_index.json
 
+graphify-out/cost.json
+graphify-out/cache/     # optional: commit for speed
+
 *.safetensors
 *.pt
 *.pth
 *.onnx
+*.gguf
+*.bin

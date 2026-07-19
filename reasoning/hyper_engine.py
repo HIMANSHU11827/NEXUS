@@ -7,8 +7,8 @@ verification checks, and replan triggers that the main loop or swarm can consume
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
 import re
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List
 
 

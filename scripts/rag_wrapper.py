@@ -25,7 +25,6 @@ os.environ.pop("PYTHONHOME", None)
 sys.path = [p for p in sys.path if 'cpython-3.11' not in p.lower()]
 
 # Now safe to import non-builtin modules
-import json
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)

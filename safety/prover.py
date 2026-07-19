@@ -5,9 +5,10 @@ NEXUS LOGIC PROVER 3.1 — ACTION-AWARE SAFETY GATE
 """
 
 import ast
-import re
 import os
-from typing import Tuple, List, Any, Optional
+import re
+from typing import List, Tuple
+
 from utils.discovery import NexusAutoDiscover
 
 SHELL_RULES: List[Tuple[str, str, bool]] = [
@@ -120,13 +121,11 @@ class LogicProver:
         prompt = f"PROVE_LOGIC: Goal is '{goal}'. Action is '{action}'.\nIs this mathematically certain to achieve the goal? Are there side effects? Response: SAFE or FAIL: [reason]"
         
         from providers.router import ModelRouter
-        from intelligence.moa import MixtureOfArchitects
         router = ModelRouter()
-        moa = MixtureOfArchitects(router)
         
-        import asyncio
-        res = asyncio.run(moa.solve(prompt))
-        
+        res = router.generate([{"role": "user", "content": prompt}])
+        if not isinstance(res, str):
+            return False, "No response from router"
         if "FAIL" in res.upper():
             return False, res
         return True, "PROVEN"

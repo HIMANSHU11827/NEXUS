@@ -1,105 +1,219 @@
-import os
+import asyncio
 import importlib
-from typing import Any, List, Dict, Optional
+import logging
+import os
+from typing import Any, Optional
+
 from utils.singleton import ThreadSafeSingleton
 
+logger = logging.getLogger(__name__)
 
-# Linter-proof imports
+
 def get_loader() -> Any:
     mod = importlib.import_module("config.config_loader")
     return getattr(mod, "NexusConfigLoader")()
 
 
-class NexusProviderFactory(ThreadSafeSingleton):
-    """
-    NEXUS UNIVERSAL PROVIDER FACTORY 3.1
-    True dynamic model mesh implementation.
-    """
+def _configured_api_key(value: Any) -> Optional[str]:
+    key = str(value or "").strip()
+    if not key or "YOUR_" in key:
+        return None
+    if key.startswith("${") and key.endswith("}"):
+        return os.environ.get(key[2:-1], "").strip() or None
+    return key
 
+
+def _resolve_api_key(provider_id: str, profile_name: Optional[str] = None) -> Optional[str]:
+    try:
+        from providers.profiles import resolve_api_key
+        key = resolve_api_key(provider_id, profile_name)
+        if key:
+            return key
+    except Exception:
+        logger.warning("providers/factory.py:29 _resolve_api_key: suppressed error", exc_info=True)
+        pass
+    try:
+        from providers.oauth.registry import get_oauth_provider
+        from providers.oauth.providers.autoregister import register_all_oauth_providers
+        from providers.oauth.storage import load_oauth_token_store
+        register_all_oauth_providers()
+        store = load_oauth_token_store()
+        credentials = store.get(provider_id)
+        if credentials is not None:
+            oauth_provider = get_oauth_provider(provider_id)
+            import time
+            if time.time() * 1000 >= credentials.expires and oauth_provider is not None:
+                try:
+                    credentials = asyncio.run(oauth_provider.refresh_token(credentials))
+                    store.set(provider_id, credentials)
+                except Exception:
+                    logger.warning("OAuth token refresh failed for provider %s; refusing expired credentials", provider_id, exc_info=True)
+                    return None
+            if oauth_provider is not None:
+                return oauth_provider.get_api_key(credentials)
+            if time.time() * 1000 >= credentials.expires:
+                logger.warning("OAuth token for provider %s is expired and no OAuth provider is registered", provider_id)
+                return None
+            return credentials.access
+    except Exception:
+        logger.warning("providers/factory.py:48 : suppressed error", exc_info=True)
+        pass
+    return None
+
+
+MAPPINGS = {
+    "openrouter": ("providers.openrouter", "OpenRouterProvider"),
+    "nvidia": ("providers.nvidia", "NvidiaProvider"),
+    "gemini": ("providers.google_gemini", "GoogleGeminiProvider"),
+    "google_gemini": ("providers.google_gemini", "GoogleGeminiProvider"),
+    "anthropic": ("providers.anthropic", "AnthropicProvider"),
+    "openai": ("providers.openai", "OpenAIProvider"),
+    "groq": ("providers.groq", "GroqProvider"),
+    "qwen": ("providers.qwen", "QwenProvider"),
+    "deepseek": ("providers.deepseek", "DeepSeekProvider"),
+    "xai": ("providers.xai", "XAIProvider"),
+    "grok": ("providers.xai", "XAIProvider"),
+    "cohere": ("providers.cohere", "CohereProvider"),
+    "mistral": ("providers.mistral", "MistralProvider"),
+    "perplexity": ("providers.perplexity", "PerplexityProvider"),
+    "together": ("providers.together", "TogetherProvider"),
+    "lm_studio": ("providers.lm_studio", "LMStudioProvider"),
+    "ollama": ("providers.ollama", "OllamaProvider"),
+    "huggingface": ("providers.huggingface", "HuggingFaceProvider"),
+    "sambanova": ("providers.sambanova", "SambaNovaProvider"),
+    "fireworks": ("providers.fireworks", "FireworksProvider"),
+    "azure_openai": ("providers.azure_openai", "AzureOpenAIProvider"),
+    "replicate": ("providers.replicate", "ReplicateProvider"),
+    "llama_cpp": ("providers.llama_cpp", "LlamaCPPProvider"),
+    "zupra": ("providers.zupra", "ZupraProvider"),
+    "vlm": ("providers.vlm", "VLMProvider"),
+    "universal": ("providers.universal", "UniversalProvider"),
+    "commandcode": ("providers.commandcode", "CommandCodeProvider"),
+    # OpenAI-compatible API-key providers route through universal
+    "deepinfra": ("providers.universal", "UniversalProvider"),
+    "cerebras": ("providers.universal", "UniversalProvider"),
+    "moonshot": ("providers.universal", "UniversalProvider"),
+    "kimi": ("providers.universal", "UniversalProvider"),
+    "stepfun": ("providers.universal", "UniversalProvider"),
+    "zai": ("providers.universal", "UniversalProvider"),
+    "venice": ("providers.universal", "UniversalProvider"),
+    "novita": ("providers.universal", "UniversalProvider"),
+    "byteplus": ("providers.universal", "UniversalProvider"),
+    "volcengine": ("providers.universal", "UniversalProvider"),
+    "arcee": ("providers.universal", "UniversalProvider"),
+    "cloudflare_ai_gateway": ("providers.universal", "UniversalProvider"),
+    "vercel_ai_gateway": ("providers.universal", "UniversalProvider"),
+    "tencent_tokenhub": ("providers.universal", "UniversalProvider"),
+    "qianfan": ("providers.universal", "UniversalProvider"),
+    "litellm": ("providers.universal", "UniversalProvider"),
+    "opencode": ("providers.opencode_cli", "OpenCodeCLIProvider"),
+    "fal": ("providers.universal", "UniversalProvider"),
+    "vydra": ("providers.universal", "UniversalProvider"),
+    "synthetic": ("providers.universal", "UniversalProvider"),
+    "gmi": ("providers.universal", "UniversalProvider"),
+    "copilot_proxy": ("providers.universal", "UniversalProvider"),
+    "vllm": ("providers.universal", "UniversalProvider"),
+    "sglang": ("providers.universal", "UniversalProvider"),
+    # OAuth-compatible providers
+    "codex": ("providers.universal", "UniversalProvider"),
+    "claude": ("providers.universal", "UniversalProvider"),
+    "github_copilot": ("providers.universal", "UniversalProvider"),
+    "minimax": ("providers.universal", "UniversalProvider"),
+    "chutes": ("providers.universal", "UniversalProvider"),
+}
+
+
+class NexusProviderFactory(ThreadSafeSingleton):
     _provider = None
 
     def __init__(self):
         if getattr(self, "_initialized", False):
             return
         self._initialized = True
-        # ⚡ Load the Master Config
         self.loader = get_loader()
+        provider_config = self.loader.get("provider", {})
+        provider_name = ""
+        if isinstance(provider_config, dict):
+            provider_name = str(provider_config.get("default_provider") or "").strip()
+        self.group = self.loader.get_system("provider_group", "cloud")
+        self.name = provider_name or self.loader.get_system("provider_name", "openrouter")
 
-        # Determine Group (local vs cloud)
-        self.group = self.loader.get_system("default_provider", "cloud")
-        # Determine Name (openrouter, gemini, ollama, etc.)
-        self.name = self.loader.get_system("provider_name", "openrouter")
+    def _load_provider_instance(self, target_name: str) -> Any:
+        if target_name in MAPPINGS:
+            mod_path, cls_name = MAPPINGS[target_name]
+            mod = importlib.import_module(mod_path)
+            return getattr(mod, cls_name)()
+        mod_name = f"providers.{target_name.replace('-', '_')}"
+        cls_name = "".join(p.capitalize() for p in target_name.replace("-", "_").split("_")) + "Provider"
+        mod = importlib.import_module(mod_name)
+        return getattr(mod, cls_name)()
 
-    def get_provider_by_name(self, group: str, name: str) -> Any:
-        """Loads and returns a specific provider instance."""
+    def get_provider_by_name(self, group: str, name: str, profile: Optional[str] = None) -> Any:
         try:
-            # ⚡ 3.2: Instance ID Resolution
             provider_id = str(name or "").strip()
             inst_config = self.loader.get_provider_config(provider_id)
             parent = inst_config.get("parent_provider")
             target_name = str(parent if parent else provider_id).lower()
 
-            # ⚡ 3.1: Explicit Mapping for God-Architect stability
-            mappings = {
-                "openrouter": ("providers.openrouter", "OpenRouterProvider"),
-                "nvidia": ("providers.nvidia", "NvidiaProvider"),
-                "gemini": ("providers.google_gemini", "GoogleGeminiProvider"),
-                "google_gemini": ("providers.google_gemini", "GoogleGeminiProvider"),
-                "anthropic": ("providers.anthropic", "AnthropicProvider"),
-                "openai": ("providers.openai", "OpenAIProvider"),
-                "groq": ("providers.groq", "GroqProvider"),
-                "qwen": ("providers.qwen", "QwenProvider"),
-                "deepseek": ("providers.deepseek", "DeepSeekProvider"),
-                "xai": ("providers.xai", "XAIProvider"),
-                "grok": ("providers.xai", "XAIProvider"),
-                "cohere": ("providers.cohere", "CohereProvider"),
-                "mistral": ("providers.mistral", "MistralProvider"),
-                "perplexity": ("providers.perplexity", "PerplexityProvider"),
-                "together": ("providers.together", "TogetherProvider"),
-                "lm_studio": ("providers.lm_studio", "LMStudioProvider"),
-                "ollama": ("providers.ollama", "OllamaProvider"),
-                "huggingface": ("providers.huggingface", "HuggingFaceProvider"),
-                "sambanova": ("providers.sambanova", "SambaNovaProvider"),
-                "fireworks": ("providers.fireworks", "FireworksProvider"),
-                "azure_openai": ("providers.azure_openai", "AzureOpenAIProvider"),
-                "replicate": ("providers.replicate", "ReplicateProvider"),
-                "llama_cpp": ("providers.llama_cpp", "LlamaCPPProvider"),
-                "vlm": ("providers.vlm", "VLMProvider"),
-                "universal": ("providers.universal", "UniversalProvider"),
-                "commandcode": ("providers.commandcode", "CommandCodeProvider"),
-            }
+            provider = self._load_provider_instance(target_name)
+            provider.model = inst_config.get("model") or provider.model
+            provider.endpoint = inst_config.get("endpoint") or provider.endpoint
 
-            provider = None
-            if target_name in mappings:
-                mod_path, cls_name = mappings[target_name]
-                mod = importlib.import_module(mod_path)
-                provider = getattr(mod, cls_name)()
-            else:
-                # Fallback to smart-guessing if not in mapping
-                mod_name = f"providers.{target_name.replace('-', '_')}"
-                cls_name = (
-                    "".join([p.capitalize() for p in target_name.replace("-", "_").split("_")])
-                    + "Provider"
-                )
-                mod = importlib.import_module(mod_name)
-                provider = getattr(mod, cls_name)()
+            config_key = _configured_api_key(inst_config.get("api_key"))
+            env_key = (
+                os.environ.get(f"{provider_id.upper()}_API_KEY", "").strip()
+                or os.environ.get(f"{target_name.upper()}_API_KEY", "").strip()
+            )
+            key = config_key or _resolve_api_key(provider_id, profile) or env_key
+            if key:
+                provider.api_key = key
+                if hasattr(provider, "headers"):
+                    provider.headers["Authorization"] = f"Bearer {key}"
+            elif parent and provider:
+                parent_key = _configured_api_key(inst_config.get("api_key"))
+                if parent_key:
+                    provider.api_key = parent_key
+                    if hasattr(provider, "headers"):
+                        provider.headers["Authorization"] = f"Bearer {provider.api_key}"
 
-            # ⚡ Apply Instance Overrides (API Key, Model, Endpoint)
-            if parent and provider:
-                provider.api_key = inst_config.get("api_key") or provider.api_key
-                provider.model = inst_config.get("model") or provider.model
-                provider.endpoint = inst_config.get("endpoint") or provider.endpoint
-                
-                # Special handling for headers if api_key changed
-                if hasattr(provider, "headers") and inst_config.get("api_key"):
-                    provider.headers["Authorization"] = f"Bearer {provider.api_key}"
-
+            provider._provider_id = provider_id
+            provider._profile_name = profile
             return provider
 
         except Exception as e:
-            print(f"[FACTORY_ERROR]: Falling back from {name} due to: {e}")
-            from providers.openrouter import OpenRouterProvider
-            return OpenRouterProvider()
+            logger.error("Failed to initialize requested provider %s: %s", name, e)
+            return None
+
+    def resolve_with_fallback(self, name: str, profile: Optional[str] = None, attempt: int = 0) -> Any:
+        provider = self.get_provider_by_name("cloud", name, profile)
+        if provider is not None and attempt > 0:
+            provider._fallback_attempt = attempt
+        return provider
+
+    def next_profile_fallback(self, provider_id: str, current_profile: str) -> Optional[str]:
+        try:
+            from providers.profiles import load_profile_store
+            store = load_profile_store()
+            next_p = store.next_profile(provider_id, current_profile)
+            if next_p:
+                return next_p.name
+        except Exception:
+            logger.warning("providers/factory.py:182 next_profile_fallback: suppressed error", exc_info=True)
+            pass
+        return None
+
+    def next_provider_fallback(self, current: str) -> Optional[str]:
+        try:
+            cfg = self.loader.get("provider", {})
+            chain = cfg.get("fallback_chain", []) if isinstance(cfg, dict) else []
+            if current in chain:
+                idx = chain.index(current)
+                if idx + 1 < len(chain):
+                    return chain[idx + 1]
+        except Exception:
+            logger.warning("providers/factory.py:194 next_provider_fallback: suppressed error", exc_info=True)
+            pass
+        return None
 
     def get_provider(self) -> Any:
         """Returns the active provider based on MASTER CONFIG."""
@@ -115,4 +229,5 @@ class NexusProviderFactory(ThreadSafeSingleton):
 if __name__ == "__main__":
     f = NexusProviderFactory()
     p = f.get_provider()
-    print(f"Active NEXUS Brain: [{type(p).__name__}] using [{p.default_model}]")
+    model = getattr(p, "model", getattr(p, "default_model", "unknown"))
+    logger.info("Active NEXUS Brain: [%s] using [%s]", type(p).__name__, model)

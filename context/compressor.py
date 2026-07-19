@@ -4,10 +4,8 @@ Automatic context window compression for long conversations.
 Prevents God-Architect token-limit crashes.
 """
 
-import logging
-import time
 import json
-import re
+import logging
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -208,6 +206,6 @@ Use structure:
         compressed = self._sanitize_tool_pairs(compressed)
         
         self.compression_count += 1
-        logger.info(f"[NEXUS_COMPRESSOR]: Compaction complete with Semantic Vault persistence.")
+        logger.info("[NEXUS_COMPRESSOR]: Compaction complete with Semantic Vault persistence.")
         
         return compressed

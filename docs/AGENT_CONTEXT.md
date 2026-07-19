@@ -1,3 +1,5 @@
+> _(Architectural reference — may not reflect latest code changes)_
+
 # Agent Context Files
 
 NEXUS generates a compact repository instruction file for coding agents:

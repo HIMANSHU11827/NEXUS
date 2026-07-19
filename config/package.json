@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "cd cli && npm start",
+    "start": "cd tui && npm start",
     "api": "python -m server",
     "ui": "npm --prefix gui run dev"
   },

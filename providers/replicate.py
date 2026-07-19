@@ -1,7 +1,9 @@
-from typing import Dict, Any, Optional, List, Iterator
-from providers.base import NexusBaseProvider
-import json
+import os
 import time
+from typing import Dict, Iterator, List, Optional
+
+from providers.base import NexusBaseProvider
+
 
 class ReplicateProvider(NexusBaseProvider):
     """
@@ -12,13 +14,13 @@ class ReplicateProvider(NexusBaseProvider):
     def __init__(self):
         super().__init__("replicate", "https://api.replicate.com/v1/predictions")
         if not self.model:
-            self.model = "meta/meta-llama-3.1-405b-instruct"
+            self.model = os.environ.get("NEXUS_PROVIDER_REPLICATE_MODEL", "meta/meta-llama-3.1-405b-instruct")
         self.headers = {
             "Authorization": f"Token {self.api_key}",
             "Content-Type": "application/json"
         }
 
-    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> str:
+    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         # Replicate usually takes an 'input' dict
         # We need to map the model string to a version hash or use the deployment ID
         # For simplicity, we assume model string is the full path
@@ -56,7 +58,9 @@ class ReplicateProvider(NexusBaseProvider):
         except Exception as e:
             return f"Error: Failed to reach Replicate. {str(e)}"
 
-    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> Iterator[str]:
+    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
         # Replicate streaming is a bit complex via HTTP, usually uses Server-Sent Events on a specific URL
         # For now, we'll yield the full result to maintain compatibility
         yield self.generate(prompt, system_prompt, messages)
+
+

@@ -1,0 +1,14 @@
+{
+  "name": "hive",
+  "version": "1.0.0",
+  "description": "Spawn dedicated sub-agents for complex multi-step tasks — each sub-agent runs as an isolated LLM call with a specific persona",
+  "entry": "scripts/hive.py",
+  "class": "HiveTool",
+  "params": {
+    "task": {"type": "string", "description": "The task for the sub-agent to complete", "required": true},
+    "persona": {"type": "string", "description": "WORKER|RESEARCHER|ENGINEER|CRITIC|PLANNER", "default": "WORKER"},
+    "mode": {"type": "string", "description": "single|parallel|hive", "default": "single"},
+    "sub_tasks": {"type": "array", "description": "List of sub-tasks for parallel/hive mode", "default": []}
+  },
+  "category": "orchestration"
+}

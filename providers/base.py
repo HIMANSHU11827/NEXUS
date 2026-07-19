@@ -1,10 +1,10 @@
-import os
-import json
 import logging
-import requests
+import os
 import time
-from typing import Dict, Any, Optional, List, Iterator
 from abc import ABC, abstractmethod
+from typing import Any, Dict, Iterator, List, Optional
+
+import requests
 
 logger = logging.getLogger("NEXUS_PROVIDER")
 
@@ -29,18 +29,21 @@ class NexusBaseProvider(ABC):
             loader = NexusConfigLoader()
             config = loader.get_provider_config(provider_name)
             
-            # Priority: 1) process env var, 2) YAML config api_key, 3) ${VAR} expansion
-            raw_key = os.getenv(f"{provider_name.upper()}_API_KEY", "") or config.get("api_key", "")
+            # provider.yml stores provider metadata and may reference secrets as ${VAR}.
+            # Raw secrets should stay in environment variables or local encrypted/profile storage.
+            raw_key = config.get("api_key", "")
             if isinstance(raw_key, str) and raw_key.startswith("${") and raw_key.endswith("}"):
                 env_name = raw_key[2:-1]
                 raw_key = os.getenv(env_name, "")
+            if not raw_key:
+                raw_key = os.getenv(f"{provider_name.upper()}_API_KEY", "")
             self.api_key = raw_key
             self.model = config.get("model") or ""
             self.endpoint = config.get("endpoint") or self.endpoint
             
             # Sanitize key
             if self.api_key and "YOUR_" in self.api_key:
-                self.api_key = os.getenv(f"{provider_name.upper()}_API_KEY", "")
+                self.api_key = ""
                 
         except Exception as e:
             logger.warning(f"[{provider_name.upper()}_INIT]: Failed to load config: {e}")

@@ -1,10 +1,13 @@
-import os
 import json
 import math
+import os
 import re
-from typing import List, Dict, Any, Tuple, Optional
-from .ast_indexer import AtlasASTIndexer
+from typing import Any, Dict, List, Optional
+
 from utils.singleton import ThreadSafeSingleton
+
+from .ast_indexer import AtlasASTIndexer
+
 
 class NexusAtlasEngine(ThreadSafeSingleton):
     """

@@ -1,8 +1,10 @@
 from __future__ import annotations
-__version__ = "1.0.0"
 
+__version__ = "2.0.0"
+
+import asyncio
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from mcp.client import MCPClient
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
@@ -10,20 +12,21 @@ from tools.nexus_tools.base_tool import BaseTool, ToolResult
 logger = logging.getLogger(__name__)
 
 class MCPTool(BaseTool):
-    """
-    A generic NEXUS tool that proxies calls to an MCP server tool.
-    """
+    """A generic NEXUS tool that proxies calls to an MCP server tool."""
 
-    def __init__(self, client: MCPClient, tool_def: Dict[str, Any]):
+    def __init__(self, client: MCPClient, tool_def: Dict[str, Any], root_dir: Optional[str] = None):
+        super().__init__(root_dir=root_dir)
         self.client = client
         self.tool_def = tool_def
         self.name = tool_def["name"]
         self.description = tool_def.get("description", f"MCP Tool: {self.name}")
-        self.aliases = []
+        self.aliases: List[str] = []
 
-    def call(self, **kwargs) -> ToolResult:
+    async def execute(self, **kwargs) -> ToolResult:
         try:
-            result = self.client.call_tool(self.name, kwargs)
+            if not self.is_available():
+                return ToolResult(error=f"MCP server for tool '{self.name}' is not running")
+            result = await _run_mcp_call(self.client, self.name, kwargs)
             if not result:
                 return ToolResult(error=f"MCP Tool '{self.name}' returned no result")
 
@@ -35,7 +38,7 @@ class MCPTool(BaseTool):
 
             if is_error:
                 return ToolResult(error=output)
-            return ToolResult(data=output)
+            return ToolResult(output=output)
         except Exception as e:
             logger.exception(f"Failed to call MCP tool {self.name}")
             return ToolResult(error=str(e))
@@ -46,9 +49,23 @@ class MCPTool(BaseTool):
             return True
         return False
 
+    def is_available(self) -> bool:
+        checker = getattr(self.client, "is_running", None)
+        if callable(checker):
+            try:
+                return bool(checker())
+            except Exception:
+                return False
+        return True
+
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": self.name,
             "description": self.description,
             "parameters": self.tool_def.get("inputSchema", {"type": "object", "properties": {}}),
         }
+
+
+async def _run_mcp_call(client: MCPClient, tool_name: str, arguments: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Run an MCP tool call in a thread to avoid blocking the event loop."""
+    return await asyncio.to_thread(client.call_tool, tool_name, arguments)

@@ -11,9 +11,9 @@ The project is not trying to be a chatbot with plugins. It is trying to become a
 - Repo map and lightweight symbol graph for codebase understanding.
 - Persistent BM25 RAG plus hybrid keyword/vector result blending for project recall.
 - Persistent failure memory for self-correction and regression prevention.
-- Four user surfaces — terminal, CLI, GUI, gateway — all feeding one agent runtime.
+- Three primary interfaces — TUI, GUI, Gateway — all feeding one agent runtime.
 - FastAPI GUI API and React operator GUI.
-- TypeScript Ink CLI (API thin client; not the live terminal).
+- TypeScript Ink TUI (API thin client; not the live terminal).
 - Multi-provider model routing, provider health telemetry, and local model experiments.
 - Capability-aware provider fallback with normalized provider error handling.
 - Environment-variable provider secrets and a repository secret scanner.
@@ -41,6 +41,9 @@ The project is not trying to be a chatbot with plugins. It is trying to become a
 - gui audit control plane for unified graph status, roadmap progress, evidence, mission replay, and tool economy.
 - Experimental training and self-improvement systems.
 - MediaPipe Holistic Vision integration (543 landmarks tracking for face, body, and hands); full MediaPipe suite status is documented in `docs/MEDIAPIPE_SUITE.md`.
+- **NATE-Route**: Zero-training embedding-based tool router (all-MiniLM-L6-v2 + FAISS). 88% schema token reduction, 67% input token savings. Solves all 12 skill alignment problems. See `docs/NATE.md`.
+- **Self-Improving Lifecycle**: `evolution/local_trainer/` — auto harvests tool logs, fine-tunes embedding + Zupra-50M models, exports to GGUF, reloads into NATE. Self-improving cycle improves routing + local inference over time.
+- **Zupra Local Provider**: `providers/zupra.py` — MultivexAI/Zupra-1.6-50M-Instruct-Ultra-exp for fully offline CPU inference. No API key needed. Registered as "zupra" in provider factory.
 
 ## Architecture
 
@@ -73,18 +76,18 @@ NEXUS carries a durable repair directive for weak/fake systems in [docs/SPECIAL_
 
 ## User Surfaces
 
-A user can send a mission from **any** of these four surfaces:
+A user can send a mission from **any** of these three interfaces:
 
-| Surface | Start | Path |
-|---------|-------|------|
-| **Terminal** (live) | `python -m nexus` | `nexus/` package |
-| **CLI** (Ink client) | `cd cli && npm start` | `cli/` — needs API on `:8000` |
-| **GUI** | `cd gui && python -m server` | `gui/`, `server/` package |
-| **Gateway** | `python -m gateway.main` | `gateway/` — Telegram, Discord, WA |
+| Interface | Start | Path |
+|-----------|-------|------|
+| **TUI** (Ink client) | `python -m nexus` | `tui/` + `gui.api` backend on `:8000` |
+| **GUI** | `python -m nexus --gui` | React app + `gui.api` backend |
+| **Server** | `python -m nexus --server` | standalone `server:app` API |
+| **Gateway** | `python -m nexus --gateway` | `gateway/` — Telegram, Discord, WhatsApp, Slack |
 
-Terminal is the real in-process operator. CLI is **not** the terminal — it is an Ink UI over the API.
+TUI is **not** the terminal (host environment) — it is an Ink UI over the API.
 
-All four surfaces are **internally connected** via `session_bus/`: one active `session_id`, shared chat history (`logs/sessions/`), and mission timelines (`workspace/work_events/`). Chat in GUI → terminal or CLI auto-join the same session and can continue without re-sending.
+All interfaces are **internally connected** via `utils/session_bus.py`: one active `session_id`, shared chat history (`logs/sessions/`), and mission timelines (`workspace/work_events/`). Chat in GUI or TUI auto-join the same session and can continue without re-sending.
 
 ## Quick Start
 
@@ -103,24 +106,19 @@ $env:QWEN_API_KEY="..."
 GUI:
 
 ```powershell
-cd gui
-npm install
-npm run build
-python -m server
+python -m nexus --gui
 ```
 
-CLI (requires GUI API running):
+TUI:
 
 ```powershell
-cd cli
-npm install
-npm start
+python -m nexus
 ```
 
 Gateway:
 
 ```powershell
-python -m gateway.main
+python -m nexus --gateway
 ```
 
 Voice mode:
@@ -134,6 +132,8 @@ python -m voice_chat --warmup
 
 ```powershell
 python -m pytest tests/ -v --tb=short
+cd tui && npm run build && npm test
+cd gui && npm run build
 ```
 
 Version integrity:

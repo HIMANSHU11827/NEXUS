@@ -115,6 +115,7 @@ def _load_profile_meta(name: str) -> Dict[str, Any]:
         try:
             return json.loads(meta_file.read_text())
         except Exception:
+            logger.warning("config/profiles.py:117 _load_profile_meta: suppressed error", exc_info=True)
             pass
     return {"name": name, "created": datetime.now().isoformat(), "last_used": None, "description": ""}
 

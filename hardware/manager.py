@@ -1,6 +1,7 @@
-"""NexusHardwareManager stub."""
+import logging
 
+logger = logging.getLogger("NEXUS_HARDWARE")
 
 class NexusHardwareManager:
     def __init__(self):
-        pass
+        logger.info("NexusHardwareManager initialized (stub — no hardware abstraction)")

@@ -1,8 +1,7 @@
-import subprocess
-import sys
 import os
 import shutil
-
+import subprocess
+import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DASHBOARD_DIR = os.path.join(ROOT, "gui")
@@ -80,8 +79,8 @@ def setup():
     # Warm up: download models
     print("[*] Warming up Holistic models...")
     try:
-        import mediapipe as mp
         import cv2
+        import mediapipe as mp
         import numpy as np
 
         if not hasattr(mp, "solutions"):

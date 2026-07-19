@@ -1,6 +1,9 @@
-from typing import Dict, Any, Optional, List, Iterator
-from providers.base import NexusBaseProvider
+import os
 import json
+from typing import Dict, Iterator, List, Optional
+
+from providers.base import NexusBaseProvider
+
 
 class TogetherProvider(NexusBaseProvider):
     """
@@ -12,13 +15,13 @@ class TogetherProvider(NexusBaseProvider):
     def __init__(self):
         super().__init__("together", "https://api.together.xyz/v1/chat/completions")
         if not self.model:
-            self.model = "meta-llama/Llama-3-70b-chat-hf"
+            self.model = os.environ.get("NEXUS_PROVIDER_TOGETHER_MODEL", "meta-llama/Llama-3-70b-chat-hf")
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
         
-    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> str:
+    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs}
         try:
@@ -29,7 +32,7 @@ class TogetherProvider(NexusBaseProvider):
         except Exception as e:
             return f"Error: Failed to reach Together. {str(e)}"
 
-    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> Iterator[str]:
+    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs, "stream": True}
         try:
@@ -54,3 +57,5 @@ class TogetherProvider(NexusBaseProvider):
 if __name__ == "__main__":
     p = TogetherProvider()
     # print(p.generate("Code this."))
+
+

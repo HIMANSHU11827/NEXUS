@@ -5,15 +5,16 @@ import sys
 os.environ.pop("PYTHONHOME", None)
 sys.path = [p for p in sys.path if 'cpython-3.11' not in p.lower()]
 if sys.version_info[:2] == (3, 14):
-    _PY314 = r"C:\Python314"
+    _PY314 = os.environ.get("NEXUS_PYTHON314_HOME") or r"C:\Python314"
     for _p in [os.path.join(_PY314, "Lib"), os.path.join(_PY314, "DLLs")]:
         if os.path.isdir(_p) and _p not in sys.path:
             sys.path.insert(1, _p)
 
+import hashlib
 import json
 import re
-import hashlib
-from typing import List, Dict, Any, Tuple
+from typing import Any, Dict, List, Tuple
+
 
 class NexusTurboVectorEngine:
     """

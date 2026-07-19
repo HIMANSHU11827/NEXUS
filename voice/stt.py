@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import threading
 import warnings
 from typing import Any, Dict
 
+logger = logging.getLogger("nexus.voice.stt")
+
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
+        logger.warning("voice/stt.py:13 : suppressed error", exc_info=True)
         pass
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -51,7 +55,11 @@ class NexusWhisperSTT:
             try:
                 # print("[voice] Loading Whisper STT Engine (torch/transformers)...")
                 import torch
-                from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+                from transformers import (
+                    AutoModelForSpeechSeq2Seq,
+                    AutoProcessor,
+                    pipeline,
+                )
                 # print("[voice] STT Engine libraries loaded.")
             except ImportError as exc:
                 raise RuntimeError(
@@ -93,8 +101,8 @@ class NexusWhisperSTT:
 
     def _load_faster_whisper(self, model_name: str) -> None:
         try:
-            from faster_whisper import WhisperModel
             import torch
+            from faster_whisper import WhisperModel
 
             device = "cuda" if torch.cuda.is_available() else "cpu"
             compute_type = "float16" if device == "cuda" else "int8"
@@ -116,7 +124,7 @@ class NexusWhisperSTT:
 
             print(f"[voice] Loading faster-whisper ({fw_model}, {device}/{compute_type})...")
             self._faster_stt = WhisperModel(fw_model, device=device, compute_type=compute_type)
-            print(f"[voice] faster-whisper ready.")
+            print("[voice] faster-whisper ready.")
         except ImportError:
             raise ImportError("faster-whisper not installed.")
         except Exception as e:
@@ -147,7 +155,7 @@ class NexusWhisperSTT:
             )
             return
         except ImportError:
-            pass
+            logger.warning("voice/stt.py:157 suppressed error", exc_info=True)
         except Exception as e:
             print(f"[voice-error] whisper.cpp Python load failed: {e}")
             self._whispercpp_stt = None

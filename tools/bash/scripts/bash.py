@@ -1,8 +1,11 @@
 from __future__ import annotations
+
 __version__ = "1.0.0"
 import asyncio
 import os
 from typing import Optional
+
+from sandbox.sandbox_manager import SovereignSandbox
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
 
 
@@ -13,17 +16,17 @@ class BashTool(BaseTool):
     async def execute(self, command: str, timeout: int = 30, workdir: Optional[str] = None, **kwargs) -> ToolResult:
         try:
             cwd = workdir or self.root_dir or os.getcwd()
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd
+            sandbox = SovereignSandbox(self.root_dir or os.getcwd())
+            chunks = []
+            async for chunk in sandbox.stream_execute(command, cwd, timeout=timeout):
+                chunks.append(chunk)
+            output = "".join(chunks)
+            exit_code = sandbox.last_exit_code
+            return ToolResult(
+                success=(exit_code in (None, 0)) and "[SANDBOX_BLOCK]" not in output and "[SANDBOX_TIMEOUT]" not in output,
+                output=output,
+                metadata={"exit_code": exit_code},
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            output = stdout.decode(errors="replace")
-            if stderr:
-                output += f"\n[stderr]\n{stderr.decode(errors='replace')}"
-            return ToolResult(success=proc.returncode == 0, output=output, metadata={"exit_code": proc.returncode})
         except asyncio.TimeoutError:
             return ToolResult(success=False, error=f"Command timed out after {timeout}s")
         except Exception as e:

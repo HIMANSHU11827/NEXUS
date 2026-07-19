@@ -1,0 +1,8 @@
+{
+  "name": "core",
+  "version": "1.0.0",
+  "description": "Core system tests — mission control orchestration, web search tool integration",
+  "category": "test",
+  "entry": "scripts/test_mission_control.py",
+  "class": "TestCore"
+}

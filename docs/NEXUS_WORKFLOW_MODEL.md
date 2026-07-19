@@ -34,11 +34,10 @@ NEXUS completes mission
   Remaining risks
 ```
 
-The same mission should appear differently per surface:
+The same mission should appear differently per interface:
 
 - GUI: timeline cards and live computer drawer.
-- Terminal: compact phase/event lines.
-- CLI: interactive terminal panels.
+- TUI: compact phase/event lines.
 - Gateway: short status notifications.
 - Voice: spoken status and final summary.
 

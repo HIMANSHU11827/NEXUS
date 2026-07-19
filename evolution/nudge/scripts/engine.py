@@ -4,8 +4,10 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
+
 from providers.router import ModelRouter
+
 logger = logging.getLogger(__name__)
 _ROUTER: Optional[ModelRouter] = None
 
@@ -54,6 +56,7 @@ Return a short actionable nudge (1-2 sentences).
                 with open(self.state_path, "r", encoding="utf-8") as f:
                     return json.load(f)
             except Exception:
+                logger.warning("evolution/nudge/scripts/engine.py:58 _load_state: suppressed error", exc_info=True)
                 pass
         return {}
 
@@ -69,4 +72,5 @@ Return a short actionable nudge (1-2 sentences).
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"nudge": nudge_text, "timestamp": time.time()}) + "\n")
         except Exception:
+            logger.warning("evolution/nudge/scripts/engine.py:73 _log_nudge: suppressed error", exc_info=True)
             pass

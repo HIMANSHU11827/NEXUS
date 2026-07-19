@@ -1,9 +1,11 @@
 from __future__ import annotations
+
 __version__ = "1.0.0"
 import os
 import platform
 from pathlib import Path
 from typing import Optional
+
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
 
 

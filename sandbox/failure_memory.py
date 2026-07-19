@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import json
 import os
 import time
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional
 
 

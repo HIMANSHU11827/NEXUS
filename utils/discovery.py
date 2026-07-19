@@ -1,8 +1,13 @@
 """NEXUS Auto-Discovery — scans project for modules, tools, skills, and components."""
 
-import os
 import json
-from typing import Dict, List, Any
+import logging
+import os
+from typing import Any, Dict, List
+
+logger = logging.getLogger("nexus.discovery")
+
+from skills.registry import SkillRegistry
 
 
 class NexusAutoDiscover:
@@ -34,36 +39,25 @@ class NexusAutoDiscover:
                         "entry": meta.get("entry", ""),
                         "path": tool_dir,
                     })
-                except Exception:
+                except Exception as e:
+                    logger.debug("discover_tools(%s) failed: %s", name, e)
                     result.append({"name": name, "version": "?", "path": tool_dir})
             else:
                 result.append({"name": name, "version": "?", "path": tool_dir})
         return result
 
     def discover_skills(self) -> List[Dict[str, Any]]:
-        skills_dir = os.path.join(self.root, "skills")
-        result = []
-        if not os.path.isdir(skills_dir):
-            return result
-        for fname in sorted(os.listdir(skills_dir)):
-            if fname.endswith(".md") and fname not in ("read.md", "README.md"):
-                path = os.path.join(skills_dir, fname)
-                try:
-                    with open(path, encoding="utf-8") as f:
-                        content = f.read()
-                    version = "1.0.0"
-                    for line in content.split("\n"):
-                        if line.lower().startswith("version:"):
-                            version = line.split(":", 1)[1].strip()
-                            break
-                    result.append({
-                        "name": fname[:-3],
-                        "version": version,
-                        "path": path,
-                    })
-                except Exception:
-                    result.append({"name": fname[:-3], "version": "?", "path": path})
-        return result
+        return [
+            {
+                "id": skill.id,
+                "name": skill.name,
+                "description": skill.description,
+                "version": skill.version,
+                "path": skill.path,
+                "source": skill.source,
+            }
+            for skill in SkillRegistry(self.root).discover()
+        ]
 
     def discover_evolution_modules(self) -> List[Dict[str, Any]]:
         evo_dir = os.path.join(self.root, "evolution")
@@ -87,7 +81,8 @@ class NexusAutoDiscover:
                         "version": meta.get("version", "?"),
                         "description": meta.get("description", ""),
                     })
-                except Exception:
+                except Exception as e:
+                    logger.debug("discover_evolution_modules(%s) failed: %s", name, e)
                     result.append({"name": name, "type": "evolution", "version": "?"})
         return result
 
@@ -112,7 +107,8 @@ class NexusAutoDiscover:
                         "version": meta.get("version", "?"),
                         "description": meta.get("description", ""),
                     })
-                except Exception:
+                except Exception as e:
+                    logger.debug("discover_plugins(%s) failed: %s", name, e)
                     result.append({"name": name, "version": "?"})
         return result
 

@@ -5,11 +5,12 @@ Supports: local_bash, local_agent, remote_agent task types with status tracking.
 
 import json
 import os
+import threading
 import time
 import uuid
-import threading
-from typing import Dict, Any, Optional, List, Callable
 from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
+
 from utils.singleton import ThreadSafeSingleton
 
 

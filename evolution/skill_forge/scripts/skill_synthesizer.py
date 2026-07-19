@@ -1,10 +1,10 @@
 """Skill Synthesizer — auto-generates new skills from examples."""
 
 from __future__ import annotations
+
 __version__ = "1.0.0"
-import os
 from pathlib import Path
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, List, Optional
 
 
 class SkillSynthesizer:

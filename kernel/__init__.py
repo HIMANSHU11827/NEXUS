@@ -1,16 +1,24 @@
 """NEXUS kernel: shared runtime services for tools, providers, memory, and telemetry."""
 
-import os
+import glob
 import json
+import logging
+import os
+import threading
 import time
 import uuid
-import logging
-import threading
-import glob
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+
 import psutil
-from utils.nexus_compat import import_requests, s, safe_round, itail
+from dotenv import load_dotenv
+
+from utils.nexus_compat import import_requests, itail, s, safe_round
 from utils.singleton import ThreadSafeSingleton
+
+# Load .env at kernel import — covers both `python -m nexus` and direct imports
+_env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", ".env")
+if os.path.isfile(_env_path):
+    load_dotenv(_env_path)
 
 _requests: Any = import_requests()
 logger = logging.getLogger("NEXUS_KERNEL")
@@ -56,98 +64,183 @@ class NexusKernel(ThreadSafeSingleton):
 
     @property
     def config(self):
-        from config.config_loader import NexusConfigLoader
+        try:
+            from config.config_loader import NexusConfigLoader
+        except ImportError:
+            logger.warning("Subsystem 'config' not available")
+            return {}
         return self._get_or_init("config", NexusConfigLoader)
 
     @property
     def moe(self):
-        from intelligence.moe_router import NexusMoERouter
+        try:
+            from intelligence.moe_router import NexusMoERouter
+        except ImportError:
+            logger.warning("Subsystem 'moe' not available")
+            return {}
         return self._get_or_init("moe", NexusMoERouter)
 
     @property
     def moa(self):
-        from intelligence.moa import MixtureOfArchitects
+        try:
+            from intelligence.moa import MixtureOfArchitects
+        except ImportError:
+            logger.warning("Subsystem 'moa' not available")
+            return {}
         return self._get_or_init("moa", lambda: MixtureOfArchitects(self.moe.base_router))
 
     @property
     def nerve(self):
-        from neural.nerve_center import NexusNerveCenter
+        try:
+            from neural.nerve_center import NexusNerveCenter
+        except ImportError:
+            logger.warning("Subsystem 'nerve' not available")
+            return {}
         return self._get_or_init("nerve", lambda: NexusNerveCenter(self.root))
 
     @property
     def omni(self):
-        from evolution.omni_kernel import OmniEvolutionKernel
+        try:
+            from evolution.omni_kernel import OmniEvolutionKernel
+        except ImportError:
+            logger.warning("Subsystem 'omni' not available")
+            return {}
         return self._get_or_init("omni", lambda: OmniEvolutionKernel(self.root))
 
     @property
     def hyper(self):
-        from evolution.hyper_kernel import HyperKernel
+        try:
+            from evolution.hyper_kernel import HyperKernel
+        except ImportError:
+            logger.warning("Subsystem 'hyper' not available")
+            return {}
         return self._get_or_init("hyper", lambda: HyperKernel(self.root))
 
     @property
     def researcher(self):
-        from evolution.researcher import NexusResearcher
+        try:
+            from evolution.researcher import NexusResearcher
+        except ImportError:
+            logger.warning("Subsystem 'researcher' not available")
+            return {}
         return self._get_or_init("researcher", lambda: NexusResearcher(self.root))
 
     @property
     def persistence(self):
-        from context.persistence import NexusFilePersistence
+        try:
+            from context.persistence import NexusFilePersistence
+        except ImportError:
+            logger.warning("Subsystem 'persistence' not available")
+            return {}
         return self._get_or_init("persistence", lambda: NexusFilePersistence(self.root))
 
     @property
     def hal(self):
-        from hardware.manager import NexusHardwareManager
+        try:
+            from hardware.manager import NexusHardwareManager
+        except ImportError:
+            logger.warning("Subsystem 'hal' not available")
+            return {}
         return self._get_or_init("hal", NexusHardwareManager)
 
     @property
     def horizons(self):
-        from evolution.horizons import StrategicHorizons
+        try:
+            from evolution.horizons import StrategicHorizons
+        except ImportError:
+            logger.warning("Subsystem 'horizons' not available")
+            return {}
         return self._get_or_init("horizons", lambda: StrategicHorizons(self.root))
 
     @property
     def local_brain(self):
-        from intelligence.local_brain import NexusLocalBrain
+        try:
+            from intelligence.local_brain import NexusLocalBrain
+        except ImportError:
+            logger.warning("Subsystem 'local_brain' not available")
+            return {}
         return self._get_or_init("local_brain", lambda: NexusLocalBrain(self.root))
 
     @property
     def trainer(self):
-        from neural.trainer import NexusTrainer
+        try:
+            from neural.trainer import NexusTrainer
+        except ImportError:
+            logger.warning("Subsystem 'trainer' not available")
+            return {}
         return self._get_or_init("trainer", lambda: NexusTrainer(self.root))
 
     @property
     def indexer(self):
-        from indexer import NexusSemanticIndexer
+        try:
+            from indexer import NexusSemanticIndexer
+        except ImportError:
+            logger.warning("Subsystem 'indexer' not available")
+            return {}
         return self._get_or_init("indexer", lambda: NexusSemanticIndexer(self.root))
 
     @property
     def intent(self):
-        from evolution.intent.scripts.engine import NexusIntentEngine
+        try:
+            from evolution.intent.scripts.engine import NexusIntentEngine
+        except ImportError:
+            logger.warning("Subsystem 'intent' not available")
+            return {}
         return self._get_or_init("intent", NexusIntentEngine)
 
     @property
     def prover(self):
-        from safety.prover import LogicProver
+        try:
+            from safety.prover import LogicProver
+        except ImportError:
+            logger.warning("Subsystem 'prover' not available")
+            return {}
         return self._get_or_init("prover", lambda: LogicProver(strictness=0.9))
 
     @property
     def tools(self):
-        from tools.nexus_tools.registry import ToolRegistry
-        return self._get_or_init("tools", ToolRegistry)
+        try:
+            from tools.nexus_tools.registry import ToolRegistry
+        except ImportError:
+            logger.warning("Subsystem 'tools' not available")
+            return {}
+        return self._get_or_init("tools", lambda: ToolRegistry(self.root))
 
     @property
     def telemetry(self):
-        from telemetry.database import NexusTelemetryDB
+        try:
+            from telemetry.database import NexusTelemetryDB
+        except ImportError:
+            logger.warning("Subsystem 'telemetry' not available")
+            return {}
         return self._get_or_init("telemetry", NexusTelemetryDB)
 
     @property
     def rag(self):
-        from rag.engine import NexusAtlasRAG
+        try:
+            from rag.engine import NexusAtlasRAG
+        except ImportError:
+            logger.warning("Subsystem 'rag' not available")
+            return {}
         return self._get_or_init("rag", NexusAtlasRAG)
 
     @property
     def hive(self):
-        from hive.engine import NexusHiveEngine
+        try:
+            from hive.engine import NexusHiveEngine
+        except ImportError:
+            logger.warning("Subsystem 'hive' not available")
+            return {}
         return self._get_or_init("hive", lambda: NexusHiveEngine(self.root))
+
+    @property
+    def plugins(self):
+        try:
+            from plugins.manager import PluginManager
+        except ImportError:
+            logger.warning("Subsystem 'plugins' not available")
+            return {}
+        return self._get_or_init("plugins", lambda: PluginManager(self.root))
 
     def _save_state(self) -> None:
         """Atomically saves the kernel state to disk."""
@@ -173,7 +266,8 @@ class NexusKernel(ThreadSafeSingleton):
             logger.error(f"Atomic state save failed: {e}")
             if os.path.exists(temp_path):
                 try: os.remove(temp_path)
-                except Exception: pass
+                except Exception as e:
+                    logger.warning(f"Failed to remove temp state file {temp_path}: {e}")
 
     def _restore_state(self) -> None:
         """Restores kernel state with fallback to legacy snapshots or boots a fresh state file."""
@@ -227,7 +321,10 @@ class NexusKernel(ThreadSafeSingleton):
 
     # --- Evolution Proxies ---
     def reinforce(self, task_type: str, tool_name: str, delta: float):
-        self.nerve.reinforce(task_type, tool_name, delta)
+        try:
+            self.nerve.reinforce(task_type, tool_name, delta)
+        except (AttributeError, TypeError):
+            logger.warning("kernel/__init__.py:326 suppressed error", exc_info=True)
 
 # --- GLOBAL WRAPPER (For Singleton Access) ---
 _kernel = None
@@ -241,4 +338,3 @@ def get_nexus_kernel(root_dir: Optional[str] = None) -> NexusKernel:
         NexusKernel._reset_instance()
         _kernel = NexusKernel(root_dir=root_dir)
     return _kernel
-

@@ -6,7 +6,7 @@ Primary entry point — launches the API server and interactive shell.
 
 ## Entry
 `powershell
-python -m nexus          # Boot loader → API server + Ink CLI
+python -m nexus          # Boot loader → API server + TUI
 python -m nexus --shell  # Launch NexusShell directly
 `
 

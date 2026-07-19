@@ -1,20 +1,24 @@
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import sys
 import threading
 import time
 
+logger = logging.getLogger("nexus.voice.tts")
+
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
+        logger.warning("voice/tts.py:13 : suppressed error", exc_info=True)
         pass
 import re
-from typing import List
 from contextlib import contextmanager, redirect_stdout
+from typing import List
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 

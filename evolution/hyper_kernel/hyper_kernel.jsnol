@@ -1,0 +1,7 @@
+{
+  "name": "hyper_kernel",
+  "version": "1.0.0",
+  "description": "HyperKernel — meta-reasoning kernel for cross-domain synthesis",
+  "entry": "scripts/hyper_kernel.py",
+  "class": "HyperKernel"
+}

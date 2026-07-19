@@ -1,0 +1,8 @@
+{
+  "name": "test_nate",
+  "version": "1.0.0",
+  "description": "Tests for NATE (Nexus Autonomous Thought Engine) — engine, gene map, execution graph, adaptive schema, universal adapter",
+  "category": "test",
+  "entry": "scripts/test_nate_engine.py",
+  "class": "TestNateEngine"
+}

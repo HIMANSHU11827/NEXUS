@@ -4,9 +4,9 @@ Externalizes agent state to the file system to enable unbounded task horizon.
 Inspired by InfiAgent and 2027-horizon research.
 """
 
-import os
 import json
 import logging
+import os
 import time
 
 logger = logging.getLogger(__name__)

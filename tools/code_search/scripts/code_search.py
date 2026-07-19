@@ -1,9 +1,13 @@
 from __future__ import annotations
+
 __version__ = "1.0.0"
+import logging
 import re
-import os
 from pathlib import Path
-from typing import Optional, List
+from typing import List, Optional
+
+logger = logging.getLogger("nexus.tools.code_search")
+
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
 
 
@@ -26,6 +30,7 @@ class CodeSearchTool(BaseTool):
                                     rel = fpath.relative_to(root) if fpath.is_relative_to(root) else fpath
                                     results.append(f"{rel}:{i}: {line.strip()[:200]}")
                         except Exception:
+                            logger.warning("tools/code_search/scripts/code_search.py:29 async execute: suppressed error", exc_info=True)
                             pass
                 return ToolResult(success=True, output="\n".join(results[:500]) or "No matches found")
 

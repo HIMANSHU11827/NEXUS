@@ -1,193 +1,112 @@
-import { Search, Settings2 } from 'lucide-react'
-import type { Dispatch, ReactNode, SetStateAction } from 'react'
+/* eslint-disable react-hooks/static-components */
+import { FileCode2, FileJson2, FileText, Search, Settings2 } from 'lucide-react'
+import type { Dispatch, SetStateAction } from 'react'
 
-type ConfigRecord = Record<string, unknown>
 type ConfigStatus = { kind: 'idle' | 'valid' | 'error' | 'saving'; message: string }
-type ConfigMode = 'form' | 'json'
+type ConfigMode = 'editor' | 'info'
+type ConfigFile = {
+   path: string
+   name: string
+   format: string
+   category: string
+   editable: boolean
+   size: number
+   summary?: string
+   content: string
+}
 
 type ConfigPanelProps = {
    configDirty: boolean
-   configDraft: ConfigRecord | null
-   configJsonText: string
+   configEditorText: string
    configMode: ConfigMode
    configSearch: string
-   configSection: string
+   configSelectedPath: string
    configStatus: ConfigStatus
-   filteredConfigSections: string[]
+   filteredConfigFiles: ConfigFile[]
    formatCardName: (value: string) => string
    loadConfig: () => void
    resetConfigDraft: () => void
    saveConfigDraft: () => void
-   selectedConfigValue: unknown
-   setConfigJsonText: Dispatch<SetStateAction<string>>
+   selectedConfigFile: ConfigFile | null
+   setConfigEditorText: Dispatch<SetStateAction<string>>
    setConfigMode: Dispatch<SetStateAction<ConfigMode>>
    setConfigSearch: Dispatch<SetStateAction<string>>
-   setConfigSection: Dispatch<SetStateAction<string>>
-   setConfigStatus: Dispatch<SetStateAction<ConfigStatus>>
-   setConfigDraft: Dispatch<SetStateAction<ConfigRecord | null>>
-   updateConfigPath: (path: string[], value: unknown) => void
-   validateConfigDraft: (draft: ConfigRecord) => string
+   setConfigSelectedPath: Dispatch<SetStateAction<string>>
+}
+
+const iconForFormat = (format: string) => {
+   const value = String(format || '').toLowerCase()
+   if (value === 'json') return FileJson2
+   if (value === 'md') return FileText
+   return FileCode2
 }
 
 export function ConfigPanel({
    configDirty,
-   configDraft,
-   configJsonText,
+   configEditorText,
    configMode,
    configSearch,
-   configSection,
+   configSelectedPath,
    configStatus,
-   filteredConfigSections,
+   filteredConfigFiles,
    formatCardName,
    loadConfig,
    resetConfigDraft,
    saveConfigDraft,
-   selectedConfigValue,
-   setConfigDraft,
-   setConfigJsonText,
+   selectedConfigFile,
+   setConfigEditorText,
    setConfigMode,
    setConfigSearch,
-   setConfigSection,
-   setConfigStatus,
-   updateConfigPath,
-   validateConfigDraft,
+   setConfigSelectedPath,
 }: ConfigPanelProps) {
-   const renderConfigValue = (value: unknown, path: string[], depth = 0): ReactNode => {
-      const key = path[path.length - 1] || 'root';
-      const label = formatCardName(key);
-      const pathLabel = path.join('.');
-      if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
-         const isBool = typeof value === 'boolean';
-         const isNumber = typeof value === 'number';
-         const optionMap: Record<string, string[]> = {
-            'gui.interface_mode': ['dark', 'light', 'grey', 'night', 'white'],
-            'system.default_provider': ['local', 'cloud'],
-            'system.brain_mode': ['AUTO', 'LOCAL', 'CLOUD'],
-            'system.log_level': ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
-            'voice_input.whisper_device': ['auto', 'cpu', 'cuda'],
-            'voice_input.whisper_language': ['auto', 'en', 'hi'],
-            'memory.persistence': ['atomic_checkpoints', 'session_json', 'disabled'],
-            'memory.vault_mode': ['gravity_rag', 'bm25', 'hybrid', 'disabled'],
-            'security.sandbox_mode': ['firecracker_ev', 'local_guarded', 'disabled'],
-         };
-         const options = optionMap[pathLabel];
-         return (
-            <div className="config-field" key={pathLabel}>
-               <div className="config-field-head">
-                  <div>
-                     <label>{label}</label>
-                     <code>{pathLabel}</code>
-                  </div>
-                  {isBool && (
-                     <button
-                        className={`config-toggle ${value ? 'on' : ''}`}
-                        onClick={() => updateConfigPath(path, !value)}
-                     >
-                        {value ? 'ON' : 'OFF'}
-                     </button>
-                  )}
-               </div>
-               {!isBool && options && (
-                  <select
-                     value={String(value ?? '')}
-                     onChange={(event) => updateConfigPath(path, event.target.value)}
-                  >
-                     {options.map(option => <option key={option} value={option}>{option}</option>)}
-                  </select>
-               )}
-               {!isBool && !options && (
-                  <input
-                     type={isNumber ? 'number' : 'text'}
-                     value={String(value ?? '')}
-                     onChange={(event) => updateConfigPath(path, isNumber ? Number(event.target.value) : event.target.value)}
-                  />
-               )}
-            </div>
-         );
-      }
-      if (Array.isArray(value)) {
-         return (
-            <div className="config-field" key={pathLabel}>
-               <div className="config-field-head">
-                  <div>
-                     <label>{label}</label>
-                     <code>{pathLabel} · array[{value.length}]</code>
-                  </div>
-               </div>
-               <textarea
-                  value={JSON.stringify(value, null, 2)}
-                  onChange={(event) => {
-                     try {
-                        updateConfigPath(path, JSON.parse(event.target.value));
-                     } catch {
-                        setConfigStatus({ kind: 'error', message: `Invalid JSON array at ${pathLabel}` });
-                     }
-                  }}
-               />
-            </div>
-         );
-      }
-      if (value && typeof value === 'object') {
-         const entries = Object.entries(value);
-         return (
-            <div className={depth === 0 ? 'config-section-card' : 'config-nested-card'} key={pathLabel}>
-               {depth > 0 && (
-                  <div className="config-nested-title">
-                     <span>{label}</span>
-                     <code>{pathLabel}</code>
-                  </div>
-               )}
-               {entries.length === 0 ? (
-                  <div className="config-empty">Empty object</div>
-               ) : entries.map(([childKey, childValue]) => renderConfigValue(childValue, [...path, childKey], depth + 1))}
-            </div>
-         );
-      }
-      return null;
-   };
+   const file = selectedConfigFile
+   const InfoIcon = iconForFormat(file?.format || '')
 
    return (
       <div className="config-page">
          <div className="config-command-head">
             <div>
-               <span>Active Profile</span>
-               <h2>{formatCardName(configSection || 'Config')}</h2>
-               <p>Edit the runtime config directly. Vision settings live here now; providers, tools, skills, MCP, and plugins stay on their own pages.</p>
+               <span>Project Config</span>
+               <h2>{file ? formatCardName(file.name) : 'Config Files'}</h2>
+               <p>Project config files only. YAML, JSON, TOML, and markdown/OKF notes live here. Skills, tools, plugins, MCP, and providers stay on their own pages.</p>
             </div>
             <div className="config-command-actions">
                <button onClick={loadConfig}>Reload</button>
                <button onClick={resetConfigDraft} disabled={!configDirty}>Reset</button>
-               <button onClick={() => setConfigMode(configMode === 'form' ? 'json' : 'form')}>{configMode === 'form' ? 'JSON' : 'Form'}</button>
-               <button className="primary" onClick={saveConfigDraft} disabled={!configDirty && configMode === 'form'}>Save</button>
+               <button onClick={() => setConfigMode(configMode === 'editor' ? 'info' : 'editor')}>{configMode === 'editor' ? 'Info' : 'Editor'}</button>
+               <button className="primary" onClick={saveConfigDraft} disabled={!file?.editable || !configDirty}>Save</button>
             </div>
          </div>
 
          <div className="config-shell">
             <aside className="config-sidebar">
                <div className="config-sidebar-head">
-                  <b>Settings</b>
+                  <b>Files</b>
                   <span className={`config-status-pill ${configStatus.kind}`}>{configStatus.kind === 'saving' ? 'working' : configStatus.kind}</span>
                </div>
                <div className="config-sidebar-meta">
-                  <span>{filteredConfigSections.length} sections</span>
+                  <span>{filteredConfigFiles.length} files</span>
                   <span>{configDirty ? 'unsaved' : 'saved'}</span>
                </div>
                <div className="config-search">
                   <Search size={15} />
-                  <input value={configSearch} onChange={(event) => setConfigSearch(event.target.value)} placeholder="Search config..." />
+                  <input value={configSearch} onChange={(event) => setConfigSearch(event.target.value)} placeholder="Search config files..." />
                </div>
                <div className="config-section-list">
-                  {filteredConfigSections.map(section => (
-                     <button
-                        key={section}
-                        className={configSection === section ? 'active' : ''}
-                        onClick={() => setConfigSection(section)}
-                     >
-                        <Settings2 size={15} />
-                        <span>{formatCardName(section)}</span>
-                        <small>{configDraft?.[section] && typeof configDraft[section] === 'object' ? Object.keys(configDraft[section] as ConfigRecord).length : 1}</small>
-                     </button>
-                  ))}
+                  {filteredConfigFiles.map(item => {
+                     const RowIcon = iconForFormat(item.format)
+                     return (
+                        <button
+                           key={item.path}
+                           className={configSelectedPath === item.path ? 'active' : ''}
+                           onClick={() => setConfigSelectedPath(item.path)}
+                        >
+                           <RowIcon size={15} />
+                           <span>{item.path.replace(/^config\//, '').replace(/^okf\//, 'OKF / ')}</span>
+                           <small>{item.format.toUpperCase()}</small>
+                        </button>
+                     )
+                  })}
                </div>
             </aside>
 
@@ -195,10 +114,10 @@ export function ConfigPanel({
                <div className="config-toolbar">
                   <div>
                      <div className="config-title-row">
-                        <h2>{formatCardName(configSection || 'Config')}</h2>
+                        <h2>{file ? formatCardName(file.name) : 'Config Files'}</h2>
                         <span className={configDirty ? 'dirty' : ''}>{configDirty ? 'Unsaved changes' : 'No changes'}</span>
                      </div>
-                     <p>{configSection === 'vision' ? 'Camera, stream, model, and acceleration defaults.' : `Editing ${formatCardName(configSection || 'config')} settings.`}</p>
+                     <p>{file ? `${file.path} • ${file.editable ? 'editable' : 'read-only'} • ${Math.max(1, Math.round(file.size / 1024))} KB` : 'Select a project config file.'}</p>
                   </div>
                </div>
 
@@ -206,38 +125,49 @@ export function ConfigPanel({
                   <span>{configStatus.message}</span>
                </div>
 
-               {configMode === 'json' ? (
-                  <textarea
-                     className="config-json-editor"
-                     value={configJsonText}
-                     onChange={(event) => {
-                        setConfigJsonText(event.target.value);
-                        try {
-                           const parsed = JSON.parse(event.target.value) as ConfigRecord;
-                           setConfigDraft(parsed);
-                           const validation = validateConfigDraft(parsed);
-                           setConfigStatus(validation ? { kind: 'error', message: validation } : { kind: 'valid', message: 'JSON is valid. Save to persist.' });
-                        } catch (error) {
-                           setConfigStatus({ kind: 'error', message: `JSON parse error: ${error instanceof Error ? error.message : String(error)}` });
-                        }
-                     }}
-                     spellCheck={false}
-                  />
-               ) : configDraft ? (
-                  <div className="config-form">
-                     {selectedConfigValue === undefined ? (
-                        <div className="config-empty">Select a section to edit.</div>
-                     ) : renderConfigValue(selectedConfigValue, [configSection], 0)}
-                  </div>
-               ) : (
+               {!file ? (
                   <div className="config-empty big">
                      <Settings2 size={24} />
                      <b>Config not loaded</b>
                      <button onClick={loadConfig}>Load Config</button>
                   </div>
+               ) : configMode === 'info' ? (
+                  <div className="config-form">
+                     <div className="config-section-card">
+                        <div className="config-nested-title">
+                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                              <InfoIcon size={16} />
+                              {formatCardName(file.name)}
+                           </span>
+                           <code>{file.path}</code>
+                        </div>
+                        <div className="config-field">
+                           <div className="config-field-head"><div><label>Format</label><code>{file.format.toUpperCase()}</code></div></div>
+                        </div>
+                        <div className="config-field">
+                           <div className="config-field-head"><div><label>Category</label><code>{formatCardName(file.category)}</code></div></div>
+                        </div>
+                        <div className="config-field">
+                           <div className="config-field-head"><div><label>Access</label><code>{file.editable ? 'Editable' : 'Read-only'}</code></div></div>
+                        </div>
+                        {file.summary && (
+                           <div className="config-field">
+                              <div className="config-field-head"><div><label>Summary</label><code>{file.summary}</code></div></div>
+                           </div>
+                        )}
+                     </div>
+                  </div>
+               ) : (
+                  <textarea
+                     className="config-json-editor"
+                     value={configEditorText}
+                     onChange={(event) => setConfigEditorText(event.target.value)}
+                     spellCheck={file.format === 'md'}
+                     readOnly={!file.editable}
+                  />
                )}
             </section>
          </div>
       </div>
-   );
+   )
 }

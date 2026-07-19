@@ -8,17 +8,19 @@ keeps exposed tools read-focused except for explicit graph indexing.
 from __future__ import annotations
 
 import json
-import os
 import sys
 from typing import Any, Dict, List
 
-from code_intel.knowledge_graph import CodebaseKnowledgeGraph
-
+try:
+    from code_intel.knowledge_graph import CodebaseKnowledgeGraph
+except ImportError:
+    CodebaseKnowledgeGraph = None
+import logging
+_logger = logging.getLogger("nexus.mcp.server")
+from mcp.security import MAX_INDEX_FILES, MAX_RESULT_LIMIT, bounded_int, read_bounded_line, workspace_root
 
 SERVER_NAME = "nexus-code-graph"
 PROTOCOL_VERSION = "2025-06-18"
-
-
 def tool_definitions() -> List[Dict[str, Any]]:
     return [
         {
@@ -97,12 +99,17 @@ def tool_definitions() -> List[Dict[str, Any]]:
 
 
 def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-    root = os.path.abspath(str(arguments.get("root") or os.getcwd()))
+    if not isinstance(arguments, dict):
+        raise ValueError("Tool arguments must be an object")
+    root = workspace_root(arguments)
+    if CodebaseKnowledgeGraph is None:
+        return {"content": [{"type": "text", "text": '{"error": "code_intel not installed — pip install nexus-code-intel"}'}], "isError": True}
     graph = CodebaseKnowledgeGraph(root)
-    limit = int(arguments.get("limit", 20) or 20)
+    limit = bounded_int(arguments, "limit", 20, MAX_RESULT_LIMIT)
 
     if name == "nexus_code_graph_build":
-        built = graph.build(max_files=int(arguments.get("max_files", 5000) or 5000))
+        max_files = bounded_int(arguments, "max_files", 5000, MAX_INDEX_FILES)
+        built = graph.build(max_files=max_files)
         payload = graph.summary(built, limit=limit)
     elif name == "nexus_code_graph_summary":
         payload = graph.summary(limit=limit)
@@ -149,7 +156,15 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any] | None:
 
 
 def serve() -> None:
-    for line in sys.stdin:
+    while True:
+        line, oversized = read_bounded_line(sys.stdin)
+        if not line and not oversized:
+            break
+        if oversized:
+            response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "MCP message too large"}}
+            sys.stdout.write(json.dumps(response) + "\n")
+            sys.stdout.flush()
+            continue
         line = line.strip()
         if not line:
             continue

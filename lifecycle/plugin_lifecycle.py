@@ -10,6 +10,7 @@ Versioning:
   major_upgrade:    1.x → 2.0 → 2.1 → 3.0
 """
 
+import logging
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -138,6 +139,8 @@ class PluginLifecycle(LifecycleManager):
             try:
                 hook(plugin_id)
             except Exception:
+                _logger = logging.getLogger("nexus.lifecycle.plugin")
+                _logger.warning("lifecycle/plugin_lifecycle.py:140 _run_plugin_hooks: suppressed error", exc_info=True)
                 pass
 
     def get_plugin_state(self, plugin_id: str) -> Optional[str]:

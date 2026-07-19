@@ -1,7 +1,7 @@
-import binascii
-import os
-from cryptography.fernet import Fernet
 from typing import Optional
+
+from cryptography.fernet import Fernet
+
 
 class NexusEncryption:
     """

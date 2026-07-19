@@ -1,9 +1,11 @@
-import os
 import json
-import re
 import logging
-from typing import List, Dict, Any, Optional
+import os
+import re
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from skills.registry import SkillRegistry
 
 logger = logging.getLogger("NEXUS_SKILLS")
 
@@ -11,42 +13,56 @@ logger = logging.getLogger("NEXUS_SKILLS")
 class NexusSkillMaster:
     _instance = None
     _SINGLETON = None
+    _INSTANCES: Dict[str, "NexusSkillMaster"] = {}
 
     def __new__(cls, root: Optional[str] = None):
-        if cls._SINGLETON is None:
-            cls._SINGLETON = super().__new__(cls)
-        return cls._SINGLETON
+        resolved = os.path.abspath(root or os.getcwd())
+        if resolved not in cls._INSTANCES:
+            cls._INSTANCES[resolved] = super().__new__(cls)
+        cls._SINGLETON = cls._INSTANCES[resolved]
+        return cls._INSTANCES[resolved]
 
     def __init__(self, root: Optional[str] = None):
-        if hasattr(self, "_initialized"):
+        resolved = os.path.abspath(root or os.getcwd())
+        if getattr(self, "_initialized_root", "") == resolved:
             return
-        self._initialized = True
-        self._root = root or os.getcwd()
-        skills_dir = os.path.join(self._root, "skills")
-        os.makedirs(skills_dir, exist_ok=True)
-        self._skills_dir = skills_dir
+        self._initialized_root = resolved
+        self._root = resolved
+        primary = os.path.join(self._root, "skills")
+        bundled = os.path.join(os.path.dirname(os.path.abspath(__file__)))
+        # Auto-discover files in the project skills/ directory AND any
+        # skills/ directory bundled alongside this module. This avoids losing
+        # the registry when callers pass the wrong root or the process is
+        # launched from a different working directory.
+        self._search_dirs: List[str] = []
+        for candidate in (primary, bundled):
+            skills_dir = os.path.join(candidate, "skills") if candidate != primary else primary
+            if os.path.isdir(skills_dir):
+                self._search_dirs.append(skills_dir)
+        if primary not in self._search_dirs:
+            self._search_dirs.insert(0, primary)
+        # Backward compat for code paths that expect a single dir.
+        self._skills_dir = self._search_dirs[0]
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._load_all()
 
     @classmethod
     def _reset_instance(cls):
         cls._SINGLETON = None
+        cls._INSTANCES.clear()
 
     def _load_all(self):
         self._cache.clear()
-        skills_dir = Path(self._skills_dir)
-        if not skills_dir.exists():
-            return
-        for fpath in sorted(skills_dir.iterdir()):
-            if fpath.suffix == ".md":
-                try:
-                    content = fpath.read_text(encoding="utf-8")
-                    meta = self._parse_frontmatter(content)
-                    if meta:
-                        meta["filepath"] = str(fpath)
-                        self._cache[meta.get("id", fpath.stem)] = meta
-                except Exception:
-                    pass
+        for skill in SkillRegistry(self._root).discover():
+            self._cache[skill.id] = {
+                "id": skill.id,
+                "name": skill.name,
+                "description": skill.description,
+                "version": skill.version,
+                "prompt": skill.prompt,
+                "filepath": skill.path,
+                "source": skill.source,
+            }
 
     def _parse_frontmatter(self, content: str) -> Optional[Dict[str, Any]]:
         m = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", content, re.DOTALL)
@@ -62,6 +78,7 @@ class NexusSkillMaster:
         return meta
 
     def list_skills(self) -> List[Dict[str, Any]]:
+        disabled = self._disabled_skill_ids()
         return [
             {
                 "id": v.get("id", k),
@@ -70,13 +87,44 @@ class NexusSkillMaster:
                 "category": v.get("category", ""),
                 "prompt": v.get("prompt", ""),
                 "filepath": v.get("filepath", ""),
+                "source": v.get("source", ""),
+                "active": k not in disabled and str(v.get("name", k)) not in disabled,
             }
             for k, v in self._cache.items()
         ]
 
+    def _disabled_skill_ids(self) -> set:
+        config_path = Path(self._root) / "config" / "nexus_config.yaml"
+        if not config_path.exists():
+            return set()
+        try:
+            import yaml
+            loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            logger.warning("Failed to read skill activation config: %s", config_path, exc_info=True)
+            return set()
+        if not isinstance(loaded, dict):
+            return set()
+        disabled = loaded.get("disabled_skills", [])
+        if isinstance(disabled, dict):
+            result = {str(name) for name, value in disabled.items() if value}
+        elif isinstance(disabled, list):
+            result = {str(name) for name in disabled}
+        else:
+            result = set()
+        custom = loaded.get("custom_skill_configs", {})
+        if isinstance(custom, dict):
+            for name, meta in custom.items():
+                if isinstance(meta, dict) and meta.get("active") is False:
+                    result.add(str(name))
+        return {item for item in result if item}
+
     def get_active_prompt(self) -> str:
+        disabled = self._disabled_skill_ids()
         parts = []
-        for skill in self._cache.values():
+        for skill_id, skill in self._cache.items():
+            if skill_id in disabled or str(skill.get("name", skill_id)) in disabled:
+                continue
             prompt = skill.get("prompt", "")
             if prompt:
                 parts.append(prompt)
@@ -88,7 +136,8 @@ class NexusSkillMaster:
 
     def craft_skill(self, name: str, prompt: str) -> Dict[str, Any]:
         safe_name = name.lower().replace(" ", "_").replace("-", "_")
-        fpath = Path(self._skills_dir) / f"{safe_name}.md"
+        fpath = Path(self._root) / ".opencode" / "skills" / safe_name / "SKILL.md"
+        fpath.parent.mkdir(parents=True, exist_ok=True)
         content = f"""---
 id: {safe_name}
 name: {name}
@@ -105,11 +154,19 @@ category: tool
         self._load_all()
         return json.dumps(self.list_skills(), indent=2)
 
-    def delete_skill(self, name: str) -> bool:
+    def delete_skill(self, name: str, force: bool = False) -> bool:
         for skill_id, meta in list(self._cache.items()):
             if skill_id == name or meta.get("name") == name:
                 fpath = meta.get("filepath")
                 if fpath and os.path.exists(fpath):
+                    resolved = Path(fpath).resolve()
+                    crafted_root = (Path(self._root) / ".opencode" / "skills").resolve()
+                    if not force:
+                        try:
+                            resolved.relative_to(crafted_root)
+                        except ValueError:
+                            logger.warning("Refusing to delete non-crafted skill without force: %s", resolved)
+                            return False
                     os.remove(fpath)
                     del self._cache[skill_id]
                     return True

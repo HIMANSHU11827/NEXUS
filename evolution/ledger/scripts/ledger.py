@@ -5,7 +5,8 @@ import logging
 import os
 import time
 from collections import Counter
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
+
 logger = logging.getLogger(__name__)
 
 class EvolutionLedger:
@@ -38,5 +39,6 @@ class EvolutionLedger:
                         if line.strip():
                             entries.append(json.loads(line))
             except Exception:
+                logger.warning("evolution/ledger/scripts/ledger.py:41 _read_all: suppressed error", exc_info=True)
                 pass
         return entries

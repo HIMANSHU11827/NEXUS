@@ -1,0 +1,8 @@
+{
+  "name": "test_threat_scanner",
+  "version": "1.0.0",
+  "description": "Tests for threat pattern scanner — content scanning, file scanning, threat detection patterns",
+  "category": "test",
+  "entry": "scripts/test_threat_scanner.py",
+  "class": "TestScanResult"
+}

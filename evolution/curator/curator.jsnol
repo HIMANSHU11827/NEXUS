@@ -1,0 +1,7 @@
+{
+  "name": "curator",
+  "version": "1.0.0",
+  "description": "Skill Curator \u2014 background skill lifecycle manager",
+  "entry": "scripts/curator.py",
+  "class": "SkillCurator"
+}

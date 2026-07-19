@@ -1,10 +1,8 @@
-import asyncio
-import json
 import logging
-import time
 import threading
-from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional, Callable
+import time
+from datetime import datetime
+from typing import Any, Callable, Dict, List
 
 logger = logging.getLogger(__name__)
 

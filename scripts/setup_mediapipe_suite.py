@@ -1,7 +1,6 @@
 import os
 import sys
 
-
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -19,7 +18,14 @@ def setup(download: bool = True):
     except Exception as exc:
         print(f"[!] Holistic asset vendoring failed: {exc}")
 
-    from tools.nexus_tools.vision.mediapipe_suite_tool import MediaPipeSuiteTool
+    try:
+        from tools.nexus_tools.vision.mediapipe_suite_tool import MediaPipeSuiteTool
+    except ImportError:
+        MediaPipeSuiteTool = None
+
+    if MediaPipeSuiteTool is None:
+        print("[!] MediaPipeSuiteTool not available")
+        return {"mediapipe": {"installed": False}}
 
     tool = MediaPipeSuiteTool()
     status = tool.status()

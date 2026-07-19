@@ -1,8 +1,10 @@
 # NEXUS Profiles + Isolated Config System
 
-## Status: ARCHITECTURE v1.0 — Design Document
+## Status: ARCHITECTURE v1.0 — Design Document (Historical)
 ## Date: 2026-05-21
 ## Author: NEXUS Evolution Council — Architect
+
+> _(Historical design proposal. The current config system uses `config/config_loader.py` (NexusConfigLoader singleton), `config/profiles.py` (profile CRUD), and `config/provider.yml`. The proposed `hive/profiles/` and `core/schema/` structures were not implemented as described.)_
 
 ---
 

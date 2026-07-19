@@ -1,5 +1,10 @@
 # NEXUS AI vs Hermes Agent — Architecture Comparison & Upgrade Report
 
+> **Historical report.** Several statements below describe an earlier NEXUS
+> implementation and are no longer current. For the current public-source
+> comparison, including Hermes, see
+> [docs/research/HARNESS_LANDSCAPE_2026-07.md](research/HARNESS_LANDSCAPE_2026-07.md).
+
 Generated: June 22, 2026
 Scope: Full source code comparison between `NEXUS AI/` and `hermes_analysis/`
 
@@ -13,7 +18,7 @@ NEXUS AI and Hermes Agent are both autonomous AI agent platforms but with
 | Dimension | NEXUS AI | Hermes Agent |
 |---|---|---|
 | **Philosophy** | "OS of Intelligence" — local-first, sovereign, self-evolving | "Personal AI Agent" — multi-surface, plugin-extensible |
-| **Language** | Python (core), TypeScript (GUI/CLI) | Python (core), TypeScript (TUI/Desktop) |
+| **Language** | Python (core), TypeScript (GUI/TUI) | Python (core), TypeScript (TUI/Desktop) |
 | **Version** | 1.0.0 | 0.17.0 |
 | **Tests** | ~46 test files | ~1,688 test files |
 | **Plugins** | None (empty dir) | 18 plugin categories, 29 model providers, 8 memory providers |
@@ -45,7 +50,7 @@ NEXUS AI and Hermes Agent are both autonomous AI agent platforms but with
 ### 2.3 Profile System (MEDIUM IMPACT)
 - **Hermes**: Multi-instance profiles with fully isolated `HERMES_HOME` directories,
   `get_hermes_home()` vs `display_hermes_home()` distinction, profile creation/
-  switching/deletion via CLI.
+  switching/deletion via TUI.
 - **NEXUS**: No profile support.
 - **Action**: ✅ **IMPLEMENTED** — `nexus_path/` and `profiles.py` with full profile
   management (create, list, switch, delete).

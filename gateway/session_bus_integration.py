@@ -1,12 +1,13 @@
 """Gateway session bus integration — manages platform sessions."""
 
-import hashlib
 import json
 import logging
 import os
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from gateway.session_ids import gateway_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +23,7 @@ class GatewaySessionManager:
 
     def resolve_session(self, platform: str, chat_id: str, user_id: Optional[str] = None) -> str:
         """Resolve a session ID. Same platform+chat gets same ID regardless of user."""
-        raw = f"{platform}:{chat_id}"
-        session_id = hashlib.sha256(raw.encode()).hexdigest()[:16]
-        key = f"gateway_{platform}_{session_id}"
+        key = gateway_session_id(platform, chat_id)
         if key not in self._cache:
             self._cache[key] = {
                 "session_id": key,
@@ -46,6 +45,7 @@ class GatewaySessionManager:
                 self._cache[session_id] = data
                 return data
             except Exception:
+                logger.warning("gateway/session_bus_integration.py:48 get_session: suppressed error", exc_info=True)
                 pass
         return None
 

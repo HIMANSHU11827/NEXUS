@@ -1,9 +1,14 @@
-import os
-import json
-import torch
-import random
 import gc
+import json
+import logging
+import os
+import random
+
+logger = logging.getLogger("nexus.scripts.nexus_trainer")
+
+import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
 
 def _training_model_path(root):
     try:
@@ -13,6 +18,7 @@ def _training_model_path(root):
         if rel_path:
             return os.path.join(root, rel_path)
     except Exception:
+        logger.warning("scripts/nexus_trainer.py:17 _training_model_path: suppressed error", exc_info=True)
         pass
     return os.path.join(root, "models", "local", "qwen3.5-0.8b-uncensored-opus-distill")
 

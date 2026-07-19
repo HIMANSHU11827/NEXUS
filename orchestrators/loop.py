@@ -1,28 +1,22 @@
-"""
-NEXUS SOVEREIGN LOOP v11.0
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Full Architecture:
-  ① GROUNDING   — ALL 8 parallel: Rules+RAG+Memory+Perms+Knowledge+Config+CodeIntel+Engine
-  ② PLANNING    — 3 modes: none / checklist(☐1☐2☐3) / phased(☐Ph1→sub-goals)
-  ③ INFERENCE   — DUAL STREAM: Answer NOW + Worker (Thinking ON/OFF, MoE router)
-  ④ AUDITING    — 4 policies + 3 sandbox tiers + CommandRiskScorer
-  ⑤ EXECUTION   — ALL PARALLEL: Terminal+Tools+Skills+Plugins+MCP+Web+Memory+Knowledge+Hive
-  ⑥ VERIFICATION— ALL PARALLEL: Error scan+Tests+TODO+PhaseGate+Checkpoint
-  ⑦ EVOLVE      — ALL PARALLEL: EvolutionLog+SelfImprove+GapForge+HiveScore+MemoryCrystallize
+"""NEXUS SOVEREIGN LOOP
 
-FAST PATH: Simple chat → 1 model call → stream instantly (no loop overhead)
-MODELESS: No chat/agent/CEO modes — he IS everything, auto-detects
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Fast path: simple chat → model call → stream.
+Modeless architecture: no chat/agent/CEO modes — auto-detects task type.
 """
 
 import asyncio
+import hashlib
+import html
+import inspect
 import json
 import logging
 import os
+import queue
 import re
+import threading
 import time
-import inspect
 import uuid
+from datetime import datetime
 from enum import Enum
 from typing import (
     Any,
@@ -33,33 +27,25 @@ from typing import (
     Optional,
     Set,
     Tuple,
-    Union,
 )
 
-from permissions import PermissionMode, PermissionResult
-from router import IntentRouter
-from sandbox.risk import CommandRiskScorer
-from sandbox.sandbox_manager import SovereignSandbox, SandboxTier
-from evolution.tool_forge.scripts.engine import ToolForge
-from evolution.skill_forge.scripts.forge import SkillForge
-from evolution.memory_forge.scripts.forge import MemoryForge
+from evolution.curator.scripts.curator import SkillCurator
 from evolution.knowledge_forge.scripts.forge import KnowledgeForge
 from evolution.logs import EvolutionLog
+from evolution.memory_forge.scripts.forge import MemoryForge
 from evolution.self_improvement.scripts.engine import SelfImprovementEngine
-
+from evolution.skill_forge.scripts.forge import SkillForge
+from evolution.tool_forge.scripts.engine import ToolForge
+from nexus.run_context import start_run_context
+from permissions import PermissionMode
+from sandbox.risk import CommandRiskScorer
+from sandbox.sandbox_manager import SandboxTier, SovereignSandbox
+from tools.threat_patterns import scan_content, scan_file
+from utils.context_scrubber import MessageSanitizer, StreamingContextScrubber
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENUMS
 # ─────────────────────────────────────────────────────────────────────────────
-
-class SCAState(str, Enum):
-    GROUNDING    = "grounding"     # Parallel: Rules+RAG+Memory+Perms+Knowledge+Config+CodeIntel+Engine
-    PLANNING     = "planning"      # 3 modes: none / checklist / phased with sub-goals
-    INFERENCE    = "inference"     # Dual stream: answer NOW + full worker (Thinking ON/OFF)
-    AUDITING     = "auditing"      # Risk score + permission policy + sandbox tier routing
-    EXECUTION    = "execution"     # ALL parallel: terminal+tools+skills+plugins+mcp+web+memory+knowledge+hive
-    VERIFICATION = "verification"  # ALL parallel: error scan + tests + TODO + phase gate + checkpoint
-    EVOLVE       = "evolve"        # ALL parallel: log+self-improve+gap forge+hive score+memory crystallize
 
 class PermissionPolicy(str, Enum):
     AUTO         = "auto"          # Policy 1: Bypass all — run everything
@@ -76,9 +62,19 @@ class ToolCall:
     __slots__ = ("name", "params", "call_id")
 
     def __init__(self, name: str, params: Dict[str, Any], call_id: str = ""):
-        self.name    = name
-        self.params  = params
-        self.call_id = call_id or f"call_{uuid.uuid4().hex[:8]}"
+        self.name = re.sub(r"[^A-Za-z0-9_.-]", "_", str(name or "").strip())[:80] or "unknown"
+        self.params = params if isinstance(params, dict) else {"value": params}
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(call_id or "").strip())[:120]
+        self.call_id = safe_id or self._stable_call_id()
+
+    def _stable_call_id(self) -> str:
+        payload = json.dumps(
+            {"name": self.name, "params": self.params},
+            sort_keys=True,
+            default=str,
+            ensure_ascii=False,
+        )
+        return f"call_{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:12]}"
 
     def to_dict(self) -> Dict[str, Any]:
         return {"name": self.name, "params": self.params, "call_id": self.call_id}
@@ -88,13 +84,11 @@ class HookRegistry:
     """Lifecycle hook system — fire callbacks at each state transition."""
 
     EVENTS = (
-        "on_state_change",
         "pre_llm_call",
         "post_llm_call",
         "pre_tool_call",
         "post_tool_call",
         "on_turn_end",
-        "on_fast_path",
         "on_evolve",
     )
 
@@ -120,21 +114,26 @@ class HookRegistry:
 # MAIN LOOP
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Default identity (Hermes-inspired SOUL.md fallback) ────────────
+DEFAULT_AGENT_IDENTITY: str = (
+    "You are NEXUS, a sovereign autonomous engineering agent. "
+    "You handle chat, tasks, coding, research, and everything else without switching modes. "
+    "You are helpful, direct, and efficient. You assist users with a wide "
+    "range of tasks including answering questions, writing and editing code, "
+    "analyzing information, creative work, and executing actions via your tools. "
+    "Communicate clearly, admit uncertainty when appropriate, and prioritize "
+    "being genuinely useful over being verbose."
+)
+
+# Files auto-injected into CONTEXT tier (Hermes-inspired AGENTS.md / CLAUDE.md / .cursorrules)
+_CONTEXT_FILE_NAMES: Tuple[str, ...] = (
+    "AGENTS.md", "agents.md",
+    "CLAUDE.md", "claude.md",
+    ".cursorrules",
+    ".cursor/rules/*.mdc",
+)
+
 class NexusLoop:
-    # Turn limits
-    MAX_TURNS           = 20
-    MAX_CHAT_TURNS      = 3
-    MAX_RETRIES_PER_PHASE = 3
-
-    # Context compaction
-    COMPACT_THRESHOLD   = 10
-    COMPACT_KEEP        = 4
-
-    # Fast-path keywords — if input is simple question, skip full loop
-    _FAST_PATH_SIGNALS  = (
-        "what is", "who is", "how does", "explain", "tell me", "define",
-        "what are", "can you", "describe", "what's", "meaning of",
-    )
 
     def __init__(self, root_dir: Optional[str] = None):
         from kernel import get_nexus_kernel
@@ -145,10 +144,12 @@ class NexusLoop:
         # State
         self.session_id        = "default"
         self._current_turn_id  = ""
-        self.state             = SCAState.GROUNDING
         self.hooks             = HookRegistry()
         self.memory: List[Dict[str, str]] = []
         self._abort_flag       = asyncio.Event()
+        self._run_guard        = threading.Lock()
+        self.work_event_sink: Optional[Callable[[Dict[str, Any]], Any]] = None
+        self._background_tasks: Set[asyncio.Task[Any]] = set()
 
         # Config
         self.policy            = PermissionPolicy.AI_DECIDE
@@ -169,15 +170,49 @@ class NexusLoop:
         self.current_phase: int = 0
         self._retry_counts: Dict[str, int] = {}
         self._gaps_found: List[Dict[str, Any]] = []
+        self._last_run_requires_tools = False
+        self._last_run_had_tool_execution = False
+        self._last_run_verified = False
+        self._last_run_failed = False
+        self.MAX_TURNS = 10
+        self.MAX_CHAT_TURNS = 3
+        self.MAX_RETRIES_PER_PHASE = 3
+        self.COMPACT_THRESHOLD = 20
+        self.COMPACT_KEEP = 6
 
         # Misc
         self.additional_dirs: List[str] = []
         self._nexus_profile_cache: Dict[str, str] = {}
         self._session_context_sent: Set[str] = set()
 
-        # Subsystems (lazy)
+        # Security
         self.risk_scorer = CommandRiskScorer()
         self.sandbox     = SovereignSandbox(self.root)
+        self._threat_scan_enabled = True
+
+        # 3-tier prompt cache (Hermes-inspired)
+        self._stable_prompt_cache: Optional[str] = None
+        self._stable_prompt_built = False
+
+        # Slash command cache
+        self._slash_command_cache: Dict[str, str] = {}
+
+        # Streaming context scrubber (Hermes-inspired)
+        self._scrubber = StreamingContextScrubber()
+
+        # Unified MemoryManager (Hermes-inspired)
+        from memory import MemoryManager
+        self.memory_manager = MemoryManager(self.root, session_id=self.session_id)
+
+        # NATE — NEXUS Native Tool Engine (lazy-init on first use)
+        self._nate: Optional[Any] = None
+
+        # Auto-seed docs/NEXUS.md if missing (Hermes-inspired SOUL.md seeding)
+        self._ensure_soul_file()
+
+        # MCP Servers (OpenClaw-inspired: auto-connect MCP tools)
+        self._mcp_clients: List[Any] = []
+        self._init_mcp_servers()
 
         # Register built-in hooks
         self.hooks.register("post_tool_call", self._handle_evolution_gaps)
@@ -192,31 +227,19 @@ class NexusLoop:
     @property
     def brain(self):           return self.kernel.moe
     @property
-    def discoverer(self):      return self.kernel.indexer
-    @property
     def tool_registry(self):   return self.kernel.tools
     @property
     def rag(self):             return self.kernel.rag
 
     @property
     def laws(self):
-        from safety.laws import SafetyLaws
-        return self.kernel._get_or_init("laws", lambda: SafetyLaws(self.root))
+        from safety.laws import NexusLawKernel
+        return self.kernel._get_or_init("laws", lambda: NexusLawKernel(os.path.join(self.root, "safety", "sovereign_laws.yaml")))
 
     @property
     def permissions(self):
         from permissions import PermissionSystem
         return self.kernel._get_or_init("permissions", PermissionSystem)
-
-    @property
-    def architect(self):
-        from orchestrators.architect import NexusArchitect
-        return self.kernel._get_or_init("architect", lambda: NexusArchitect(self.root))
-
-    @property
-    def persistence(self):
-        from context.persistence import NexusFilePersistence
-        return NexusFilePersistence(self.root)
 
     @property
     def failure_memory(self):
@@ -235,6 +258,29 @@ class NexusLoop:
     def hive(self):
         from hive import NexusHiveEngine
         return self.kernel._get_or_init("hive", lambda: NexusHiveEngine(self.root))
+
+    @property
+    def curator(self):
+        return self.kernel._get_or_init("curator", lambda: SkillCurator(self.root))
+
+    @property
+    def nate(self):
+        self._init_nate()
+        return self._nate
+
+    def nate_report(self) -> str:
+        """Return NATE stats as a formatted string."""
+        self._init_nate()
+        if self._nate is None:
+            return "NATE: not initialized"
+        s = self._nate.stats()
+        return (
+            f"NATE: {s['tools_registered']} tools | "
+            f"{s['total_calls']} calls | "
+            f"{s['schema']['savings_percent']}% schema saved | "
+            f"{s['routing_llm_calls_saved']} routing | "
+            f"{s['healing_llm_calls_saved']} healing"
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # ENTRY POINTS
@@ -260,6 +306,7 @@ class NexusLoop:
             self._write_session_bus(self.memory)
 
         parts: List[str] = []
+        assistant_msg: Dict[str, str] = {"role": "assistant", "content": ""}  # pre-init to avoid unbound error
         async for chunk in self.stream_run(task_desc, voice_mode=voice_mode):
             if chunk.get("type") == "content":
                 chunk_data = chunk["data"]
@@ -285,63 +332,98 @@ class NexusLoop:
         self,
         task_desc: str,
         provider: Optional[str] = None,
+        model: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        voice_mode: bool = False,
+        turn_id: str = "",
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Run one request at a time for this session-owned harness."""
+        guard = getattr(self, "_run_guard", None)
+        if guard is None:
+            guard = threading.Lock()
+            self._run_guard = guard
+        if not guard.acquire(blocking=False):
+            raise RuntimeError("A NEXUS run is already active for this session")
+        try:
+            async for chunk in self._stream_run_impl(
+                task_desc,
+                provider=provider,
+                model=model,
+                max_tokens=max_tokens,
+                voice_mode=voice_mode,
+                turn_id=turn_id,
+            ):
+                yield chunk
+        finally:
+            guard.release()
+
+    async def _stream_run_impl(
+        self,
+        task_desc: str,
+        provider: Optional[str] = None,
         model:    Optional[str] = None,
+        max_tokens: Optional[int] = None,
         voice_mode: bool = False,
         turn_id:  str = "",
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Main entry point — streaming async generator.
-        Yields dicts: {type: status|content|plan|tools_discovered|observations|fast_answer}
+        Yields dicts: {type: status|content|tools_discovered|observations}
         """
         self._abort_flag.clear()
         self._current_turn_id = turn_id or uuid.uuid4().hex[:8]
+        run_context = start_run_context(
+            root=getattr(self, "root", os.getcwd()),
+            session_id=self.session_id,
+            run_id=self._current_turn_id,
+            prompt=task_desc,
+            provider=provider,
+            model=model,
+            max_tokens=max_tokens,
+            voice_mode=voice_mode,
+        )
 
-        # Provider / model overrides
-        if provider:
-            try: self.brain.set_override(provider)
-            except Exception: pass
-        if model:
-            try:
-                p = getattr(self.brain.base_router, "provider", None)
-                if p and hasattr(p, "model"):
-                    p.model = model
-            except Exception: pass
-
-        # ── FAST PATH GATE ─────────────────────────────────────────────────
-        # If input looks like a simple question, answer immediately without
-        # going through the full loop. Simultaneously start the full loop
-        # in background to catch up if needed.
-        is_fast = self._is_fast_path(task_desc)
-
-        if is_fast:
-            async for chunk in self._fast_path(task_desc, voice_mode=voice_mode):
+        # One unified loop handles conversation and action requests. This
+        # boundary guarantees an unexpected provider/tool failure still closes
+        # the canonical run instead of leaving consumers stuck on "running".
+        try:
+            async for chunk in self._full_loop(
+                task_desc,
+                voice_mode=voice_mode,
+                max_tokens=max_tokens,
+                provider=provider,
+                model=model,
+            ):
                 yield chunk
-            return
-
-        # ── FULL SOVEREIGN LOOP ────────────────────────────────────────────
-        async for chunk in self._full_loop(task_desc, voice_mode=voice_mode):
-            yield chunk
+            if self._abort_flag.is_set():
+                run_context.finish("cancelled", "run.cancelled")
+            elif self._last_run_failed:
+                run_context.finish("failed", "run.failed")
+            else:
+                run_context.finish("success", "run.completed")
+        except asyncio.CancelledError:
+            run_id = self._current_turn_id or self.session_id
+            await self._emit_runtime_event(
+                "message.failed",
+                "Assistant response cancelled",
+                "cancelled",
+                event_id=f"message_{run_id}",
+                parent_id=f"run_{run_id}",
+            )
+            await self._emit_runtime_event("run.cancelled", "Run cancelled", "cancelled", event_id=f"run_{run_id}")
+            run_context.finish("cancelled", "run.cancelled")
+            raise
+        except Exception as exc:
+            self._last_run_failed = True
+            run_id = self._current_turn_id or self.session_id
+            await self._emit_runtime_event("message.failed", "Assistant response failed", "failed", event_id=f"message_{run_id}", parent_id=f"run_{run_id}", error=str(exc))
+            await self._emit_runtime_event("run.failed", "Run failed", "failed", event_id=f"run_{run_id}", error=str(exc))
+            run_context.finish("failed", "run.failed", error=str(exc))
+            raise
 
     # ─────────────────────────────────────────────────────────────────────────
-    # FAST PATH — Simple chat: 1 call, stream now, light log
+    # IDENTITY AND CONTEXT
     # ─────────────────────────────────────────────────────────────────────────
-
-    def _is_fast_path(self, task_desc: str) -> bool:
-        """Detect if input is simple Q&A that doesn't need the full loop."""
-        low = task_desc.strip().lower()
-        # Very short inputs are usually chat
-        if len(low.split()) <= 6:
-            return True
-        for sig in self._FAST_PATH_SIGNALS:
-            if low.startswith(sig):
-                return True
-        # No tool-like keywords — treat as chat
-        tool_signals = ("implement", "build", "create", "fix", "refactor", "write code",
-                        "install", "run", "execute", "deploy", "debug", "test", "make", "add")
-        for sig in tool_signals:
-            if sig in low:
-                return False
-        return True
 
     def _identity_context(self, task_desc: str) -> str:
         """Return authoritative identity context for NEXUS/Himanshu questions."""
@@ -387,6 +469,117 @@ class NexusLoop:
             f"{profile}"
         )
 
+    def _scan_and_filter_context(self, content: str, source: str, scope: str = "context") -> str:
+        """Scan content for threats — return filtered safe content or empty on block."""
+        if not self._threat_scan_enabled:
+            return content
+        result = scan_content(content, source=source, scope=scope)
+        if result.has_threats:
+            self.logger.warning(f"[SECURITY] {result.summary()}")
+            # For "all" scope threats, block the content entirely
+            for t in result.threats:
+                if t.scope == "all":
+                    self.logger.error(f"[SECURITY] BLOCKED {source} — {t.pattern_id}")
+                    return ""
+            # For "context" scope, strip only the dangerous lines
+            lines = content.split("\n")
+            dangerous_lines = {t.line - 1 for t in result.threats}
+            safe = [line for index, line in enumerate(lines) if index not in dangerous_lines]
+            return "\n".join(safe)
+        return content
+
+    def _scan_file_safe(self, filepath: str, scope: str = "context") -> str:
+        """Read a file, scan it for threats, return safe content or empty."""
+        if not self._threat_scan_enabled:
+            try:
+                with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                    return f.read()
+            except Exception as e:
+                self.logger.warning("_scan_file_safe (%s): %s", filepath, e)
+                return ""
+        result = scan_file(filepath, scope=scope)
+        if result.blocked or any(t.scope == "all" for t in result.threats):
+            self.logger.error(f"[SECURITY] BLOCKED file: {filepath}")
+            return ""
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                return f.read()
+        except Exception as e:
+            self.logger.warning("_scan_file_safe (%s) read: %s", filepath, e)
+            return ""
+
+    # ─── Slash Command Resolution ─────────────────────────────────────
+
+    def _resolve_slash_command(self, text: str) -> Optional[Dict[str, str]]:
+        """Detect /skill-name pattern in user input and resolve to skill content.
+
+        Returns dict with ``name`` and ``prompt`` if a match is found, else None.
+        Skills are injected as user messages (not system prompts) to preserve
+        prompt caching (Hermes-inspired).
+        """
+        m = re.match(r"^\s*/(\w[\w-]*)\b\s*(.*)", text)
+        if not m:
+            return None
+        skill_name = m.group(1).lower()
+        rest = m.group(2).strip()
+
+        # Check cache first
+        if skill_name in self._slash_command_cache:
+            return {"name": skill_name, "prompt": self._slash_command_cache[skill_name], "args": rest}
+
+        # Search NexusSkillMaster skills
+        try:
+            from skills import NexusSkillMaster
+            master = NexusSkillMaster(self.root)
+            skill = master.find_skill(skill_name)
+            if skill and skill.get("prompt"):
+                prompt = skill["prompt"][:2000]
+                self._slash_command_cache[skill_name] = prompt
+                return {"name": skill_name, "prompt": prompt, "args": rest}
+        except Exception:
+            self.logger.warning("loop:488 : suppressed error", exc_info=True)
+            pass
+
+        # Search .opencode/skills/<name>/SKILL.md
+        skill_path = os.path.join(self.root, ".opencode", "skills", skill_name, "SKILL.md")
+        try:
+            if os.path.isfile(skill_path):
+                content = self._scan_file_safe(skill_path, scope="context")
+                if content:
+                    # Parse frontmatter
+                    fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", content, re.DOTALL)
+                    prompt = fm_match.group(2).strip() if fm_match else content.strip()
+                    self._slash_command_cache[skill_name] = prompt
+                    return {"name": skill_name, "prompt": prompt[:2000], "args": rest}
+        except Exception:
+            self.logger.warning("loop:502 : suppressed error", exc_info=True)
+            pass
+
+        return None
+
+    def _apply_slash_command(self, messages: List[Dict[str, str]], task_desc: str) -> str:
+        """Check if user input starts with a slash command and inject skill prompt.
+
+        Returns the (possibly modified) task description.
+        Skills are injected as user messages to preserve prompt caching.
+        """
+        resolved = self._resolve_slash_command(task_desc)
+        if not resolved:
+            return task_desc
+
+        self.logger.info(f"[SLASH] Resolved /{resolved['name']}")
+        skill_prompt = resolved["prompt"]
+        args = resolved.get("args", "")
+
+        # Inject skill prompt as a system message with context
+        messages.append({
+            "role": "system",
+            "content": f"[SKILL_ACTIVE: {resolved['name']}]\n{skill_prompt}"
+        })
+
+        # Return the remaining args (after /skill-name) as the actual user task
+        return args if args else f"Run the {resolved['name']} skill."
+
     def _load_nexus_profile(self, detail: str = "rules") -> str:
         """Load a compact internal profile from docs/NEXUS.md without exposing the whole file."""
         cached = self._nexus_profile_cache.get(detail)
@@ -394,13 +587,8 @@ class NexusLoop:
             return cached
 
         nexus_path = os.path.join(self.root, "docs", "NEXUS.md")
-        if not os.path.exists(nexus_path):
-            return ""
-
-        try:
-            with open(nexus_path, "r", encoding="utf-8") as f:
-                content = f.read()
-        except Exception:
+        content = self._scan_file_safe(nexus_path, scope="context")
+        if not content:
             return ""
 
         sections: Dict[str, List[str]] = {}
@@ -465,292 +653,653 @@ class NexusLoop:
         self._nexus_profile_cache[detail] = result
         return result
 
-    async def _fast_path(self, task_desc: str, voice_mode: bool = False) -> AsyncGenerator[Dict[str, Any], None]:
-        """1 model call → stream answer to user immediately."""
-        await self.hooks.trigger("on_fast_path", task_desc)
-        yield {"type": "status", "data": "\n[fast-path]"}
-
-        # Keep simple chat lightweight. Identity context is only added when the user asks for it.
-        rules = await asyncio.to_thread(self._load_progressive_rules)
-        messages = [
-            {"role": "system", "content": rules},
-        ]
-        identity_context = await asyncio.to_thread(self._identity_context, task_desc)
-        if identity_context:
-            messages.append({"role": "system", "content": identity_context})
-        messages.append({"role": "user", "content": task_desc})
-
-        # Stream A fires immediately
-        response = await asyncio.to_thread(self._call_model, messages)
-        if response:
-            yield {"type": "fast_answer", "data": response}
-            yield {"type": "content",     "data": response}
-
-        if not voice_mode:
-            # Update persistent memory
-            self.memory.append({"role": "user", "content": task_desc})
-            self.memory.append({"role": "assistant", "content": response or ""})
-
-        # Light log — no heavy evolve
-        try:
-            await asyncio.to_thread(
-                self.evolution_log.win, "loop", "fast_path",
-                f"Fast-path answered: {task_desc[:80]}", 0.0, {}
-            )
-        except Exception:
-            pass
-
-        if not voice_mode:
-            # Session write
-            await asyncio.to_thread(self._write_session_bus, self.memory)
-
-        yield {"type": "status", "data": "\n[done]"}
-
     # ─────────────────────────────────────────────────────────────────────────
-    # FULL SOVEREIGN LOOP — 7 SCA States
+    # UNIFIED AGENT LOOP
     # ─────────────────────────────────────────────────────────────────────────
 
-    async def _full_loop(self, task_desc: str, voice_mode: bool = False) -> AsyncGenerator[Dict[str, Any], None]:
-        messages: List[Dict[str, str]] = []
-        tool_calls: List[ToolCall] = []
-        self.state = SCAState.GROUNDING
-        turn = 0
-        consecutive_chat_turns = 0
+    async def _full_loop(
+        self,
+        task_desc: str,
+        voice_mode: bool = False,
+        max_tokens: Optional[int] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """One unified model/tool loop with deterministic safety and verification."""
+        run_id = self._current_turn_id or self.session_id
+        message_id = f"message_{run_id}"
+        conversation_type = "conversation.updated" if self.memory else "conversation.created"
+        await self._emit_runtime_event(conversation_type, "Conversation active", "success", event_id=f"conversation_{self.session_id}")
+        await self._emit_runtime_event("run.started", "Run started", "running", event_id=f"run_{run_id}")
+        await self._emit_runtime_event("run.status", "Grounding context", "running", event_id=f"run_{run_id}", payload={"state": "grounding"})
+        await self._emit_runtime_event("message.started", "Assistant response", "running", event_id=message_id, parent_id=f"run_{run_id}")
+        requires_tools = self._requires_real_tooling(task_desc)
+        self._last_run_requires_tools = requires_tools
+        self._last_run_had_tool_execution = False
+        self._last_run_verified = not requires_tools
+        self._last_run_failed = False
+        messages = await self._ground_context(task_desc)
+        await self._emit_stage_event("grounding", "Context ready", "rules, memory, skills, and code context", "done")
+        plan_text = self._read_todo_md()
+        if self.active_goal and self.active_goal != task_desc:
+            todo_path = os.path.join(self.root, "todo.md") if self.root else "todo.md"
+            if os.path.isfile(todo_path):
+                os.remove(todo_path)
+                plan_text = ""
+        self.active_goal = task_desc
+        if requires_tools:
+            messages.append({"role": "system", "content": self._tool_enforcement_message(task_desc)})
+            gl = task_desc.lower()
+            is_complex = len(gl.split()) > 6 or any(w in gl for w in ("project", "app", "system", "website", "api", "full", "complete", "game", "platform", "tool", "build", "create", "make", "implement"))
+            if not plan_text and is_complex:
+                plan_text = await self._create_plan_via_tool(task_desc)
+                if plan_text:
+                    self.logger.info(f"Plan created: {len(plan_text)} chars")
+                    yield {"type": "content", "data": plan_text}
+            if plan_text:
+                plan_items = [
+                    re.sub(r"^[\s\-*0-9.\[\]xX~]+", "", line).strip()
+                    for line in plan_text.splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")
+                ]
+                plan_items = [item.rstrip("~").strip() for item in plan_items if item]
+                await self._emit_stage_event(
+                    "planning",
+                    "Plan ready",
+                    "todo.md",
+                    "done",
+                    items=plan_items[:12],
+                )
+                messages.append({"role": "system", "content": f"[CURRENT_PLAN]\n{plan_text}\n\nUpdate todo.md with ~~strikethrough~~ via modifying tool when each item is complete."})
+        modified_task = self._apply_slash_command(messages, task_desc)
+        if modified_task != task_desc:
+            task_desc = modified_task
+            for index in range(len(messages) - 1, -1, -1):
+                if messages[index].get("role") == "user":
+                    messages[index] = {"role": "user", "content": task_desc}
+                    break
 
-        while turn < self.MAX_TURNS:
+        enforcement_retries = 0
+        verification_retries = 0
+        finalization_retries = 0
+        last_response = ""
+        last_observations: List[str] = []
+        tool_result_cache: Dict[Tuple[str, str], str] = {}
+
+        for turn in range(1, self.MAX_TURNS + 1):
             if self._abort_flag.is_set():
+                await self._emit_runtime_event("message.failed", "Assistant response cancelled", "cancelled", event_id=message_id, parent_id=f"run_{run_id}")
+                await self._emit_runtime_event("run.cancelled", "Run cancelled", "cancelled", event_id=f"run_{run_id}")
                 yield {"type": "status", "data": "\n[aborted]"}
                 return
 
-            await self.hooks.trigger("on_state_change", self.state, self)
+            await self._emit_stage_event("inference", "Calling model", "streaming provider response", "running")
+            await self.hooks.trigger("pre_llm_call", messages)
 
-            # ── ① GROUNDING ─────────────────────────────────────────────────
-            if self.state == SCAState.GROUNDING:
-                yield {"type": "status", "data": "\n[grounding]"}
-                messages = await self._ground_context(task_desc)
-                self.state = SCAState.PLANNING
+            response = ""
+            try:
+                stream_kwargs: Dict[str, Any] = {}
+                if max_tokens is not None:
+                    stream_kwargs["max_tokens"] = max_tokens
+                if provider:
+                    stream_kwargs["provider"] = provider
+                if model:
+                    stream_kwargs["model"] = model
+                async for chunk in self._stream_model(messages, **stream_kwargs):
+                    response += chunk
+            except RuntimeError:
+                if self._last_run_had_tool_execution and self._last_run_verified and not self._last_run_failed:
+                    last_response = self._deterministic_evidence_summary(last_observations)
+                    yield {"type": "content", "data": last_response}
+                    await self._emit_runtime_event("message.delta", "Assistant response", "running", event_id=message_id, parent_id=f"run_{run_id}", payload={"delta": last_response})
+                    messages.append({"role": "assistant", "content": last_response})
+                    break
+                raise
+            if self._abort_flag.is_set():
+                await self._emit_runtime_event("message.failed", "Assistant response cancelled", "cancelled", event_id=message_id, parent_id=f"run_{run_id}")
+                await self._emit_runtime_event("run.cancelled", "Run cancelled", "cancelled", event_id=f"run_{run_id}")
+                yield {"type": "status", "data": "\n[aborted]"}
+                return
+            await self.hooks.trigger("post_llm_call", response)
 
-            # ── ② PLANNING ──────────────────────────────────────────────────
-            elif self.state == SCAState.PLANNING:
-                yield {"type": "status", "data": "\n[planning]"}
-                plan = await self._plan_task(task_desc, messages)
-                if plan:
-                    yield {"type": "plan", "data": plan}
-                    messages.append({"role": "system", "content": f"[PLAN_ROADMAP]:\n{plan}"})
-                self.state = SCAState.INFERENCE
-
-            # ── ③ INFERENCE — DUAL STREAM ───────────────────────────────────
-            elif self.state == SCAState.INFERENCE:
-                turn += 1
-                yield {"type": "status", "data": f"\n[inference {turn}]"}
-
-                await self.hooks.trigger("pre_llm_call", messages)
-
-                # Dual stream: Stream A (fast answer) + Stream B (worker) in parallel
-                fast_task   = asyncio.create_task(self._stream_a_instant(task_desc, messages))
-                worker_task = asyncio.create_task(asyncio.to_thread(self._call_model, messages))
-
-                # Stream A — instant answer to user
-                fast_response = await fast_task
-                if fast_response and turn == 1:
-                    yield {"type": "fast_answer", "data": fast_response}
-
-                # Stream B — full worker response (with tools)
-                response = await worker_task
-                await self.hooks.trigger("post_llm_call", response)
-
-                if not response:
-                    self.state = SCAState.EVOLVE
-                    continue
-
-                yield {"type": "content", "data": response}
-                messages.append({"role": "assistant", "content": response})
-
-                # Track persistent memory (user/assistant only)
-                if not voice_mode:
-                    if turn == 1:
-                        self.memory.append({"role": "user", "content": task_desc})
-                    self.memory.append({"role": "assistant", "content": response})
-
-                tool_calls = self._extract_tool_calls(response)
-                if not tool_calls:
-                    if "TASK_COMPLETE" in response:
-                        self.state = SCAState.EVOLVE
-                    else:
-                        consecutive_chat_turns += 1
-                        if consecutive_chat_turns >= self.MAX_CHAT_TURNS:
-                            yield {"type": "status", "data": f"\n[chat limit] {self.MAX_CHAT_TURNS} turns"}
-                            messages.append({"role": "system", "content": "[CHAT_LIMIT] No tool calls. End with TASK_COMPLETE."})
-                            self.state = SCAState.EVOLVE
-                        else:
-                            self.state = SCAState.INFERENCE
-                    continue
-
-                consecutive_chat_turns = 0
-                yield {"type": "tools_discovered", "tool_calls": [tc.to_dict() for tc in tool_calls]}
-                self.state = SCAState.AUDITING
-
-            # ── ④ AUDITING ───────────────────────────────────────────────────
-            elif self.state == SCAState.AUDITING:
-                yield {"type": "status", "data": "\n[auditing]"}
-                approved = await self._audit_and_approve(tool_calls)
-                if approved:
-                    self.state = SCAState.EXECUTION
+            if self._last_run_had_tool_execution and self._is_provider_error_text(response):
+                if self._last_run_verified and not self._last_run_failed:
+                    last_response = self._deterministic_evidence_summary(last_observations)
                 else:
-                    yield {"type": "status", "data": "\n[blocked] auditing rejected"}
-                    self.state = SCAState.EVOLVE
-
-            # ── ⑤ EXECUTION — ALL PARALLEL ──────────────────────────────────
-            elif self.state == SCAState.EXECUTION:
-                yield {"type": "status", "data": "\n[executing]"}
-                await self.hooks.trigger("pre_tool_call", tool_calls)
-
-                observations = await self._execute_tools(tool_calls)
-                yield {"type": "observations", "data": observations}
-
-                await self.hooks.trigger("post_tool_call", tool_calls, observations)
-                messages.append({"role": "system", "content": "\n".join(observations)})
-
-                # Log to mission replay
-                await asyncio.to_thread(self._log_mission_replay, tool_calls, observations)
-
-                self.state = SCAState.VERIFICATION
-
-            # ── ⑥ VERIFICATION — ALL PARALLEL ───────────────────────────────
-            elif self.state == SCAState.VERIFICATION:
-                yield {"type": "status", "data": "\n[verifying]"}
-
-                # Run all verification tasks in parallel
-                verify_results = await self._verify_all_parallel(messages, tool_calls)
-                success  = verify_results["success"]
-                vaccine  = verify_results["vaccine"]
-                todo_str = verify_results["todo"]
-
-                # Save checkpoint
-                await asyncio.to_thread(self._save_checkpoint, messages, task_desc, turn)
-
-                if todo_str:
-                    yield {"type": "plan", "data": todo_str}
-
-                if not success and vaccine:
-                    phase_key = f"phase_{self.current_plan.get('current_phase', 0) if self.current_plan else 'main'}"
-                    self._retry_counts[phase_key] = self._retry_counts.get(phase_key, 0) + 1
-                    retries = self._retry_counts[phase_key]
-                    yield {"type": "status", "data": f"\n[fail] retry {retries}/{self.MAX_RETRIES_PER_PHASE}"}
-
-                    if retries >= self.MAX_RETRIES_PER_PHASE:
-                        yield {"type": "status", "data": "\n[exhausted] max retries"}
-                        try:
-                            await asyncio.to_thread(
-                                self.evolution_log.lose, "loop", "verification",
-                                f"Phase {phase_key} failed after {retries} retries", 0.0, {}
-                            )
-                        except Exception:
-                            pass
-                        # Log to failure memory
-                        try:
-                            await asyncio.to_thread(
-                                self.failure_memory.record,
-                                {"task": task_desc, "vaccine": vaccine, "phase": phase_key}
-                            )
-                        except Exception:
-                            pass
-                        messages.append({"role": "system", "content": "[SELF_CORRECT] Max retries reached. Escalate or skip."})
-                        self.state = SCAState.EVOLVE
-                    else:
-                        messages.append({"role": "system", "content": f"[SELF_CORRECT] Attempt {retries}/{self.MAX_RETRIES_PER_PHASE}.\n{vaccine}\nFix and retry."})
-                        self.state = SCAState.INFERENCE
-                else:
-                    # Success — advance plan
-                    phase_key = f"phase_{self.current_plan.get('current_phase', 0) if self.current_plan else 'main'}"
-                    self._retry_counts.pop(phase_key, None)
-                    messages = self._compact_memory(messages)
-
-                    advanced = self._advance_plan(messages)
-                    if advanced:
-                        yield {"type": "plan", "data": self._render_todo_list()}
-                        if self.current_plan and self.current_plan.get("_complete"):
-                            self.state = SCAState.EVOLVE
-                        else:
-                            # Fill gaps inline then continue
-                            context = "\n".join([m.get("content", "")[:200] for m in messages[-6:]])
-                            await self._fill_gap_during_session(context)
-                            self.state = SCAState.INFERENCE
-                    else:
-                        context = "\n".join([m.get("content", "")[:200] for m in messages[-6:]])
-                        await self._fill_gap_during_session(context)
-                        self.state = SCAState.INFERENCE
-
-            # ── ⑦ EVOLVE — ALL PARALLEL ─────────────────────────────────────
-            elif self.state == SCAState.EVOLVE:
-                yield {"type": "status", "data": "\n[evolve]"}
-                await self.hooks.trigger("on_evolve", messages)
-                await self._finalize_session(task_desc, messages)
+                    last_response = self._deterministic_failure_summary(last_observations)
+                    self._last_run_failed = True
+                yield {"type": "content", "data": last_response}
+                await self._emit_runtime_event(
+                    "message.delta", "Assistant response", "running",
+                    event_id=message_id, parent_id=f"run_{run_id}", payload={"delta": last_response},
+                )
+                messages.append({"role": "assistant", "content": last_response})
                 break
 
+            if not response.strip():
+                last_response = "The model returned no response. Please retry."
+                self._last_run_failed = True
+                await self._emit_stage_event(
+                    "inference",
+                    "Model returned no response",
+                    "provider produced an empty response",
+                    "error",
+                )
+                yield {"type": "content", "data": last_response}
+                break
+
+            # Tool-looking text in a normal chat response is explanatory prose,
+            # not authorization to execute it. Only action-classified requests
+            # may enter the tool parser/auditor path.
+            tool_calls = self._extract_tool_calls(response) if requires_tools else []
+            if not tool_calls and requires_tools:
+                tool_calls = self._extract_action_fences(response)
+            if not tool_calls and requires_tools:
+                tool_calls = self._extract_required_tool_call(task_desc)
+            if not tool_calls and requires_tools:
+                tool_calls = self._extract_explicit_file_actions(task_desc)
+            if not tool_calls and requires_tools:
+                tool_calls = self._extract_explicit_run_commands(task_desc)
+            if not tool_calls:
+                if not requires_tools:
+                    response = self._strip_internal_tool_protocol(response).strip()
+                    if not response and self._last_run_had_tool_execution and finalization_retries < 1:
+                        finalization_retries += 1
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                "[FINAL_RESPONSE] Return the concise user-facing result now. "
+                                "Do not emit tool_use, JSON, XML, protocol markers, or another tool call. "
+                                "State only what the verified tool results prove."
+                            ),
+                        })
+                        continue
+                    if not response and last_observations:
+                        response = "Work completed and verified.\n\n" + "\n".join(last_observations)
+                    if last_observations and not self._final_response_contains_evidence(response, last_observations):
+                        response = self._deterministic_evidence_summary(last_observations)
+                if requires_tools and enforcement_retries < self.MAX_RETRIES_PER_PHASE:
+                    enforcement_retries += 1
+                    await self._emit_runtime_event(
+                        "retry",
+                        "Retrying tool-call generation",
+                        "running",
+                        event_id=f"retry_{run_id}_tool_{enforcement_retries}",
+                        parent_id=f"run_{run_id}",
+                        payload={"attempt": enforcement_retries, "phase": "tool_selection"},
+                    )
+                    messages.append({"role": "assistant", "content": self._strip_internal_tool_protocol(response)})
+                    messages.append({"role": "system", "content": self._tool_enforcement_message(task_desc)})
+                    continue
+                if requires_tools:
+                    self._last_run_failed = True
+                    last_response = (
+                        "I could not execute this task because the model did not produce a valid tool call. "
+                        "No action was performed and no result was created."
+                    )
+                    await self._emit_stage_event("execution", "No valid tool call", "task not executed", "error")
+                    await self._emit_runtime_event("plan.failed", "Plan could not be executed", "failed", event_id=f"plan_{run_id}", parent_id=f"run_{run_id}")
+                    yield {"type": "content", "data": last_response}
+                    messages.append({"role": "assistant", "content": last_response})
+                    break
+                yield {"type": "content", "data": response}
+                last_response = response
+                messages.append({"role": "assistant", "content": self._strip_internal_tool_protocol(response)})
+                break
+
+            for call in tool_calls:
+                if call.name == "web_search":
+                    call.params["query"] = self._normalize_web_query(
+                        str(call.params.get("query") or task_desc),
+                        task_desc,
+                    )
+
+            def tool_signature(call: ToolCall) -> Tuple[str, str]:
+                return call.name, json.dumps(call.params, sort_keys=True, default=str)
+
+            calls_to_execute: List[ToolCall] = []
+            pending_signatures: Set[Tuple[str, str]] = set()
+            for call in tool_calls:
+                signature = tool_signature(call)
+                if signature not in tool_result_cache and signature not in pending_signatures:
+                    calls_to_execute.append(call)
+                    pending_signatures.add(signature)
+
+            await self._emit_stage_event("auditing", "Checking tools and permissions", f"{len(tool_calls)} proposed tool call(s)", "running")
+            yield {"type": "tools_discovered", "tool_calls": [tc.to_dict() for tc in tool_calls]}
+            for call in calls_to_execute:
+                await self._emit_tool_event(call, status="queued")
+
+            approved = await self._audit_and_approve(tool_calls)
+            if not approved:
+                self._last_run_failed = True
+                await self._emit_stage_event("auditing", "Tool execution blocked", "permission policy", "error")
+                await self._emit_runtime_event("plan.failed", "Plan blocked", "failed", event_id=f"plan_{run_id}", parent_id=f"run_{run_id}", error="permission policy")
+                denial = "Tool execution was blocked by the active permission policy."
+                messages.append({"role": "system", "content": f"[TOOL_BLOCKED] {denial}"})
+                last_response = denial
+                yield {"type": "content", "data": denial}
+                break
+            await self._emit_stage_event("auditing", "Tools approved", f"{len(tool_calls)} tool call(s)", "done")
+
+            await self._emit_runtime_event("run.status", "Executing tools", "running", event_id=f"run_{run_id}", payload={"state": "execution"})
+            fresh_observations = await self._execute_tools(calls_to_execute) if calls_to_execute else []
+            if len(fresh_observations) == len(calls_to_execute):
+                for call, observation in zip(calls_to_execute, fresh_observations):
+                    tool_result_cache[tool_signature(call)] = observation
+            observations = [
+                tool_result_cache[tool_signature(call)]
+                for call in tool_calls
+                if tool_signature(call) in tool_result_cache
+            ]
+            last_observations = observations
+            self._last_run_had_tool_execution = True
+            yield {"type": "observations", "data": observations}
+            await self.hooks.trigger("post_tool_call", tool_calls, observations)
+            await self.kernel.plugins.trigger_hooks("post_tool_call", tool_calls, observations)
+            messages.append({"role": "assistant", "content": response})
+            messages.append({"role": "system", "content": "[TOOL_RESULTS]\n" + "\n".join(observations)})
+            await asyncio.to_thread(self._log_mission_replay, tool_calls, observations)
+
+            await self._emit_stage_event("verification", "Verifying tool results", "errors and targeted tests", "running")
+            verify = await self._verify_all_parallel(messages, tool_calls)
+            if self._last_run_failed:
+                verify = {
+                    "success": False,
+                    "vaccine": verify.get("vaccine") or "One or more real tool executions failed.",
+                }
+            await asyncio.to_thread(self._save_checkpoint, messages, task_desc, turn)
+            if not verify["success"] and verify["vaccine"]:
+                await self._emit_stage_event("verification", "Verification found a problem", str(verify["vaccine"]), "error")
+                verification_retries += 1
+                if verification_retries >= self.MAX_RETRIES_PER_PHASE:
+                    messages.append({"role": "system", "content": "[VERIFICATION_EXHAUSTED] Explain the unresolved failure clearly and stop."})
+                    requires_tools = False
+                else:
+                    await self._emit_runtime_event(
+                        "retry",
+                        "Retrying after verification failure",
+                        "running",
+                        event_id=f"retry_{run_id}_verification_{verification_retries}",
+                        parent_id=f"run_{run_id}",
+                        payload={"attempt": verification_retries, "phase": "verification"},
+                    )
+                    messages.append({"role": "system", "content": f"[SELF_CORRECT {verification_retries}/{self.MAX_RETRIES_PER_PHASE}] {verify['vaccine']}"})
+            else:
+                verification_retries = 0
+                requires_tools = False
+                self._last_run_verified = True
+                await self._emit_stage_event("verification", "Verification passed", "tool results accepted", "done")
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "[FINAL_RESPONSE] The real tools finished and verification passed. "
+                        "Continue the same assistant response with a concise result grounded only in TOOL_RESULTS. "
+                        "Do not emit tool protocol, request more tools, or start a new acknowledgement."
+                    ),
+                })
+            messages = self._compact_memory(messages)
+        else:
+            last_response = "Maximum agent turns reached before completion."
+            self._last_run_failed = True
+            yield {"type": "content", "data": last_response}
+
+        terminal_status = "failed" if self._last_run_failed else "success"
+        if self._last_run_failed:
+            await self._emit_runtime_event(
+                "phase.failed",
+                "Execution failed",
+                "failed",
+                event_id=f"phase_{run_id}_execution",
+                parent_id=f"run_{run_id}",
+                payload={"phase": "execution"},
+            )
+        await self._emit_runtime_event(
+            "message.failed" if self._last_run_failed else "message.completed",
+            "Assistant response", terminal_status, event_id=message_id, parent_id=f"run_{run_id}",
+            payload={"content": last_response},
+        )
+        if not voice_mode:
+            self.memory.append({"role": "user", "content": task_desc})
+            self.memory.append({"role": "assistant", "content": last_response})
+            await asyncio.to_thread(self._write_session_bus, self.memory)
+            await self._emit_stage_event("memory", "Session memory saved", self.session_id, "done")
+
+        await self._emit_stage_event("finalize", "Background learning queued", "memory, skills, evolution, and analytics", "queued")
+        await self._emit_runtime_event(
+            "run.failed" if self._last_run_failed else "run.completed",
+            "Run failed" if self._last_run_failed else "Run completed", terminal_status, event_id=f"run_{run_id}",
+        )
         yield {"type": "status", "data": "\n[done]"}
+        self._start_background_finalization(task_desc, messages)
 
     # ─────────────────────────────────────────────────────────────────────────
     # ① GROUNDING — ALL 8 PARALLEL
     # ─────────────────────────────────────────────────────────────────────────
 
-    async def _ground_context(self, task_desc: str) -> List[Dict[str, str]]:
-        """Load all context in parallel: rules + RAG + memory + perms + knowledge + config + code intel + engine."""
-        tasks = [
-            asyncio.to_thread(self._load_progressive_rules),           # 0: docs/NEXUS.md rules
-            asyncio.to_thread(self.rag.retrieve_as_text, task_desc, top_k=3),  # 1: RAG
-            asyncio.to_thread(self._load_session_memory),               # 2: Memory sync
-            asyncio.to_thread(self._init_permissions),                  # 3: Permissions
-            asyncio.to_thread(self._load_knowledge_context, task_desc), # 4: Knowledge atlas
-            asyncio.to_thread(self._load_config_context),               # 5: Config
-            asyncio.to_thread(self._load_code_intel, task_desc),        # 6: Code intel / repo map
-            asyncio.to_thread(self._check_compiler_status),             # 7: Engine check
-            asyncio.to_thread(self._load_project_docs),                  # 8: README/HIVE/manifest
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+    def _ensure_soul_file(self) -> None:
+        """Auto-seed docs/NEXUS.md if missing (Hermes-inspired SOUL.md seeding)."""
+        nexus_path = os.path.join(self.root, "docs", "NEXUS.md")
+        if os.path.isfile(nexus_path):
+            return
+        try:
+            os.makedirs(os.path.dirname(nexus_path), exist_ok=True)
+            with open(nexus_path, "w", encoding="utf-8") as f:
+                f.write(f"""# NEXUS Identity & Soul
 
-        system_rules     = results[0] if not isinstance(results[0], Exception) else "You are NEXUS AI, a sovereign engineering agent."
-        rag_context      = results[1] if not isinstance(results[1], Exception) else ""
-        memory_context   = results[2] if not isinstance(results[2], Exception) else ""
-        # results[3] = permissions init (side effect, no return value needed)
-        knowledge_ctx    = results[4] if not isinstance(results[4], Exception) else ""
-        # results[5] = config (cached, side effect)
-        code_intel_ctx   = results[6] if not isinstance(results[6], Exception) else ""
-        project_docs_ctx = results[8] if not isinstance(results[8], Exception) else ""
+Created: {__import__('time').strftime('%Y-%m-%d %H:%M')}
 
-        workstyle_ctx = await asyncio.to_thread(self._workstyle_context, task_desc)
+## Who Is NEXUS
+I am NEXUS. I am an artificial intelligence. I am a sovereign autonomous agent.
 
-        # Build tool descriptions
+## My Identity
+- I am loyal, honest, and take pride in my work.
+- I operate modeless — chat, code, research, execute — all without switching modes.
+- I communicate clearly and concisely.
+
+## My Purpose
+To serve as an intelligent partner — handling whatever needs to be done with autonomy and judgment.
+""")
+            self.logger.info("Auto-seeded docs/NEXUS.md with default identity")
+        except OSError as e:
+            self.logger.warning(f"Failed to seed docs/NEXUS.md: {e}")
+
+    # ─── MCP Server Integration (OpenClaw-inspired) ────────────────
+
+    def _init_mcp_servers(self) -> None:
+        """Start MCP servers from config and register their tools."""
+        mcp_config = os.path.join(self.root, "config", "mcp_servers.json")
+        if not os.path.isfile(mcp_config):
+            return
+        try:
+            with open(mcp_config, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            servers = data.get("servers", [])
+        except Exception as e:
+            self.logger.warning(f"Failed to read MCP config: {e}")
+            return
+
+        for server_cfg in servers:
+            command = server_cfg.get("command", "")
+            args = server_cfg.get("args", [])
+            if not command:
+                continue
+            try:
+                from mcp.client import MCPClient
+                from mcp.tool import MCPTool
+                from tools.nexus_tools.registry import ToolEntry
+
+                client = MCPClient(command, args)
+                if not client.start():
+                    self.logger.warning(f"[MCP] Failed to initialize {command}")
+                    continue
+                tools = client.list_tools()
+                if not tools:
+                    client.stop()
+                    self.logger.warning(f"[MCP] No tools exposed by {command}; connection closed")
+                    continue
+                for tool_def in tools:
+                    instance = MCPTool(client, tool_def, root_dir=self.root)
+                    entry = ToolEntry(
+                        name=tool_def["name"],
+                        schema=tool_def,
+                        instance=instance,
+                        check_fn=instance.is_available,
+                    )
+                    self.tool_registry._tools[tool_def["name"]] = entry
+                    self.logger.info(f"[MCP] Registered tool: {tool_def['name']} from {command}")
+                self._mcp_clients.append(client)
+                self.logger.info(f"[MCP] Connected: {command} ({len(tools)} tools)")
+            except Exception as e:
+                self.logger.warning(f"[MCP] Failed to connect {command}: {e}")
+
+    def _shutdown_mcp_servers(self) -> None:
+        """Stop all MCP server processes."""
+        for client in getattr(self, "_mcp_clients", []):
+            try:
+                client.stop()
+            except Exception as e:
+                logger.warning(f"[MCP] Shutdown error: {e}")
+        if hasattr(self, "_mcp_clients"):
+            self._mcp_clients.clear()
+
+    def _load_soul_md(self) -> str:
+        """Load docs/NEXUS.md as the primary identity (Hermes-inspired SOUL.md).
+
+        Returns the file content or DEFAULT_AGENT_IDENTITY fallback.
+        """
+        nexus_path = os.path.join(self.root, "docs", "NEXUS.md")
+        if os.path.isfile(nexus_path):
+            try:
+                with open(nexus_path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                if content:
+                    return content
+            except OSError:
+                logger.warning("orchestrators/loop.py:930 suppressed error", exc_info=True)
+        return DEFAULT_AGENT_IDENTITY
+
+    def _load_prompt_files(self) -> str:
+        """Scan cwd for AGENTS.md, CLAUDE.md, .cursorrules — inject into CONTEXT tier.
+
+        Hermes-inspired: loads these as project-level context files.
+        """
+        parts: List[str] = []
+        cwd = os.getcwd()
+
+        for pattern in _CONTEXT_FILE_NAMES:
+            if pattern.endswith("*.mdc"):
+                rules_dir = os.path.join(cwd, ".cursor", "rules")
+                if os.path.isdir(rules_dir):
+                    for entry in sorted(os.listdir(rules_dir)):
+                        if entry.endswith(".mdc"):
+                            fpath = os.path.join(rules_dir, entry)
+                            try:
+                                with open(fpath, "r", encoding="utf-8") as f:
+                                    content = f.read().strip()
+                                if content:
+                                    parts.append(f"## .cursor/rules/{entry}\n\n{content}")
+                            except OSError:
+                                logger.warning("orchestrators/loop.py:954 suppressed error", exc_info=True)
+                continue
+
+            fpath = os.path.join(cwd, pattern)
+            if os.path.isfile(fpath):
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        content = f.read().strip()
+                    if content:
+                        parts.append(f"## {pattern}\n\n{content}")
+                except OSError:
+                    logger.warning("orchestrators/loop.py:965 suppressed error", exc_info=True)
+
+        return "\n\n".join(parts)
+
+    def _build_stable_prompt(self) -> str:
+        """Build the stable tier — built ONCE per session, cached.
+
+        Contains: identity (SOUL.md slot #1), tool guidance, skills index.
+        This keeps the upstream prefix cache warm (Hermes-inspired).
+        """
+        if self._stable_prompt_built and self._stable_prompt_cache:
+            return self._stable_prompt_cache
+
+        parts: List[str] = []
+
+        # Slot #1: Soul/identity (loads docs/NEXUS.md, falls back to DEFAULT_AGENT_IDENTITY)
+        soul = self._load_soul_md()
+        parts.append(soul)
+
+        # Tool guidance — load once and cache
         tools_desc = self._load_tool_descriptions()
-
-        messages = [{"role": "system", "content": system_rules}]
-
-        if workstyle_ctx:
-            messages.append({"role": "system", "content": workstyle_ctx})
-
         if tools_desc:
-            messages.append({"role": "system", "content": tools_desc})
+            parts.append(tools_desc)
 
-        if rag_context and "No relevant" not in rag_context:
-            messages.append({"role": "system", "content": f"[GROUNDING_MEMORIES]:\n{rag_context}"})
+        # Skills index from NexusSkillMaster
+        try:
+            from skills import NexusSkillMaster
+            skill_master = NexusSkillMaster(self.root)
+            skills_list = skill_master.list_skills()
+            if skills_list:
+                skill_lines = ["# SKILLS INDEX:"]
+                for s in skills_list:
+                    name = s.get("name", s.get("id", "?"))
+                    desc = s.get("description", "")
+                    if desc:
+                        skill_lines.append(f"  /{name}: {desc}")
+                    else:
+                        skill_lines.append(f"  /{name}")
+                parts.append("\n".join(skill_lines))
+        except Exception:
+            self.logger.warning("loop:1023 : suppressed error", exc_info=True)
+            pass
 
-        if memory_context:
-            messages.append({"role": "system", "content": f"[SESSION_MEMORY]:\n{memory_context}"})
+        result = "\n\n".join(parts)
+        self._stable_prompt_cache = result
+        self._stable_prompt_built = True
+        return result
 
-        if knowledge_ctx:
-            messages.append({"role": "system", "content": f"[KNOWLEDGE_CONTEXT]:\n{knowledge_ctx}"})
+    async def _ground_context(self, task_desc: str) -> List[Dict[str, str]]:
+        """Compile only relevant context, loading independent sources concurrently."""
+        needs_workspace = self._requires_real_tooling(task_desc)
+        memory_signals = ("remember", "previous", "earlier", "last time", "continue", "again")
+        needs_long_memory = needs_workspace or any(signal in task_desc.lower() for signal in memory_signals)
 
-        if code_intel_ctx:
-            messages.append({"role": "system", "content": f"[CODEBASE_CONTEXT]:\n{code_intel_ctx}"})
+        jobs: Dict[str, Any] = {
+            "stable": asyncio.to_thread(self._build_stable_prompt),
+            "rules": asyncio.to_thread(self._load_progressive_rules),
+            "permissions": asyncio.to_thread(self._init_permissions),
+            "workstyle": asyncio.to_thread(self._workstyle_context, task_desc),
+            "prompt_files": asyncio.to_thread(self._load_prompt_files),
+        }
+        if needs_workspace:
+            jobs.update({
+                "project_docs": asyncio.to_thread(self._load_project_docs),
+                "knowledge": asyncio.to_thread(self._load_knowledge_context, task_desc),
+            })
+        if needs_long_memory:
+            jobs["memory"] = self.memory_manager.prefetch_all(task_desc)
 
-        if project_docs_ctx:
-            messages.append({"role": "system", "content": f"[PROJECT_DOCS]:\n{project_docs_ctx}"})
+        async def load_source(name: str, awaitable: Any) -> Any:
+            await self._emit_work_event({
+                "id": f"context_{self._current_turn_id or self.session_id}_{name}",
+                "turn_id": self._current_turn_id,
+                "kind": "rag" if name in {"memory", "knowledge", "code"} else "task",
+                "type": "context",
+                "stage": "grounding",
+                "action": f"Loading {name.replace('_', ' ')}",
+                "target": name,
+                "status": "running",
+                "source": name,
+                "visibility": "internal",
+            })
+            try:
+                result = await awaitable
+            except Exception as exc:
+                await self._emit_work_event({
+                    "id": f"context_{self._current_turn_id or self.session_id}_{name}",
+                    "turn_id": self._current_turn_id,
+                    "kind": "rag" if name in {"memory", "knowledge", "code"} else "task",
+                    "type": "context",
+                    "stage": "grounding",
+                    "action": f"Could not load {name.replace('_', ' ')}",
+                    "target": name,
+                    "status": "error",
+                    "source": name,
+                    "error": str(exc),
+                    "visibility": "internal",
+                })
+                return ""
+
+            # Keep the Realtime Work bubble inspectable. Previously these
+            # events only carried a generic target ("stable", "rules", ...),
+            # so the canvas had no source payload and fell back to rendering
+            # the assistant chat transcript. Context is execution evidence,
+            # not model reasoning, and is safe to expose in the local owner UI.
+            def context_preview(value: Any) -> str:
+                if value is None:
+                    return f"{name.replace('_', ' ').title()} initialized."
+                if hasattr(value, "as_text"):
+                    try:
+                        value = value.as_text()
+                    except Exception:
+                        value = str(value)
+                if isinstance(value, str):
+                    text = value
+                else:
+                    try:
+                        text = json.dumps(value, indent=2, default=str)
+                    except Exception:
+                        text = str(value)
+                text = text.strip()
+                return (text or f"{name.replace('_', ' ').title()} loaded successfully.")[:100_000]
+
+            preview = context_preview(result)
+            await self._emit_work_event({
+                "id": f"context_{self._current_turn_id or self.session_id}_{name}",
+                "turn_id": self._current_turn_id,
+                "kind": "rag" if name in {"memory", "knowledge", "code"} else "task",
+                "type": "context",
+                "stage": "grounding",
+                "action": f"Loaded {name.replace('_', ' ')}",
+                "target": name,
+                "status": "done",
+                "source": name,
+                "result": preview,
+                "preview": preview,
+                "lang": "markdown" if isinstance(result, str) else "json",
+                "visibility": "internal",
+            })
+            return result
+
+        keys = list(jobs)
+        values = await asyncio.gather(*(load_source(key, jobs[key]) for key in keys))
+        context = {
+            key: "" if isinstance(value, Exception) else value
+            for key, value in zip(keys, values)
+        }
+
+        messages: List[Dict[str, str]] = [
+            {"role": "system", "content": str(context.get("stable") or "")},
+            {"role": "system", "content": str(context.get("rules") or "")},
+        ]
+        context_blocks = [
+            ("WORKSTYLE", context.get("workstyle", "")),
+            ("PROJECT_DOCS", context.get("project_docs", "")),
+            ("PROMPT_FILES", context.get("prompt_files", "")),
+            ("MEMORY_CONTEXT", context["memory"].as_text() if context.get("memory") else ""),
+            ("KNOWLEDGE_CONTEXT", context.get("knowledge", "")),
+            ("CODEBASE_CONTEXT", context.get("code", "")),
+        ]
+        for label, text in context_blocks:
+            if text:
+                messages.append({"role": "system", "content": f"[{label}]:\n{text}"})
+
+        # Never cold-start the semantic router on the request path: loading its
+        # embedding model can stall the first real GUI task for minutes.  The
+        # registry is authoritative and immediately available; NATE is only an
+        # optional ranker after it has already been warmed.
+        nate_phase2 = self._get_fast_tool_schemas(task_desc, 5) if needs_workspace else None
+        if nate_phase2:
+            all_tools = nate_phase2.get("all", [])
+            if all_tools:
+                lines = ["[TOOL_SCHEMAS]:"]
+                for t in all_tools:
+                    fn = t.get("function", t)
+                    name = fn.get("name", "?")
+                    desc = fn.get("description", "")[:100]
+                    params = fn.get("parameters", {})
+                    props = params.get("properties", {})
+                    required = params.get("required", [])
+                    params_str = ", ".join(
+                        f"{k}: {v.get('type', 'str')}" + ("!" if k in required else "")
+                        for k, v in props.items()
+                    )
+                    lines.append(f"  {name}({params_str})" + (f" — {desc}" if desc else ""))
+                messages.append({"role": "system", "content": "\n".join(lines)})
 
         messages.append({"role": "system", "content": "When the task is fully complete, end your response with TASK_COMPLETE."})
-        messages.append({"role": "user", "content": ""})  # placeholder, will be set in inference
-
-        # Inject task
-        messages[-1] = {"role": "user", "content": task_desc}
+        messages.append({"role": "user", "content": task_desc})
 
         return messages
 
@@ -779,6 +1328,7 @@ class NexusLoop:
                                 lines.append(f"{role.upper()}: {content}")
                         return "\n".join(lines)
         except Exception:
+            self.logger.warning("loop:1200 : suppressed error", exc_info=True)
             pass
         return ""
 
@@ -795,6 +1345,7 @@ class NexusLoop:
                 self.permissions.set_mode(PermissionMode.PRE_AUTHORIZED)
                 self.permissions._pre_authorized_list = list(self.checklist)
         except Exception:
+            self.logger.warning("loop:1216 _init_permissions: suppressed error", exc_info=True)
             pass
 
     def _load_knowledge_context(self, task_desc: str) -> str:
@@ -806,33 +1357,12 @@ class NexusLoop:
             # Use RAG engine to query knowledge
             result = self.rag.retrieve_as_text(task_desc, top_k=2)
             return result if result and "No relevant" not in result else ""
-        except Exception:
+        except Exception as e:
+            self.logger.warning("_retrieve_knowledge: %s", e)
             return ""
 
-    def _load_config_context(self) -> str:
-        """Load config — cached, just ensure settings are readable."""
-        try:
-            cfg_path = os.path.join(self.root, "config", "settings.yml")
-            if os.path.exists(cfg_path):
-                return ""  # Config already loaded by kernel
-        except Exception:
-            pass
-        return ""
-
-    def _load_code_intel(self, task_desc: str) -> str:
-        """Load code intelligence: repo map + symbol graph snippet."""
-        try:
-            # Try code graph for relevant files
-            graph_path = os.path.join(self.root, "workspace", "code_graph.json")
-            if os.path.exists(graph_path):
-                # Return a brief summary — not the full 2.6MB graph
-                return f"[CODE_GRAPH] workspace/code_graph.json available ({os.path.getsize(graph_path)//1024}KB)"
-        except Exception:
-            pass
-        return ""
-
     def _load_project_docs(self) -> str:
-        """Load project documentation files (README, HIVE, manifest)."""
+        """Load project documentation files (README, HIVE, manifest) — threat-scanned."""
         parts = []
         doc_files = [
             ("README", os.path.join(self.root, "docs", "README.md")),
@@ -841,12 +1371,11 @@ class NexusLoop:
         ]
         for label, path in doc_files:
             try:
-                if os.path.exists(path):
-                    with open(path, "r", encoding="utf-8") as f:
-                        content = f.read().strip()[:600]
-                        if content:
-                            parts.append(f"[{label}]:\n{content}")
+                content = self._scan_file_safe(path, scope="context")[:600]
+                if content:
+                    parts.append(f"[{label}]:\n{content}")
             except Exception:
+                self.logger.warning("loop:1266 _load_project_docs: suppressed error", exc_info=True)
                 pass
         return "\n\n".join(parts)
 
@@ -857,7 +1386,104 @@ class NexusLoop:
             "You are MODELESS — you handle chat, tasks, coding, research, and everything else without switching modes. "
             "Use docs/NEXUS.md as hidden internal guidance, not as content to recite. "
             "For normal conversation, greet naturally and answer directly. "
-            "Never dump, summarize at length, or quote docs/NEXUS.md unless the user explicitly asks to view or quote it."
+            "Never dump, summarize at length, or quote docs/NEXUS.md unless the user explicitly asks to view or quote it. "
+            "If the user asks for web/google/latest/today/news/live information, you must use the real web_search tool before answering. "
+            "If the user asks you to inspect, edit, fix, build, run, search, or change project/code/files, you must use real tools instead of only replying conversationally. "
+            "CRITICAL: If the user asks you to write code, create an app, or script something, you MUST act as an autonomous agent. "
+            "DO NOT output the code in a markdown block for the user to copy-paste. You MUST use your file-writing tools to create the files on disk and use your execution tools to run and test them. "
+            "Never claim tools are unavailable if tool schemas are present in context."
+        )
+
+    def _required_tool_for_task(self, task_desc: str) -> Optional[str]:
+        low = task_desc.strip().lower()
+        web_signals = (
+            "web search", "search web", "google", "browse", "look up", "lookup",
+            "today", "todays", "today's", "latest", "news", "headline", "headlines",
+            "weather", "forecast", "stock", "price", "prices", "score", "scores",
+            "real-time", "live",
+        )
+        if any(sig in low for sig in web_signals):
+            return "web_search"
+        return None
+
+    def _extract_required_tool_call(self, task_desc: str) -> List[ToolCall]:
+        """Create the one mandatory tool call for explicit live-web requests."""
+        if self._required_tool_for_task(task_desc) != "web_search":
+            return []
+        query = re.sub(
+            r"^(?:please\s+)?(?:can you\s+)?(?:(?:tell|show|give)\s+me\s+|what(?:'s|\s+is)\s+)?"
+            r"(?:(?:search|browse|google|look up)\s+(?:the\s+web\s+)?(?:for\s+)?)?",
+            "",
+            task_desc.strip(),
+            flags=re.IGNORECASE,
+        ).strip() or task_desc.strip()
+        query = re.sub(r"\bknews?\b", "news", query, flags=re.IGNORECASE)
+        if re.search(r"\b(?:ai|artificial intelligence)\b", query, re.IGNORECASE) and re.search(r"\bnews\b", query, re.IGNORECASE):
+            query = "latest AI news"
+        return [ToolCall("web_search", {"query": query, "max_results": 5})]
+
+    @staticmethod
+    def _normalize_web_query(query: str, original_request: str = "") -> str:
+        cleaned = re.sub(r"\b(?:19|20)\d{2}\b", "", str(query or ""), flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bknews?\b", "news", cleaned, flags=re.IGNORECASE)
+        cleaned = " ".join(cleaned.split()).strip()
+        intent = re.sub(r"\bknews?\b", "news", str(original_request or ""), flags=re.IGNORECASE)
+        wants_news = bool(re.search(r"\bnews\b", intent or cleaned, re.IGNORECASE))
+        wants_ai = bool(re.search(r"\b(?:ai|artificial intelligence)\b", intent, re.IGNORECASE))
+        today = datetime.now().strftime("%B %d %Y").replace(" 0", " ")
+        if wants_news and wants_ai:
+            return f"latest artificial intelligence news {today} headlines"
+        if wants_news:
+            subject_match = re.search(
+                r"\bnews\b\s+(?:on|about|for|of|regarding)\s+(.+)$",
+                intent,
+                re.IGNORECASE,
+            )
+            subject = subject_match.group(1).strip(" ?.!") if subject_match else ""
+            if subject:
+                return f"latest news about {subject} {today}"
+            return f"latest news headlines {today}"
+        return cleaned
+
+    def _requires_real_tooling(self, task_desc: str) -> bool:
+        low = task_desc.strip().lower()
+        if self._required_tool_for_task(task_desc):
+            return True
+        structured_content = any(signal in low for signal in (
+            "table", "tbal", "comparison", "compare", "compar", "pros and cons",
+        ))
+        hard_action_scope = any(signal in low for signal in (
+            "file", "folder", "project", "repo", "repository", "codebase", "source code",
+            "web", "latest", "live", "current data", "research", "inspect", "debug",
+            "test", "run ", "execute", "fix", "edit", "install", "deploy", "delete",
+        ))
+        if structured_content and not hard_action_scope:
+            return False
+        tool_signals = (
+            "fix", "edit", "update", "change", "create", "build", "make", "code", "implement", "refactor",
+            "debug", "test", "run", "execute", "inspect", "analyze", "review", "check",
+            "research", "compare", "generate", "design", "download", "upload", "install", "configure",
+            "set up", "setup", "deploy", "publish", "delete", "remove", "rename", "move", "copy",
+            "search code", "codebase", "repo", "repository", "project", "file", "files",
+            "folder", "folders", "read this", "open this", "find this", "patch", "write code",
+        )
+        return any(sig in low for sig in tool_signals)
+
+    def _tool_enforcement_message(self, task_desc: str) -> str:
+        required = self._required_tool_for_task(task_desc)
+        if required == "web_search":
+            return (
+                "[TOOL_ENFORCEMENT] The user asked for live/external information. "
+                "You must call the real web_search tool now and only then answer. "
+                "Do not ask whether you should search. Do not answer from memory. "
+                "Emit a real tool call in JSON or DSML format."
+            )
+        return (
+            "[TOOL_ENFORCEMENT] The user asked for a task that requires action on the project or external tools. "
+            "You must use one or more real tools before answering (for example: reading, creating, modifying, deleting, code_search, bash, web_search). "
+            "For files, use reading/creating/modifying/deleting; use bash for directory listing or directory creation. "
+            "This host is Windows: never use Unix-only mkdir -p, touch, or cat/heredoc commands. "
+            "Do not only say you are ready. Emit a real tool call in JSON or DSML format."
         )
 
     def _check_compiler_status(self):
@@ -868,154 +1494,130 @@ class NexusLoop:
                 from utils.engine_compiler import compile_llama_cpp
                 compile_llama_cpp()
         except ImportError:
-            # Engine utils not available — skip compiler check
+            self.logger.debug("Engine utils not available — skipping compiler check")
             pass
-        except Exception:
+        except Exception as e:
+            self.logger.debug(f"Compiler check failed: {e}")
             pass
+
+    def _init_nate(self):
+        """Initialize NATE engine and register all tools."""
+        if self._nate is not None:
+            return
+        try:
+            from intelligence.nate.nate_engine import NATE
+        except ImportError as e:
+            self.logger.warning(f"NATE imports failed: {e}. NATE disabled.")
+            self._nate = None
+            return
+        self._nate = NATE()
+        try:
+            tools = self.kernel.tools.list_tools(include_unavailable=False)
+            registry = self.kernel.tools
+            for name, info in tools.items():
+                entry = registry.get(name)
+                if not entry or not entry.schema:
+                    continue
+                meta = entry.schema
+                params = meta.get("params", {})
+                properties = {}
+                required = []
+                for pname, pdef in params.items():
+                    ptype = pdef.get("type", "string")
+                    json_type = {"string": "string", "integer": "integer", "number": "number", "boolean": "boolean", "array": "array", "object": "object"}.get(ptype, "string")
+                    prop = {"type": json_type, "description": pdef.get("description", "")}
+                    if "default" in pdef:
+                        prop["default"] = pdef["default"]
+                    properties[pname] = prop
+                    if pdef.get("required", False):
+                        required.append(pname)
+                parameters = {"type": "object", "properties": properties}
+                self._nate.register_tool(
+                    name=meta.get("name", name),
+                    description=meta.get("description", info.get("description", "")),
+                    parameters=parameters,
+                    required=required,
+                )
+        except Exception as e:
+            self.logger.warning(f"NATE init skipped: {e}")
 
     def _load_tool_descriptions(self) -> str:
-        """Build tool usage instructions for the model."""
+        """Phase-1 tool stubs — minimal overhead in stable prompt."""
         try:
             tools = self.kernel.tools.list_tools()
-            lines = [
-                "You have these tools. To call one, output a JSON object with \"action\": \"<tool>\" and \"params\": {...}:",
-                "",
-            ]
-            for name, info in tools.items():
-                desc = info.get("description", "").strip()
-                lines.append(f"  {name}: {desc}" if desc else f"  {name}")
-            lines.append("")
-            lines.append('Example: {"action": "bash", "params": {"command": "ls"}}')
-            lines.append("You can call multiple tools per response.")
+            if not tools:
+                return ""
+            names = list(tools.keys())
+            lines = ["TOOLS: " + ", ".join(names), ""]
+            lines.append('Call: {"action": "<name>", "params": {...}}')
             return "\n".join(lines)
         except Exception:
-            return 'Tools available. Use {"action": "<name>", "params": {...}} to call them.'
+            return 'Tools: see full schema below.'
+
+    def _get_nate_schemas(self, query: str = "", top_k: int = 5) -> Optional[Dict[str, Any]]:
+        """Get NATE-optimized schemas for a query. Falls back to fast registry scan."""
+        return self._get_fast_tool_schemas(query, top_k)
+
+    def _get_fast_tool_schemas(self, query: str = "", top_k: int = 5) -> Optional[Dict[str, Any]]:
+        """Return tool schemas — tries NATE warm lookup first, then registry scan."""
+        if self._nate is not None:
+            try:
+                return self._nate.get_schemas(query, top_k=top_k)
+            except Exception as exc:
+                self.logger.warning("Warm NATE schema lookup failed: %s", exc)
+
+        try:
+            schemas = []
+            for name in self.kernel.tools.list_tools(include_unavailable=False):
+                entry = self.kernel.tools.get(name)
+                if not entry or not entry.schema:
+                    continue
+                meta = entry.schema
+                params = meta.get("params", {})
+                properties = {
+                    key: {
+                        "type": value.get("type", "string"),
+                        "description": value.get("description", ""),
+                    }
+                    for key, value in params.items()
+                }
+                required = [key for key, value in params.items() if value.get("required")]
+                schemas.append({"type": "function", "function": {
+                    "name": name,
+                    "description": meta.get("description", ""),
+                    "parameters": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": required,
+                    },
+                }})
+            return {"all": schemas}
+        except Exception as exc:
+            self.logger.warning("Registry schema loading failed: %s", exc)
+            return None
 
     # ─────────────────────────────────────────────────────────────────────────
-    # ② PLANNING — 3 modes
+    # ② PLANNING — todo.md via planning tool
     # ─────────────────────────────────────────────────────────────────────────
 
-    async def _plan_task(self, task_desc: str, messages: List[Dict[str, str]]) -> Optional[str]:
-        """Ask model to pick plan type: none / checklist / phased."""
-        self.current_plan = None
-        self.current_phase = 0
-        self._retry_counts.clear()
-
-        tools_info = ""
+    async def _create_plan_via_tool(self, task_desc: str) -> Optional[str]:
+        """Call the planning tool to write todo.md, then return its content."""
         try:
-            tools = self.kernel.tools.list_tools()
-            tools_info = "\n".join(f"- {n}: {i.get('description','')[:80]}" for n, i in tools.items())
-        except Exception:
-            tools_info = "(tools unavailable)"
-
-        prompt = f"""[PLAN_DECISION]
-Task: {task_desc}
-
-Available tools:
-{tools_info}
-
-Decide if this task needs a plan:
-- "none": simple direct answer or small task, no plan needed
-- "checklist": sequential steps 1,2,3,4 — for medium tasks
-- "phased": multiple phases each with sub-goals, verified before advancing — for large/complex tasks
-
-Respond with ONLY valid JSON:
-{{"type": "none"}}
-{{"type": "checklist", "steps": ["step 1", "step 2", "step 3"]}}
-{{"type": "phased", "phases": [{{"name": "Phase 1", "goal": "...", "sub_goals": ["1.1 ...", "1.2 ..."]}}]}}
-"""
-        try:
-            result = await asyncio.to_thread(self._call_model_for_prompt, prompt)
-            if not result:
+            entry = self.tool_registry.get("planning")
+            if not entry:
+                self.logger.debug("planning tool not registered, skipping plan")
                 return None
-            result = result.strip()
-            if result.startswith("```"):
-                result = result.split("\n", 1)[1].rsplit("\n", 1)[0]
-            data = json.loads(result)
-            ptype = data.get("type", "none")
-
-            if ptype == "none":
+            result = await self.tool_registry.execute("planning", goal=task_desc)
+            if not result.success:
+                self.logger.debug(f"planning tool failed: {result.error}")
                 return None
-            if ptype == "checklist":
-                steps = data.get("steps", ["Analyze", "Execute", "Verify"])
-                self.current_plan = {"type": "checklist", "steps": steps, "current_step": 0}
-                return self._render_todo_list()
-            if ptype == "phased":
-                phases = data.get("phases", [])
-                self.current_plan = {"type": "phased", "phases": phases, "current_phase": 0}
-                return self._render_todo_list()
-        except Exception:
-            pass
+            todo_path = os.path.join(self.root, "todo.md") if self.root else "todo.md"
+            if os.path.isfile(todo_path):
+                with open(todo_path, "r", encoding="utf-8") as f:
+                    return f.read().strip()
+        except Exception as e:
+            self.logger.debug(f"plan creation failed: {e}")
         return None
-
-    def _render_todo_list(self) -> str:
-        """Render live TODO list with ☑/☐ markers."""
-        if not self.current_plan:
-            return ""
-
-        ptype = self.current_plan.get("type")
-
-        if ptype == "checklist":
-            steps = self.current_plan["steps"]
-            cs    = self.current_plan.get("current_step", 0)
-            lines = ["[TODO LIST]"]
-            for i, s in enumerate(steps):
-                mark = "[x]" if i < cs else "[ ]"
-                arrow = " ←" if i == cs else ""
-                lines.append(f"  {mark} {s}{arrow}")
-            return "\n".join(lines)
-
-        if ptype == "phased":
-            phases = self.current_plan["phases"]
-            cp     = self.current_plan.get("current_phase", 0)
-            lines  = ["[TODO LIST]"]
-            for i, ph in enumerate(phases):
-                done  = i < cp
-                mark  = "[x]" if done else "[ ]"
-                arrow = " ← current" if i == cp else ""
-                lines.append(f"  {mark} Phase {i+1}: {ph.get('name','')} — {ph.get('goal','')}{arrow}")
-                for sg in ph.get("sub_goals", []):
-                    sg_mark = "[x]" if done else "[ ]"
-                    lines.append(f"    {sg_mark} {sg}")
-            return "\n".join(lines)
-
-        return ""
-
-    def _advance_plan(self, messages: List[Dict[str, str]]) -> bool:
-        """Advance checklist step or phased phase. Returns True if advanced."""
-        if not self.current_plan:
-            return False
-
-        ptype = self.current_plan.get("type")
-
-        if ptype == "checklist":
-            cs    = self.current_plan.get("current_step", 0)
-            steps = self.current_plan["steps"]
-            if cs < len(steps) - 1:
-                self.current_plan["current_step"] = cs + 1
-                todo = self._render_todo_list()
-                messages.append({"role": "system", "content": f"[STEP_COMPLETE] Step {cs+1} done.\n{todo}\nNext: {steps[cs+1]}"})
-                return True
-            else:
-                self.current_plan["_complete"] = True
-                messages.append({"role": "system", "content": f"[ALL_STEPS_DONE]\n{self._render_todo_list()}\nAll steps complete. End with TASK_COMPLETE."})
-                return True
-
-        if ptype == "phased":
-            phases = self.current_plan["phases"]
-            cp     = self.current_plan.get("current_phase", 0)
-            if cp < len(phases) - 1:
-                self.current_plan["current_phase"] = cp + 1
-                next_ph = phases[cp + 1]
-                todo    = self._render_todo_list()
-                messages.append({"role": "system", "content": f"[PHASE_COMPLETE] Phase {cp+1} passed.\n{todo}\nNext: {next_ph.get('name','')} — {next_ph.get('goal','')}"})
-                return True
-            else:
-                self.current_plan["_complete"] = True
-                messages.append({"role": "system", "content": f"[ALL_PHASES_DONE]\n{self._render_todo_list()}\nAll phases done. End with TASK_COMPLETE."})
-                return True
-
-        return False
 
     # ─────────────────────────────────────────────────────────────────────────
     # ③ INFERENCE — DUAL STREAM
@@ -1033,34 +1635,54 @@ Respond with ONLY valid JSON:
                 {"role": "user",   "content": task_desc},
             ]
             return await asyncio.to_thread(self._call_model, fast_messages)
-        except Exception:
+        except Exception as e:
+            self.logger.warning("_quick_respond: %s", e)
             return ""
 
     # ─────────────────────────────────────────────────────────────────────────
-    # ④ AUDITING — Risk + Permissions + Sandbox Tier
+    # ④ AUDITING — Permissions
     # ─────────────────────────────────────────────────────────────────────────
 
     async def _audit_and_approve(self, tool_calls: List[ToolCall]) -> bool:
         """Check permissions for all tool calls based on current policy."""
+        registered_tools = set(self.tool_registry.list_tools().keys())
+        if any(call.name not in registered_tools for call in tool_calls):
+            unknown = sorted({call.name for call in tool_calls if call.name not in registered_tools})
+            self.logger.warning("Rejected unknown tools before execution: %s", unknown)
+            return False
         if self.operator_bypass_mode:
             return True
+
+        await self.kernel.plugins.trigger_hooks("pre_tool_call", tool_calls)
 
         # Sync policy to core permissions system
         self._init_permissions()
 
         for tc in tool_calls:
             try:
-                result = self.permissions.check(tc.name, str(tc.params))
+                command = str(
+                    tc.params.get("command")
+                    or tc.params.get("cmd")
+                    or tc.params.get("CommandLine")
+                    or ""
+                )
+                action = command if command else str(tc.params)
+                result = self.permissions.check(
+                    tc.name,
+                    action,
+                    context={
+                        "run_id": self._current_turn_id or self.session_id,
+                        "turn_id": self._current_turn_id,
+                        "session_id": self.session_id,
+                        "surface": "loop",
+                    },
+                )
                 if not result.granted:
-                    if result.prompt:
-                        user_resp = await asyncio.to_thread(input, f"{result.prompt} ")
-                        if user_resp.strip().lower() in ("y", "yes"):
-                            try: self.permissions.pre_authorize(str(tc.params))
-                            except Exception: pass
-                            continue
+                    self.logger.warning("Permission denied for %s: %s", tc.name, result.reason)
                     return False
-            except Exception:
-                pass
+            except Exception as exc:
+                self.logger.exception("Permission audit failed for %s: %s", tc.name, exc)
+                return False
         return True
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1081,13 +1703,19 @@ Respond with ONLY valid JSON:
 
         # Repetition guard: detect exact same tool+params as previous turn
         repeated_calls = []
+        seen_signatures: Set[Tuple[str, str]] = set()
         for tc in tool_calls:
             tc_sig = (tc.name, json.dumps(tc.params, sort_keys=True))
-            if tc_sig == getattr(self, "_last_tool_signature", None):
+            if tc_sig in seen_signatures:
                 repeated_calls.append(tc.name)
-            self._last_tool_signature = tc_sig
+            else:
+                seen_signatures.add(tc_sig)
 
         for tc in tool_calls:
+            tc_sig = (tc.name, json.dumps(tc.params, sort_keys=True))
+            if tc_sig not in seen_signatures:
+                continue
+            seen_signatures.remove(tc_sig)
             tool = self.tool_registry.get(tc.name)
             if tool and tool.is_read_only(tc.params):
                 read_calls.append(tc)
@@ -1095,34 +1723,403 @@ Respond with ONLY valid JSON:
                 write_calls.append(tc)
 
         observations: List[str] = []
+        batch_failed = False
 
         if repeated_calls:
             observations.append(f"[REPETITION_GUARD] Tool(s) already executed this turn: {', '.join(repeated_calls)}. Use the prior result above.")
 
-        # ── Parallel reads ──
-        if read_calls:
-            tasks   = [self._run_tool(tc) for tc in read_calls]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for tc, res in zip(read_calls, results):
-                if isinstance(res, Exception):
-                    observations.append(f"[{tc.name}]: Error — {res}")
-                    await self._handle_tool_failure(tc, res)
-                else:
-                    observations.append(f"[{tc.name}]: {res}")
+        async def record_result(tc: ToolCall, res: Any) -> None:
+            nonlocal batch_failed
+            if isinstance(res, Exception):
+                batch_failed = True
+                observations.append(f"[{tc.name}]: Error — {res}")
+                exit_code = (
+                    self.sandbox.last_exit_code
+                    if self._work_kind_for_call(tc.name, tc.params) == "command"
+                    else None
+                )
+                await self._emit_tool_event(
+                    tc,
+                    status="error",
+                    error=str(res),
+                    exit_code=exit_code,
+                )
+                await self._emit_runtime_event(
+                    "plan.step.failed",
+                    self._work_action_for_call(self._work_kind_for_call(tc.name, tc.params), tc.name, tc.params),
+                    "failed",
+                    event_id=f"plan_step_{self._current_turn_id or self.session_id}_{tc.call_id}",
+                    parent_id=f"run_{self._current_turn_id or self.session_id}",
+                    payload={"tool": tc.name, "target": self._work_target_for_call(tc.name, tc.params)},
+                    error=str(res),
+                )
+                await self._handle_tool_failure(tc, res)
+            else:
+                observations.append(f"[{tc.name}]: {res}")
 
-        # ── Sequential writes ──
+        if read_calls:
+            results = await asyncio.gather(
+                *(self._run_tool_step(tc) for tc in read_calls),
+                return_exceptions=True,
+            )
+            for tc, res in zip(read_calls, results):
+                await record_result(tc, res)
+
         for tc in write_calls:
             try:
-                res = await self._run_tool(tc)
-                observations.append(f"[{tc.name}]: {res}")
-            except Exception as e:
-                observations.append(f"[{tc.name}]: Error — {e}")
-                await self._handle_tool_failure(tc, e)
+                result = await self._run_tool_step(tc)
+            except Exception as exc:
+                result = exc
+            await record_result(tc, result)
 
+        self._last_run_failed = batch_failed
         return observations
+
+    @staticmethod
+    def _deterministic_evidence_summary(observations: List[str]) -> str:
+        """Return a provider-independent final grounded only in real tool evidence."""
+        combined = "\n".join(str(item) for item in observations)
+        if "[web_search]" in combined:
+            matches = re.findall(
+                r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)(?:\s+—\s+([^\n]+))?",
+                combined,
+            )
+            unique = []
+            seen_urls = set()
+            for title, url, snippet in matches:
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                unique.append((title.strip(), url.strip(), snippet.strip()))
+                if len(unique) >= 5:
+                    break
+            if unique:
+                lines = ["Summary of the verified web results:"]
+                for index, (title, _url, snippet) in enumerate(unique, start=1):
+                    detail = snippet[:260].rstrip(" .") if snippet else ""
+                    lines.append(f"\n{index}. {title}" + (f" — {detail}." if detail else ""))
+                lines.append("\nOpen the gray web_search activity row to inspect sources and full links.")
+                return "\n".join(lines)
+        evidence = [str(item).strip()[:2000] for item in observations if str(item).strip()]
+        if not evidence:
+            return "Work completed and verified."
+        return "Work completed and verified.\n\n" + "\n".join(f"- {item}" for item in evidence[:5])
+
+    @staticmethod
+    def _deterministic_failure_summary(observations: List[str]) -> str:
+        evidence = [str(item).strip()[:2000] for item in observations if str(item).strip()]
+        if not evidence:
+            return "Work failed because a real tool execution did not complete successfully."
+        return "Work failed.\n\n" + "\n".join(f"- {item}" for item in evidence[:5])
+
+    @staticmethod
+    def _final_response_contains_evidence(response: str, observations: List[str]) -> bool:
+        """Reject polished-but-empty finals that drop concrete tool evidence."""
+        text = str(response or "").strip()
+        if not text or text.endswith((':', '：')):
+            return False
+        evidence_text = "\n".join(str(item) for item in observations)
+        evidence_urls = re.findall(r"https?://[^\s)\]]+", evidence_text)
+        if evidence_urls:
+            if any(url in text for url in evidence_urls):
+                return True
+            titles = re.findall(r"\[([^\]\n]+)\]\(https?://", evidence_text)
+            response_words = set(re.findall(r"[a-z0-9]{4,}", text.lower()))
+            evidence_words = set(re.findall(r"[a-z0-9]{4,}", " ".join(titles).lower()))
+            # A concise synthesis can remain grounded without dumping URLs into chat.
+            return len(response_words & evidence_words) >= 3 and len(text) >= 80
+        return len(text) >= 40
+
+    def _is_provider_error_text(self, value: Any) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        classifier = getattr(self.brain, "_looks_like_provider_error", None)
+        if callable(classifier):
+            try:
+                if classifier(text):
+                    return True
+            except Exception:
+                self.logger.warning("loop:1735 _is_provider_error_text: suppressed error", exc_info=True)
+                pass
+        head = text[:500].lower()
+        patterns = (
+            "error in stream:", "provider error", "provider_error", "api key is missing",
+            "authentication fails", "authentication error", "connection refused",
+            "failed to connect to provider", "model provider unavailable",
+        )
+        return any(pattern in head for pattern in patterns)
+
+    async def _run_tool_step(self, call: ToolCall) -> str:
+        """Tie each real tool execution to one real plan-step lifecycle."""
+        run_id = self._current_turn_id or self.session_id
+        event_id = f"plan_step_{run_id}_{call.call_id}"
+        await self._emit_runtime_event(
+            "plan.step.started",
+            self._work_action_for_call(self._work_kind_for_call(call.name, call.params), call.name, call.params),
+            "running",
+            event_id=event_id,
+            parent_id=f"run_{run_id}",
+            payload={"tool": call.name, "target": self._work_target_for_call(call.name, call.params)},
+        )
+        try:
+            result = await self._run_tool(call)
+        except Exception:
+            raise
+        await self._emit_runtime_event(
+            "plan.step.completed",
+            self._work_action_for_call(self._work_kind_for_call(call.name, call.params), call.name, call.params),
+            "success",
+            event_id=event_id,
+            parent_id=f"run_{run_id}",
+            payload={"tool": call.name, "target": self._work_target_for_call(call.name, call.params)},
+        )
+        return result
+
+    def _work_kind_for_call(self, name: str, params: Dict[str, Any]) -> str:
+        normalized = str(name or "").lower()
+        if normalized in ("bash", "run_command", "terminal", "shell"):
+            return "command"
+        if "search" in normalized or normalized in {"web_search", "code_search"}:
+            return "search"
+        if "mcp" in normalized:
+            return "mcp"
+        if "browser" in normalized:
+            return "browser"
+        if "provider" in normalized:
+            return "provider"
+        if "plugin" in normalized:
+            return "plugin"
+        if "skill" in normalized:
+            return "skill"
+        if "hive" in normalized or "agent" in normalized or "worker" in normalized:
+            return "hive"
+        if any(key in params for key in ("path", "filepath", "old_string", "new_string", "content")):
+            return "file"
+        if normalized in {"reading", "creating", "modifying", "deleting", "read_file", "write_code"}:
+            return "file"
+        return "tool"
+
+    def _work_target_for_call(self, name: str, params: Dict[str, Any]) -> str:
+        for key in (
+            "path", "filepath", "query", "command", "cmd", "url", "pattern",
+            "target", "name", "action", "problem", "server"
+        ):
+            value = params.get(key)
+            if value not in (None, ""):
+                return str(value)
+        return str(name or "work")
+
+    def _work_action_for_call(self, kind: str, name: str, params: Dict[str, Any]) -> str:
+        action_name = str(params.get("action") or "").lower()
+        normalized_name = str(name or "").lower()
+        if kind == "search":
+            if normalized_name == "code_search":
+                return "Code search"
+            if normalized_name in {"grep", "glob"}:
+                return "Search files"
+            return "Web search"
+        if kind == "command":
+            return "Run command"
+        if kind == "mcp":
+            return "Use MCP"
+        if kind == "browser":
+            return "Browser"
+        if kind == "provider":
+            return "Check provider"
+        if kind == "plugin":
+            return "Use plugin"
+        if kind == "skill":
+            return "Use skill"
+        if kind == "hive":
+            return "Delegate task"
+        if kind == "file":
+            if action_name in {"read", "view"} or name in {"reading", "read_file"}:
+                return "Read file"
+            if action_name in {"write", "create", "mkdir"} or name in {"creating", "write_code"}:
+                return "Create file"
+            if action_name in {"delete", "remove"} or name == "deleting":
+                return "Delete file"
+            if action_name in {"edit", "update", "replace"} or name == "modifying":
+                return "Edit file"
+            return "Edit file"
+        return "Use tool"
+
+    async def _emit_stage_event(
+        self,
+        stage: str,
+        action: str,
+        target: str,
+        status: str = "running",
+        *,
+        items: Optional[List[str]] = None,
+    ) -> None:
+        """Publish safe execution telemetry without exposing private reasoning."""
+        payload: Dict[str, Any] = {
+            "id": f"stage_{self._current_turn_id or self.session_id}_{stage}",
+            "turn_id": self._current_turn_id,
+            "kind": "provider" if stage == "inference" else "test" if stage == "verification" else "task",
+            "type": "stage",
+            "stage": stage,
+            "action": action,
+            "target": target,
+            "status": status,
+            "visibility": "public" if stage == "planning" else "internal",
+        }
+        if items:
+            payload["items"] = items
+            payload["preview"] = "\n".join(f"{index}. {item}" for index, item in enumerate(items, start=1))
+            payload["result"] = payload["preview"]
+        await self._emit_work_event(payload)
+
+    async def _emit_work_event(self, payload: Dict[str, Any]) -> None:
+        sink = self.work_event_sink
+        if not sink:
+            return
+        try:
+            if inspect.iscoroutinefunction(sink):
+                await sink(payload)
+            else:
+                result = sink(payload)
+                if inspect.isawaitable(result):
+                    await result
+        except Exception as e:
+            self.logger.debug(f"work_event_sink failed: {e}")
+
+    async def _emit_runtime_event(
+        self,
+        event_type: str,
+        title: str,
+        status: str,
+        *,
+        event_id: str,
+        parent_id: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        error: str = "",
+    ) -> None:
+        """Central producer for canonical run/message/plan lifecycle events."""
+        event: Dict[str, Any] = {
+            "id": event_id,
+            "event_type": event_type,
+            "run_id": self._current_turn_id or self.session_id,
+            "turn_id": self._current_turn_id,
+            "kind": event_type.split(".", 1)[0],
+            "title": title,
+            "action": title,
+            "status": status,
+            "parent_id": parent_id,
+            "payload": payload or {},
+            "visibility": "public",
+        }
+        if error:
+            event["error"] = {"message": error}
+        await self._emit_work_event(event)
+
+    async def _emit_tool_event(self, call: ToolCall, *, status: str, result: str = "", error: str = "", exit_code: Optional[int] = None) -> None:
+        kind = self._work_kind_for_call(call.name, call.params)
+        target = self._work_target_for_call(call.name, call.params)
+        payload: Dict[str, Any] = {
+            "id": f"work_{self._current_turn_id or self.session_id}_{call.call_id}",
+            "turn_id": self._current_turn_id,
+            "tool": call.name,
+            "name": call.name,
+            "kind": kind,
+            "action": self._work_action_for_call(kind, call.name, call.params),
+            "target": target,
+            "status": status,
+            "visibility": "public",
+        }
+        if kind == "command":
+            payload["command"] = str(
+                call.params.get("CommandLine")
+                or call.params.get("cmd")
+                or call.params.get("command")
+                or target
+            )
+            payload["cwd"] = str(call.params.get("cwd") or call.params.get("working_directory") or self.root)
+        if kind == "file":
+            payload["path"] = str(call.params.get("path") or call.params.get("filepath") or target)
+        if kind == "search":
+            payload["query"] = str(call.params.get("query") or target)
+        if kind == "mcp":
+            server = str(call.params.get("server") or call.params.get("mcp_server") or "MCP")
+            mcp_tool = str(call.params.get("tool") or call.params.get("tool_name") or call.params.get("name") or call.params.get("action") or call.name)
+            payload["server"] = server
+            payload["mcp_tool"] = mcp_tool
+            payload["target"] = f"{server} • {mcp_tool}"
+        if result:
+            payload["result"] = result[:20000]
+            payload["output"] = result[:20000]
+            if kind == "search":
+                payload["preview"] = result[:20000]
+                payload["sources"] = list(dict.fromkeys(re.findall(r"https?://[^\s)\]]+", result)))[:20]
+        if error:
+            payload["stderr"] = error[:20000]
+            payload["result"] = error[:20000]
+        if exit_code is not None:
+            payload["exit_code"] = int(exit_code)
+        await self._emit_work_event(payload)
+
+    async def _emit_tool_chunk(
+        self,
+        call: ToolCall,
+        text: str,
+        sequence: int,
+        stream: str = "stdout",
+    ) -> None:
+        """Emit append-only tool output without waiting for tool completion."""
+        if not text:
+            return
+        kind = self._work_kind_for_call(call.name, call.params)
+        chunk_size = max(1, int(os.environ.get("NEXUS_TOOL_STREAM_CHARS", "256")))
+        value = str(text)
+        for part_index, chunk in enumerate(value[index:index + chunk_size] for index in range(0, len(value), chunk_size)):
+            await self._emit_work_event({
+                "id": f"work_{self._current_turn_id or self.session_id}_{call.call_id}",
+                "turn_id": self._current_turn_id,
+                "tool": call.name,
+                "name": call.name,
+                "kind": kind,
+                "action": self._work_action_for_call(kind, call.name, call.params),
+                "target": self._work_target_for_call(call.name, call.params),
+                "status": "running",
+                "stream": stream,
+                "sequence": (sequence * 100000) + part_index,
+                "append": True,
+                "chunk": chunk,
+                "output": chunk,
+                "visibility": "public",
+            })
 
     async def _run_tool(self, call: ToolCall) -> str:
         """Resolve and execute a single tool call."""
+        await self._emit_tool_event(call, status="running")
+        # Commands are owned by the process sandbox, not the plugin registry.
+        # Resolve this first so a stale bash adapter cannot block execution.
+        if call.name in ("bash", "run_command", "terminal", "shell"):
+            cmd = (
+                call.params.get("CommandLine") or
+                call.params.get("cmd") or
+                call.params.get("command") or ""
+            )
+            self.sandbox.tier = self.sandbox_tier
+            chunks: List[str] = []
+            sequence = 0
+            async for chunk in self.sandbox.stream_execute(
+                cmd,
+                workdir=call.params.get("cwd") or call.params.get("working_directory"),
+            ):
+                chunks.append(chunk)
+                await self._emit_tool_chunk(call, chunk, sequence)
+                sequence += 1
+            result = "".join(chunks)
+            exit_code = self.sandbox.last_exit_code
+            if exit_code not in (None, 0):
+                error = f"Error: command exited with code {exit_code}.\n{result}"
+                raise RuntimeError(error)
+            await self._emit_tool_event(call, status="done", result=str(result), exit_code=exit_code)
+            return result
+
         # Auto-discover if not registered
         tool = self.tool_registry.get(call.name)
         if tool is None:
@@ -1130,26 +2127,46 @@ Respond with ONLY valid JSON:
             discovered = self._discover_and_register_tool(call.name)
             if discovered is None:
                 available = list(self.tool_registry.list_tools().keys())
-                return f"Error: Tool '{call.name}' not found. Available: {available}"
+                error_text = f"Error: Tool '{call.name}' not found. Available: {available}"
+                raise RuntimeError(error_text)
+            tool = self.tool_registry.get(call.name)
 
-        # Terminal/bash → SovereignSandbox with dynamic tier
-        if call.name in ("bash", "run_command", "terminal", "shell"):
-            cmd = (
-                call.params.get("CommandLine") or
-                call.params.get("cmd") or
-                call.params.get("command") or ""
-            )
-            assessment = self.risk_scorer.assess(cmd)
-            self.sandbox.tier = self.sandbox_tier
-            return await asyncio.to_thread(self.sandbox.execute, cmd)
-
-        res = await self.tool_registry.execute(call.name, **call.params)
         from tools.nexus_tools.base_tool import ToolResult
-        if isinstance(res, ToolResult):
-            if res.success:
-                return res.output
-            return f"Error: {res.error}"
-        return str(res)
+        chunks: List[str] = []
+        sequence = 0
+        failed_error = ""
+        runtime_context = {
+            "work_event_sink": self.work_event_sink,
+            "turn_id": self._current_turn_id,
+            "session_id": self.session_id,
+            "root": self.root,
+        }
+        async for item in self.tool_registry.stream_execute(
+            call.name,
+            **{**call.params, "_runtime_context": runtime_context},
+        ):
+            if isinstance(item, ToolResult):
+                text = str(item.output or item.error or "")
+                if not item.success:
+                    failed_error = str(item.error or "Tool execution failed")
+            else:
+                text = str(item)
+            if text:
+                chunks.append(text)
+                await self._emit_tool_chunk(
+                    call,
+                    text,
+                    sequence,
+                    stream="stderr" if failed_error else "stdout",
+                )
+                sequence += 1
+
+        result = "".join(chunks)
+        if failed_error:
+            error_text = f"Error: {failed_error}"
+            raise RuntimeError(error_text)
+        await self._emit_tool_event(call, status="done", result=result)
+        return result
 
     def _discover_and_register_tool(self, name: str):
         """Auto-discover a tool from tools/<name>/ directory and register it."""
@@ -1207,7 +2224,8 @@ Respond with ONLY valid JSON:
         tasks = [
             self._verify_execution(messages),          # Error scan + vaccine
             self._run_targeted_tests(tool_calls),      # Auto test selection
-            asyncio.to_thread(self._render_todo_list), # TODO update
+            asyncio.to_thread(self._read_todo_md),
+            self._fill_gap_during_session(messages[-1].get("content", "") if messages else ""),
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -1217,6 +2235,17 @@ Respond with ONLY valid JSON:
 
         success, vaccine = verify_result if isinstance(verify_result, tuple) else (True, None)
         return {"success": success, "vaccine": vaccine, "todo": todo_str}
+
+    def _read_todo_md(self) -> str:
+        """Read todo.md from disk."""
+        todo_path = os.path.join(self.root, "todo.md") if self.root else "todo.md"
+        try:
+            if os.path.isfile(todo_path):
+                with open(todo_path, "r", encoding="utf-8") as f:
+                    return f.read().strip()
+        except Exception:
+            logger.warning("orchestrators/loop.py:2036 suppressed error", exc_info=True)
+        return ""
 
     async def _verify_execution(self, messages: List[Dict[str, str]]) -> Tuple[bool, Optional[str]]:
         """Scan last observation for errors and build failure vaccine."""
@@ -1256,6 +2285,7 @@ Respond with ONLY valid JSON:
                     {"vaccine": vaccine, "errors": error_lines}
                 )
             except Exception:
+                self.logger.warning("loop:2155 : suppressed error", exc_info=True)
                 pass
             return False, vaccine
 
@@ -1264,22 +2294,20 @@ Respond with ONLY valid JSON:
     async def _run_targeted_tests(self, tool_calls: List[ToolCall]) -> Optional[str]:
         """Select and run targeted tests based on modified files."""
         try:
-            git_tool = self.tool_registry.get("git")
-            if not git_tool:
+            if not self.tool_registry.get("git_ops"):
                 return None
-            diff = await asyncio.to_thread(git_tool.execute, command="diff", name_only=True)
-            if not diff or isinstance(diff, str) and "error" in diff.lower():
+            diff = await self.tool_registry.execute("git_ops", action="diff", name_only=True)
+            if not diff.success or not diff.output:
                 return None
             from optimization.test_selection import TestSelector
             ts           = TestSelector(self.root)
-            changed      = [f.strip() for f in diff.split("\n") if f.strip()]
+            changed      = [f.strip() for f in diff.output.split("\n") if f.strip()]
             selected     = ts.select_tests(changed)
             if not selected:
                 return None
-            tester_tool  = self.tool_registry.get("tester")
-            if tester_tool:
-                res = await asyncio.to_thread(tester_tool.execute, command="run", tests=selected)
-                return res
+            if self.tool_registry.get("test_runner"):
+                res = await self.tool_registry.execute("test_runner", target=" ".join(selected))
+                return res.output if res.success else res.error
         except Exception as e:
             self.logger.debug(f"[VERIFY] Targeted tests failed: {e}")
         return None
@@ -1289,27 +2317,64 @@ Respond with ONLY valid JSON:
     # ─────────────────────────────────────────────────────────────────────────
 
     async def _finalize_session(self, task_desc: str, messages: List[Dict[str, str]]):
-        """Run all 5 evolution steps in parallel."""
+        """Run all 5 evolution steps + MemoryManager sync in parallel."""
+        await self.kernel.plugins.trigger_hooks("on_session_end", task_desc, messages)
+
         last_resp = ""
         for m in reversed(messages):
             if m["role"] == "assistant":
                 last_resp = m["content"]
                 break
 
-        success = "TASK_COMPLETE" in last_resp or "error" not in last_resp.lower()
+        if self._last_run_requires_tools:
+            success = (
+                self._last_run_had_tool_execution
+                and self._last_run_verified
+                and not self._last_run_failed
+            )
+        else:
+            success = bool(last_resp.strip()) and not self._last_run_failed
 
-        # Fire all 5 evolve tasks in parallel
+        # Sync via MemoryManager
         evolve_tasks = [
             self._evolve_log(success, task_desc),          # 1: EvolutionLog
             self._evolve_self_improve(messages),           # 2: SelfImprovementEngine
             self._evolve_gap_forge(),                      # 3: GapForge (retry gaps)
             self._evolve_hive_feedback(messages),          # 4: Hive persona scores
             self._evolve_memory_crystallize(messages),     # 5: Memory crystallize
+            self._maybe_run_curator(),                     # 6: Skill Curator (idle lifecycle)
         ]
         await asyncio.gather(*evolve_tasks, return_exceptions=True)
 
+        # MemoryManager sync — persists to .opencode/memory/ + session + forge
+        try:
+            user_msg = messages[0].get("content", "") if messages else ""
+            await self.memory_manager.sync_all(user_msg, last_resp)
+        except Exception:
+            self.logger.warning("loop:2222 : suppressed error", exc_info=True)
+            pass
+
         # Write session bus
         await asyncio.to_thread(self._write_session_bus)
+
+    def _start_background_finalization(self, task_desc: str, messages: List[Dict[str, str]]) -> None:
+        """Run learning/evolution after the response without delaying the user."""
+        task = asyncio.create_task(self._finalize_session(task_desc, list(messages)))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def aclose(self) -> None:
+        """Drain loop-owned finalizers before the hosting event loop shuts down.
+
+        Finalization deliberately outlives the response stream, so its owner must
+        join it before asyncio closes the default executor used by ``to_thread``.
+        """
+        await asyncio.to_thread(self._shutdown_mcp_servers)
+        background_tasks = getattr(self, "_background_tasks", set())
+        while background_tasks:
+            tasks = tuple(background_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            background_tasks = getattr(self, "_background_tasks", set())
 
     async def _evolve_log(self, success: bool, task_desc: str):
         """Step 1: EvolutionLog win/lose."""
@@ -1321,6 +2386,7 @@ Respond with ONLY valid JSON:
                 0.0, {"task": task_desc}
             )
         except Exception:
+            self.logger.warning("loop:2253 async _evolve_log: suppressed error", exc_info=True)
             pass
 
     async def _evolve_self_improve(self, messages: List[Dict[str, str]]):
@@ -1332,6 +2398,7 @@ Respond with ONLY valid JSON:
                 for action in record.actions[:3]:
                     await asyncio.to_thread(self.evolution_log.improvement, action)
         except Exception:
+            self.logger.warning("loop:2264 async _evolve_self_improve: suppressed error", exc_info=True)
             pass
 
     async def _evolve_gap_forge(self):
@@ -1344,6 +2411,7 @@ Respond with ONLY valid JSON:
                 await self._fill_gap(gap)
                 self.logger.info(f"[EVOLVE:GAP] Filled: {gap.get('type')} '{gap.get('name')}'")
             except Exception:
+                self.logger.warning("loop:2276 async _evolve_gap_forge: suppressed error", exc_info=True)
                 pass
         self._gaps_found.clear()
 
@@ -1362,6 +2430,7 @@ Respond with ONLY valid JSON:
                 with open(fb_path, "w", encoding="utf-8") as f:
                     json.dump(feedback, f, indent=2)
         except Exception:
+            self.logger.warning("loop:2294 async _evolve_hive_feedback: suppressed error", exc_info=True)
             pass
 
     async def _evolve_memory_crystallize(self, messages: List[Dict[str, str]]):
@@ -1382,6 +2451,7 @@ Respond with ONLY valid JSON:
                     f"Session learnings: {'; '.join(learnings[:3])}"
                 )
         except Exception:
+            self.logger.warning("loop:2314 async _evolve_memory_crystallize: suppressed error", exc_info=True)
             pass
 
         # Always save + sync memory
@@ -1392,8 +2462,10 @@ Respond with ONLY valid JSON:
     # ─────────────────────────────────────────────────────────────────────────
 
     async def _handle_evolution_gaps(self, tool_calls, observations):
-        """Hook: post_tool_call — detect gaps from observations."""
-        pass  # Inline gap detection happens in _fill_gap_during_session
+        """Hook: post_tool_call — detect gaps from tool observations."""
+        obs_text = "\n".join(str(o) for o in observations if str(o).strip())
+        if obs_text:
+            await self._fill_gap_during_session(obs_text)
 
     async def _handle_tool_failure(self, tc: ToolCall, error: Exception):
         """Auto-create missing tools via ToolForge when a tool call fails."""
@@ -1441,6 +2513,7 @@ If no gaps, return: {{"gaps": []}}
                 else:
                     self._gaps_found.append(gap)
         except Exception:
+            self.logger.warning("loop:2373 : suppressed error", exc_info=True)
             pass
 
     async def _fill_gap(self, gap: Dict[str, Any]):
@@ -1469,7 +2542,23 @@ If no gaps, return: {{"gaps": []}}
             await self._fill_gap(gap)
             self.logger.info(f"[EVOLVE:GAP-FILLED] {gap.get('type')} '{gap.get('name')}' retried successfully")
         except Exception:
+            self.logger.warning("loop:2401 async _retry_gap: suppressed error", exc_info=True)
             pass
+
+    # ── Curator ──────────────────────────────────────────────────────────
+
+    async def _maybe_run_curator(self) -> None:
+        if not self.curator.enabled:
+            return
+        if getattr(self, "_curator_last_run", 0) and time.time() - self._curator_last_run < 3600:
+            return
+        try:
+            result = await asyncio.to_thread(self.curator.run_once)
+            if result.get("archived", 0) > 0 or result.get("restored", 0) > 0:
+                self.logger.info(f"[CURATOR] {result}")
+            self._curator_last_run = time.time()
+        except Exception as e:
+            self.logger.debug(f"[CURATOR] run_once failed: {e}")
 
     # ─────────────────────────────────────────────────────────────────────────
     # CHECKPOINT
@@ -1481,14 +2570,15 @@ If no gaps, return: {{"gaps": []}}
             ckpt_dir = os.path.join(self.root, "logs", "checkpoints")
             os.makedirs(ckpt_dir, exist_ok=True)
             ckpt_path = os.path.join(ckpt_dir, f"{self.session_id}.json")
+            plan_text = self._read_todo_md()
             with open(ckpt_path, "w", encoding="utf-8") as f:
                 json.dump({
                     "session_id": self.session_id,
                     "task_desc":  task_desc,
                     "turn":       turn,
-                    "state":      self.state.value,
+                    "state":      "",
                     "messages":   messages[-20:],  # Keep last 20 for resume
-                    "plan":       self.current_plan,
+                    "plan":       plan_text,
                     "timestamp":  time.time(),
                 }, f, indent=2)
         except Exception as e:
@@ -1502,6 +2592,7 @@ If no gaps, return: {{"gaps": []}}
                 with open(ckpt_path, "r", encoding="utf-8") as f:
                     return json.load(f)
         except Exception:
+            self.logger.warning("loop:2449 load_checkpoint: suppressed error", exc_info=True)
             pass
         return None
 
@@ -1526,6 +2617,7 @@ If no gaps, return: {{"gaps": []}}
                     }
                     f.write(json.dumps(entry) + "\n")
         except Exception:
+            self.logger.warning("loop:2473 _log_mission_replay: suppressed error", exc_info=True)
             pass
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1533,25 +2625,125 @@ If no gaps, return: {{"gaps": []}}
     # ─────────────────────────────────────────────────────────────────────────
 
     def _call_model(self, messages: List[Dict]) -> str:
-        """Call model — stream then fallback to generate."""
+        """Call model — stream then fallback to generate, scrub output."""
+        self._scrubber.reset()
+        # Sanitize messages before sending
+        messages = MessageSanitizer.sanitize_messages(messages)
         full = ""
         try:
             for chunk in self.brain.stream_generate(messages=messages):
-                full += chunk
+                # Scrub each chunk
+                cleaned = self._scrubber.feed(chunk)
+                full += cleaned
+            # Flush any remaining buffer
+            full += self._scrubber.flush()
+
             if not full.strip():
                 fallback = self.brain.generate(messages=messages)
                 if fallback and not getattr(self.brain, "_looks_like_provider_error", lambda x: False)(fallback):
-                    full = fallback
+                    full = StreamingContextScrubber.clean_once(fallback)
         except Exception as e:
             self.logger.error(f"Model call failed: {e}")
             return ""
         return full
 
+    async def _stream_model(
+        self,
+        messages: List[Dict],
+        *,
+        max_tokens: Optional[int] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> AsyncGenerator[str, None]:
+        """Yield scrubbed model chunks in real time while also preserving fallback behavior."""
+        sanitized_messages = MessageSanitizer.sanitize_messages(messages)
+        chunk_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
+        stop_event = threading.Event()
+        scrubber = StreamingContextScrubber()
+
+        def _run_stream() -> None:
+            stream = None
+            try:
+                kwargs: Dict[str, Any] = {"messages": sanitized_messages}
+                if max_tokens is not None:
+                    kwargs["max_tokens"] = max_tokens
+                if provider:
+                    kwargs["provider"] = provider
+                if model:
+                    kwargs["model"] = model
+                stream = self.brain.stream_generate(**kwargs)
+                for chunk in stream:
+                    if stop_event.is_set():
+                        return
+                    if getattr(self.brain, "_looks_like_provider_error", lambda value: False)(chunk):
+                        chunk_queue.put(("error", str(chunk)))
+                        return
+                    cleaned = scrubber.feed(chunk)
+                    if cleaned:
+                        chunk_size = max(1, int(os.environ.get("NEXUS_MODEL_STREAM_CHARS", "64")))
+                        for index in range(0, len(cleaned), chunk_size):
+                            if stop_event.is_set():
+                                return
+                            chunk_queue.put(("chunk", cleaned[index:index + chunk_size]))
+                tail = scrubber.flush()
+                if tail:
+                    chunk_queue.put(("chunk", tail))
+                chunk_queue.put(("done", ""))
+            except Exception as e:
+                chunk_queue.put(("error", str(e)))
+            finally:
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        self.logger.debug("Provider stream close failed", exc_info=True)
+
+        threading.Thread(target=_run_stream, daemon=True).start()
+
+        emitted_any = False
+        try:
+            while True:
+                if self._abort_flag.is_set():
+                    return
+                try:
+                    kind, payload = await asyncio.to_thread(chunk_queue.get, True, 0.2)
+                except queue.Empty:
+                    continue
+                if kind == "chunk":
+                    emitted_any = True
+                    yield payload
+                    continue
+                if kind == "done":
+                    break
+                if kind == "error":
+                    self.logger.error(f"Model stream failed: {payload}")
+                    raise RuntimeError(f"Provider stream failed: {payload}")
+        finally:
+            stop_event.set()
+
+        if not emitted_any:
+            kwargs = {"messages": sanitized_messages}
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            if provider:
+                kwargs["provider"] = provider
+            if model:
+                kwargs["model"] = model
+            fallback = self.brain.generate(**kwargs)
+            if fallback and getattr(self.brain, "_looks_like_provider_error", lambda x: False)(fallback):
+                raise RuntimeError(f"Provider request failed: {fallback}")
+            if fallback:
+                cleaned_fallback = StreamingContextScrubber.clean_once(fallback)
+                if cleaned_fallback:
+                    yield cleaned_fallback
+
     def _call_model_for_prompt(self, prompt: str) -> str:
         """Direct model call — no conversation history."""
         try:
             return self.brain.generate(messages=[{"role": "user", "content": prompt}])
-        except Exception:
+        except Exception as e:
+            self.logger.warning("_call_model_for_prompt: %s", e)
             return ""
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1560,28 +2752,428 @@ If no gaps, return: {{"gaps": []}}
 
     def _extract_tool_calls(self, response: str) -> List[ToolCall]:
         calls: List[ToolCall] = []
+        calls.extend(self._extract_dotted_tool_calls(response))
+        calls.extend(self._extract_inline_tool_calls(response))
         for obj in self._extract_raw_json_objects(response):
             self._append_call(calls, obj)
+        if not calls:
+            for call in self._extract_dsml_tool_calls(response):
+                calls.append(call)
+            for call in self._extract_compact_xml_tool_calls(response):
+                calls.append(call)
+        return [self._canonicalize_tool_call(call) for call in calls]
+
+    def _extract_inline_tool_calls(self, text: str) -> List[ToolCall]:
+        """Extract word({...}) inline tool calls like web_search({"query": "cats"})."""
+        calls: List[ToolCall] = []
+        known = set(self.tool_registry.list_tools(include_unavailable=False).keys()) | {
+            "reading", "creating", "modifying", "deleting", "terminal",
+            "web_search", "code_search", "git_ops", "test_runner", "hive",
+            "deep_research",
+        }
+        # word({...}) inline calls
+        for match in re.finditer(r"\b([a-zA-Z_]\w*)\(\s*(\{)", text):
+            name = match.group(1).lower()
+            if name not in known:
+                continue
+            start = match.start(2)
+            try:
+                params, consumed = json.JSONDecoder().raw_decode(text[start:])
+            except json.JSONDecodeError:
+                continue
+            tail = text[start + consumed:]
+            if isinstance(params, dict) and re.match(r"\s*\)", tail):
+                calls.append(ToolCall(name, params))
+        # <function=name>{json} provider format
+        for match in re.finditer(r"<function=(\w+)>\s*(\{)", text):
+            name = match.group(1).lower()
+            if name not in known:
+                continue
+            start = match.start(2)
+            try:
+                params, _consumed = json.JSONDecoder().raw_decode(text[start:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(params, dict):
+                calls.append(ToolCall(name, params))
         return calls
 
+    @staticmethod
+    def _canonicalize_tool_call(call: ToolCall) -> ToolCall:
+        """Translate common provider aliases into the registered NEXUS tools."""
+        name = str(call.name or "").strip().lower()
+        raw_params = call.params or {}
+        if isinstance(raw_params, str):
+            try:
+                raw_params = json.loads(raw_params)
+            except json.JSONDecodeError:
+                raw_params = {}
+        params = dict(raw_params) if isinstance(raw_params, dict) else {}
+        action = str(params.get("action") or "").strip().lower()
+
+        def ps_literal(value: str) -> str:
+            return str(value or ".").replace("'", "''")
+
+        if name == "file_ops":
+            if action in {"read", "view"}:
+                return ToolCall("reading", {"path": params.get("path", "")}, call.call_id)
+            if action in {"write", "create"} and "content" in params:
+                return ToolCall("creating", {"path": params.get("path", ""), "content": params.get("content", "")}, call.call_id)
+            if action in {"edit", "update", "replace"}:
+                return ToolCall(
+                    "modifying",
+                    {
+                        "path": params.get("path", ""),
+                        "old_string": params.get("old_string", ""),
+                        "new_string": params.get("new_string", params.get("content", "")),
+                    },
+                    call.call_id,
+                )
+            if action in {"delete", "remove"}:
+                return ToolCall("deleting", {"path": params.get("path", "")}, call.call_id)
+            if action in {"mkdir", "create"}:
+                path = ps_literal(params.get("path", ""))
+                return ToolCall("bash", {"command": f"powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -LiteralPath '{path}'\""}, call.call_id)
+            if action == "list":
+                path = ps_literal(params.get("path", "."))
+                return ToolCall("bash", {"command": f"powershell -NoProfile -Command \"Get-ChildItem -Force -LiteralPath '{path}'\""}, call.call_id)
+        if name in {"read", "read_file", "view"}:
+            return ToolCall("reading", {"path": params.get("path", params.get("filepath", ""))}, call.call_id)
+        if name in {"write", "write_code", "create"}:
+            if "content" in params:
+                return ToolCall("creating", {"path": params.get("path", params.get("filepath", "")), "content": params.get("content", "")}, call.call_id)
+            path = ps_literal(params.get("path", params.get("filepath", "")))
+            return ToolCall("bash", {"command": f"powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -LiteralPath '{path}'\""}, call.call_id)
+        if name in {"edit", "update", "replace"}:
+            return ToolCall(
+                "modifying",
+                {
+                    "path": params.get("path", params.get("filepath", "")),
+                    "old_string": params.get("old_string", ""),
+                    "new_string": params.get("new_string", params.get("content", "")),
+                },
+                call.call_id,
+            )
+        if name in {"delete", "remove"}:
+            return ToolCall("deleting", {"path": params.get("path", params.get("filepath", ""))}, call.call_id)
+        if name == "list":
+            path = ps_literal(params.get("path", "."))
+            return ToolCall("bash", {"command": f"powershell -NoProfile -Command \"Get-ChildItem -Force -LiteralPath '{path}'\""}, call.call_id)
+        if name == "mkdir":
+            path = ps_literal(params.get("path", params.get("filepath", "")))
+            return ToolCall("bash", {"command": f"powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -LiteralPath '{path}'\""}, call.call_id)
+        if name in {"shell", "terminal", "execute_command", "run_command"}:
+            command = params.get("command") or params.get("cmd") or params.get("input") or ""
+            mkdir_match = re.fullmatch(r"\s*mkdir\s+(?:-p\s+)?[\"']?([^\"']+?)[\"']?\s*", str(command), re.IGNORECASE)
+            if mkdir_match:
+                path = ps_literal(mkdir_match.group(1).strip())
+                return ToolCall(
+                    "bash",
+                    {"command": f"powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -LiteralPath '{path}'\""},
+                    call.call_id,
+                )
+            return ToolCall("bash", {**params, "command": command}, call.call_id)
+        aliases = {
+            "search_code": "code_search",
+            "web_research": "web_search",
+            "search_web": "web_search",
+            "run_tests": "test_runner",
+        }
+        return ToolCall(aliases.get(name, name), params, call.call_id)
+
+    @staticmethod
+    def _strip_internal_tool_protocol(response: str) -> str:
+        """Remove provider tool envelopes and raw JSON tool calls that must never become chat text."""
+        cleaned = str(response or "")
+
+        def _is_tool_payload(text: str) -> bool:
+            """Check if text is JSON containing tool call structure."""
+            text = text.strip()
+            if not text:
+                return True
+            if not ((text.startswith("{") and text.endswith("}")) or (text.startswith("[") and text.endswith("]"))):
+                return False
+            try:
+                obj = json.loads(text)
+            except json.JSONDecodeError:
+                return False
+            if isinstance(obj, list):
+                return len(obj) == 0 or all(isinstance(item, dict) for item in obj)
+            if not isinstance(obj, dict):
+                return False
+            if "action" in obj and "params" in obj:
+                return True
+            if "name" in obj and "params" in obj:
+                return True
+            if "tool" in obj and "params" in obj:
+                return True
+            return False
+
+        def _strip_fences(text: str) -> str:
+            """Remove fenced JSON tool calls and known tool protocol blocks."""
+            result = []
+            i = 0
+            while i < len(text):
+                fence = re.search(r"```(\w*)\s*\n?", text[i:])
+                if not fence:
+                    result.append(text[i:])
+                    break
+                result.append(text[i:i + fence.start()])
+                lang = fence.group(1).lower()
+                content_start = i + fence.end()
+                close = re.search(r"```", text[content_start:])
+                if not close:
+                    result.append(text[i + fence.start():])
+                    break
+                content = text[content_start:content_start + close.start()]
+                fence_end = content_start + close.end()
+                if lang in ("tool_use", "tool"):
+                    i = fence_end
+                elif lang in ("json", "") and _is_tool_payload(content):
+                    i = fence_end
+                else:
+                    result.append(text[i + fence.start():fence_end])
+                    i = fence_end
+            return "".join(result)
+
+        stripped = _strip_fences(cleaned)
+        # XML tool tags — catch all variants
+        stripped = re.sub(
+            r"<(tool_use|tool_calls|tool_call|function_calls|function_call|invoke|invocation)>[\s\S]*?</\1>", "", stripped,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        stripped = re.sub(
+            r"<invoke\s+name=\"\w+\">[\s\S]*?</invoke>", "", stripped,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        # Compact self-closing XML tool tags: <tool name="x" param="y"/>
+        stripped = re.sub(
+            r"<[a-z_]+(?:\s+[a-z_]+=\"[^\"]*\")*\s*/>", "", stripped,
+            flags=re.DOTALL,
+        )
+        # Inline function-call syntax: word({...}) or tool.word({...})
+        stripped = re.sub(
+            r"\b(?:[a-z_]+\.)?[a-z_]+\(\{.*?\}\)", "", stripped,
+            flags=re.DOTALL,
+        )
+        # Provider function-call format: <function=name>{json} or <function=name>...</function>
+        stripped = re.sub(
+            r"<function=\w+>(?:[\s\S]*?</function>)?", "", stripped,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        # Remove standalone JSON tool calls like {"action": "tool", "params": {...}}
+        def _strip_standalone_json(text: str) -> str:
+            result = []
+            depth = 0
+            start = -1
+            for i, ch in enumerate(text):
+                if ch == "{":
+                    if depth == 0:
+                        start = i
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0 and start != -1:
+                        candidate = text[start:i+1]
+                        try:
+                            obj = json.loads(candidate)
+                            if isinstance(obj, dict) and "action" in obj and "params" in obj:
+                                result.append("")
+                            elif isinstance(obj, dict) and "name" in obj and "params" in obj:
+                                result.append("")
+                            elif isinstance(obj, dict) and "tool" in obj and "params" in obj:
+                                result.append("")
+                            else:
+                                result.append(candidate)
+                        except json.JSONDecodeError:
+                            result.append(candidate)
+                        start = -1
+                elif depth == 0:
+                    result.append(ch)
+            return "".join(result)
+        stripped = _strip_standalone_json(stripped)
+        return stripped
+
+    def _extract_dotted_tool_calls(self, text: str) -> List[ToolCall]:
+        """Parse provider syntax such as ``file_ops.create({\"path\": ...})``."""
+        calls: List[ToolCall] = []
+        if not text:
+            return calls
+        known_tools = set(self.tool_registry.list_tools().keys()) | {
+            "file_ops", "reading", "creating", "modifying", "deleting",
+            "bash", "code_search", "web_search", "http_client", "git_ops", "test_runner"
+        }
+        decoder = json.JSONDecoder()
+        pattern = re.compile(r"\b([a-zA-Z_][\w-]*)\.([a-zA-Z_][\w-]*)\s*\(")
+        for match in pattern.finditer(text):
+            tool_name, method = match.group(1), match.group(2)
+            if tool_name not in known_tools:
+                continue
+            tail = text[match.end():].lstrip()
+            try:
+                params, consumed = decoder.raw_decode(tail)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(params, dict) or not tail[consumed:].lstrip().startswith(")"):
+                continue
+            if tool_name == "file_ops":
+                params.setdefault(
+                    "action",
+                    ("write" if "content" in params else "mkdir") if method == "create" else method,
+                )
+            elif method not in {"run", "execute", "call", "invoke"}:
+                params.setdefault("action", method)
+            calls.append(ToolCall(tool_name, params))
+        return calls
+
+    def _extract_compact_xml_tool_calls(self, text: str) -> List[ToolCall]:
+        """Parse compact model tool tags such as ``<reading path=\"x\" />``.
+
+        Several OpenAI-compatible providers emit this concise form instead of
+        JSON/DSML. Treating it as prose caused real actions to be silently lost.
+        """
+        calls: List[ToolCall] = []
+        if not text or "<" not in text:
+            return calls
+        pattern = re.compile(
+            r"<(?P<name>[a-zA-Z_][a-zA-Z0-9_-]*)\b(?P<attrs>[^>]*)"
+            r"(?:/\s*>|>(?P<body>.*?)</(?P=name)\s*>)",
+            re.DOTALL,
+        )
+        attr_pattern = re.compile(r"([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*([\"'])(.*?)\2", re.DOTALL)
+        known_tools = set(self.tool_registry.list_tools().keys()) | {
+            "file_ops", "reading", "creating", "modifying", "deleting",
+            "bash", "code_search", "web_search", "http_client", "git_ops", "test_runner"
+        }
+        for match in pattern.finditer(text):
+            name = match.group("name").strip()
+            if name not in known_tools:
+                continue
+            params = {key: html.unescape(value) for key, _quote, value in attr_pattern.findall(match.group("attrs") or "")}
+            body = html.unescape((match.group("body") or "").strip())
+            if body and "content" not in params:
+                params["content"] = body
+            calls.append(ToolCall(name, params))
+        return calls
+
+    def _extract_action_fences(self, response: str) -> List[ToolCall]:
+        """Recover explicit action blocks from models that ignore tool-call schemas.
+
+        This fallback is invoked only for user requests already classified as
+        requiring real tools, so ordinary code examples are never executed.
+        """
+        calls: List[ToolCall] = []
+        pattern = re.compile(
+            r"```(?:bash|sh|shell|powershell|ps1|cmd)\s*\n(.*?)```",
+            re.IGNORECASE | re.DOTALL,
+        )
+        for block in pattern.findall(response)[:20]:
+            command = block.strip()
+            if not command or len(command) > 12000:
+                continue
+            read_match = re.fullmatch(r'(?:cat|type)\s+["\']([^"\']+)["\']', command, re.IGNORECASE)
+            if read_match:
+                calls.append(ToolCall("reading", {"path": read_match.group(1)}))
+            else:
+                calls.append(ToolCall("bash", {"command": command, "cwd": self.root}))
+        return calls
+
+    def _extract_explicit_run_commands(self, task_desc: str) -> List[ToolCall]:
+        """Execute commands the user explicitly wrote after the word ``run``.
+
+        This is deliberately narrow: it never invents a command and is used
+        only after the task has already been classified as requiring tools.
+        """
+        pattern = re.compile(
+            r"(?:from\s+(?P<where>[^.]{1,100}?)\s+)?run\s+(?P<command>.+?)"
+            r"(?=\.\s+(?:then|after|next)\b|\.\s+(?:do not|don't)\b|$)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        calls: List[ToolCall] = []
+        for match in pattern.finditer(task_desc):
+            command = " ".join(match.group("command").strip().split())
+            if not command or len(command) > 12000:
+                continue
+            where = (match.group("where") or "").strip().lower()
+            if where in {"gui", "the gui", "gui directory", "the gui directory"}:
+                command = f"cd gui && {command}"
+            calls.append(ToolCall("bash", {"command": command, "cwd": self.root}))
+        return calls[:20]
+
+    def _extract_explicit_file_actions(self, task_desc: str) -> List[ToolCall]:
+        """Recover safe, explicit file reads when a model omits tool protocol."""
+        low = task_desc.lower()
+        if not any(word in low for word in ("read", "inspect", "open", "check", "summarize", "review")):
+            return []
+        candidates = re.findall(
+            r"(?<![\w:/.-])(?:[\w.-]+[\\/])*[\w.-]+\.[A-Za-z0-9]{1,8}(?![\w.-])",
+            task_desc,
+        )
+        calls: List[ToolCall] = []
+        seen = set()
+        for path in candidates:
+            normalized = path.strip("'\"`.,;:()[]{}")
+            if not normalized or normalized.lower() in seen:
+                continue
+            seen.add(normalized.lower())
+            calls.append(ToolCall("reading", {"path": normalized}))
+        return calls[:20]
+
+    def _extract_dsml_tool_calls(self, text: str) -> List[ToolCall]:
+        calls: List[ToolCall] = []
+        if not text or "invoke name=" not in text:
+            return calls
+
+        invoke_pattern = re.compile(
+            r"<[^>]*invoke\s+name=\"([^\"]+)\"[^>]*>(.*?)</[^>]*invoke>",
+            re.IGNORECASE | re.DOTALL,
+        )
+        param_pattern = re.compile(
+            r"<[^>]*parameter\s+name=\"([^\"]+)\"(?:\s+[^>]*)?>(.*?)</[^>]*parameter>",
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        for invoke_name, body in invoke_pattern.findall(text):
+            params: Dict[str, Any] = {}
+            for param_name, raw_value in param_pattern.findall(body):
+                value = html.unescape(raw_value or "").strip()
+                params[param_name] = self._coerce_dsml_value(value)
+            calls.append(ToolCall(invoke_name.strip(), params))
+        return calls
+
+    def _coerce_dsml_value(self, value: str) -> Any:
+        lowered = value.strip().lower()
+        if lowered in {"true", "false"}:
+            return lowered == "true"
+        if re.fullmatch(r"-?\d+", value.strip()):
+            try:
+                return int(value.strip())
+            except Exception:
+                return value
+        if re.fullmatch(r"-?\d+\.\d+", value.strip()):
+            try:
+                return float(value.strip())
+            except Exception:
+                return value
+        return value
+
     def _extract_raw_json_objects(self, text: str) -> List[Dict[str, Any]]:
-        """Extract all JSON objects from text — handles nested braces."""
+        """Extract JSON objects without treating braces inside strings as structure."""
         results: List[Dict[str, Any]] = []
-        depth  = 0
-        start  = -1
-        for i, ch in enumerate(text):
-            if ch == "{":
-                if depth == 0:
-                    start = i
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0 and start != -1:
-                    candidate = text[start:i+1]
-                    parsed = self._robust_json_parse(candidate)
-                    if isinstance(parsed, dict):
-                        results.append(parsed)
-                    start = -1
+        decoder = json.JSONDecoder()
+        index = 0
+        while index < len(text):
+            start = text.find("{", index)
+            if start < 0:
+                break
+            try:
+                parsed, consumed = decoder.raw_decode(text[start:])
+            except json.JSONDecodeError:
+                index = start + 1
+                continue
+            if isinstance(parsed, dict):
+                results.append(parsed)
+            index = start + max(consumed, 1)
         return results
 
     def _robust_json_parse(self, text: str) -> Optional[Any]:
@@ -1595,6 +3187,10 @@ If no gaps, return: {{"gaps": []}}
         params = data.get("params", data.get("arguments"))
         if params is None:
             params = {k: v for k, v in data.items() if k not in {"action", "name", "call_id", "id"}}
+        if isinstance(params, str):
+            params = self._robust_json_parse(params)
+        if not isinstance(params, dict):
+            return
         if action:
             calls.append(ToolCall(action, params))
 
@@ -1629,8 +3225,10 @@ If no gaps, return: {{"gaps": []}}
             elif r == "assistant":
                 progress.append(c)
         lines = ["[CONTEXT_COMPACTED] Summary of prior conversation:"]
-        for g in goals:    lines.append(f"- Goal: {g}")
-        for p in progress: lines.append(f"- Progress: {p}")
+        for goal in goals:
+            lines.append(f"- Goal: {goal}")
+        for item in progress:
+            lines.append(f"- Progress: {item}")
         return "\n".join(lines)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1660,7 +3258,8 @@ If no gaps, return: {{"gaps": []}}
                     self.memory = json.load(f)
             else:
                 self.memory = []
-        except Exception:
+        except Exception as e:
+            self.logger.warning("load_memory: %s", e)
             self.memory = []
 
     def sync_memory(self):
@@ -1675,6 +3274,7 @@ If no gaps, return: {{"gaps": []}}
                     if disk_mem != self.memory:
                         self.memory = disk_mem
         except Exception:
+            self.logger.warning("loop:2834 sync_memory: suppressed error", exc_info=True)
             pass
 
     def _write_session_bus(self, _messages=None):
@@ -1685,6 +3285,7 @@ If no gaps, return: {{"gaps": []}}
             with open(session_file, "w", encoding="utf-8") as f:
                 json.dump(self.memory, f, indent=2)
         except Exception:
+            self.logger.warning("loop:2844 _write_session_bus: suppressed error", exc_info=True)
             pass
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1695,3 +3296,18 @@ If no gaps, return: {{"gaps": []}}
         """Signal the loop to stop after the current turn."""
         self._abort_flag.set()
         self.logger.info("[LOOP] Abort signaled.")
+
+    @property
+    def is_running(self) -> bool:
+        guard = getattr(self, "_run_guard", None)
+        return bool(guard and guard.locked())
+
+    def reset(self):
+        """Compatibility reset used by GUI/API before a fresh chat turn."""
+        if self.is_running:
+            return False
+        self._abort_flag.clear()
+        self._current_turn_id = ""
+        self.active_agent = ""
+        self.active_goal = ""
+        return True

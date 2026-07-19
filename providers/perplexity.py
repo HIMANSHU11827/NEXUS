@@ -1,6 +1,9 @@
-from typing import Dict, Any, Optional, List, Iterator
-from providers.base import NexusBaseProvider
+import os
 import json
+from typing import Dict, Iterator, List, Optional
+
+from providers.base import NexusBaseProvider
+
 
 class PerplexityProvider(NexusBaseProvider):
     """
@@ -12,13 +15,13 @@ class PerplexityProvider(NexusBaseProvider):
     def __init__(self):
         super().__init__("perplexity", "https://api.perplexity.ai/chat/completions")
         if not self.model:
-            self.model = "llama-3.1-sonar-large-128k-online"
+            self.model = os.environ.get("NEXUS_PROVIDER_PERPLEXITY_MODEL", "llama-3.1-sonar-large-128k-online")
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
         
-    def generate(self, prompt: str = '', system_prompt: str = "Be precise and cite sources.", messages: Optional[List[Dict[str, str]]] = None) -> str:
+    def generate(self, prompt: str = '', system_prompt: str = "Be precise and cite sources.", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs}
         try:
@@ -29,7 +32,7 @@ class PerplexityProvider(NexusBaseProvider):
         except Exception as e:
             return f"Error: Failed to reach Perplexity. {str(e)}"
 
-    def stream_generate(self, prompt: str = '', system_prompt: str = "Be precise and cite sources.", messages: Optional[List[Dict[str, str]]] = None) -> Iterator[str]:
+    def stream_generate(self, prompt: str = '', system_prompt: str = "Be precise and cite sources.", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs, "stream": True}
         try:
@@ -54,3 +57,5 @@ class PerplexityProvider(NexusBaseProvider):
 if __name__ == "__main__":
     p = PerplexityProvider()
     # print(p.generate("What is the latest AI breakthrough today?"))
+
+

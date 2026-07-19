@@ -1,9 +1,11 @@
-from typing import Dict, Any, Optional, List, Iterator
-from providers.base import NexusBaseProvider
+import os
 import json
 import logging
 import os
 import time
+from typing import Dict, Iterator, List, Optional
+
+from providers.base import NexusBaseProvider
 
 logger = logging.getLogger("NEXUS_OPENROUTER")
 
@@ -17,7 +19,7 @@ class OpenRouterProvider(NexusBaseProvider):
     def __init__(self):
         super().__init__("openrouter", "https://openrouter.ai/api/v1/chat/completions")
         if not self.model:
-            self.model = "openrouter/free"
+            self.model = os.environ.get("NEXUS_PROVIDER_OPENROUTER_MODEL", "openrouter/free")
         self._base_model = self.model
 
         self.fallback_models = [
@@ -30,8 +32,8 @@ class OpenRouterProvider(NexusBaseProvider):
         ]
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "HTTP-Referer": "https://nexus-ai-os.com",
-            "X-Title": "Nexus AI OS",
+            "HTTP-Referer": os.environ.get("NEXUS_OPENROUTER_REFERER", "https://nexus-ai-os.com"),
+            "X-Title": os.environ.get("NEXUS_OPENROUTER_TITLE", "Nexus AI OS"),
             "Content-Type": "application/json",
         }
 
@@ -100,6 +102,7 @@ class OpenRouterProvider(NexusBaseProvider):
                                 if sock:
                                     sock.settimeout(float(timeout))
                     except Exception:
+                        logger.warning("providers/openrouter.py:103 : suppressed error", exc_info=True)
                         pass
                     first_token_deadline = time.time() + timeout
                     has_received_token = False
@@ -137,3 +140,5 @@ class OpenRouterProvider(NexusBaseProvider):
                     continue
                 yield f"Error in stream: {str(e)}"
                 return
+
+

@@ -9,6 +9,6 @@ Isolated execution environment for running tools, agent scripts, and commands sa
 - `risk.py` — `CommandRiskScorer`: deterministic command risk scoring
 
 ## Security Tiers
-- **NO_SANDBOX** — Direct speed (default)
-- **NORMAL** — Restricted shell isolation
-- **DOCKER** — Full container isolation
+- **NO_SANDBOX** — Direct execution for explicit local override only
+- **NORMAL** — Workspace-scoped shell isolation and the default/fail-closed tier
+- **DOCKER** — Container isolation with host workspace-scope validation before launch

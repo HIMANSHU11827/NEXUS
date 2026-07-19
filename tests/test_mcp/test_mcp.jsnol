@@ -1,0 +1,8 @@
+{
+  "name": "test_mcp",
+  "version": "1.0.0",
+  "description": "Tests for MCPTool and MCP server/client integration in the main loop",
+  "category": "test",
+  "entry": "scripts/test_tool.py",
+  "class": "TestMCPTool"
+}

@@ -1,10 +1,11 @@
 """NEXUS Meta Adapter - WhatsApp / Facebook / Instagram via Graph API."""
 
-import asyncio
 import logging
 import os
-import httpx
 from typing import Optional
+
+import httpx
+
 from gateway.base import BasePlatformAdapter, MessageEvent, SendResult
 
 logger = logging.getLogger(__name__)
@@ -18,13 +19,16 @@ class MetaAdapter(BasePlatformAdapter):
     Uses the Meta Graph API for sending messages and processing webhooks.
     """
 
-    def __init__(self, platform: str, access_token: str, verify_token: str = ""):
+    def __init__(self, platform: str = "facebook", access_token: str = "", verify_token: str = ""):
         super().__init__(platform)
-        self.access_token = access_token
-        self.verify_token = verify_token
+        self.access_token = access_token or os.getenv("META_ACCESS_TOKEN", "") or os.getenv("META_PAGE_TOKEN", "")
+        self.verify_token = verify_token or os.getenv("META_VERIFY_TOKEN", "")
         self._client: Optional[httpx.AsyncClient] = None
 
     async def connect(self) -> bool:
+        if not self.access_token:
+            logger.error("META_ACCESS_TOKEN not set")
+            return False
         self._client = httpx.AsyncClient(timeout=30.0)
         logger.info(f"[{self.platform.upper()}]: Meta adapter ready (Graph API).")
         return True
@@ -36,7 +40,7 @@ class MetaAdapter(BasePlatformAdapter):
 
     def _phone_number_id(self, chat_id: str) -> str:
         """WhatsApp send requires phone-number-id; for FB/IG we use page-id or ig-user-id."""
-        return os.getenv("META_PHONE_NUMBER_ID", "").strip()
+        return (os.getenv("META_PHONE_NUMBER_ID", "") or os.getenv("WHATSAPP_PHONE_ID", "")).strip()
 
     async def send_text(self, chat_id: str, text: str, reply_to: Optional[str] = None) -> SendResult:
         if not self._client:
@@ -113,6 +117,7 @@ class MetaAdapter(BasePlatformAdapter):
                 },
             )
         except Exception:
+            logger.warning("gateway/platforms/meta.py:116 async send_typing: suppressed error", exc_info=True)
             pass
 
     async def handle_webhook_payload(self, payload: dict):

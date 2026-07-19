@@ -46,7 +46,6 @@ class DiscordAdapter(BasePlatformAdapter):
         if not self._connected:
             return {"error": "not connected", "platform": "discord"}
         try:
-            import discord
             channel_id = int(target)
             if self._bot and self._bot.is_ready():
                 async def _send():

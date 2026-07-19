@@ -4,11 +4,14 @@ Stores facts with importance scores, persists to disk as JSON,
 and retrieves by real keyword + recency scoring.
 """
 import json
+import logging
 import os
-import sys
 import time
-from typing import List, Dict, Any, Optional
-from utils.nexus_compat import s, safe_del, sx  # type: ignore
+from typing import Any, Dict, List, Optional
+
+from utils.nexus_compat import s, sx  # type: ignore
+
+logger = logging.getLogger("nexus.knowledge.vault")
 
 
 class KnowledgeVault:
@@ -26,10 +29,11 @@ class KnowledgeVault:
         self.db_path: str = db_path
         
         # 🛡️ Sovereignty Key Resolution
-        from cryptography.fernet import Fernet
-        import hashlib
         import base64
+        import hashlib
         import uuid
+
+        from cryptography.fernet import Fernet
         
         # Generate a key based on the env var, or machine-specific identity
         env_key = os.environ.get("NEXUS_VAULT_KEY")
@@ -69,6 +73,7 @@ class KnowledgeVault:
                     print(f"[VAULT_MIGRATE]: Imported {len(data)} facts from {legacy}")
                     return data
             except Exception:
+                logger.warning("knowledge/vault.py:72 _migrate_from_legacy: suppressed error", exc_info=True)
                 pass
         return {}
 
@@ -143,7 +148,7 @@ class KnowledgeVault:
             scored.append((score, fact))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [f for _, f in sx(scored, 0, top_k)]
+        return [f for _, f in scored[:top_k]]
 
     def retrieve_as_text(self, query: str, top_k: int = 5) -> str:
         facts = self.retrieve_by_proximity(query, top_k)

@@ -1,8 +1,7 @@
+from typing import Optional
+
 import requests
-import json
-import yaml
-import os
-from typing import Dict, Any, Optional
+
 from config.config_loader import NexusConfigLoader
 
 
@@ -32,14 +31,14 @@ class LMStudioAutoProvider:
                     self.active_model = models[0]["id"]
                     self.is_running = True
                     # Optional: Update the YAML file if the model changed
-                    print(f"[*] 🦀 Auto-Detected Local Model: {self.active_model}")
+                    print(f"[*] ðŸ¦€ Auto-Detected Local Model: {self.active_model}")
                     return True
             return False
         except (ConnectionError, TimeoutError, requests.RequestException):
             self.is_running = False
             return False
 
-    def generate(self, prompt: str = '', system_prompt: str = "") -> str:
+    def generate(self, prompt: str = '', system_prompt: str = "", **kwargs) -> str:
         """Sends a generation request to the auto-detected model."""
         if not self.is_running:
             self.auto_scan()
@@ -68,3 +67,6 @@ if __name__ == "__main__":
         # print(scanner.generate("Hello Gemma!"))
     else:
         print("LM Studio is not running on port 1234.")
+
+
+

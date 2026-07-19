@@ -1,33 +1,101 @@
-import os
-import subprocess
+import asyncio
+import codecs
 import logging
-from typing import Dict, Any, List, Optional
+import os
+import re
+import subprocess
 from enum import Enum
-from sandbox.risk import CommandRiskScorer
+from typing import AsyncGenerator, Optional
 
 logger = logging.getLogger("NEXUS_SANDBOX")
 
 class SandboxTier(Enum):
     NO_SANDBOX = "no_sandbox"  # Direct execution (Default)
-    NORMAL = "normal"          # Restricted shell isolation
+    NORMAL = "normal"          # Workspace-only shell isolation
     DOCKER = "docker"          # Full container isolation
 
 class SovereignSandbox:
     """
     NEXUS SOVEREIGN SANDBOX 2.0
-    Implements 2-tier security (No-Sandbox vs Sandbox) with multiple isolation backends.
+    Implements sandbox tiering. Permissions decide whether a command may run;
+    this layer decides where the command may touch.
     """
 
     def __init__(self, root_dir: str):
         self.root = os.path.abspath(root_dir)
-        self.risk_scorer = CommandRiskScorer()
         
-        # ⚡ [DEFAULT_TIER]: Set to No-Sandbox as requested
-        tier_env = os.environ.get("NEXUS_SANDBOX_TIER", "no_sandbox").lower()
+        tier_env = os.environ.get("NEXUS_SANDBOX_TIER", "normal").lower()
         try:
             self.tier = SandboxTier(tier_env)
         except ValueError:
-            self.tier = SandboxTier.NO_SANDBOX
+            logger.warning("Invalid NEXUS_SANDBOX_TIER=%r; falling back to normal sandbox", tier_env)
+            self.tier = SandboxTier.NORMAL
+        self.last_exit_code: Optional[int] = None
+
+    @staticmethod
+    def _normalize_host_command(command: str) -> str:
+        if os.name != "nt":
+            return command
+        return re.sub(
+            r'(?P<quote>["\']?)/(?P<drive>[a-zA-Z])/(?P<rest>[^"\'\r\n]*)',
+            lambda match: f'{match.group("quote")}{match.group("drive").upper()}:/{match.group("rest")}',
+            command,
+        )
+
+    def _is_inside_root(self, path: str) -> bool:
+        try:
+            return os.path.commonpath([self.root, os.path.abspath(path)]) == self.root
+        except ValueError:
+            return False
+
+    def _workspace_block(self, reason: str) -> str:
+        return f"[SANDBOX_BLOCK]: Simple sandbox is workspace-only: {reason}"
+
+    def _iter_command_paths(self, command: str, base_dir: str):
+        """Yield likely filesystem paths mentioned by a shell command."""
+        drive_paths = re.findall(r"(?<![\w.-])([a-zA-Z]:[\\/][^\"'\s<>|;&]*)", command)
+        unc_paths = re.findall(r"(\\\\[^\"'\s<>|;&]+)", command)
+        for path in drive_paths + unc_paths:
+            yield path.rstrip(".,)")
+
+        for match in re.finditer(r'"([^"]+)"|\'([^\']+)\'|([^\s<>|;&]+)', command):
+            token = next(group for group in match.groups() if group is not None)
+            token = token.strip().strip("`").rstrip(".,)")
+            if not token or "://" in token:
+                continue
+            lower = token.lower()
+            if lower in {"cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+                continue
+            if token.startswith(("-", "/")) and not re.match(r"^/[a-zA-Z]/", token):
+                if not (len(token) > 2 and "/" in token[1:]):
+                    continue
+
+            looks_like_path = (
+                re.match(r"^[a-zA-Z]:[\\/]", token) is not None
+                or token.startswith("\\\\")
+                or token.startswith(("~", ".", "..", "/", "\\"))
+                or "\\" in token
+                or "/" in token
+            )
+            if looks_like_path:
+                yield token
+
+    def _validate_workspace_scope(self, command: str, workdir: str) -> Optional[str]:
+        target_dir = os.path.abspath(workdir)
+        if not self._is_inside_root(target_dir):
+            return self._workspace_block(f"workdir is outside workspace: {target_dir}")
+
+        for raw_path in self._iter_command_paths(command, target_dir):
+            if raw_path.startswith("~"):
+                resolved = os.path.abspath(os.path.expanduser(raw_path))
+            elif os.path.isabs(raw_path):
+                resolved = os.path.abspath(raw_path)
+            else:
+                resolved = os.path.abspath(os.path.join(target_dir, raw_path))
+
+            if not self._is_inside_root(resolved):
+                return self._workspace_block(f"path is outside workspace: {raw_path}")
+        return None
 
     def execute(self, command: str, workdir: Optional[str] = None) -> str:
         """
@@ -37,14 +105,15 @@ class SovereignSandbox:
         if self.tier == SandboxTier.NO_SANDBOX:
             return self._execute_direct(command, workdir or self.root)
 
-        # 2. SANDBOXED: Perform risk assessment first
-        assessment = self.risk_scorer.assess(command)
-        if assessment.blocked:
-            return f"[SANDBOX_BLOCK]: Command blocked due to critical risk: {assessment.summary()}"
-
-        target_dir = workdir if workdir else self.root
+        command = self._normalize_host_command(command)
+        target_dir = os.path.abspath(workdir if workdir else self.root)
         
-        # 3. NORMAL: Restricted Shell
+        # 3. NORMAL / DOCKER: validate host workspace scope before execution.
+        if self.tier in (SandboxTier.NORMAL, SandboxTier.DOCKER):
+            block = self._validate_workspace_scope(command, target_dir)
+            if block:
+                return block
+
         if self.tier == SandboxTier.NORMAL:
             return self._execute_restricted(command, target_dir)
             
@@ -54,16 +123,96 @@ class SovereignSandbox:
 
         return "[SANDBOX_ERROR]: Invalid sandbox configuration."
 
+    async def stream_execute(
+        self,
+        command: str,
+        workdir: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> AsyncGenerator[str, None]:
+        """Execute a command and yield Unicode-safe output chunks as they arrive."""
+        command = self._normalize_host_command(command)
+        target_dir = os.path.abspath(workdir or self.root)
+        if self.tier in (SandboxTier.NORMAL, SandboxTier.DOCKER):
+            block = self._validate_workspace_scope(command, target_dir)
+            if block:
+                yield block
+                return
+
+        effective_timeout = float(timeout) if timeout is not None else 600.0
+        if self.tier == SandboxTier.NORMAL:
+            env = {
+                "PATH": os.environ.get("PATH", ""),
+                "NEXUS_ROOT": self.root,
+                "USER": "nexus_worker",
+            }
+            venv_scripts = os.path.join(self.root, ".venv", "Scripts")
+            if os.path.isdir(venv_scripts):
+                env["PATH"] = venv_scripts + os.pathsep + env["PATH"]
+            effective_timeout = float(timeout) if timeout is not None else 300.0
+        else:
+            env = os.environ.copy()
+            venv_scripts = os.path.join(self.root, ".venv", "Scripts")
+            if os.path.isdir(venv_scripts):
+                env["PATH"] = venv_scripts + os.pathsep + env.get("PATH", "")
+
+        if self.tier == SandboxTier.DOCKER:
+            rel_workdir = os.path.relpath(target_dir, self.root).replace("\\", "/")
+            container_workdir = f"/workspace/{rel_workdir}" if rel_workdir != "." else "/workspace"
+            process = await asyncio.create_subprocess_exec(
+                "docker", "run", "--rm",
+                "-v", f"{self.root}:/workspace",
+                "-w", container_workdir,
+                "nexus-worker", "sh", "-c", command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            effective_timeout = float(timeout) if timeout is not None else 300.0
+        else:
+            process = await asyncio.create_subprocess_shell(
+                command,
+                cwd=target_dir,
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+
+        assert process.stdout is not None
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        deadline = asyncio.get_running_loop().time() + effective_timeout
+        try:
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                raw = await asyncio.wait_for(process.stdout.read(1024), timeout=remaining)
+                if not raw:
+                    break
+                text = decoder.decode(raw)
+                if text:
+                    yield text
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                yield tail
+            return_code = await process.wait()
+            self.last_exit_code = return_code
+            if return_code:
+                yield f"\n[EXIT_CODE]: {return_code}"
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            self.last_exit_code = -1
+            yield f"\n[SANDBOX_TIMEOUT]: Execution exceeded {int(effective_timeout)} seconds."
+
     def _execute_direct(self, command: str, workdir: str) -> str:
         """Direct execution without isolation (Default)."""
         try:
             process = subprocess.run(
-                command,
-                shell=True,
+                command if os.name == "nt" else ["sh", "-c", command],
+                shell=(os.name == "nt"),
                 cwd=workdir,
                 capture_output=True,
                 text=True,
-                timeout=600 # 10 minute direct limit
+                timeout=600
             )
             output = process.stdout
             if process.stderr:
@@ -73,21 +222,26 @@ class SovereignSandbox:
             return f"[EXECUTION_ERROR]: {str(e)}"
 
     def _execute_restricted(self, command: str, workdir: str) -> str:
-        """Restricted shell isolation."""
+        """Workspace-only restricted shell isolation."""
         try:
+            command = self._normalize_host_command(command)
+            workdir = os.path.abspath(workdir)
+            block = self._validate_workspace_scope(command, workdir)
+            if block:
+                return block
             safe_env = {
                 "PATH": os.environ.get("PATH", ""),
                 "NEXUS_ROOT": self.root,
                 "USER": "nexus_worker"
             }
             process = subprocess.run(
-                command,
-                shell=True,
+                command if os.name == "nt" else ["sh", "-c", command],
+                shell=(os.name == "nt"),
                 cwd=workdir,
                 env=safe_env,
                 capture_output=True,
                 text=True,
-                timeout=300 # 5 minute restricted limit
+                timeout=300
             )
             output = process.stdout
             if process.stderr:

@@ -1,7 +1,7 @@
 # NEXUS Unified Agent Architecture
 
 This document defines the target architecture for NEXUS as one autonomous agent
-platform across terminal, CLI, GUI, gateway channels, browser, tools, memory,
+platform across TUI, GUI, gateway channels, browser, tools, memory,
 voice, vision, and long-running missions.
 
 NEXUS should feel like one system with many surfaces:
@@ -23,7 +23,7 @@ and gives the user a replayable final report.
 
 ```text
 User
-  -> Terminal | CLI | GUI | Gateway  (any of the four)
+  -> TUI | GUI | Gateway  (any of the three)
   -> Unified Mission Runtime
   -> Planner -> Phase Engine -> Executor -> Verifier -> Memory
   -> Tools: shell, files, browser, search, RAG, Hive, diagnostics, rollback
@@ -31,36 +31,36 @@ User
   -> Final answer + timeline + resumable state
 ```
 
-## Four User Surfaces
+## Three User Interfaces
 
-A user can send a mission from **any** of these four surfaces. All four feed the same
+A user can send a mission from **any** of these three interfaces. All three feed the same
 agent core (`orchestrators/loop.py` today; `core/mission/` as the wrapper matures).
 
-| Surface | Path | Role |
-|---------|------|------|
-| **Terminal** | `nexus.py`, `shell.py` | Live operator shell. Direct `NexusLoop` — the real in-process runtime. **Not** the Ink CLI. |
-| **CLI** | `cli/nexus-cli.tsx` | TypeScript Ink thin client over `gui/api.py` (`localhost:8000/api`). |
+| Interface | Path | Role |
+|-----------|------|------|
+| **TUI** | `tui/`, `nexus/` | Ink API client launched by `python -m nexus`; starts/uses the `gui.api` backend. |
+| **Rich shell** | `shell/`, `nexus/` | Legacy in-process shell available with `python -m nexus --shell`. |
 | **GUI** | `gui/api.py`, `gui/src/App.tsx` | Visual mission cockpit and local FastAPI control plane. |
 | **Gateway** | `gateway/` | External channels (Telegram, Discord, WhatsApp, Meta) into the same runtime. |
 
 Rules:
 
-- The user may start work from terminal, CLI, GUI, or gateway interchangeably.
-- Surfaces must not fork separate agent brains; they normalize requests into one mission runtime.
-- Terminal is the standalone live path (`python nexus.py`). CLI and GUI require the API unless terminal is used.
-- Voice (`voice_chat.py`) and MCP/API are additional surfaces, not a fifth primary user channel.
+- The user may start work from TUI, GUI, or gateway interchangeably.
+- Interfaces must not fork separate agent brains; they normalize requests into one mission runtime.
+- The terminal (PowerShell/Windows Terminal) is the **host environment**, not an interface.
+- Voice (`voice_chat.py`) and MCP/API are additional surfaces, not a fourth primary user channel.
 
-### Internally connected surfaces
+### Internally connected interfaces
 
-The four surfaces are **one linked system**, not four isolated apps. If a user starts
+The three interfaces are **one linked system**, not three isolated apps. If a user starts
 a mission in the GUI, the same session id, chat history, and work-event timeline must
-be visible from terminal, CLI, and gateway (compact form).
+be visible from TUI and gateway (compact form).
 
 Shared state bus (local files today):
 
 | Store | Path | Contents |
 |-------|------|----------|
-| Active session | `workspace/active_session.json` | Current linked session for all four surfaces |
+| Active session | `workspace/active_session.json` | Current linked session for all three interfaces |
 | Session memory | `logs/sessions/{session_id}.json` | Conversation + loop memory |
 | Work events | `workspace/work_events/{session_id}.jsonl` | Mission timeline (tools, files, commands) |
 | Session meta | `logs/sessions/{session_id}.meta` | Title and session labels |
@@ -69,23 +69,23 @@ Implementation: `core/session_bus.py` + `/api/sessions/active`.
 
 Connection rules:
 
-- Use the **same `session_id`** on every surface (`default`, `session_173…`, or `gateway_{platform}_{chat_id}`).
-- Any surface that chats or switches session updates `active_session.json`.
-- GUI and CLI sync through `gui/api.py` (`/api/sessions/active`, `/api/work-events`).
-- Terminal auto-joins the active session on start and calls `sync_memory` before each reply.
+- Use the **same `session_id`** on every interface (`default`, `session_173…`, or `gateway_{platform}_{chat_id}`).
+- Any interface that chats or switches session updates `active_session.json`.
+- GUI sync through `gui/api.py` (`/api/sessions/active`, `/api/work-events`).
+- TUI auto-joins the active session on start and calls `sync_memory` before each reply.
 - Gateway maps each chat to a stable session id on the same bus.
-- A mission started on any surface must be observable and continuable on the others without re-sending the prompt.
+- A mission started on any interface must be observable and continuable on the others without re-sending the prompt.
 
 ## Primary Runtime Layers
 
 ### 1. Interface Layer
 
 Most entry points are thin clients. They should not contain separate agent logic.
-**Terminal is the exception**: it runs `NexusLoop` in-process via `shell.py`.
+**Legacy Rich shell is the exception**: it runs `NexusLoop` in-process via `shell/`.
 
-- `nexus.py` and `shell.py`: **Terminal** — live, direct operator interface.
-- `cli/`: **CLI** — TypeScript/Ink UI (API client, not the live terminal).
-- `gui/api.py`: local FastAPI control plane for CLI and GUI.
+- `tui/` and `nexus/`: **TUI** — Ink client over the API backend.
+- `shell/` and `nexus/`: **Rich shell** — legacy direct operator interface with in-process `NexusLoop`.
+- `gui/api.py`: local FastAPI control plane for GUI.
 - `gui/src/App.tsx`: **GUI** — visual mission cockpit.
 - `gateway/`: **Gateway** — Telegram, WhatsApp, Discord, webhooks, and future channels.
 - `voice_chat.py` and `core/voice/`: speech input/output surface (supplementary).
@@ -116,7 +116,7 @@ Core responsibilities:
 - Attach every tool call to a phase.
 - Persist work events.
 - Track pause/resume/cancel state.
-- Expose one event stream for GUI, terminal, CLI, and gateway.
+- Expose one event stream for TUI, GUI, and gateway.
 - Summarize outcomes and verification evidence.
 
 Target modules:
@@ -289,7 +289,7 @@ Gateway channels should support:
 
 ```text
 1. Intake
-   Normalize request from GUI, terminal, CLI, gateway, voice, or API.
+   Normalize request from TUI, GUI, gateway, voice, or API.
 
 2. Context Build
    Load NEXUS.md, repo map, session memory, RAG, provider health, and constraints.
@@ -369,10 +369,9 @@ transport, but the payload should follow this contract.
 - Add pause, stop, continue, and resume controls.
 - Add mission replay view.
 
-### Phase D: Terminal And CLI Parity
+### Phase D: TUI And GUI Parity
 
-- Render the same mission events in terminal text mode.
-- Add concise phase rows to the Ink CLI.
+- Render the same mission events in TUI text mode.
 
 ### Phase E: Gateway Parity
 

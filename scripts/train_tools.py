@@ -1,10 +1,13 @@
-import os
 import json
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer
-from peft import LoraConfig, get_peft_model
-from datasets import Dataset
 import logging
+import os
+
+logger = logging.getLogger("nexus.scripts.train_tools")
+
+import torch
+from datasets import Dataset
+from peft import LoraConfig, get_peft_model
+from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
 
 # 🔱 [PROTOCOL_SATURATION]: Forcefully Locking NEXUS JSON standards
 
@@ -18,6 +21,7 @@ def _training_model_path(root):
         if rel_path:
             return os.path.join(root, rel_path)
     except Exception:
+        logger.warning("scripts/train_tools.py:21 _training_model_path: suppressed error", exc_info=True)
         pass
     return os.path.join(root, "models", "local", "qwen3.5-0.8b-uncensored-opus-distill")
 
@@ -60,7 +64,7 @@ def run_saturation():
                 user_q = parts[0].replace("User: ", "")
                 # 🛑 THE TARGET: Must be literal action/params JSON
                 nexus_a = parts[1].replace("TASK_COMPLETE", "").strip()
-                chatml = f"<|im_start|>system\nYou are Nexus. Execute tools using strict JSON schema: {{'action': '...', 'params': {{...}}}}<|im_end|>\n"
+                chatml = "<|im_start|>system\nYou are Nexus. Execute tools using strict JSON schema: {'action': '...', 'params': {...}}<|im_end|>\n"
                 chatml += f"<|im_start|>user\n{user_q}<|im_end|>\n"
                 chatml += f"<|im_start|>assistant\n{nexus_a}<|im_end|>\n"
                 final_params.append(chatml)

@@ -1,10 +1,11 @@
 """NEXUS INTENT & PROACTIVE ENGINE (v17.0)"""
 __version__ = "1.0.0"
-import asyncio
 import logging
 import re
 from typing import Dict, List, Optional
+
 from providers.router import ModelRouter
+
 logger = logging.getLogger(__name__)
 _ROUTER: Optional[ModelRouter] = None
 

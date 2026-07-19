@@ -5,8 +5,10 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
+
 from evolution.logs import EvolutionLog
+
 logger = logging.getLogger(__name__)
 
 class EvolutionStatus:
@@ -69,6 +71,7 @@ class EvolutionStatus:
                         with open(schema_path, "r", encoding="utf-8") as f:
                             ver = json.load(f).get("version", "?")
                     except Exception:
+                        logger.warning("evolution/status/scripts/status.py:73 _scan_tools: suppressed error", exc_info=True)
                         pass
                 items.append({"name": entry, "version": str(ver)})
         return {"count": len(items), "items": items}
@@ -88,6 +91,7 @@ class EvolutionStatus:
                             with open(os.path.join(pd, fname), "r", encoding="utf-8") as f:
                                 ver = json.load(f).get("version", "?")
                         except Exception:
+                            logger.warning("evolution/status/scripts/status.py:92 _scan_plugins: suppressed error", exc_info=True)
                             pass
                 items.append({"name": entry, "version": str(ver)})
         return {"count": len(items), "items": items}
@@ -107,6 +111,7 @@ class EvolutionStatus:
                                 data = json.load(f)
                             items.append({"title": data.get("title", entry), "importance": data.get("importance", 0)})
                         except Exception:
+                            logger.warning("evolution/status/scripts/status.py:111 _scan_memories: suppressed error", exc_info=True)
                             pass
         return {"count": len(items), "items": items}
 
@@ -125,6 +130,7 @@ class EvolutionStatus:
                                 data = json.load(f)
                             items.append({"title": data.get("title", entry), "key_concepts": data.get("key_concepts", [])})
                         except Exception:
+                            logger.warning("evolution/status/scripts/status.py:129 _scan_knowledge: suppressed error", exc_info=True)
                             pass
         return {"count": len(items), "items": items}
 
@@ -163,5 +169,6 @@ class EvolutionStatus:
                     if m:
                         return m.group(1)
         except Exception:
+            logger.warning("evolution/status/scripts/status.py:167 _version_from_md: suppressed error", exc_info=True)
             pass
         return "?"

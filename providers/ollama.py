@@ -1,6 +1,9 @@
-from typing import Dict, Any, Optional, List, Iterator
-from providers.base import NexusBaseProvider
+import os
 import json
+from typing import Dict, Iterator, List, Optional
+
+from providers.base import NexusBaseProvider
+
 
 class OllamaProvider(NexusBaseProvider):
     """
@@ -12,9 +15,9 @@ class OllamaProvider(NexusBaseProvider):
     def __init__(self):
         super().__init__("ollama", "http://localhost:11434/api/chat")
         if not self.model:
-            self.model = "llama3"
+            self.model = os.environ.get("NEXUS_PROVIDER_OLLAMA_MODEL", "llama3")
             
-    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> str:
+    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {
             "model": self.model,
@@ -29,7 +32,7 @@ class OllamaProvider(NexusBaseProvider):
         except Exception as e:
             return f"Error: Local Ollama not reachable. {str(e)}"
 
-    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> Iterator[str]:
+    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {
             "model": self.model,
@@ -56,3 +59,5 @@ class OllamaProvider(NexusBaseProvider):
 if __name__ == "__main__":
     p = OllamaProvider()
     print(f"Connecting to [{p.model}] on {p.endpoint}")
+
+

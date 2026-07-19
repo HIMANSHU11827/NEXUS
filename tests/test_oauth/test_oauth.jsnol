@@ -1,0 +1,8 @@
+{
+  "name": "test_oauth",
+  "version": "1.0.0",
+  "description": "Tests for OAuth authentication — types, storage, provider registry, PKCE, callback server",
+  "category": "test",
+  "entry": "scripts/test_types.py",
+  "class": "TestOAuth"
+}

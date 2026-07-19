@@ -1,10 +1,28 @@
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import utils.nexus_path as nexus_path  # noqa: F401
+import logging
+import os
+import sys
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from langchain_core.tools import tool
-from tool_adapters import RegistryTerminalTool as TerminalTool
-from tool_adapters import RegistryFileTools as NexusFileTools
+
+logger = logging.getLogger("nexus.langchain_tools")
+
+try:
+    from tool_adapters import RegistryFileTools as NexusFileTools
+except ImportError:
+    class NexusFileTools:
+        def __init__(self, root): self.root = root
+        def write_file(self, name, content): return "[stub] wrote " + name
+        def read_file(self, name): return ""
+
+try:
+    from tool_adapters import RegistryTerminalTool as TerminalTool
+except ImportError:
+    class TerminalTool:
+        def __init__(self, root): self.root = root
+        def execute(self, cmd): return "[stub] " + cmd
+
+import utils.nexus_path as nexus_path  # noqa: F401
 from rag.engine import NexusAtlasRAG
 
 _terminal = TerminalTool("./workspace")

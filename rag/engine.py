@@ -13,7 +13,7 @@ import sys
 os.environ.pop("PYTHONHOME", None)
 sys.path = [p for p in sys.path if 'cpython-3.11' not in p.lower()]
 if sys.version_info[:2] == (3, 14):
-    _PY314 = r"C:\Python314"
+    _PY314 = os.environ.get("NEXUS_PYTHON314_HOME") or r"C:\Python314"
     for _p in [os.path.join(_PY314, "Lib"), os.path.join(_PY314, "DLLs")]:
         if os.path.isdir(_p) and _p not in sys.path:
             sys.path.insert(1, _p)
@@ -21,11 +21,12 @@ if sys.version_info[:2] == (3, 14):
 import json
 import math
 import re
-import time
 import threading
-from typing import List, Dict, Any, Tuple, Optional
-from utils.singleton import ThreadSafeSingleton
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
 from rag.turbo_vector import NexusTurboVectorEngine
+from utils.singleton import ThreadSafeSingleton
 
 
 class NexusAtlasRAG(ThreadSafeSingleton):
@@ -391,7 +392,7 @@ class NexusAtlasRAG(ThreadSafeSingleton):
         if not results:
             return "Turbo Quant Search: No matches found."
 
-        parts: List[str] = [f"⚡ [TURBO QUANT ENABLED SEARCH RESULTS]"]
+        parts: List[str] = ["⚡ [TURBO QUANT ENABLED SEARCH RESULTS]"]
         for score, item in results:
             doc_id = item["id"]
             content = item["content_summary"]

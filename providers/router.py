@@ -1,7 +1,7 @@
 import logging
 import os
 import time
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("NEXUS_ROUTER")
 
@@ -144,7 +144,11 @@ class ModelRouter:
 
     def _fallback_mesh(self, messages: Optional[List[Dict[str, str]]] = None, *, streaming: bool = False) -> List[str]:
         """Return provider IDs ordered by capability and recent health."""
-        candidates = self.kernel.config.get_active_providers()
+        try:
+            cfg = self.kernel.config.get("task_routing_auto", {})
+            candidates = list(cfg.keys()) if isinstance(cfg, dict) else []
+        except Exception:
+            candidates = []
         if not candidates:
             candidates = ["openrouter", "gemini", "groq", "openai", "ollama", "lm_studio"]
         active = getattr(self.provider, "provider_name", "")
@@ -206,35 +210,58 @@ class ModelRouter:
 
         if self.provider:
             self.total_cloud_calls += 1
+            emitted_any = False
             try:
                 start = time.time()
                 if hasattr(self.provider, "validate_api_key") and not self.provider.validate_api_key():
                     raise RuntimeError("provider has no valid credentials or local backend")
                 if hasattr(self.provider, "stream_generate"):
                     for chunk in self.provider.stream_generate(messages=messages, **kwargs):
+                        if self._looks_like_provider_error(chunk):
+                            raise RuntimeError(str(chunk))
+                        emitted_any = True
                         yield chunk
                 else:
-                    yield self.provider.generate(messages=messages, **kwargs)
+                    result = self.provider.generate(messages=messages, **kwargs)
+                    if self._looks_like_provider_error(result):
+                        raise RuntimeError(str(result))
+                    emitted_any = True
+                    yield result
                 self.health.mark_success(getattr(self.provider, "provider_name", type(self.provider).__name__), (time.time() - start) * 1000)
             except Exception as e:
                 provider_id = getattr(self.provider, "provider_name", type(self.provider).__name__)
                 self.health.mark_failure(provider_id, e)
                 last_error = self.health.normalize_error(e)
+                # Once bytes from a provider have reached the caller, switching
+                # providers would splice two unrelated answers into one stream.
+                if emitted_any:
+                    yield f"[PROVIDER_ERROR]: {last_error}"
+                    return
                 for fallback_id in self._fallback_mesh(messages=messages, streaming=True):
+                    fallback_emitted = False
                     try:
                         fallback_provider = self.factory.get_provider_by_id(fallback_id)
                         if fallback_provider and fallback_provider.validate_api_key():
                             start = time.time()
                             if hasattr(fallback_provider, "stream_generate"):
                                 for chunk in fallback_provider.stream_generate(messages=messages, **kwargs):
+                                    if self._looks_like_provider_error(chunk):
+                                        raise RuntimeError(str(chunk))
+                                    fallback_emitted = True
                                     yield chunk
                             else:
-                                yield fallback_provider.generate(messages=messages, **kwargs)
+                                result = fallback_provider.generate(messages=messages, **kwargs)
+                                if self._looks_like_provider_error(result):
+                                    raise RuntimeError(str(result))
+                                fallback_emitted = True
+                                yield result
                             self.health.mark_success(fallback_id, (time.time() - start) * 1000)
                             return
                     except Exception as fallback_error:
                         self.health.mark_failure(fallback_id, fallback_error)
                         last_error = self.health.normalize_error(fallback_error)
+                        if fallback_emitted:
+                            break
                 yield f"[PROVIDER_ERROR]: {last_error}"
 
     def provider_health(self) -> List[Dict[str, Any]]:

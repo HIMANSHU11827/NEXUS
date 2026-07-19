@@ -39,7 +39,7 @@ GPU is optional. Windows CPU is the default target.
 
 ## Config
 
-Voice settings live in `configs/nexus_config.yaml`:
+Voice settings live in `config/voice.yml`:
 
 ```yaml
 voice:
@@ -49,7 +49,9 @@ voice:
   speaker_device: null
   sample_rate: 16000
   record_seconds: 3.0
-  silence_threshold: 0.01
+  silence_threshold: 0.010
+  min_speech_seconds: 0.18
+  silence_timeout_seconds: 0.9
   whisper_model: models/local/voice/ggml-tiny-q5_1.bin
   whisper_device: auto
   whisper_language: auto
@@ -65,6 +67,8 @@ voice:
   wake_word: nexus
   allow_text_fallback: true
   keep_models_loaded: true
+  assistant_timeout_seconds: 45.0
+  require_wake_word: false
 ```
 
 The default STT model is `models/local/voice/ggml-tiny-q5_1.bin`, a multilingual quantized whisper.cpp model chosen for low memory use and fast CPU inference. Switch to another local Whisper-compatible file or model name if you need a different speed/accuracy tradeoff.
@@ -126,7 +130,7 @@ voice/
   pipeline.py      microphone -> STT -> NEXUS -> TTS orchestration
   stt.py           Whisper loader/transcriber
   tts.py           KittenTTS loader, sentence chunking, speech playback
-voice_chat/        package containing the runnable CLI logic
+voice_chat/        package containing the runnable logic
 docs/VOICE_ASSISTANT.md
 ```
 
@@ -173,7 +177,7 @@ TTS is too loud or too fast:
 
 The first request is slow:
 
-- Run `python voice_chat.py --warmup`.
+- Run `python -m voice_chat --warmup`.
 - The first run downloads model files; later runs use the local cache.
 
 ## Sources

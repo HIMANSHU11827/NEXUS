@@ -4,18 +4,20 @@ Enables remote God-Architect control of NEXUS OS via Telegram.
 Architecture: Async Event Loop + Persistent Architect Session.
 """
 
-import os
 import asyncio
 import logging
+import os
+
 from telebot.async_telebot import AsyncTeleBot
-from orchestrators.architect import NexusArchitect
+
+from orchestrators.loop import NexusLoop
 
 # Configuration
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_IDS = [int(x) for x in os.getenv("ALLOWED_TELEGRAM_IDS", "").split(",") if x]
 
 # NEXUS Kernel
-architect = NexusArchitect()
+loop = NexusLoop()
 
 bot = AsyncTeleBot(TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None
 
@@ -23,7 +25,7 @@ bot = AsyncTeleBot(TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None
 async def send_welcome(message):
     if message.from_user.id not in ALLOWED_USER_IDS:
         return
-    status = f"NEXUS OS v6.2 [ONLINE]\nKernel: God-Architect\nUptime: Active\nCWD: {architect.terminal.root}"
+    status = f"NEXUS OS v6.2 [ONLINE]\nKernel: NexusLoop\nUptime: Active\nCWD: {loop.root}"
     await bot.reply_to(message, status)
 
 
@@ -42,7 +44,7 @@ async def handle_task(message):
     await bot.reply_to(message, "🚀 [NEXUS]: Initiating cognitive loop for remote task...")
     
     try:
-        for chunk in architect.stream_coordinate(task_desc):
+        async for chunk in loop.stream_run(task_desc):
             full_response += chunk
             chunk_counter += 1
             

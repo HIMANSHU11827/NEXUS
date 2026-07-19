@@ -1,0 +1,8 @@
+{
+  "name": "test_smoke",
+  "version": "1.0.0",
+  "description": "Smoke tests — end-to-end workflow, old chat compatibility, server import and basic API health",
+  "category": "test",
+  "entry": "scripts/test_e2e_workflow.py",
+  "class": "TestSmoke"
+}

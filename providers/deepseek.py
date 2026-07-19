@@ -1,7 +1,10 @@
+import os
 import json
 import logging
-from typing import Dict, Any, Optional, List, Iterator
+from typing import Dict, Iterator, List, Optional
+
 from providers.base import NexusBaseProvider
+
 
 class DeepSeekProvider(NexusBaseProvider):
     """
@@ -12,7 +15,7 @@ class DeepSeekProvider(NexusBaseProvider):
     def __init__(self):
         super().__init__("deepseek", "https://api.deepseek.com/chat/completions")
         if not self.model:
-            self.model = "deepseek-chat"
+            self.model = os.environ.get("NEXUS_PROVIDER_DEEPSEEK_MODEL", "deepseek-chat")
         self._base_model = self.model
         self._thinking_model = "deepseek-reasoner"
         self.headers = {
@@ -24,7 +27,7 @@ class DeepSeekProvider(NexusBaseProvider):
         self.thinking = enabled
         self.model = self._thinking_model if enabled else self._base_model
 
-    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> str:
+    def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs}
         try:
@@ -38,14 +41,16 @@ class DeepSeekProvider(NexusBaseProvider):
         except Exception as e:
             return f"Error: Failed to reach DeepSeek. {str(e)}"
 
-    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None) -> Iterator[str]:
+    def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs, "stream": True}
         try:
             response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=60)
             if response.status_code == 200:
                 in_thinking = False
-                for line in response.iter_lines():
+                # Use the smallest practical chunk size so the GUI gets tokens
+                # as early as the provider sends them.
+                for line in response.iter_lines(chunk_size=1):
                     if line:
                         decoded = line.decode("utf-8").strip()
                         if decoded.startswith("data: "):
@@ -69,8 +74,9 @@ class DeepSeekProvider(NexusBaseProvider):
                             except json.JSONDecodeError: continue
                 if in_thinking:
                     yield "</thinking>"
-                yield "\n\nTASK_COMPLETE"
             else:
-                yield f"Error: {response.status_code}. {response.text}\n\nTASK_COMPLETE"
+                yield f"Error: {response.status_code}. {response.text}"
         except Exception as e:
-            yield f"Error in DeepSeek stream: {str(e)}\n\nTASK_COMPLETE"
+            yield f"Error in DeepSeek stream: {str(e)}"
+
+

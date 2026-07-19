@@ -1,7 +1,7 @@
 import ast
-import os
 import hashlib
-from typing import List, Dict, Any, Optional
+import os
+from typing import Any, Dict, List, Optional
 
 
 class AtlasASTIndexer:

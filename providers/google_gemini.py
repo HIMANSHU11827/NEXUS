@@ -1,6 +1,9 @@
-from typing import Dict, Any, Optional, List, Iterator
-from providers.base import NexusBaseProvider
+import os
 import json
+from typing import Dict, Iterator, List, Optional
+
+from providers.base import NexusBaseProvider
+
 
 class GoogleGeminiProvider(NexusBaseProvider):
     """
@@ -10,10 +13,11 @@ class GoogleGeminiProvider(NexusBaseProvider):
     """
     
     def __init__(self):
-        super().__init__("gemini", "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent")
-        # Injected key correctly via base class logic
-        self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={self.api_key}"
-        self.headers = {"Content-Type": "application/json"}
+        model = os.environ.get("NEXUS_PROVIDER_GEMINI_MODEL", "gemini-1.5-pro")
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        super().__init__("gemini", endpoint)
+        self.endpoint = endpoint
+        self.headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
         
     def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
@@ -68,3 +72,5 @@ class GoogleGeminiProvider(NexusBaseProvider):
                 yield f"Error: {response.status_code}"
         except Exception as e:
             yield f"Error in Gemini stream: {e}"
+
+

@@ -4,12 +4,11 @@ High-performance persistent fact memory with Full-Text Search.
 Ported from Hermes-Agent store.py logic.
 """
 
-import sqlite3
 import json
 import logging
 import os
-from typing import List, Dict, Any, Optional
-from datetime import datetime
+import sqlite3
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 

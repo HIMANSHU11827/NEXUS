@@ -1,0 +1,7 @@
+{
+  "name": "horizons",
+  "version": "1.0.0",
+  "description": "Strategic Horizons — long-term roadmap and strategic planning",
+  "entry": "scripts/horizons.py",
+  "class": "StrategicHorizons"
+}

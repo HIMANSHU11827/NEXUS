@@ -1,21 +1,19 @@
-# NEXUS AI System Settings
-version: "1.0.0"
-mode: development
+theme:
+  name: dark
+  primary: bold magenta
+  accent: bold cyan
+  success: bold green
+  panel_border: cyan
+temperature: 0.7
+max_tokens: 4096
+max_turns: 10
+thinking_mode: true
+permission_mode: auto
+auto_save: true
+check_updates: true
+telemetry: false
 log_level: INFO
-max_turns: 20
-workspace: ./workspace
-default_provider: cloud
-provider_name: deepseek
-memory:
-  type: hybrid
-  vector_store: chromadb
-  max_history: 1000
-evolution:
-  auto_forge: true
-  auto_improve: true
-  gap_detection: true
-  max_retries: 3
+language: en
 safety:
-  prover_strictness: 0.8
-  sandbox_enabled: true
-  permission_mode: strict
+  sandbox_enabled: false
+  sandbox_tier: no_sandbox

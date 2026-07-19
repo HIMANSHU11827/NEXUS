@@ -1,0 +1,12 @@
+{
+  "name": "creating",
+  "version": "1.0.0",
+  "description": "Create a new file with content",
+  "entry": "scripts/creating.py",
+  "class": "CreatingTool",
+  "params": {
+    "path": {"type": "string", "description": "File path to create", "required": true},
+    "content": {"type": "string", "description": "File content", "required": true}
+  },
+  "category": "filesystem"
+}

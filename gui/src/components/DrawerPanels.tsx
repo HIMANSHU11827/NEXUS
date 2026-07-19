@@ -1,5 +1,7 @@
 import { Activity, Bell, Clock, Cpu, Database, HeartPulse, Monitor, PauseCircle, PlayCircle, PlusCircle, Power, Shield, ShieldAlert, StopCircle, Trash2 } from 'lucide-react';
 import type { NexusState } from '../types';
+import { FileExplorerPanel } from './workspace/FileExplorerPanel';
+import { TerminalPanel } from './workspace/TerminalPanel';
 
 type HiveDrawerProps = {
   hive: NexusState['hive'];
@@ -301,6 +303,22 @@ export function RemindersDrawer({
           <span>Add one above with a time. When it becomes due, NEXUS will trigger a browser notification.</span>
         </div>
       )}
+    </div>
+  );
+}
+
+export function FilesDrawer() {
+  return (
+    <div className="files-panel" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <FileExplorerPanel />
+    </div>
+  );
+}
+
+export function TerminalDrawer() {
+  return (
+    <div className="terminal-panel" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <TerminalPanel />
     </div>
   );
 }

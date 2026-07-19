@@ -58,6 +58,18 @@ export interface SessionSummary {
 
 export interface WorkEvent {
   id?: string;
+  event_id?: string;
+  event_type?: string;
+  run_id?: string;
+  conversation_id?: string;
+  sequence?: number;
+  timestamp?: number;
+  duration_ms?: number;
+  exit_code?: number;
+  payload?: Record<string, unknown>;
+  related_files?: string[];
+  related_command?: string;
+  related_tool?: string;
   session_id?: string;
   kind?: string;
   type?: string;
@@ -80,7 +92,17 @@ export interface WorkEvent {
   [key: string]: any;
 }
 
-export type ChatMessage = { role: string; content: string };
+export type ChatMessage = { 
+  role: string; 
+  content: string;
+  id?: string;
+  turnId?: string;
+  createdAt?: number;
+  workflowStart?: number;
+  workflowEnd?: number;
+  events?: WorkEvent[];
+  isStreaming?: boolean;
+};
 
 export type NavItem = {
   id: string;

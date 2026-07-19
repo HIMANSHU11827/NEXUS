@@ -1,104 +1,100 @@
-# NEXUS Architecture
+# Architecture
 
-For the next target architecture that unifies terminal, CLI, GUI, gateway,
-voice, browser, memory, tools, mission timelines, and visual
-workflows, see
-[`docs/NEXUS_UNIFIED_AGENT_ARCHITECTURE.md`](NEXUS_UNIFIED_AGENT_ARCHITECTURE.md)
-and [`docs/NEXUS_WORKFLOW_MODEL.md`](NEXUS_WORKFLOW_MODEL.md).
+Nexus AI is a local-first autonomous AI agent framework with a Python backend and multiple frontends.
 
-NEXUS is a local-first autonomous agent platform organized around these package directories:
+## Core Runtime
 
-### Core Runtime
-- `orchestrators/loop.py`: primary reasoning loop (7-state sovereign cognitive loop: GROUNDING → PLANNING → INFERENCE → AUDITING → EXECUTION → VERIFICATION → EVOLVE), tool extraction, prompt assembly, memory sync, and self-correction hooks.
-- `kernel/`: singleton runtime, workspace ownership, shared module cache, stats, and boot health.
-- `nexus/` and `shell/`: **Terminal** — live operator shell package with direct `NexusLoop` access.
+- **nexus/** - Boot loader (`boot()` function). Entry point for `python -m nexus`, `--setup`, `--server`, `--gui`, and `--shell`. The default route launches the Ink TUI and starts `gui.api:app` when needed.
+- **nexus/events.py** - Canonical event system with ~50 event types (run, conversation, message, plan, tool, command, file, search, web, test, subagent lifecycle). Events flow via `work_event_sink` callback and stream to GUI via SSE.
+- **orchestrators/loop.py** - `NexusLoop` - the main agent loop. Handles streaming responses (`stream_run`), tool execution, memory, provider routing, and event emission. ~2900 lines.
+- **kernel/** - Central singleton with lazy-loaded subsystems, workspace ownership, shared module cache, and health stats.
 
-### Tools & Sandbox
-- `tools/<name>/`: executable capability layer — 10 tools under `tools/` (bash, code_search, file_ops, knowledge, mcp, memory, reasoning, system, task, web_search). Each tool has its own folder with `<name>.jsnol` (version metadata), `scripts/` (implementation), and `<name>.md` (docs).
-- `sandbox/`: direct-execution safety, risk scoring (`CommandRiskScorer`), and failure memory via `SovereignSandbox`.
-- `safety/`: safety laws, prover engine, and policy evaluation.
+## API Layer
 
-### Evolution & Self-Improvement
-- `evolution/`: 18 submodules in per-folder format — `tool_forge/`, `skill_forge/` (includes `SkillSynthesizer`), `plugin_forge/`, `memory_forge/`, `knowledge_forge/`, `logs/`, `status/`, `ledger/`, `nudge/`, `intent/`, `self_improvement/`, `sop/`, `ensemble/`, `version/`. Each has `<name>.jsnol`, `scripts/`, and `<name>.md`. Auto-version tracking via `VersionManager` across all 39 modules.
+- **server/** - FastAPI HTTP/SSE server on port 8000. Authenticated via `authentication/` module. Provides:
+  - `/api/chat` - Chat endpoint with streaming SSE and non-streaming modes
+  - `/api/sessions` - Session CRUD
+  - `/api/history` - Chat history per session
+  - `/api/tools`, `/api/skills`, `/api/agents`, `/api/plugins`, `/api/mcp`, `/api/providers`, `/api/features` - Resource listing
+  - `/api/manage` - Runtime management (enable/disable tools, skills, MCP, providers)
+  - `/api/files/list` - Directory listing
+  - `/api/health` - Health check
+  - `/v1/models`, `/v1/chat/completions` - OpenAI-compatible endpoints
+- **gui/api.py** - Separate FastAPI app for the GUI frontend.
 
-### Memory & Knowledge
-- `memory/`: persistent JSON-based memory storage (per artifact).
-- `knowledge/`: knowledge store with RAG index files.
-- `rag/`: retrieval layer — BM25 + hybrid vector retrieval with Atlas deep indexing.
-- `context/`: context persistence and compression (`NexusContextCompressor`).
+## Providers
 
-### Reasoning & Planning
-- `reasoning/`: hyper reasoning engine for planner/critic/verifier workflows with uncertainty and replan triggers.
-- `router/`: intent router — multi-signal intent classification with confidence scoring.
+- **providers/** - 40+ LLM provider implementations:
+  - Cloud: OpenAI, Anthropic, DeepSeek, Google Gemini, Groq, Mistral, Cohere, Perplexity, Together AI, Fireworks, Sambanova, xAI, OpenRouter, HuggingFace, NVIDIA
+  - Local: Ollama, LM Studio, llama.cpp, Zupra (offline CPU)
+  - Utilities: auto-detect, auto-heal, health telemetry, capability-aware routing, fallback chain
+- **providers/router.py** - Provider router for capability-aware fallback
+- **providers/factory.py** - `NexusProviderFactory` singleton
+- **providers/profiles.py** - Provider profile store
 
-### Providers
-- `providers/`: 35+ model providers (OpenAI, Anthropic, Groq, Gemini, Ollama, DeepSeek, Mistral, etc.) with health telemetry, capability registry, and fallback routing.
+## Tools
 
-### User Surfaces
-- `cli/`: **CLI** — TypeScript Ink UI (API thin client; not the live terminal).
-- `gui/`: **GUI** — FastAPI backend and React operator surface.
-- `gateway/`: **Gateway** — Telegram, Discord, WhatsApp, and other external channels.
+- **tools/** - 19 tools organized in subdirectories:
+  - `bash/`, `code_search/`, `creating/`, `deep_research/`, `deleting/`, `git_ops/`, `hive/`, `knowledge/`, `memory/`, `modifying/`, `planning/`, `reading/`, `reasoning/`, `shortcuts/`, `system/`, `task/`, `terminal/`, `test_runner/`, `web_search/`
+  - Each tool has a `<name>.jsnol` metadata file and handler scripts
+- **tools/nexus_tools/registry.py** - `ToolRegistry` for tool discovery and management
+- **tools/threat_patterns.py** - Threat pattern detection for security
 
-### Support
-- `config/`: YAML configuration (provider.yml, settings.yml, system.yml) loaded by `config_loader.py`.
-- `prompts/`: `NexusPromptEngine` — token-efficient dynamic prompt builder.
-- `security/`: lightweight release hygiene checks, secret scanner.
-- `permissions/`: permission policy definitions.
-- `lifecycle/`: lifecycle management hooks.
-- `tasks/`: task scheduler.
-- `skills/`: skill definitions and `NexusSkillMaster` singleton.
-- `plugins/`: plugin system (early stage).
-- `utils/`: utilities (logger, encryption, compression, math, token counter).
-- `mcp/`: MCP stdio server for code graph (Claude/Cursor/Windsurf-style).
-- `voice/`: voice mode (whisper.cpp `ggml-tiny-q5_1.bin` + KittenTTS Nano int8).
-- `tests/`: test suites (42 passing, 3 pre-existing failures).
+## Interfaces
 
-## Four User Surfaces
+Three user interfaces, all feeding into the same agent runtime:
 
-Users can send missions from **any** of the four surfaces above. All normalize into the
-same agent runtime (`orchestrators/loop.py`). Terminal is the only surface that runs the
-loop in-process; CLI and GUI call `gui` API; gateway routes through `gateway`.
+| Interface | Command | Technology | Port |
+|-----------|---------|------------|------|
+| **TUI** | `python -m nexus` | Ink + `gui.api` backend | 8000 |
+| **Rich shell** | `python -m nexus --shell` | Rich | in-process |
+| **GUI** | `python -m nexus --gui` | React 19 + Vite + `gui.api` | 8000/5173 |
+| **Server** | `python -m nexus --server` | standalone FastAPI `server:app` | 8000 |
+| **Gateway** | `python -m nexus --gateway` | Telegram, Discord, WhatsApp, Slack | external |
 
-### Internally connected
+All interfaces share sessions via `utils/session_bus.py`:
+- `workspace/active_session.json` - Active session tracking
+- `logs/sessions/<id>.json` - Conversation memory
+- `workspace/work_events/<id>.jsonl` - Mission timeline
 
-All four surfaces share one linked session via `session_bus/`:
+## Support Systems
 
-- `workspace/active_session.json` — which session is live right now
-- `logs/sessions/{session_id}.json` — conversation memory
-- `workspace/work_events/{session_id}.jsonl` — mission timeline
+- **memory/** - Persistent JSON-based memory storage (per artifact/session)
+- **sandbox/** - `CommandRiskScorer` with 3 tiers: NO_SANDBOX / NORMAL / DOCKER
+- **rag/** - BM25 + hybrid vector retrieval with Atlas deep indexing
+- **knowledge/** - Knowledge store with SQLite index and RAG index files
+- **context/** - Context persistence and compression (`NexusContextCompressor`)
+- **safety/** - Safety laws and policy evaluation
+- **security/** - Secret scanner for repository hygiene
+- **permissions/** - Permission mode definitions (auto, plan, acceptEdits, dontAsk, bypass, approve)
+- **lifecycle/** - Lifecycle hooks (tool, skill, plugin, memory, cron, self-improvement)
+- **tasks/** - Task scheduler
+- **telemetry/** - SQLite-based telemetry database
+- **hive/** - Multi-agent orchestration engine
+- **reasoning/** - Hyper-reasoning engine for planner/critic/verifier workflows
+- **router/** - Intent router for multi-signal intent classification
 
-Chat in GUI → terminal auto-joins on start; CLI/GUI poll `/api/sessions/active` every 5s. Use `/session <id>` or `/events` to switch or inspect manually.
+## Extension Systems
 
-## Operating Model
+- **mcp/** - MCP stdio client/server and tool adapter. Security boundary rejects workspace-root escape, bounds result limits.
+- **plugins/** - Plugin discovery/execution with trust model. Remote installation disabled by default.
+- **skills/** - Skill definitions with `SKILL.md` format and `SkillRegistry`.
+- **evolution/** - 18+ submodules: tool_forge, skill_forge, plugin_forge, memory_forge, knowledge_forge, logs, status, ledger, nudge, intent, self_improvement, sop, ensemble, version.
+- **voice/** - Voice mode (whisper.cpp ggml-tiny-q5_1.bin + KittenTTS Nano int8)
 
-NEXUS is designed for fast direct execution. It avoids approval spam by default and instead uses deterministic guardrails:
+## Event Flow
 
-1. Score command risk before execution.
-2. Block clearly destructive commands unless explicitly enabled.
-3. Keep path writes inside the project root.
-4. Store failures for later self-correction.
-5. Build a repo map before reasoning so the agent starts with project structure.
-6. Verify work through tests, compile checks, and gui builds.
-7. Store durable memory as ranked graph nodes and inject compact context packets instead of raw history.
-8. Convert failures into reusable strategies and future regression candidates.
-9. Predict edit blast radius before multi-file changes.
-10. Use rollback/process primitives for long-running or risky OS work.
-11. Route providers by health and capability instead of static wishful status.
-12. Treat provider error strings as failures so fallback can continue.
-13. Run diagnostics and edit planning before risky code changes.
-14. Record tool execution in mission replay and tool economy ledgers.
-15. Select targeted tests from edit plans, imports, and related test files.
-16. Convert concrete failures into reusable strategies, memory rules, and regression plans.
+1. User sends input to any surface
+2. `NexusLoop.stream_run()` processes input through the model
+3. Loop emits structured work events via `work_event_sink` callback
+4. Events are validated through `CanonicalEvent.from_work_event()` in `nexus/events.py`
+5. Events are persisted to `workspace/work_events/<session>.jsonl`
+6. SSE stream multiplexes events to connected clients
+7. GUI and TUI render public events
 
-## Honest Capability Boundary
+## Key Dependencies
 
-- Swarm is now a real local orchestrator, but it does not yet run independent LLM brains per role by default.
-- World modeling is deterministic impact analysis, not a physical simulator.
-- Provider health tracks latency/errors, validates keys, routes by capability, and falls back on provider failures. Deep network probes are intentionally bounded to avoid slow startup.
-- RAG supports persistent BM25 and hybrid result blending, including cleanup of stale keyword/vector entries. Production vector storage and graph retrieval remain roadmap items.
-- Cognition primitives are local deterministic foundations; they are not yet a learned memory optimizer.
-- gui state is config-derived and local-first, not a multi-tenant admin service.
-
-## Current Reliability Boundary
-
-The current system is powerful but still experimental. It should be treated as a local development agent, not a hosted multi-tenant service. Stronger gui authentication UX, sandboxed process isolation, role-specific LLM swarm workers, and benchmark-driven improvement are the next production gates.
+- Python: FastAPI, uvicorn, aiohttp, httpx, rich, pyyaml, python-dotenv, numpy, faiss-cpu, sentence-transformers, psutil, cryptography
+- GUI: React 19, Vite 8, TypeScript 6, Tailwind, Framer Motion, Lucide React
+- Voice: torch, transformers, sounddevice, pywhispercpp, KittenTTS
+- Optional: playwright (browser), opencv-python + mediapipe (vision)

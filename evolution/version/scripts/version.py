@@ -1,12 +1,15 @@
 """Centralized version management for all NEXUS modules."""
 
 from __future__ import annotations
+
 __version__ = "1.0.0"
 import json
+import logging
 import os
-import re
+
+logger = logging.getLogger("evolution.version")
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 
 class VersionManager:
@@ -28,6 +31,7 @@ class VersionManager:
                 ver = data.get("version", "0.0.0")
                 self._versions[name] = ver
             except Exception:
+                logger.warning("evolution/version/scripts/version.py:30 _scan: suppressed error", exc_info=True)
                 pass
 
     def get_version(self, name: str) -> Optional[str]:
@@ -52,6 +56,7 @@ class VersionManager:
                     self._versions[name] = new_ver
                     return new_ver
             except Exception:
+                logger.warning("evolution/version/scripts/version.py:54 bump: suppressed error", exc_info=True)
                 pass
         return None
 

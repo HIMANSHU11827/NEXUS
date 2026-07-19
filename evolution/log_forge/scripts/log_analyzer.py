@@ -3,11 +3,10 @@ __version__ = "1.0.0"
 import json
 import logging
 import os
-import re
-import time
-from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict
+
 from evolution.version.scripts.version import VersionManager
+
 logger = logging.getLogger(__name__)
 
 class LogAnalyzer:
@@ -61,6 +60,7 @@ class LogAnalyzer:
                             else:
                                 entries.append(json.load(f))
                     except Exception:
+                        logger.warning("evolution/log_forge/scripts/log_analyzer.py:62 scan_logs: suppressed error", exc_info=True)
                         pass
             if entries:
                 result[subdir] = entries
@@ -93,6 +93,7 @@ class LogAnalyzer:
                 if result.get("created"):
                     actions.append({"type": "skill", "name": gap["name"], "result": "created"})
             except Exception:
+                logger.warning("evolution/log_forge/scripts/log_analyzer.py:94 evolve: suppressed error", exc_info=True)
                 pass
         for gap in patterns.get("tool_opportunities", []):
             try:
@@ -102,5 +103,6 @@ class LogAnalyzer:
                 if result.get("created"):
                     actions.append({"type": "tool", "name": gap.get("name", "unknown"), "result": "created"})
             except Exception:
+                logger.warning("evolution/log_forge/scripts/log_analyzer.py:103 evolve: suppressed error", exc_info=True)
                 pass
         return {"patterns_found": len(patterns.get("failure_patterns", [])) + len(patterns.get("skill_gaps", [])), "actions_taken": len(actions), "actions": actions}

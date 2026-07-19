@@ -1,6 +1,4 @@
-"""NexusResearcher stub."""
+"""NexusResearcher — autonomous research agent for deep investigation."""
+from evolution.researcher.scripts.researcher import NexusResearcher
 
-
-class NexusResearcher:
-    def __init__(self, root: str):
-        self.root = root
+__all__ = ["NexusResearcher"]

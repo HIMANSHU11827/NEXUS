@@ -7,9 +7,9 @@ dangerous commands fail closed unless explicitly enabled.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import re
-from typing import Iterable, List
+from dataclasses import dataclass, field
+from typing import List
 
 
 @dataclass(frozen=True)
@@ -51,7 +51,7 @@ class CommandRiskScorer:
     )
 
     RISK_RULES = (
-        (r"\brm\s+-rf\b|\brmdir\s+/s\b|\bRemove-Item\b.*\b-Recurse\b", 95, "recursive deletion"),
+        (r"\brm\s+-rf\b|\brmdir\s+/s\b|\bRemove-Item\b.*(?<!\w)-Recurse(?!\w)", 95, "recursive deletion"),
         (r"\bformat\b|\bdiskpart\b|\bdd\s+if=", 100, "disk/device destructive command"),
         (r"\bchmod\s+777\b|\bicacls\b.*\b/grant\b.*\bEveryone\b", 70, "unsafe permission widening"),
         (r"\bcurl\b.*\|\s*(bash|sh|python)|\biwr\b.*\|\s*iex", 90, "remote code execution pipeline"),

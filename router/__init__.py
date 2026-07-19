@@ -4,7 +4,7 @@ No keyword guessing. Uses scoring, context awareness, and task decomposition.
 """
 
 import re
-from typing import Dict, List, Any, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class IntentResult:

@@ -1,4 +1,4 @@
-FROM python:3.12-slim AS base
+FROM python:3.13-slim AS base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -13,14 +13,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-RUN addgroup --system nexus && adduser --system --group nexus \
+RUN addgroup --system nexus && adduser --system --ingroup nexus nexus \
     && mkdir -p /home/nexus/.nexus \
     && chown -R nexus:nexus /home/nexus
 
-COPY config/pyproject.toml config/uv.lock /app/
-COPY . /app/
+COPY --chown=nexus:nexus pyproject.toml uv.lock /app/
 
-RUN pip install --no-cache-dir -e ".[dev]"
+RUN pip install uv && uv sync --no-dev --frozen
+
+COPY --chown=nexus:nexus . /app/
+
+RUN uv sync --no-dev --frozen
 
 USER nexus
 

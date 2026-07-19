@@ -43,16 +43,14 @@ export function BackendOfflineBanner() {
       display: 'inline-flex',
       alignItems: 'center',
       gap: '8px',
-      padding: '7px 12px',
+      padding: '8px 14px',
       borderRadius: '999px',
-      background: 'rgba(15,23,42,0.86)',
-      border: '1px solid rgba(96,165,250,0.24)',
+      background: '#111827',
+      border: '1px solid #253047',
       color: '#dbeafe',
       fontSize: '0.68rem',
       fontWeight: 800,
       letterSpacing: '0.3px',
-      boxShadow: '0 10px 30px rgba(0,0,0,0.25)',
-      backdropFilter: 'blur(12px)',
     }}>
       <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#60a5fa', animation: 'pulse 1.2s infinite' }} />
       Reconnecting to NEXUS
@@ -87,14 +85,14 @@ export function FloatingNavControls({
     <div style={{ position: 'fixed', top: 14, left: 18, display: 'flex', gap: '8px', zIndex: 5000, opacity: chatScrolled ? 0.18 : 1, pointerEvents: chatScrolled ? 'none' : 'auto', transform: chatScrolled ? 'translateY(-10px)' : 'translateY(0)', transition: 'opacity 0.18s ease, transform 0.18s ease' }}>
       <button
         className="toggle-sidebar-btn"
-        style={{ position: 'static', width: '34px', height: '34px', background: 'rgba(255,255,255,0.88)', backdropFilter: 'blur(12px)', border: '1px solid rgba(0,0,0,0.10)', color: '#374151', boxShadow: '0 2px 8px rgba(0,0,0,0.08)', borderRadius: '10px' }}
+        style={{ position: 'static', width: '36px', height: '36px', background: '#17181d', border: '1px solid #2a2c34', color: '#d4d4d8', borderRadius: '12px' }}
         onClick={() => setSidebarVisible(true)}
       >
         <Menu size={17} />
       </button>
       <button
         className="toggle-sidebar-btn"
-        style={{ position: 'static', height: '34px', padding: '0 12px', background: 'rgba(59,130,246,0.10)', color: '#2563eb', border: '1px solid rgba(59,130,246,0.22)', backdropFilter: 'blur(12px)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', boxShadow: '0 2px 8px rgba(59,130,246,0.08)', borderRadius: '10px' }}
+        style={{ position: 'static', height: '36px', padding: '0 13px', background: '#17181d', color: '#e4e4e7', border: '1px solid #2a2c34', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', borderRadius: '12px' }}
         onClick={handleNewChat}
       >
         <PlusCircle size={15} />
@@ -110,7 +108,7 @@ type HeaderStatusRailProps = {
   healthClass: string;
   hiveCount: number;
   reminderCount: number;
-  setDrawerType: (drawer: 'none' | 'hive' | 'reminders' | 'health' | 'canvas') => void;
+  setDrawerType: (drawer: 'none' | 'hive' | 'reminders' | 'health' | 'canvas' | 'files' | 'terminal') => void;
 };
 
 export function HeaderStatusRail({
@@ -125,7 +123,7 @@ export function HeaderStatusRail({
     <div className={`drawer-switcher-width ${drawerType === 'canvas' ? 'canvas' : ''}`}>
       <div className="header-minimal" style={{ opacity: chatScrolled ? 0.16 : 1, pointerEvents: chatScrolled ? 'none' : 'auto', transform: chatScrolled ? 'translateY(-10px)' : 'translateY(0)' }}>
         <div className={`status-indicator clickable-indicator ${healthClass}`} onClick={() => setDrawerType('health')}>
-          HEALTH
+          Health
         </div>
         <div
           className="status-indicator clickable-indicator"
@@ -135,22 +133,23 @@ export function HeaderStatusRail({
           }}
           onClick={() => setDrawerType('hive')}
         >
-          HIVE: {hiveCount}
+          Hive {hiveCount}
         </div>
         <div
           className="status-indicator clickable-indicator"
           style={{ background: 'rgba(251, 191, 36, 0.1)', color: '#fbbf24' }}
           onClick={() => setDrawerType('reminders')}
         >
-          REMINDERS: {reminderCount}
+          Reminders {reminderCount}
         </div>
         <div
           className="status-indicator clickable-indicator"
           style={{ background: 'rgba(59, 130, 246, 0.1)', color: '#93c5fd' }}
           onClick={() => setDrawerType('canvas')}
         >
-          CANVAS
+          Canvas
         </div>
+
       </div>
     </div>
   );

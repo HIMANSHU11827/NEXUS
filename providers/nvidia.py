@@ -1,8 +1,10 @@
-from typing import Dict, Any, Optional, List, Iterator
-from providers.base import NexusBaseProvider
-import json
 import os
+import json
 import logging
+import os
+from typing import Dict, Iterator, List, Optional
+
+from providers.base import NexusBaseProvider
 
 logger = logging.getLogger("NEXUS_NVIDIA")
 
@@ -15,9 +17,9 @@ class NvidiaProvider(NexusBaseProvider):
         super().__init__("nvidia", "https://integrate.api.nvidia.com/v1/chat/completions")
         self.default_model = "z-ai/glm-5.1"
         if not self.model:
-            self.model = "z-ai/glm-5.1"
+            self.model = os.environ.get("NEXUS_PROVIDER_NVIDIA_MODEL", "z-ai/glm-5.1")
         if not self.api_key:
-            self.api_key = os.getenv("NVIDIA_API_KEY", "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")
+            self.api_key = os.getenv("NVIDIA_API_KEY")
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
@@ -61,3 +63,5 @@ class NvidiaProvider(NexusBaseProvider):
                 yield f"Error: {response.status_code}. {response.text}"
         except Exception as e:
             yield f"Error in NVIDIA NIM stream: {str(e)}"
+
+
