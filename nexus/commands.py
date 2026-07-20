@@ -355,22 +355,22 @@ async def _cmd_status(ctx: CommandContext) -> CommandResult:
 async def _cmd_version(ctx: CommandContext) -> CommandResult:
     import sys
     lines = [
-        f"NEXUS AI v2.1",
-        f"  Shell: Rich-based TUI",
-        f"  Backend: FastAPI port 8000",
-        f"  GUI: React 19 + Vite port 5173",
+        "NEXUS AI v2.1",
+        "  Shell: Rich-based TUI",
+        "  Backend: FastAPI port 8000",
+        "  GUI: React 19 + Vite port 5173",
         f"  Providers: {ctx.provider}:{ctx.model}",
         f"  Python: {sys.version.split()[0]}",
-        f"  Hive: Sub-agent engine active",
+        "  Hive: Sub-agent engine active",
     ]
     formatted_lines = [
         f"[bold]{'NEXUS AI v2.1':^50}[/bold]",
-        f"  [dim]Shell:[/dim] Rich-based TUI",
-        f"  [dim]Backend:[/dim] FastAPI port 8000",
-        f"  [dim]GUI:[/dim] React 19 + Vite port 5173",
+        "  [dim]Shell:[/dim] Rich-based TUI",
+        "  [dim]Backend:[/dim] FastAPI port 8000",
+        "  [dim]GUI:[/dim] React 19 + Vite port 5173",
         f"  [dim]Providers:[/dim] {ctx.provider}:{ctx.model}",
         f"  [dim]Python:[/dim] {sys.version.split()[0]}",
-        f"  [dim]Hive:[/dim] Sub-agent engine active",
+        "  [dim]Hive:[/dim] Sub-agent engine active",
     ]
     return CommandResult(output="\n".join(lines), formatted="\n".join(formatted_lines))
 
@@ -431,7 +431,6 @@ async def _cmd_agents(ctx: CommandContext) -> CommandResult:
 
 async def _cmd_memory(ctx: CommandContext) -> CommandResult:
     if ctx.shell:
-        from rich.markup import escape
         h = len(ctx.shell.conversation_history)
         s = ctx.shell.session_id
         return CommandResult(

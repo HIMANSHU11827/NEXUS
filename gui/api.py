@@ -1,41 +1,49 @@
-import os
-import inspect
 import asyncio
+import concurrent.futures
+import inspect
 import json
 import logging
-import yaml
+import os
+import queue
 import re
 import shutil
-import time
-import threading
-import concurrent.futures
-import queue
 import subprocess
 import sys
+import threading
+import time
+import urllib.request
 import uuid
 import zipfile
-import urllib.request
 from collections import deque
 from io import BytesIO
+from typing import Any, Dict, List, Tuple
 from urllib.parse import urlparse
-from typing import List, Dict, Any, Tuple
+
+import yaml
 
 logger = logging.getLogger("NEXUS_API")
-from fastapi import FastAPI, Request, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+
 # 🌌 [NEXUS_PATH_CORE]
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(_ROOT, "config", ".env"))
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, Response
-from orchestrators.loop import NexusLoop
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+
 from nexus.events import CanonicalEvent
 from nexus.run_context import list_run_contexts, load_run_context
 from nexus.runtime import (
     build_chat_request,
+)
+from nexus.runtime import (
     safe_session_id as runtime_safe_session_id,
+)
+from nexus.runtime import (
     session_file_path as runtime_session_file_path,
 )
+from orchestrators.loop import NexusLoop
+
 _UPLOAD_DIR = os.path.join(_ROOT, "workspace", "uploads")
 os.makedirs(_UPLOAD_DIR, exist_ok=True)
 _WORK_EVENTS_DIR = os.path.join(_ROOT, "workspace", "work_events")
@@ -2107,9 +2115,9 @@ async def run_work_command_stream(request: Request):
         raise HTTPException(status_code=413, detail="Command is too large")
 
     try:
-        timeout = max(5, min(int(data.get("timeout", 90)), 180))
+        max(5, min(int(data.get("timeout", 90)), 180))
     except Exception:
-        timeout = 90
+        pass
 
     parent_event = None
     parent_event_id = str(data.get("event_id") or "").strip()
@@ -2584,7 +2592,6 @@ def scan_metadata(directory, default_desc="Core NEXUS Capability"):
     if not os.path.exists(directory):
         return results
     
-    meta_files = ["SKILL.md", "README.md", "DESCRIPTION.md", "DESCRIPTION.txt", "INFO.md", "index.md"]
 
     for item in os.listdir(directory):
         path = os.path.join(directory, item)
@@ -3224,8 +3231,8 @@ def install_plugin_from_source(raw_url: str, kind: str = "plugin", force: bool =
 def build_skill_state() -> List[Dict[str, Any]]:
     """Build the dashboard skill list from the on-disk skill registry."""
     try:
-        from skills import NexusSkillMaster
         from kernel import get_nexus_kernel
+        from skills import NexusSkillMaster
 
         cfg = get_nexus_kernel(_ROOT).config.data
         custom_cfg = cfg.get("custom_skill_configs", {}) if isinstance(cfg, dict) else {}
@@ -3396,8 +3403,9 @@ def _python_with_module(module_name: str) -> List[str]:
 
 
 def build_evolution_plan() -> Dict[str, Any]:
-    from optimization.roadmap import RoadmapAuditor
     from evolution.context import EvolutionContextMap
+
+    from optimization.roadmap import RoadmapAuditor
 
     roadmap = RoadmapAuditor(_ROOT).audit()
     context = EvolutionContextMap(_ROOT).build()
@@ -3527,7 +3535,7 @@ async def set_provider(data: dict, request: Request):
 @app.get("/api/state")
 def get_state():
     from kernel import get_nexus_kernel
-    kernel = get_nexus_kernel(_ROOT)
+    get_nexus_kernel(_ROOT)
     default_provider = refresh_provider_runtime()
     sessions_root = os.path.join(_ROOT, "workspace", "sessions")
     session_titles = {}
@@ -3550,7 +3558,6 @@ def get_state():
     try:
         from utils.session_bus import get_active_session_id
         active_sid = get_active_session_id(_ROOT, "default")
-        from orchestrators.loop import NexusLoop as _NexusLoop
         loop = get_loop(active_sid)
     except Exception:
         loop = None
@@ -4392,7 +4399,6 @@ def _get_mp_hands():
     if _MP_HANDS is not None:
         return _MP_HANDS, None
     try:
-        import mediapipe as mp
         from mediapipe.tasks import python
         from mediapipe.tasks.python import vision
 
@@ -4448,8 +4454,9 @@ def _preload_models_bg():
     def _do():
         global _MODELS_READY, _LOW_MEM_MODE
         try:
-            import psutil
             import time
+
+            import psutil
             mem = psutil.virtual_memory()
             print(f"[VISION] Memory Check: {mem.percent}% used.")
             
@@ -4505,7 +4512,7 @@ def _proc_objects(frame, draw):
     return draw
 
 def _proc_segment(frame, draw):
-    import cv2, numpy as np
+    import cv2
     model, err = _load_yolo_seg()
     if err:
         cv2.putText(draw, f"seg:{err[:40]}", (8, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 60, 255), 1)
@@ -4595,7 +4602,8 @@ def _proc_yolo_pose(frame, draw):
     return draw
 
 def _run_rtmpose(frame, draw, sess, input_wh, connections, color):
-    import cv2, numpy as np
+    import cv2
+    import numpy as np
     H, W = frame.shape[:2]
     iw, ih = input_wh
     img = cv2.resize(frame, (iw, ih)).astype(np.float32)
@@ -4637,7 +4645,10 @@ def _mjpeg_generator():
     Mode changes take effect on the very next inference cycle (no restart).
     """
     global _VISION_CAP, _VISION_ACTIVE
-    import cv2, queue, threading
+    import queue
+    import threading
+
+    import cv2
 
     stop_event = threading.Event()
     raw_q  = queue.Queue(maxsize=1)   # latest raw frame (drop old if not consumed)

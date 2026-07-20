@@ -11,4 +11,4 @@ class NexusNerveCenter:
         logger.debug(f"NexusNerveCenter.reinforce({task_type}, {tool_name}, {delta}) — stub, no-op")
 
     def log_mutation(self, mutation: dict):
-        logger.debug(f"NexusNerveCenter.log_mutation called — stub, no-op")
+        logger.debug("NexusNerveCenter.log_mutation called — stub, no-op")

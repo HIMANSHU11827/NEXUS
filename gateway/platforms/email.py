@@ -106,7 +106,7 @@ class EmailAdapter(BasePlatformAdapter):
             return
         try:
             msg = email.message_from_bytes(raw)
-            subject = msg.get("Subject", "")
+            msg.get("Subject", "")
             sender = msg.get("From", "")
             text_body = ""
 

@@ -3,6 +3,11 @@
 Fast path: simple chat → model call → stream.
 Modeless architecture: no chat/agent/CEO modes — auto-detects task type.
 """
+"""NEXUS SOVEREIGN LOOP
+
+Fast path: simple chat → model call → stream.
+Modeless architecture: no chat/agent/CEO modes — auto-detects task type.
+"""
 
 import asyncio
 import hashlib
@@ -11,6 +16,9 @@ import inspect
 import json
 import logging
 import os
+
+logger = logging.getLogger(__name__)
+
 import queue
 import re
 import threading

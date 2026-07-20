@@ -2063,7 +2063,6 @@ async def run_command(request: Request):
         "data": result.data,
         "error": result.error if not result.success else "",
     }
-    return {"status": "success", "agent": agent}
 
 
 @app.get("/api/goal")
@@ -2133,7 +2132,7 @@ async def add_working_dir(request: Request):
 
 
 @app.post("/api/run")
-async def run_command(request: Request):
+async def execute_bash_command(request: Request):
     """Run a bash command (read-only or safe only)."""
     data = await request.json()
     command = str(data.get("command", "")).strip()

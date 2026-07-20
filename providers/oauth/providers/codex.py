@@ -1,5 +1,5 @@
-import time
 import logging
+import time
 
 from providers.oauth.callback_server import (
     parse_oauth_authorization_input,
@@ -47,7 +47,6 @@ async def login_codex(
     on_auth(OAuthAuthInfo(url=url, instructions="Complete login in your browser."))
 
     code = None
-    state = None
     try:
         result = await wait_for_local_oauth_callback(
             expected_state=expected_state,
@@ -55,7 +54,6 @@ async def login_codex(
             callback_path=CALLBACK_PATH,
         )
         code = result.code
-        state = result.state
     except Exception:
         logger.warning("providers/oauth/providers/codex.py: suppressed error in login_codex", exc_info=True)
         pass
@@ -65,13 +63,11 @@ async def login_codex(
         if manual:
             parsed = parse_oauth_authorization_input(manual)
             code = parsed.code
-            state = parsed.state or expected_state
 
     if not code:
         input_text = await on_prompt("Paste the authorization code or full redirect URL:")
         parsed = parse_oauth_authorization_input(input_text)
         code = parsed.code
-        state = parsed.state or expected_state
 
     if not code:
         raise RuntimeError("Missing authorization code")

@@ -464,7 +464,7 @@ def select(title: str, options: List[str], console=console, page_size: int = 16)
         console.print(f"\n[bold cyan]▸ {title}[/bold cyan]\n")
         for i, opt in enumerate(options):
             console.print(f"  [cyan]{i+1}[/cyan]. {opt}")
-        raw = Prompt.ask(f"\n  Choice", default="1")
+        raw = Prompt.ask("\n  Choice", default="1")
         if raw.isdigit():
             return max(0, min(int(raw) - 1, len(options) - 1))
         return 0
@@ -475,7 +475,7 @@ def select(title: str, options: List[str], console=console, page_size: int = 16)
         console.print(f"\n[bold cyan]▸ {title}[/bold cyan]\n")
         for i, opt in enumerate(options):
             console.print(f"  [cyan]{i+1}[/cyan]. {opt}")
-        raw = Prompt.ask(f"\n  Choice", default="1")
+        raw = Prompt.ask("\n  Choice", default="1")
         if raw.isdigit():
             return max(0, min(int(raw) - 1, len(options) - 1))
         return 0
@@ -499,7 +499,7 @@ def select(title: str, options: List[str], console=console, page_size: int = 16)
             prefix = "  [cyan]▸[/cyan]" if idx == sel else "   "
             style = "[bold white]" if idx == sel else "[dim]"
             console.print(f"{prefix} {style}{opt}[/]")
-        console.print(f"\n[dim]↑↓ navigate | Space/Enter select[/dim]")
+        console.print("\n[dim]↑↓ navigate | Space/Enter select[/dim]")
 
         key = msvcrt.getch()
         if key == b'\xe0':
@@ -919,7 +919,7 @@ def check_ram() -> Tuple[bool, str]:
         if os.name == "nt":
             out = _run_cmd(["wmic", "OS", "get", "FreePhysicalMemory,TotalVisibleMemorySize", "/Value"])
             if out:
-                free = avail = 0
+                free = 0
                 for line in out.splitlines():
                     if "FreePhysicalMemory" in line:
                         free = int(line.split("=")[1]) / 1024 / 1024
@@ -1980,7 +1980,7 @@ def configure_fallback(root_dir: str, provider_cfg: Dict[str, Any], current: str
         sel = select(f"Add {pool_name} fallbacks?", ["Yes, pick some", "No"])
         console.print()
         if sel == 0:
-            names = [f"{PROVIDER_DEFS[k]['name']}" for k in pool]
+            [f"{PROVIDER_DEFS[k]['name']}" for k in pool]
             selections = []
             for i, key in enumerate(pool):
                 if Confirm.ask(f"  Add {PROVIDER_DEFS[key]['name']}?", default=False):
@@ -2222,7 +2222,7 @@ def verify_connection(root_dir: str, provider_info: Dict[str, Any]) -> bool:
         console=console,
     )
     with progress:
-        task = progress.add_task("[cyan]Contacting provider...", total=None)
+        progress.add_task("[cyan]Contacting provider...", total=None)
         success, message, elapsed = test_provider(provider, api_key, endpoint, model)
 
     if success:

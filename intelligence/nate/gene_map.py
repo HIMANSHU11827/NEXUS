@@ -149,7 +149,6 @@ class SelfHealingEngine:
         self._strategies[name] = RepairStrategy(name, handler)
 
     def heal(self, failure_code: str, error: Any, context: Optional[Dict] = None) -> Tuple[bool, str, str]:
-        strategy_used = "none"
         result = False
         message = ""
 

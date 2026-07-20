@@ -33,8 +33,8 @@ def _resolve_api_key(provider_id: str, profile_name: Optional[str] = None) -> Op
         logger.warning("providers/factory.py:29 _resolve_api_key: suppressed error", exc_info=True)
         pass
     try:
-        from providers.oauth.registry import get_oauth_provider
         from providers.oauth.providers.autoregister import register_all_oauth_providers
+        from providers.oauth.registry import get_oauth_provider
         from providers.oauth.storage import load_oauth_token_store
         register_all_oauth_providers()
         store = load_oauth_token_store()

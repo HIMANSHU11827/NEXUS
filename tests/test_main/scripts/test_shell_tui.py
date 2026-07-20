@@ -219,7 +219,7 @@ def test_clients_adapt_canonical_envelope_and_guard_replay_sequence():
 
     root = Path(__file__).resolve().parents[3]
     utility = (root / "gui" / "src" / "utils" / "workActivityUtils.ts").read_text(encoding="utf-8")
-    app = (root / "gui" / "src" / "App.tsx").read_text(encoding="utf-8")
+    (root / "gui" / "src" / "App.tsx").read_text(encoding="utf-8")
     timeline = (root / "gui" / "src" / "components" / "WorkActivityTimeline.tsx").read_text(encoding="utf-8")
     bubble = (root / "gui" / "src" / "components" / "chat" / "MessageBubble.tsx").read_text(encoding="utf-8")
     interactive = (root / "tui" / "nexus-tui.tsx").read_text(encoding="utf-8")

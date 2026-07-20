@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
 import time
 import uuid
-
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional
 
 EVENT_TYPES = frozenset(
     """run.started run.status run.completed run.failed run.cancelled

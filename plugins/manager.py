@@ -9,10 +9,10 @@ import os
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
+from plugins.trust import is_bundled_plugin_dir, is_user_plugin_load_allowed
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
 from tools.nexus_tools.registry import ToolEntry
 from utils.singleton import ThreadSafeSingleton
-from plugins.trust import is_bundled_plugin_dir, is_user_plugin_load_allowed
 
 logger = logging.getLogger(__name__)
 

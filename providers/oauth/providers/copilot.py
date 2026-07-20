@@ -66,7 +66,7 @@ async def refresh_github_copilot_token(
 ) -> OAuthCredentials:
     import httpx
     domain = enterprise_domain or "github.com"
-    urls = get_urls(domain)
+    get_urls(domain)
     copilot_token_url = f"https://api.{domain}/copilot_internal/v2/token"
 
     async with httpx.AsyncClient() as client:

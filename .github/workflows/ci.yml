@@ -15,7 +15,7 @@ jobs:
       - name: Install package
         run: python -m pip install -e ".[dev]"
       - name: Compile
-        run: python -m compileall -q nexus server shell orchestrators tools rag knowledge utils providers gui/api.py
+        run: python -m compileall -q nexus server orchestrators tools rag knowledge utils providers gui/api.py
       - name: Unit tests
         run: python -m pytest -q
 

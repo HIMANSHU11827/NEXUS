@@ -16,8 +16,15 @@ try:
 except ImportError:
     CodebaseKnowledgeGraph = None
 import logging
+
 _logger = logging.getLogger("nexus.mcp.server")
-from mcp.security import MAX_INDEX_FILES, MAX_RESULT_LIMIT, bounded_int, read_bounded_line, workspace_root
+from mcp.security import (
+    MAX_INDEX_FILES,
+    MAX_RESULT_LIMIT,
+    bounded_int,
+    read_bounded_line,
+    workspace_root,
+)
 
 SERVER_NAME = "nexus-code-graph"
 PROTOCOL_VERSION = "2025-06-18"

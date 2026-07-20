@@ -1,4 +1,10 @@
 from config.config_loader import NexusConfigLoader
-from config.profiles import list_profiles, create_profile, switch_profile, delete_profile, get_profile_path
+from config.profiles import (
+    create_profile,
+    delete_profile,
+    get_profile_path,
+    list_profiles,
+    switch_profile,
+)
 
 __all__ = ["NexusConfigLoader", "list_profiles", "create_profile", "switch_profile", "delete_profile", "get_profile_path"]

@@ -103,7 +103,7 @@ class TestPluginToolAdapter:
         def failing():
             raise RuntimeError("fail")
 
-        adapter = PluginToolAdapter("fail", lambda **kw: (_ for _ in ()).throw(RuntimeError("fail")))
+        PluginToolAdapter("fail", lambda **kw: (_ for _ in ()).throw(RuntimeError("fail")))
         # Actually use a real failing handler
         async def bad(**kw):
             raise ValueError("bad")

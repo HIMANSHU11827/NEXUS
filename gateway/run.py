@@ -131,7 +131,6 @@ class GatewayRunner:
     async def run(self):
         """Start all added adapters."""
         self._running = True
-        tasks = []
         for adapter in self.adapters.values():
             success = await adapter.connect()
             if success:

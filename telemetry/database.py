@@ -10,4 +10,4 @@ class NexusTelemetryDB:
         logger.debug(f"NexusTelemetryDB.log_tool_call({tool}) — stub, no-op")
 
     def log_error(self, error: str, context: dict):
-        logger.debug(f"NexusTelemetryDB.log_error — stub, no-op")
+        logger.debug("NexusTelemetryDB.log_error — stub, no-op")

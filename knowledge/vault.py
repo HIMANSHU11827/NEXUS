@@ -9,7 +9,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
-from utils.nexus_compat import s, sx  # type: ignore
+from utils.nexus_compat import s  # type: ignore
 
 logger = logging.getLogger("nexus.knowledge.vault")
 

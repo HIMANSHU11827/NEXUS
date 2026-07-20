@@ -121,7 +121,12 @@ def _mark_setup_complete(project_root: str, mode: str = "manual") -> None:
 
 
 def _quick_configure(project_root: str) -> None:
-    from tui.setup_wizard import load_env, load_provider_yml, save_env, save_provider_yml
+    from tui.setup_wizard import (
+        load_env,
+        load_provider_yml,
+        save_env,
+        save_provider_yml,
+    )
 
     config_dir = os.path.join(project_root, "config")
     os.makedirs(config_dir, exist_ok=True)
@@ -178,7 +183,6 @@ def _apply_command_alias(argv: list[str]) -> list[str]:
     invoked_as = Path(argv[0]).stem.lower()
     command_aliases = {
         "nexus-tui": "--tui",
-        "nexus-shell": "--shell",
         "nexus-gui": "--gui",
         "nexus-server": "--server",
         "nexus-api": "--server",
@@ -208,7 +212,7 @@ async def _wait_for_health(url: str, timeout: float = 15.0, label: str = "servic
     import httpx
     from rich.progress import Progress, SpinnerColumn, TextColumn
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
-        task = progress.add_task(f"[cyan]Waiting for {label}...", total=None)
+        progress.add_task(f"[cyan]Waiting for {label}...", total=None)
         start = time.monotonic()
         async with httpx.AsyncClient() as client:
             while time.monotonic() - start < timeout:
@@ -231,7 +235,6 @@ def _make_parser() -> argparse.ArgumentParser:
   python -m nexus                    Start TUI (default)
   nexus                              Start TUI (default)
   nexus-tui                          Start TUI
-  nexus-shell                        Start legacy Rich shell
   nexus-gui                          Start GUI + backend
   nexus-server                       Start API server only
   nexus-gateway                      Start gateway
@@ -251,7 +254,6 @@ def _make_parser() -> argparse.ArgumentParser:
     )
     group = p.add_mutually_exclusive_group()
     group.add_argument("--tui", action="store_true", help="Start TUI (default)")
-    group.add_argument("--shell", action="store_true", help="Start legacy Rich shell")
     group.add_argument("--gui", action="store_true", help="Start GUI + backend")
     group.add_argument("--server", action="store_true", help="Start API server only")
     group.add_argument("--gateway", action="store_true", help="Start gateway")
@@ -424,13 +426,13 @@ def _run_ink_tui(project_root: str, console) -> int:
     tui_dir = os.path.join(project_root, "tui")
     tui_entry = os.path.join(tui_dir, "nexus-tui.tsx")
     if not os.path.exists(tui_entry):
-        console.print("[yellow]Ink TUI not found. Falling back to legacy shell.[/yellow]")
-        return _run_rich_shell()
+        console.print("[red]Ink TUI not found.[/red]")
+        return 1
 
     runner = _find_tui_runner(tui_dir)
     if not runner:
-        console.print("[yellow]Node TUI runner not found. Falling back to legacy shell.[/yellow]")
-        return _run_rich_shell()
+        console.print("[red]Node TUI runner not found.[/red]")
+        return 1
 
     backend_proc = None
     reuse_existing_api = os.environ.get("NEXUS_REUSE_API", "").lower() in {"1", "true", "yes", "on"}
@@ -452,13 +454,6 @@ def _run_ink_tui(project_root: str, console) -> int:
     finally:
         if backend_proc:
             backend_proc.terminate()
-
-
-def _run_rich_shell() -> int:
-    from shell import NexusShell
-    shell = NexusShell()
-    asyncio.run(shell.start())
-    return 0
 
 
 def _first_run_choice(console, panel, box) -> str:
@@ -668,10 +663,6 @@ def boot():
         finally:
             proc.terminate()
         return
-
-    if args.shell:
-        _print_banner(console)
-        raise SystemExit(_run_rich_shell())
 
     raise SystemExit(_run_ink_tui(project_root, console))
 

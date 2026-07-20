@@ -66,7 +66,6 @@ import uvicorn
 
 from server import app
 
-
 # Start server in thread. Keep ownership so the harness can request a graceful
 # shutdown and let NEXUS drain response-detached finalizers before exiting.
 SERVER = None

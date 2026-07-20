@@ -5,7 +5,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mcp.client import MCPClient
-from mcp.security import bounded_int, read_bounded_line, redact_secret_text, workspace_root
+from mcp.security import (
+    bounded_int,
+    read_bounded_line,
+    redact_secret_text,
+    workspace_root,
+)
 from plugins.trust import PluginInstallDisabled, require_unverified_install_opt_in
 from skills.registry import SkillRegistry
 from tools.nexus_tools.base_tool import BaseTool, ToolResult

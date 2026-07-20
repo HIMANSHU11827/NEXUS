@@ -169,7 +169,7 @@ class NexusPromptEngine:
         # ⚡ 4.0: STRATEGIC HORIZONS (Long-term Persistence)
         from kernel import get_nexus_kernel
         kernel = get_nexus_kernel()
-        horizons_text = kernel.horizons.get_active_horizons()
+        kernel.horizons.get_active_horizons()
         
         segments: List[str] = [
             cls.get_identity_segment(),

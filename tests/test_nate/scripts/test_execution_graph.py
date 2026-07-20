@@ -80,7 +80,6 @@ class TestExecutionGraph:
         assert path is None or "weather" not in path
 
     def test_execute_with_handlers(self):
-        results = []
         eg = ExecutionGraph()
         eg.set_start("start")
         eg.set_goal("finish")

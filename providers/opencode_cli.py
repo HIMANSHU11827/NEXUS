@@ -6,7 +6,6 @@ from typing import Dict, Iterator, List, Optional
 
 from providers.base import NexusBaseProvider
 
-
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 

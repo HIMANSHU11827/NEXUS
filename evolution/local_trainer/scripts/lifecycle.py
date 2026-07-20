@@ -198,7 +198,9 @@ class SelfImprovementLifecycle:
         # 3. Fine-tune embedding model
         if total >= self.MIN_EMBED_EXAMPLES:
             logger.info("[LIFECYCLE] Phase 1: Fine-tuning embedding model...")
-            from evolution.local_trainer.scripts.embedding_trainer import EmbeddingFinetuner
+            from evolution.local_trainer.scripts.embedding_trainer import (
+                EmbeddingFinetuner,
+            )
 
             embed = EmbeddingFinetuner()
             logs = self._build_training_logs("routing")

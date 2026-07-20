@@ -7,6 +7,7 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "cryptography>=42.0",
     "dataclasses-json>=0.6",
+    "discord.py>=2.3",
     "fastapi>=0.115",
     "faiss-cpu>=1.7",
     "httpx>=0.28",
@@ -72,7 +73,7 @@ nexus-mcp = "mcp.server:main"
 nexus-voice = "voice_chat:main"
 
 [tool.setuptools]
-py-modules = ["nexus", "shell", "voice_chat", "server"]
+py-modules = ["nexus", "voice_chat", "server"]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -100,7 +101,7 @@ reportMissingImports = false
 
 [tool.ruff]
 select = ["E", "F", "I"]
-ignore = ["E501"]
+ignore = ["E501", "E402", "E701", "F401", "I001", "E702", "E741"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

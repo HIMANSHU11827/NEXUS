@@ -9,6 +9,7 @@ from html.parser import HTMLParser
 from urllib import error as urlerror
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
+
 try:
     from defusedxml.ElementTree import fromstring as _xml_fromstring
 except ImportError:

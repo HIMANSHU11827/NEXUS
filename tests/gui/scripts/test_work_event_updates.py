@@ -3,10 +3,11 @@ import queue
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from starlette.requests import Request
+
+from gui import api
 from nexus.events import EVENT_STATUSES, EVENT_TYPES, CanonicalEvent
 from nexus.run_context import start_run_context
-from gui import api
-from starlette.requests import Request
 
 
 def test_list_work_events_keeps_latest_state_for_same_event_id(tmp_path, monkeypatch):

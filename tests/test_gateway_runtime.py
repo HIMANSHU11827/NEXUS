@@ -1,5 +1,5 @@
-import importlib
 import asyncio
+import importlib
 
 from gateway.base import BasePlatformAdapter, MessageEvent, SendResult
 from gateway.run import GatewayRunner

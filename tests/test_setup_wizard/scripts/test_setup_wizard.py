@@ -86,17 +86,6 @@ class TestSetupWizardRun:
             config_dir.mkdir()
 
 
-            inputs = [
-                "",           # Press Enter to begin (welcome)
-                "1",          # Select DeepSeek (first provider)
-                "",           # Press Enter for default model
-                "",           # Press Enter for default endpoint (Y)
-                "",           # Re-use existing key (or lack thereof — won't be prompted)
-                "n",          # Skip gateway
-                "n",          # Skip profile
-                "y",          # Test connection
-                "n",          # Don't retry with different provider
-            ]
 
             # The wizard requires interactive input, so we need a more
             # targeted approach: test individual steps instead.
@@ -196,7 +185,9 @@ class TestSetupWizardRun:
 
     def test_save_env_writes_private_file_permissions(self, tmp_path):
         import os
+
         import pytest
+
         import tui.setup_wizard as wizard
 
         if os.name == "nt":
@@ -208,8 +199,8 @@ class TestSetupWizardRun:
         assert mode & 0o077 == 0
 
     def test_configure_oauth_provider_uses_login_flow(self, tmp_path, monkeypatch):
-        from providers.oauth.types import OAuthCredentials
         import tui.setup_wizard as wizard
+        from providers.oauth.types import OAuthCredentials
 
         creds = OAuthCredentials(
             access="oauth-access",
