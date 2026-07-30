@@ -1,6 +1,6 @@
 {
   "name": "web_search",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "description": "Search the web by query or fetch a URL",
   "entry": "scripts/web_search.py",
   "class": "WebSearchTool",

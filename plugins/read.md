@@ -1,15 +1,16 @@
 # Plugins
 
-Plugin architecture and plugin registry — extensible modules that add functionality to the core platform.
+Plugin architecture — extensible modules with lifecycle hooks, tool registration, and trust model.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Status
-Early stage. Plugin forge exists in `evolution/plugin_forge/` for creation and refinement.
+Beta. Plugin forge exists in `evolution/plugin_forge/` for creation and refinement.
 
 ## Runtime Lifecycle
-- Plugins register tools through `PluginContext.register_tool()`.
-- Plugins register lifecycle hooks through `PluginContext.register_hook()`.
-- `PluginManager.unload_plugin(name)` removes tools and hooks owned by that plugin before dropping the loaded context.
-- Plugin metadata with `active: false` is respected by the runtime loader; disabled plugins are discoverable but not executed.
-- User plugin source remains opt-in because plugins are executable Python code.
+- `PluginManager` (ThreadSafeSingleton) — discover, load, unload plugins from bundled + user paths
+- `PluginContext` — register_tool(), register_hook(), register_cli_command() exposed to plugins
+- `HookRegistry` — event-driven lifecycle hooks (pre/post tool call, session events)
+- `PluginToolAdapter` — wraps plugin handlers as BaseTool-compatible with streaming support
+- `trust.py` — PluginInstallDisabled, require_unverified_install_opt_in(), path-based bundled checks
+- User plugin source remains opt-in; disabled plugins discoverable but not executed

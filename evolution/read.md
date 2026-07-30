@@ -1,28 +1,27 @@
 # Evolution
 
-NEXUS AI self-evolution system — forges, learning, improvement, and auto-version tracking.
+NEXUS AI self-evolution system — forges, learning, improvement, auto-version tracking.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
-## Forges
-- \	ool_forge/\ — ToolForge: auto-create tools with version bump
-- \skill_forge/\ — SkillForge + SkillSynthesizer: auto-create skills
-- \plugin_forge/\ — PluginForge: auto-create plugins
-- \memory_forge/\ — MemoryForge: create memory entries
-- \knowledge_forge/\ — KnowledgeForge: create knowledge entries
-- \log_forge/\ — LogAnalyzer: pattern analysis & forge
+## Forges (Auto-Creation & Refinement)
+- `tool_forge/` — ToolForge: auto-create and refine tools with version bump
+- `skill_forge/` — SkillForge + SkillSynthesizer: auto-create skills
+- `plugin_forge/` — PluginForge: auto-create plugins
+- `memory_forge/` — MemoryForge: create and refine memory entries
+- `knowledge_forge/` — KnowledgeForge: create knowledge entries
+- `log_forge/` — LogAnalyzer: pattern analysis
 
 ## Core Modules
-- \logs/\ — EvolutionLog + LogAnalyzer (merged logging)
-- \status/\ — EvolutionStatus: system health
-- \ledger/\ — EvolutionLedger: immutable record
-- udge/\ — NudgeEngine: behavioral nudges
-- \intent/\ — NexusIntentEngine: intent evolution
-- \self_improvement/\ — SelfImprovementEngine: session analysis
-- \sop/\ — Standard Operating Procedures
-- \nsemble/\ — EnsembleManager: multi-strategy reasoning
-- \ersion/\ — VersionManager: auto-version tracking for all 39 modules
+- `logs/` — EvolutionLog: consolidated logging
+- `status/` — EvolutionStatus: system health reporting
+- `ledger/` — EvolutionLedger: immutable record keeping
+- `nudge/` — NudgeEngine: behavioral nudges
+- `intent/` — NexusIntentEngine: intent evolution
+- `self_improvement/` — SelfImprovementEngine: session analysis & improvement
+- `sop/` — Standard Operating Procedures
+- `version/` — VersionManager: auto-version tracking for all 39 modules (all scripts have `__version__` inline)
 
 ## Auto-Version System
-Every forge auto-bumps versions on refine (minor by default, major on upgrade).
-All 39 .jsnol files tracked; all scripts have __version__ inline.
+Every forge auto-bumps versions on refine (minor default, major on upgrade).
+All 39 `.jsnol` files tracked with version metadata. All `scripts/*.py` have inline `__version__`.

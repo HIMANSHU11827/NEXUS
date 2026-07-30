@@ -294,6 +294,7 @@ interface NexusWorkspacePanelProps {
     activityItems: ActivityItem[];
     pendingQuestion: PendingQuestion | null;
     selectedQuestionIndex: number;
+    questionCustomMode?: boolean;
     planItems: string[];
     planStatus: string;
     planExpanded: boolean;
@@ -1064,6 +1065,7 @@ const formatDurationMs = (value?: number) => {
 
 const normalizeActivityStatus = (status: unknown, error?: unknown) => {
     const value = String(status || '').toLowerCase();
+    if (value.includes('block') || value.includes('guardrail') || value.includes('denied')) return 'blocked';
     if (error || value.includes('error') || value.includes('fail') || value.includes('exception')) return 'error';
     if (value === 'success' || value === 'succeeded' || value === 'complete' || value === 'completed') return 'done';
     if (value === 'in_progress' || value === 'started') return 'running';
@@ -2395,10 +2397,12 @@ const ActivityPanelBody = React.memo(({activity}: {activity: ActivityItem | null
 
 const QuestionPanelBody = React.memo(({
     question,
-    selectedIndex
+    selectedIndex,
+    customActive
 }: {
     question: PendingQuestion | null;
     selectedIndex: number;
+    customActive: boolean;
 }) => (
     <Box flexDirection="column" flexGrow={1}>
         <Box marginBottom={1}>
@@ -2433,7 +2437,7 @@ const QuestionPanelBody = React.memo(({
                         <Box width={3}>
                             <Text color="magenta">{question.options.length + 1}.</Text>
                         </Box>
-                        <Text color="grey">write answer in chat box</Text>
+                        <Text color={customActive ? 'magentaBright' : 'grey'} bold={customActive}>type your own answer in chat box{customActive ? ' (active)' : ''}</Text>
                     </Box>
                 )}
 
@@ -2565,6 +2569,7 @@ const NexusWorkspacePanel = React.memo(({
     activityItems,
     pendingQuestion,
     selectedQuestionIndex,
+    questionCustomMode,
     planItems,
     planStatus,
     planExpanded,
@@ -2625,7 +2630,7 @@ const NexusWorkspacePanel = React.memo(({
             )}
 
             {mode === 'question' ? (
-                <QuestionPanelBody question={pendingQuestion} selectedIndex={selectedQuestionIndex} />
+                <QuestionPanelBody question={pendingQuestion} selectedIndex={selectedQuestionIndex} customActive={questionCustomMode === true} />
             ) : mode === 'plan' ? (
                 <PlanPanelBody items={planItems} status={planStatus} expanded={planExpanded} />
             ) : mode === 'hive' || mode === 'agent' ? (
@@ -2667,6 +2672,7 @@ const App = () => {
     const [mcpConnectedCount, setMcpConnectedCount] = useState(0);
     const [activityItems, setActivityItems] = useState<ActivityItem[]>([]);
     const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
+    const [questionCustomMode, setQuestionCustomMode] = useState(false);
     const [selectedQuestionIndex, setSelectedQuestionIndex] = useState(0);
     const [planItems, setPlanItems] = useState<string[]>([]);
     const [planStatus, setPlanStatus] = useState('planning');
@@ -2684,6 +2690,10 @@ const App = () => {
     const [chatScroll, setChatScroll] = useState(0);
     const activityCounter = useRef(0);
     const streamedActivityIds = useRef(new Set<string>());
+    // SSE reconnects and server history replay can deliver the same canonical
+    // event more than once. Keep a bounded identity set so replay is harmless
+    // before it reaches timeline/history side effects.
+    const seenWorkEventIds = useRef(new Set<string>());
     const previousChatLineCount = useRef(0);
     const voiceJustStartedRef = useRef(0);
     const chatAbortControllerRef = useRef<AbortController | null>(null);
@@ -2874,6 +2884,16 @@ const App = () => {
         const wheelDirection = mouseWheelDirection(value, leftPanelWidth);
 
         if (panelMode === 'question' && pendingQuestion) {
+            if (questionCustomMode && key.escape) {
+                setQuestionCustomMode(false);
+                setInput('');
+                return;
+            }
+            if (questionCustomMode && key.return) {
+                const answer = input.trim();
+                if (answer) questionSubmitRef.current(answer);
+                return;
+            }
             const questionWheel = mouseWheelDirection(value, terminalSize.width);
             if (key.upArrow || questionWheel > 0) {
                 setSelectedQuestionIndex(index => (
@@ -2890,6 +2910,7 @@ const App = () => {
             if (key.return) {
                 const answer = pendingQuestion.options[selectedQuestionIndex];
                 if (answer) {
+                    setQuestionCustomMode(false);
                     setInput('');
                     setPendingQuestion(null);
                     setPanelMode('workspace');
@@ -2903,6 +2924,7 @@ const App = () => {
             const selectedIndex = Number(value) - 1;
             if (selectedIndex >= 0 && selectedIndex < pendingQuestion.options.length) {
                 const answer = pendingQuestion.options[selectedIndex];
+                setQuestionCustomMode(false);
                 setInput('');
                 setPendingQuestion(null);
                 setPanelMode('workspace');
@@ -2910,6 +2932,7 @@ const App = () => {
                 questionSubmitRef.current(answer);
             } else if (pendingQuestion.allowCustom !== false && selectedIndex === pendingQuestion.options.length) {
                 setInput('');
+                setQuestionCustomMode(true);
             }
             return;
         }
@@ -3235,6 +3258,23 @@ const App = () => {
         if (focusPanel) {
             setSelectedActivityId(id);
         }
+    };
+
+    const acceptWorkEvent = (event: Record<string, any>): boolean => {
+        const identity = String(
+            event.event_id
+            || event.id
+            || `${event.run_id || event.turn_id || sessionId}:${event.sequence || event.timestamp || ''}:${event.event_type || event.type || event.kind || ''}:${event.action || event.title || ''}`
+        );
+        if (seenWorkEventIds.current.has(identity)) return false;
+        seenWorkEventIds.current.add(identity);
+        // Avoid unbounded growth across a long-lived TUI session while still
+        // covering normal reconnect/replay windows.
+        if (seenWorkEventIds.current.size > 1024) {
+            const oldest = seenWorkEventIds.current.values().next().value;
+            if (oldest) seenWorkEventIds.current.delete(oldest);
+        }
+        return true;
     };
 
     const completeRunningActivities = (status: 'done' | 'error' | 'cancelled') => {
@@ -4915,6 +4955,7 @@ const App = () => {
                 }
                 if (eventType === 'work_event' || eventType === 'nexus.event') {
                     const event = adaptCanonicalEvent(payload.event || payload);
+                    if (!acceptWorkEvent(event)) return;
                     const eventKind = String(event.kind || event.type || '').toLowerCase();
                     if (event.visibility !== 'public' || !PUBLIC_ACTIVITY_KINDS.has(eventKind)) return;
                     const label = String(event.action || event.label || event.kind || 'Agent activity');
@@ -5007,6 +5048,7 @@ const App = () => {
     };
 
     questionSubmitRef.current = (answer: string) => {
+        setQuestionCustomMode(false);
         void handleSubmit(answer);
     };
 
@@ -5062,7 +5104,7 @@ const App = () => {
                     <Box marginRight={1}>
                         <Text color="blueBright" bold>{"> "}</Text>
                     </Box>
-                    <TextInput value={input} onChange={value => setInput(sanitizeComposerInput(value))} onSubmit={handleSubmit} placeholder="Type your message or @path/to/file" />
+                    <TextInput value={input} onChange={value => setInput(sanitizeComposerInput(value))} onSubmit={questionCustomMode && pendingQuestion ? (value) => questionSubmitRef.current(value) : handleSubmit} placeholder={questionCustomMode ? 'Type your answer · Enter to submit · Esc to cancel' : 'Type your message or @path/to/file'} />
                 </Box>
 
                 {/* APP FOOTER */}
@@ -5106,6 +5148,7 @@ const App = () => {
                         activityItems={activityItems}
                         pendingQuestion={pendingQuestion}
                         selectedQuestionIndex={selectedQuestionIndex}
+                        questionCustomMode={questionCustomMode}
                         planItems={planItems}
                         planStatus={planStatus}
                         planExpanded={planExpanded}

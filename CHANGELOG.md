@@ -5,6 +5,35 @@ All notable changes to NEXUS AI are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-07-30
+
+### Added
+- New GUI: React 18 + Vite + TypeScript frontend rebuilt from scratch (25 source files, ~5000 lines)
+- New agent loop: `NexusLoop` rebuilt (3555 lines) with 8 tool call extraction strategies, stable and reliable
+- Evolution system upgraded: 6 forges (tool, skill, plugin, memory, knowledge, log) + VersionManager tracking 39 modules
+- NATE 5-layer fused tool engine: adaptive schema, universal adapter, execution graph, self-healing
+- HyperReasoningEngine: deterministic planner/critic/verifier with uncertainty scoring
+- OAuth 2.0 / PKCE / Device Code: 9 provider implementations (Codex, Claude, Copilot, Gemini, Grok, OpenRouter, Qwen, MiniMax, Chutes)
+- Voice pipeline: 4 STT backends (faster-whisper, transformers, whisper.cpp, llama-cpp) + KittenTTS
+- Multi-platform gateway: 10 platform adapters (Discord, Telegram, WhatsApp, Meta, Slack, Signal, Matrix, Mattermost, Email, SMS)
+- Plugin system: PluginManager with lifecycle hooks, trust model, and tool registration
+- Authentication: OAuth 2.0 (Google, GitHub) + token auth + gateway authorization
+- MCP integration: NEXUSMCPServer + MCPClient + MCPTool adapter (full stdio protocol)
+- Memory: Multi-source MemoryManager with parallel prefetch (session + RAG + failures + knowledge)
+
+### Changed
+- All read.md files updated to v2.0.0+ with accurate descriptions
+- AGENTS.md, README.md, NEXUS_CODEBASE_MAP.md fully rewritten to reflect current state
+- ROADMAP_STATUS.md updated (67.9% weighted completion)
+- `orchestrators/architect.py` and `mission_control.py` removed — planning uses `todo.md` + `planning` tool
+- Cleaned up 9 orphaned `.pyc` files and 3 orphaned tool directories (find, glob, read)
+- Removed stale test session artifacts from server/logs/
+
+### Fixed
+- `SPECIAL_FOCUS.md` updated — all 8 repair areas now marked as completed
+- `AGENT_CONTEXT.md` updated — references `_ground_context()` instead of deleted `core.code_intelligence`
+- All internal markdown links verified and working (0 broken links in docs/)
+
 ## [1.0.0] - 2026-06-25
 
 ### Added

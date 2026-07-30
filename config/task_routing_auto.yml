@@ -1,1 +1,4 @@
-# AUTO-GENERATED â€” edit config/provider.yml to configure task routing
+# AUTO-GENERATED — edit config/provider.yml to configure task routing
+#   - commandcode          (env)
+#   - deepseek             (env)
+#   - openrouter           (env)

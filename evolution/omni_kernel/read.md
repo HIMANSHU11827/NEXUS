@@ -4,4 +4,4 @@
 
 Central orchestration kernel for coordinating evolution subsystems across NEXUS AI.
 
-**Version:** 1.0.0
+**Version:** 2.0.0

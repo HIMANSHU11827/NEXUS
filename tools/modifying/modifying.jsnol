@@ -1,6 +1,6 @@
 {
   "name": "modifying",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Edit text in an existing file",
   "entry": "scripts/modifying.py",
   "class": "ModifyingTool",

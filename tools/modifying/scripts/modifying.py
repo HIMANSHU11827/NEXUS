@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 import os
 
 from tools.nexus_tools.base_tool import BaseTool, ToolResult

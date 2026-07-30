@@ -1,6 +1,6 @@
 {
   "name": "version",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Centralized version management for all NEXUS modules",
   "entry": "scripts/version.py",
   "class": "VersionManager",

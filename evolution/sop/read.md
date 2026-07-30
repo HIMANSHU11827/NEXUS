@@ -2,7 +2,7 @@
 
 Standard Operating Procedures for NEXUS AI — defines repeatable workflows and operational patterns.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Features
 - define(name, steps) — Create SOP definition

@@ -1,6 +1,6 @@
 {
   "name": "researcher",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "NexusResearcher — autonomous research agent for deep investigation",
   "entry": "scripts/researcher.py",
   "class": "NexusResearcher"

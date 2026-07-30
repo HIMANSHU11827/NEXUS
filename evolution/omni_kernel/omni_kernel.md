@@ -1,4 +1,4 @@
 # OmniEvolutionKernel
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 Unified orchestration layer coordinating all evolution subsystems.

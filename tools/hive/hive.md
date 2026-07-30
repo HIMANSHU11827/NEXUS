@@ -1,5 +1,5 @@
 # hive Tool
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 Spawn dedicated sub-agents for complex multi-step tasks. Each sub-agent runs as an isolated LLM call with a specific persona.
 

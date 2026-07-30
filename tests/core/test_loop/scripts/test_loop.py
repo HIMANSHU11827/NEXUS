@@ -6,6 +6,7 @@ from datetime import datetime
 
 from nexus.run_context import load_run_context
 from orchestrators.loop import HookRegistry, NexusLoop, PermissionPolicy, ToolCall
+from tools.planning.scripts.planning import PlanningTool
 
 
 class _ProviderErrorBrain:
@@ -80,6 +81,127 @@ class TestToolCall:
         assert tc.name == "bad_tool_name_"
         assert tc.params == {"value": "raw"}
         assert tc.call_id == "id_with_spaces_"
+
+
+class TestProviderToolProtocolRecovery:
+    def test_extracts_colon_function_call_with_malformed_value_quote(self, tmp_path):
+        loop = NexusLoop(root_dir=str(tmp_path))
+        calls = loop._extract_tool_calls(
+            '<function: web_search>\n'
+            '<param name="query" value="today latest news headlines</param>\n'
+            '<param name="max_results" value="8</param>\n'
+            '</function>'
+        )
+
+        assert len(calls) == 1
+        assert calls[0].name == "web_search"
+        assert calls[0].params == {"query": "today latest news headlines", "max_results": 8}
+
+    def test_removes_colon_function_protocol_from_chat_text(self):
+        raw = '<function: web_search>\n<param name="query" value="news</param>\n</function>'
+        assert NexusLoop._strip_internal_tool_protocol(raw).strip() == ""
+        assert NexusLoop._contains_tool_protocol(raw) is True
+
+    def test_removes_plain_function_wrapper_from_chat_text(self):
+        raw = '<function>\nweb_search(query="latest news", max_results: 5)\n</function>'
+        assert NexusLoop._strip_internal_tool_protocol(raw).strip() == ""
+        assert NexusLoop._contains_tool_protocol(raw) is True
+
+    def test_failed_tool_observation_is_not_cacheable(self):
+        assert NexusLoop._observation_is_failure("[web_search]: Error — timeout") is True
+        assert NexusLoop._observation_is_failure("[web_search]: useful result") is False
+
+    def test_web_query_keeps_requested_subject(self):
+        query = NexusLoop._normalize_web_query(
+            "latest news headlines",
+            "Find one current NASA news headline and summarize it in one sentence.",
+        )
+        assert "nasa" in query.lower()
+        assert "news news" not in query.lower()
+
+    def test_stale_todo_plan_is_not_matched_to_a_new_task(self):
+        stale_plan = "TODO LIST\nTASK NAME: Build a website\nPHASE 1: Core Implementation"
+        assert NexusLoop._todo_matches_task(stale_plan, "Find current NASA news") is False
+
+
+class TestPlanningTool:
+    def test_missing_model_plan_fails_instead_of_writing_a_generic_template(self, tmp_path):
+        tool = PlanningTool(root_dir=str(tmp_path))
+        result = asyncio.run(tool.execute(goal="Tell me today's news"))
+
+        assert result.success is False
+        assert "Planning failed" in result.error
+        assert not (tmp_path / "todo.md").exists()
+
+    def test_model_generated_plan_is_saved_without_replacing_it_with_template(self, tmp_path):
+        tool = PlanningTool(root_dir=str(tmp_path))
+        result = asyncio.run(tool.execute(
+            goal="Tell me today's news",
+            plan_spec={
+                "plan_type": "simple",
+                "steps": [
+                    "Search major Indian and international news sources published today",
+                    "Cross-check the publication date and headline details for each selected story",
+                    "Group the verified updates into a short India, world, business, and sports briefing",
+                    "Include the sources used with the final news summary",
+                ],
+            },
+        ))
+
+        assert result.success is True
+        assert result.metadata["source"] == "llm"
+        assert "Search major Indian and international news sources published today" in result.output
+        assert "Define the live-information target" not in result.output
+        assert (tmp_path / "todo.md").read_text(encoding="utf-8").strip() == result.output
+
+    def test_live_research_uses_numbered_simple_plan_and_saves(self, tmp_path):
+        tool = PlanningTool(root_dir=str(tmp_path))
+        result = asyncio.run(tool.execute(
+            goal="Find one current NASA news headline",
+            plan_spec={"plan_type": "simple", "steps": [
+                "Search NASA newsroom and other current space-news sources for a new headline",
+                "Confirm the publication date and story details against the NASA source",
+                "Write a one-sentence summary of the verified headline",
+            ]},
+        ))
+
+        assert result.success is True
+        assert "TASK NAME: Find one current NASA news headline" in result.output
+        assert "PLAN TYPE: Simple" in result.output
+        assert "1. [ ] Search NASA newsroom and other current space-news sources for a new headline" in result.output
+        assert "PHASE 1:" not in result.output
+        assert "Core Implementation" not in result.output
+        assert (tmp_path / "todo.md").read_text(encoding="utf-8").strip() == result.output
+
+    def test_complex_task_uses_phases_with_unnumbered_subgoals(self, tmp_path):
+        tool = PlanningTool(root_dir=str(tmp_path))
+        result = asyncio.run(tool.execute(
+            goal="Build a full web application with API backend and database",
+            plan_spec={"plan_type": "phased", "phases": [
+                {"title": "Define the application scope", "subgoals": ["List the user journeys", "Identify API and data requirements"]},
+                {"title": "Build the application", "subgoals": ["Implement the frontend", "Implement the API and database"]},
+            ]},
+        ))
+
+        assert result.success is True
+        assert "PLAN TYPE: Phased" in result.output
+        assert "PHASE 1: Define the application scope" in result.output
+        assert "- [ ] List the user journeys" in result.output
+        assert "1. [ ]" not in result.output
+
+    def test_add_complete_and_update_todos(self, tmp_path):
+        tool = PlanningTool(root_dir=str(tmp_path))
+        asyncio.run(tool.execute(goal="Research current space news", plan_spec={"plan_type": "simple", "steps": [
+            "Search current space-news sources", "Verify dates and sources", "Draft a concise report",
+        ]}))
+        added = asyncio.run(tool.execute(action="add", item="Compare two sources"))
+        assert "4. [ ] Compare two sources" in added.output
+
+        completed = asyncio.run(tool.execute(action="complete", item="Compare two sources"))
+        assert "4. [x] Compare two sources" in completed.output
+
+        updated = asyncio.run(tool.execute(action="update", old_text="Draft a concise report", new_text="Prepare the final report"))
+        assert "Prepare the final report" in updated.output
 
 
 class TestHookRegistry:
@@ -773,6 +895,11 @@ class TestAgentExecutionContract:
         assert "1. AI Story" in summary
         assert "https://example.com/ai" not in summary
         assert "[web_search]" not in summary
+
+    def test_raw_search_tool_dump_is_not_accepted_as_final_answer(self):
+        raw = "[web_search]: Web search results for: latest news\n- [Story](https://www.bing.com/news/apiclick?url=https://example.com)"
+        assert NexusLoop._is_raw_tool_result_dump(raw) is True
+        assert NexusLoop._is_raw_tool_result_dump("Today's news includes Story, based on the verified search results.") is False
 
     def test_compact_creating_body_is_parsed(self, tmp_path):
         loop = NexusLoop(root_dir=str(tmp_path))

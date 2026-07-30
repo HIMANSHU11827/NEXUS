@@ -1,5 +1,5 @@
 # Terminal Tool
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 Run shell commands with timeout control.
 

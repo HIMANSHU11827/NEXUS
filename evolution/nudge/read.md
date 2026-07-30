@@ -2,7 +2,7 @@
 
 NudgeEngine — proactive behavioral nudges based on system state and user patterns.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Features
 - analyze(state) — Evaluate system state for nudge opportunities

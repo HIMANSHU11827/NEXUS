@@ -2,4 +2,4 @@
 
 Multi-angle research via sub-agent spawning with configurable depth and focus areas.
 
-**Version:** 1.0.0
+**Version:** 2.0.0

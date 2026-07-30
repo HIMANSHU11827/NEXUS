@@ -14,7 +14,7 @@ Handles chunk-boundary-safe removal of:
 from __future__ import annotations
 
 import re
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 # ── Patterns ─────────────────────────────────────────────────────────
 
@@ -52,9 +52,15 @@ class StreamingContextScrubber:
         "scratchpad": ("<scratchpad>", "</scratchpad>"),
     }
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        on_thinking_delta: Optional[Callable[[str], None]] = None,
+        on_thinking_done: Optional[Callable[[], None]] = None,
+    ) -> None:
         self._in_span: Optional[str] = None
         self._buf: str = ""
+        self._on_thinking_delta = on_thinking_delta
+        self._on_thinking_done = on_thinking_done
 
     def reset(self) -> None:
         self._in_span = None
@@ -84,6 +90,8 @@ class StreamingContextScrubber:
                     return self._light_clean("".join(out))
                 # Skip span content + close tag
                 buf = buf[idx + len(close_tag):]
+                if self._in_span == "thinking" and self._on_thinking_done:
+                    self._on_thinking_done()
                 self._in_span = None
             else:
                 # Find earliest open tag
@@ -114,6 +122,8 @@ class StreamingContextScrubber:
                     out.append(buf[:earliest_pos])
                 buf = buf[earliest_pos + len(self.SPANS[earliest_tag][0]):]
                 self._in_span = earliest_tag
+                if earliest_tag == "thinking" and self._on_thinking_delta:
+                    self._on_thinking_delta("")
 
         return self._light_clean("".join(out))
 
@@ -123,6 +133,8 @@ class StreamingContextScrubber:
         self._buf = ""
         if self._in_span is not None:
             # Unclosed span — discard entirely
+            if self._in_span == "thinking" and self._on_thinking_done:
+                self._on_thinking_done()
             self._in_span = None
             return ""
         return self._clean(buf, strip=True)

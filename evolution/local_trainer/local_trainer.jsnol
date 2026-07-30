@@ -1,6 +1,6 @@
 {
   "name": "local_trainer",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Local Fine-Tuning System for Embedding + LLM models. Triggered by NATE when routing quality dips.",
   "entry": "scripts/trainer.py",
   "class": "LocalTrainer"

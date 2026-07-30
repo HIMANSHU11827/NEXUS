@@ -2,7 +2,7 @@
 
 Creates and refines persistent memory entries for NEXUS AI.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Features
 - forge(title, content, importance, tags) — Create memory entry at version 1.0.0

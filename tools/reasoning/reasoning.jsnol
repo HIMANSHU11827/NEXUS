@@ -1,6 +1,6 @@
 {
   "name": "reasoning",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Deep chain-of-thought reasoning and problem decomposition",
   "entry": "scripts/reasoning.py",
   "class": "ReasoningTool",

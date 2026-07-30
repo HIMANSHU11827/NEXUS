@@ -2,7 +2,7 @@
 
 NEXUS AI configuration files loaded by `config_loader.py`.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Files
 - `provider.yml` — Provider definitions (models, fallbacks, `${ENV_VAR}` key references)

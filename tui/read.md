@@ -2,7 +2,7 @@
 
 TypeScript Ink thin client that connects to the FastAPI GUI server on :8000.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Usage
 `powershell

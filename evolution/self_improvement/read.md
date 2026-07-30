@@ -2,7 +2,7 @@
 
 SelfImprovementEngine — converts failures and wins into reusable tactics and strategies.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Features
 - analyze_session(logs) — Extract lessons from session history

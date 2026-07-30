@@ -5,7 +5,7 @@ Each tool gets its own folder under tools/<name>/ with:
   - scripts/<name>.py — Python implementation (BaseTool subclass)
   - read.md         — documentation
 """
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 import json
 import logging

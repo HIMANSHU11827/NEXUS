@@ -1,5 +1,5 @@
 # Modifying Tool
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 Edit text in an existing file. Replaces first occurrence of old_string with new_string.
 

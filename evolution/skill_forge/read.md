@@ -2,7 +2,7 @@
 
 Creates and refines NEXUS skills under \skills/<name>.md\ with YAML frontmatter.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Features
 - forge(name, prompt, description) — Create a new skill at version 1.0.0

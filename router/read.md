@@ -2,7 +2,7 @@
 
 Multi-signal intent classification — routes user input to the correct handler with confidence scoring.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Features
 - IntentRouter class with intent classification

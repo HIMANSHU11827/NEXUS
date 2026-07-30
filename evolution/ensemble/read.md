@@ -4,7 +4,7 @@
 
 EnsembleManager — multi-strategy reasoning for improved decision making.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Features
 - Ensemble of reasoning strategies

@@ -1,5 +1,5 @@
 # Test Runner Tool
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 Runs targeted test commands with light framework auto-detection.
 

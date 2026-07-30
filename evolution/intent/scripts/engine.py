@@ -1,5 +1,5 @@
 """NEXUS INTENT & PROACTIVE ENGINE (v17.0)"""
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 import logging
 import re
 from typing import Dict, List, Optional

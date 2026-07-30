@@ -2,7 +2,7 @@
 
 Utility scripts for automation, deployment, maintenance, and DevOps tasks.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Contents
 - Build and packaging scripts

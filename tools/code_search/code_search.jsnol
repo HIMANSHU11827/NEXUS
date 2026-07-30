@@ -1,6 +1,6 @@
 {
   "name": "code_search",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Search code with glob patterns and regex, analyze code structure",
   "entry": "scripts/code_search.py",
   "class": "CodeSearchTool",

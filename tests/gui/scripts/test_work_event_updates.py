@@ -89,7 +89,7 @@ def test_append_work_event_persists_complete_canonical_envelope(tmp_path, monkey
 
 
 def test_canonical_event_registry_covers_required_runtime_families():
-    assert EVENT_STATUSES == {"pending", "running", "success", "failed", "skipped", "cancelled"}
+    assert EVENT_STATUSES == {"pending", "running", "success", "failed", "blocked", "skipped", "cancelled"}
     for family in ("run", "conversation", "message", "plan", "phase", "tool", "command", "file", "search", "web", "test", "subagent", "handoff", "memory", "skill"):
         assert any(event_type.startswith(f"{family}.") for event_type in EVENT_TYPES), family
 

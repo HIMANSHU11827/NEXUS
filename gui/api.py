@@ -7,6 +7,7 @@ import os
 import queue
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -43,6 +44,7 @@ from nexus.runtime import (
     session_file_path as runtime_session_file_path,
 )
 from orchestrators.loop import NexusLoop
+from utils.context_scrubber import StreamingContextScrubber
 
 _UPLOAD_DIR = os.path.join(_ROOT, "workspace", "uploads")
 os.makedirs(_UPLOAD_DIR, exist_ok=True)
@@ -59,9 +61,10 @@ _RATE_WINDOW_SECONDS = 60
 _RATE_LIMIT = int(os.environ.get("NEXUS_DASHBOARD_RATE_LIMIT", "240"))
 _RATE_BUCKETS: Dict[str, List[float]] = {}
 _MAX_UPLOAD_BYTES = int(os.environ.get("NEXUS_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
-_ALLOWED_UPLOAD_EXTS = {".txt", ".md", ".json", ".py", ".js", ".ts", ".tsx", ".css", ".yaml", ".yml", ".csv", ".log"}
 _LOCAL_CLIENTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 _SHOW_CHAT_THINKING = os.environ.get("NEXUS_CHAT_SHOW_THINKING", "false").lower() in {"1", "true", "yes", "on"}
+_SANDBOX_TIER = os.environ.get("NEXUS_SANDBOX_TIER", "normal").strip().lower() or "normal"
+_SANDBOX_ROOT = os.path.abspath(os.environ.get("NEXUS_SANDBOX_ROOT", os.path.join(_ROOT, "workspace")))
 
 app = FastAPI()
 
@@ -233,12 +236,19 @@ def require_config_write_allowed(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Dashboard config writes are local-only")
 
 
+def require_local_runtime_control(request: Request) -> None:
+    """Runtime controls are available to the local GUI without a dashboard token."""
+    if _LOCAL_ONLY and request.client and request.client.host not in _LOCAL_CLIENTS:
+        raise HTTPException(status_code=403, detail="Runtime controls are local-only")
+
+
 def _check_gui_terminal_permission(sid: str, turn_id: str, command: str):
     from permissions import PermissionMode, PermissionSystem
 
     loop = _LOOPS.get(sid)
     mode_name = str(getattr(loop, "permission_mode", "") if loop else "auto").strip().lower() or "auto"
     mode_map = {
+        "full_access": PermissionMode.BYPASS,
         "all": PermissionMode.BYPASS,
         "bypass": PermissionMode.BYPASS,
         "dontask": PermissionMode.BYPASS,
@@ -249,6 +259,7 @@ def _check_gui_terminal_permission(sid: str, turn_id: str, command: str):
         "allowlist": PermissionMode.PRE_AUTHORIZED,
         "pre_authorized": PermissionMode.PRE_AUTHORIZED,
         "checklist": PermissionMode.PRE_AUTHORIZED,
+        "approval": PermissionMode.APPROVE,
         "ask": PermissionMode.APPROVE,
         "approve": PermissionMode.APPROVE,
         "default": PermissionMode.DEFAULT,
@@ -305,15 +316,16 @@ def session_file_path(session_id: str, suffix: str = ".json") -> str:
 
 
 def safe_upload_path(filename: str) -> str:
-    safe_name = os.path.basename(str(filename or "upload.bin"))
-    safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", safe_name).strip("._") or "upload.bin"
-    ext = os.path.splitext(safe_name)[1].lower()
-    if ext not in _ALLOWED_UPLOAD_EXTS:
-        raise HTTPException(status_code=400, detail=f"Upload type not allowed: {ext or 'none'}")
+    raw_name = str(filename or "upload.bin").replace("\\", "/")
+    parts = [part for part in raw_name.split("/") if part not in {"", "."}]
+    if not parts or any(part == ".." for part in parts):
+        raise HTTPException(status_code=400, detail="Invalid upload filename")
+    safe_parts = [re.sub(r"[^A-Za-z0-9_. -]", "_", part).strip() or "upload" for part in parts]
     upload_root = os.path.abspath(_UPLOAD_DIR)
-    path = os.path.abspath(os.path.join(upload_root, safe_name))
+    path = os.path.abspath(os.path.join(upload_root, *safe_parts))
     if os.path.commonpath([upload_root, path]) != upload_root:
         raise HTTPException(status_code=400, detail="Invalid upload filename")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     return path
 
 
@@ -1395,6 +1407,7 @@ def get_loop(session_id: str = "default") -> NexusLoop:
     session_id = safe_session_id(session_id)
     if session_id not in _LOOPS:
         loop = NexusLoop(root_dir=_ROOT)
+        _apply_sandbox_tier(loop)
         loop.load_memory(session_id)
         # The loop publishes structured lifecycle/tool records through this
         # adapter. Without the sink, only brittle text-marker parsing reached
@@ -1404,6 +1417,15 @@ def get_loop(session_id: str = "default") -> NexusLoop:
     else:
         sync_loop_from_disk(_LOOPS[session_id])
     return _LOOPS[session_id]
+
+
+def _apply_sandbox_tier(loop: NexusLoop) -> None:
+    """Keep every active GUI session on the user-selected execution tier."""
+    from sandbox.sandbox_manager import SandboxTier
+
+    loop.sandbox_tier = SandboxTier(_SANDBOX_TIER)
+    loop.sandbox.tier = loop.sandbox_tier
+    loop.sandbox.root = _SANDBOX_ROOT
 
 
 def bind_live_work_event_sink(loop: NexusLoop, session_id: str, turn_id: str, out_queue) -> tuple[Any, Any]:
@@ -1519,7 +1541,31 @@ async def load_session(request: Request):
     sid = safe_session_id(data.get("id", "default"))
     set_active_session_id(_ROOT, sid, source=str(data.get("source", "gui")))
     loop = get_loop(sid)
-    return {"status": "success", "id": loop.session_id, "history": loop.memory}
+    # Chat text is saved in the session memory while tool/command activity is
+    # stored in the durable work-event log. Reattach each chronological run to
+    # its assistant reply so the GUI can show the same work cards after reload.
+    history = [dict(message) for message in loop.memory if isinstance(message, dict)]
+    events_by_turn: Dict[str, List[Dict[str, Any]]] = {}
+    turn_order: List[str] = []
+    for event in list_work_events(sid, limit=1000):
+        if str(event.get("visibility", "public")).lower() == "internal":
+            continue
+        turn_id = str(event.get("turn_id") or event.get("run_id") or "")
+        if not turn_id:
+            continue
+        if turn_id not in events_by_turn:
+            events_by_turn[turn_id] = []
+            turn_order.append(turn_id)
+        events_by_turn[turn_id].append(event)
+
+    assistant_index = 0
+    for message in history:
+        if str(message.get("role", "")) != "assistant":
+            continue
+        if assistant_index < len(turn_order):
+            message["work_events"] = events_by_turn[turn_order[assistant_index]]
+        assistant_index += 1
+    return {"status": "success", "id": loop.session_id, "history": history}
 
 def _clear_session_files(session_id: str) -> bool:
     """Reset or remove persisted session data and in-memory loop cache."""
@@ -1621,7 +1667,12 @@ async def chat(request: Request):
     provider = chat_request.provider
     model = chat_request.model or str(getattr(loop, "model", "") or "").strip()
     max_tokens = chat_request.max_tokens
-    show_thinking = bool(data.get("show_thinking", _SHOW_CHAT_THINKING))
+    reasoning_effort = str(data.get("reasoning_effort") or "medium").strip().lower()
+    if reasoning_effort in {"minimal", "low", "medium", "high", "extra_high", "max", "ultra"}:
+        loop.reasoning_effort = reasoning_effort
+    # The terminal client historically sent show_thoughts while the GUI API
+    # expected show_thinking.  Accept both names as the same user setting.
+    show_thinking = bool(data.get("show_thinking", data.get("show_thoughts", _SHOW_CHAT_THINKING)))
     
     # Auto-title session if new
     meta_path = session_file_path(sid, ".meta")
@@ -1665,11 +1716,33 @@ async def chat(request: Request):
     async def event_generator():
         completed = False
         partial_response = []
-        idle_timeout = max(5, int(os.environ.get("NEXUS_CHAT_IDLE_TIMEOUT", "90")))
+        idle_timeout = max(30, int(os.environ.get("NEXUS_CHAT_IDLE_TIMEOUT", "300")))
         legacy_raw_stream = str(data.get("stream_format") or "").lower() in {"raw", "legacy"}
         stream_queue: "queue.Queue[tuple[str, Any]]" = queue.Queue()
         previous_work_event_sink, active_work_event_sink = bind_live_work_event_sink(loop, sid, turn_id, stream_queue)
         last_activity_at = time.monotonic()
+        thought_events: list[tuple[str, dict[str, str]]] = []
+        thought_open = False
+
+        # Providers may stream private reasoning in <thinking> spans.  Keep
+        # that text out of the chat, while truthfully reporting that a real
+        # reasoning span started/ended so the TUI can show a timed Thought row.
+        def on_thinking_delta(_: str) -> None:
+            nonlocal thought_open
+            if show_thinking and not thought_open:
+                thought_open = True
+                thought_events.append(("thinking", {"delta": "Reasoning in progress. Expand this record after completion for the safe activity summary."}))
+
+        def on_thinking_done() -> None:
+            nonlocal thought_open
+            if thought_open:
+                thought_events.append(("thinking_done", {}))
+                thought_open = False
+
+        scrubber = StreamingContextScrubber(
+            on_thinking_delta=on_thinking_delta,
+            on_thinking_done=on_thinking_done,
+        )
 
         def stream_frame(event: str, payload: Any) -> str:
             return encode_chat_stream_frame(event, payload, legacy=legacy_raw_stream)
@@ -1709,25 +1782,20 @@ async def chat(request: Request):
         try:
             while True:
                 try:
-                    kind, chunk = await asyncio.to_thread(stream_queue.get, True, min(15, idle_timeout))
-                    last_activity_at = time.monotonic()
+                    kind, chunk = await asyncio.to_thread(stream_queue.get, True, 15)
                 except queue.Empty:
-                    if time.monotonic() - last_activity_at < idle_timeout:
-                        yield stream_frame("heartbeat", {"timestamp": time.time()})
-                        continue
-                    chunk = (
-                        "\nNEXUS chat timed out while waiting for the model/provider. "
-                        "Check provider configuration or switch to a healthy local model."
-                    )
-                    partial_response.append(chunk)
-                    try:
-                        loop.abort()
-                    except Exception:
-                        pass
-                    yield stream_frame("error", {"message": chunk})
-                    break
+                    yield stream_frame("heartbeat", {"timestamp": time.time(), "status": "running"})
+                    continue
 
                 if kind == "done":
+                    trailing_chunk = scrubber.flush()
+                    while thought_events:
+                        event_name, payload = thought_events.pop(0)
+                        yield stream_frame(event_name, payload)
+                    if trailing_chunk:
+                        visible_chunk = attach_work_events_to_chunk(sid, filter_chat_chunk(trailing_chunk), turn_id=turn_id)
+                        if visible_chunk:
+                            yield stream_frame("message", {"content": visible_chunk})
                     completed = True
                     break
                 if kind == "error":
@@ -1742,7 +1810,11 @@ async def chat(request: Request):
                     chunk = str(chunk.get("data") or "")
 
                 partial_response.append(chunk)
-                visible_chunk = filter_chat_chunk(chunk, show_thinking=show_thinking)
+                visible_chunk = scrubber.feed(str(chunk))
+                while thought_events:
+                    event_name, payload = thought_events.pop(0)
+                    yield stream_frame(event_name, payload)
+                visible_chunk = filter_chat_chunk(visible_chunk)
                 visible_chunk = attach_work_events_to_chunk(sid, visible_chunk, turn_id=turn_id)
                 if visible_chunk:
                     yield stream_frame("message", {"content": visible_chunk})
@@ -1997,6 +2069,9 @@ def get_work_event(event_id: str, session_id: str = "default"):
 async def update_work_event(request: Request):
     data = await request.json()
     sid = safe_session_id(data.get("session_id", "default"))
+    profile = str(data.get("profile") or "pwsh").strip().lower()
+    if profile not in {"pwsh", "cmd", "bash", "wsl"}:
+        raise HTTPException(status_code=400, detail="Unsupported terminal profile")
     turn_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(data.get("turn_id", "")).strip())[:120]
     operation = str(data.get("operation") or "update").lower().strip()
     title = str(data.get("title") or data.get("action") or "Workflow update").strip()[:180]
@@ -2063,6 +2138,7 @@ async def run_work_command(request: Request):
         "title": "Run command",
         "target": command,
         "command": command,
+        "profile": profile,
         "status": "running",
         "turn_id": turn_id,
         "parent_id": parent_event_id,
@@ -2320,6 +2396,45 @@ def api_files_list(data: dict):
         full = os.path.join(target, name)
         files.append({"name": name, "path": full, "isDirectory": os.path.isdir(full)})
     return {"path": target, "files": files}
+
+
+@app.get("/api/files/tree")
+def api_files_tree(path: str = ""):
+    """Return one directory level for the GUI folder browser.
+
+    With no path supplied, the agent workspace is the safe, useful default.
+    The desktop GUI is local-only, so an operator may also explicitly browse a
+    different local folder by supplying its absolute path.
+    """
+    requested_path = str(path or "").strip()
+    target = requested_path or os.path.join(_ROOT, "workspace")
+    target = os.path.abspath(os.path.expanduser(os.path.expandvars(target)))
+
+    if not os.path.isdir(target):
+        raise HTTPException(status_code=404, detail="Folder not found")
+
+    items = []
+    try:
+        entries = list(os.scandir(target))
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied for this folder")
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Could not open folder: {exc}")
+
+    for entry in sorted(entries, key=lambda value: (not value.is_dir(follow_symlinks=False), value.name.lower())):
+        try:
+            is_directory = entry.is_dir(follow_symlinks=False)
+            items.append({
+                "name": entry.name,
+                "path": entry.path,
+                "type": "directory" if is_directory else "file",
+                "size": None if is_directory else entry.stat(follow_symlinks=False).st_size,
+            })
+        except (OSError, PermissionError):
+            # Skip entries that Windows will not let this process inspect.
+            continue
+
+    return {"path": target, "items": items}
 
 
 @app.get("/api/session-files.zip")
@@ -3501,9 +3616,33 @@ def api_health():
     return {"status": "ok", "service": "nexus-api"}
 
 
+@app.post("/api/ports/probe")
+def probe_local_port(data: dict):
+    """Verify that a local TCP service is actually listening before showing it in Ports."""
+    raw_port = str(data.get("port", "")).strip()
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Enter a valid TCP port number") from exc
+    if not 1 <= port <= 65535:
+        raise HTTPException(status_code=400, detail="Port must be between 1 and 65535")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.6)
+    try:
+        sock.connect(("127.0.0.1", port))
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail=f"No local service is listening on port {port}") from exc
+    finally:
+        sock.close()
+    return {"port": port, "address": f"http://127.0.0.1:{port}", "status": "listening"}
+
+
 @app.post("/api/model")
 async def set_model(data: dict, request: Request):
-    require_config_write_allowed(request)
+    # The local GUI applies a saved model to its own local session immediately
+    # before a chat run. This is a runtime control, not a dashboard-wide config
+    # write, so it must work from localhost without a dashboard token.
+    require_local_runtime_control(request)
     model = str(data.get("model", "") or "").strip()
     sid = safe_session_id(data.get("session_id", "default") or "default")
     loop = get_loop(sid)
@@ -3512,14 +3651,105 @@ async def set_model(data: dict, request: Request):
     return {"status": "success", "sid": sid, "model": loop.model}
 
 
+@app.get("/api/models/saved")
+def get_saved_models():
+    """Expose only models that the operator has actually saved in provider config."""
+    from kernel import get_nexus_kernel
+
+    kernel = get_nexus_kernel(_ROOT)
+    providers, _instances = build_provider_state(kernel)
+    models = []
+    seen = set()
+    for provider in providers:
+        model = str(provider.get("model") or "").strip()
+        if not model or model in seen:
+            continue
+        seen.add(model)
+        provider_name = str(provider.get("name") or provider.get("id") or "Provider")
+        models.append({"model": model, "provider": provider_name, "label": f"{provider_name} · {model}"})
+    # provider.yml is the canonical saved-provider file used by this local
+    # installation. Include it as well when the runtime config has not yet
+    # mirrored profiles into the kernel configuration.
+    provider_config = _load_provider_config()
+    configured = provider_config.get("providers", {}) if isinstance(provider_config, dict) else {}
+    if isinstance(configured, dict):
+        for provider_id, profile in configured.items():
+            if not isinstance(profile, dict):
+                continue
+            model = str(profile.get("model") or profile.get("default_model") or "").strip()
+            if not model or model in seen:
+                continue
+            seen.add(model)
+            provider_name = str(provider_id).upper()
+            models.append({"model": model, "provider": provider_name, "label": f"{provider_name} · {model}"})
+    legacy_provider_path = os.path.join(_ROOT, "config", "provider.yml")
+    if os.path.exists(legacy_provider_path):
+        try:
+            with open(legacy_provider_path, "r", encoding="utf-8") as provider_file:
+                legacy_config = yaml.safe_load(provider_file) or {}
+            legacy_providers = legacy_config.get("providers", {}) if isinstance(legacy_config, dict) else {}
+            if isinstance(legacy_providers, dict):
+                for provider_id, profile in legacy_providers.items():
+                    if not isinstance(profile, dict):
+                        continue
+                    model = str(profile.get("model") or profile.get("default_model") or "").strip()
+                    if not model or model in seen:
+                        continue
+                    seen.add(model)
+                    provider_name = str(provider_id).upper()
+                    models.append({"model": model, "provider": provider_name, "label": f"{provider_name} · {model}"})
+        except (OSError, yaml.YAMLError):
+            pass
+    return {"models": models}
+
+
 @app.post("/api/mode")
 async def set_mode(data: dict, request: Request):
-    require_config_write_allowed(request)
+    require_local_runtime_control(request)
     mode = str(data.get("mode", "") or "").strip().lower()
     sid = safe_session_id(data.get("session_id", "default") or "default")
     loop = get_loop(sid)
     loop.permission_mode = mode or loop.permission_mode
     return {"status": "success", "sid": sid, "mode": loop.permission_mode}
+
+
+@app.get("/api/sandbox")
+def get_sandbox():
+    """Return the active command execution isolation tier."""
+    return {
+        "status": "success",
+        "tier": _SANDBOX_TIER,
+        "root": _SANDBOX_ROOT,
+        "available": ["no_sandbox", "normal", "docker"],
+        "labels": {
+            "no_sandbox": "No Sandbox — full machine access",
+            "normal": "Sandbox — Nexus workspace only",
+            "docker": "Advanced Sandbox — Docker isolation",
+        },
+    }
+
+
+@app.post("/api/sandbox")
+async def set_sandbox(data: dict, request: Request):
+    """Set command execution to direct, workspace-only, or Docker isolation."""
+    require_local_runtime_control(request)
+    global _SANDBOX_TIER, _SANDBOX_ROOT
+    tier = str(data.get("tier", "") or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {"none": "no_sandbox", "off": "no_sandbox", "direct": "no_sandbox", "advanced": "docker"}
+    tier = aliases.get(tier, tier)
+    if tier not in {"no_sandbox", "normal", "docker"}:
+        raise HTTPException(status_code=400, detail="Sandbox must be no_sandbox, normal, or docker.")
+    raw_root = str(data.get("root", "") or "").strip()
+    selected_root = os.path.abspath(raw_root) if raw_root else os.path.join(_ROOT, "workspace")
+    if tier in {"normal", "docker"} and not os.path.isdir(selected_root):
+        raise HTTPException(status_code=404, detail=f"Sandbox folder not found: {selected_root}")
+    _SANDBOX_TIER = tier
+    _SANDBOX_ROOT = selected_root
+    os.environ["NEXUS_SANDBOX_TIER"] = tier
+    os.environ["NEXUS_SANDBOX_ROOT"] = selected_root
+    for loop in _LOOPS.values():
+        _apply_sandbox_tier(loop)
+    return {"status": "success", "tier": tier, "root": _SANDBOX_ROOT}
 
 
 @app.post("/api/provider")

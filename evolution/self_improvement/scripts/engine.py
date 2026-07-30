@@ -1,5 +1,5 @@
 """Self-Improvement Engine for NEXUS."""
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 import json
 import logging
 import os

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 

@@ -1,9 +1,0 @@
-{
-  "title": "tool_web_search_max_results_type",
-  "content": "The web_search tool failed because 'max_results' parameter requires integer type, but system allowed non-integer input; NEXUS should document correct parameter types.",
-  "key_concepts": [],
-  "tags": [],
-  "version": "1.0.0",
-  "created_at": 1784311918.968363,
-  "updated_at": 1784311918.968363
-}

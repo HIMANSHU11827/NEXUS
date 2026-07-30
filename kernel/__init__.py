@@ -209,7 +209,7 @@ class NexusKernel(ThreadSafeSingleton):
     @property
     def telemetry(self):
         try:
-            from telemetry.database import NexusTelemetryDB
+            from kernel.telemetry import NexusTelemetryDB
         except ImportError:
             logger.warning("Subsystem 'telemetry' not available")
             return {}

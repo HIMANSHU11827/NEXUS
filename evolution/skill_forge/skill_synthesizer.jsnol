@@ -1,6 +1,6 @@
 {
   "name": "skill_synthesizer",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Generates skills from descriptions",
   "entry": "scripts/skill_synthesizer.py",
   "class": "SkillSynthesizer"

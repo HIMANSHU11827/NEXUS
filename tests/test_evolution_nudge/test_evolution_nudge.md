@@ -1,5 +1,5 @@
 # Test Evolution Nudge
-**Version:** 1.0.0 — auto-bumped via `VersionManager` on refine.
+**Version:** 2.0.0 — auto-bumped via `VersionManager` on refine.
 
 Tests for the `NudgeEngine` module (`evolution.nudge.engine`), covering:
 

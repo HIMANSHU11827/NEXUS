@@ -2,7 +2,7 @@
 
 NexusPromptEngine — token-efficient dynamic prompt builder for the sovereign cognitive loop.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Components
 - __init__.py — NexusPromptEngine: build_super_prompt(), build_planning_prompt()

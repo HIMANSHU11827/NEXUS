@@ -1,6 +1,6 @@
 {
   "name": "deep_research",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Deep research — spawns dedicated research sub-agents to investigate a topic thoroughly across multiple angles",
   "entry": "scripts/deep_research.py",
   "class": "DeepResearchTool",

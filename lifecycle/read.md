@@ -2,7 +2,7 @@
 
 Lifecycle management — startup, teardown, and state transitions for agents, sessions, and system components.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Features
 - Agent lifecycle hooks

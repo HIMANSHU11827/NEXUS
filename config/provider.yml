@@ -1,18 +1,12 @@
 providers:
   deepseek:
-    model: deepseek-chat
+    model: deepseek-v4-flash
     endpoint: https://api.deepseek.com/chat/completions
     temperature: 0.7
     max_tokens: 8192
     api_key: ${DEEPSEEK_API_KEY}
-  ollama:
-    model: llama3
-    endpoint: http://127.0.0.1:11434/api/chat
-    temperature: 0.7
-    max_tokens: 4096
 version: 1.1.0
 default_provider: deepseek
 fallback_chain:
 - deepseek
-- ollama
 

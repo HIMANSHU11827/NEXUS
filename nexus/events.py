@@ -16,16 +16,17 @@ tool.started tool.delta tool.completed tool.failed command.started command.stdou
 file.read file.created file.edited file.diff search.started search.result search.completed search.failed
 web.started web.result web.completed web.failed test.started test.output test.completed test.failed
 subagent.started subagent.status subagent.result subagent.failed subagent.completed handoff.started handoff.completed
+approval.requested guardrail.blocked agent.thinking agent.completed
 memory.updated skill.used skill.created skill.updated error retry status.changed""".split()
 )
-EVENT_STATUSES = frozenset({"pending", "running", "success", "failed", "skipped", "cancelled"})
+EVENT_STATUSES = frozenset({"pending", "running", "success", "failed", "blocked", "skipped", "cancelled"})
 
 
 def canonical_status(value: Any) -> str:
     status = str(value or "running").lower()
     aliases = {
         "queued": "pending", "done": "success", "completed": "success", "ok": "success",
-        "error": "failed", "failure": "failed", "blocked": "failed", "aborted": "cancelled",
+        "error": "failed", "failure": "failed", "aborted": "cancelled",
     }
     status = aliases.get(status, status)
     if status not in EVENT_STATUSES:

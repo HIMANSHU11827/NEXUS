@@ -1,15 +1,14 @@
 # Orchestrators
 
-Multi-step agent pipelines, mission control, and the sovereign reasoning loop.
+Sovereign reasoning loop — the core agent orchestration layer.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Components
-- `loop.py` — `NexusLoop`: unified model/tool loop (GROUNDING → INFERENCE ↔ AUDITING/EXECUTION/VERIFICATION → FINALIZE)
+- `loop.py` — `NexusLoop` (3555 lines): unified model/tool loop (GROUNDING → INFERENCE ↔ AUDITING/EXECUTION/VERIFICATION → FINALIZE)
 - Context sources load concurrently and selectively; safe read tools run in parallel while writes remain sequential.
-- Permission/risk checks are deterministic; one session loop owns one active run and request provider/model overrides do not leak into other sessions.
-- Sandbox stdout/stderr, generator-based tool output, and canonical lifecycle events propagate live. Model text is held until safe tool-protocol classification and then returned as content.
-- `architect.py` is legacy compatibility code; normal planning uses `todo.md` and the registered `planning` tool from `NexusLoop`.
-- `mission_control.py` — `MissionOrchestrator`: multi-step mission object with artifacts
-- `architect.py` — `NexusArchitect`: roadmap/planning agent (Tier 2 complexity)
-- `read.md` — this file
+- Permission/risk checks are deterministic; one session loop owns one active run; provider/model overrides do not leak between sessions.
+- 8 tool call extraction strategies: colon-function, inline JSON, dotted, compact XML, action fences, explicit run, explicit file, DSML invoke
+- HookRegistry for lifecycle events; SelfImprovementEngine, EvolutionLog, SkillCurator integration
+- `architect.py` (legacy) and `mission_control.py` have been removed — planning uses `todo.md` + `planning` tool
+- Permission modes: AUTO, AI_DECIDE, ASK_ALL, CHECKLIST

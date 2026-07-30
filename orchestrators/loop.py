@@ -187,6 +187,14 @@ class NexusLoop:
         self.MAX_RETRIES_PER_PHASE = 3
         self.COMPACT_THRESHOLD = 20
         self.COMPACT_KEEP = 6
+        # Hermes/OpenCode both treat context as a budget, not only a message
+        # count. Keep the conservative message boundary for compatibility,
+        # but also compact by an operator-configurable token estimate.
+        try:
+            self.CONTEXT_TOKEN_LIMIT = max(8_000, int(os.environ.get("NEXUS_CONTEXT_LIMIT", "128000")))
+        except ValueError:
+            self.CONTEXT_TOKEN_LIMIT = 128_000
+        self.COMPACT_TOKEN_RATIO = 0.75
 
         # Misc
         self.additional_dirs: List[str] = []
@@ -545,7 +553,7 @@ class NexusLoop:
                 self._slash_command_cache[skill_name] = prompt
                 return {"name": skill_name, "prompt": prompt, "args": rest}
         except Exception:
-            self.logger.warning("loop:488 : suppressed error", exc_info=True)
+            self.logger.warning("loop : suppressed error", exc_info=True)
             pass
 
         # Search .opencode/skills/<name>/SKILL.md
@@ -560,7 +568,7 @@ class NexusLoop:
                     self._slash_command_cache[skill_name] = prompt
                     return {"name": skill_name, "prompt": prompt[:2000], "args": rest}
         except Exception:
-            self.logger.warning("loop:502 : suppressed error", exc_info=True)
+            self.logger.warning("loop : suppressed error", exc_info=True)
             pass
 
         return None
@@ -688,37 +696,38 @@ class NexusLoop:
         self._last_run_failed = False
         messages = await self._ground_context(task_desc)
         await self._emit_stage_event("grounding", "Context ready", "rules, memory, skills, and code context", "done")
-        plan_text = self._read_todo_md()
         if self.active_goal and self.active_goal != task_desc:
             todo_path = os.path.join(self.root, "todo.md") if self.root else "todo.md"
             if os.path.isfile(todo_path):
                 os.remove(todo_path)
-                plan_text = ""
         self.active_goal = task_desc
         if requires_tools:
             messages.append({"role": "system", "content": self._tool_enforcement_message(task_desc)})
-            gl = task_desc.lower()
-            is_complex = len(gl.split()) > 6 or any(w in gl for w in ("project", "app", "system", "website", "api", "full", "complete", "game", "platform", "tool", "build", "create", "make", "implement"))
-            if not plan_text and is_complex:
-                plan_text = await self._create_plan_via_tool(task_desc)
-                if plan_text:
-                    self.logger.info(f"Plan created: {len(plan_text)} chars")
-                    yield {"type": "content", "data": plan_text}
+            # Each tool-backed request receives a fresh, task-specific plan.
+            # Do not replay a global todo.md from an earlier run.
+            planning_started_at = time.perf_counter()
+            plan_text = await self._create_plan_via_tool(task_desc)
+            planning_duration_ms = max(0, round((time.perf_counter() - planning_started_at) * 1000))
             if plan_text:
+                self.logger.info(f"Plan created: {len(plan_text)} chars")
+                # The plan belongs in the expandable activity card, not as raw
+                # todo.md text in the conversation. Only expose actionable plan
+                # items; headings and metadata are not user work steps.
                 plan_items = [
-                    re.sub(r"^[\s\-*0-9.\[\]xX~]+", "", line).strip()
+                    re.sub(r"^\s*(?:\d+\.\s*|[-*]\s*)\[[ xX]\]\s*", "", line).strip()
                     for line in plan_text.splitlines()
-                    if line.strip() and not line.lstrip().startswith("#")
+                    if re.match(r"^\s*(?:\d+\.\s*|[-*]\s*)\[[ xX]\]\s+", line)
                 ]
-                plan_items = [item.rstrip("~").strip() for item in plan_items if item]
+                plan_items = [item for item in plan_items if item]
                 await self._emit_stage_event(
                     "planning",
                     "Plan ready",
                     "todo.md",
                     "done",
                     items=plan_items[:12],
+                    duration_ms=planning_duration_ms,
                 )
-                messages.append({"role": "system", "content": f"[CURRENT_PLAN]\n{plan_text}\n\nUpdate todo.md with ~~strikethrough~~ via modifying tool when each item is complete."})
+                messages.append({"role": "system", "content": f"[CURRENT_PLAN]\n{plan_text}\n\nUse the planning tool to add, update, or mark todo.md items done as work progresses."})
         modified_task = self._apply_slash_command(messages, task_desc)
         if modified_task != task_desc:
             task_desc = modified_task
@@ -769,6 +778,36 @@ class NexusLoop:
                 yield {"type": "status", "data": "\n[aborted]"}
                 return
             await self.hooks.trigger("post_llm_call", response)
+
+            # Providers sometimes repeat a raw function envelope after a tool
+            # has completed. This is not a final answer and must never cause an
+            # infinite duplicate-tool loop.
+            if self._last_run_had_tool_execution and self._contains_tool_protocol(response):
+                if finalization_retries < 1:
+                    finalization_retries += 1
+                    await self._emit_runtime_event(
+                        "retry", "Retrying final response", "running",
+                        event_id=f"retry_{run_id}_final_{finalization_retries}",
+                        parent_id=f"run_{run_id}",
+                        payload={"attempt": finalization_retries, "phase": "final_response"},
+                    )
+                    messages.append({"role": "assistant", "content": self._strip_internal_tool_protocol(response)})
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "[FINAL_RESPONSE] The tool already ran. Return the user-facing result "
+                            "from TOOL_RESULTS now. Do not emit another tool call or protocol."
+                        ),
+                    })
+                    continue
+                last_response = self._deterministic_evidence_summary(last_observations)
+                yield {"type": "content", "data": last_response}
+                await self._emit_runtime_event(
+                    "message.delta", "Assistant response", "running",
+                    event_id=message_id, parent_id=f"run_{run_id}", payload={"delta": last_response},
+                )
+                messages.append({"role": "assistant", "content": last_response})
+                break
 
             if self._last_run_had_tool_execution and self._is_provider_error_text(response):
                 if self._last_run_verified and not self._last_run_failed:
@@ -824,7 +863,10 @@ class NexusLoop:
                         continue
                     if not response and last_observations:
                         response = "Work completed and verified.\n\n" + "\n".join(last_observations)
-                    if last_observations and not self._final_response_contains_evidence(response, last_observations):
+                    if last_observations and (
+                        self._is_raw_tool_result_dump(response)
+                        or not self._final_response_contains_evidence(response, last_observations)
+                    ):
                         response = self._deterministic_evidence_summary(last_observations)
                 if requires_tools and enforcement_retries < self.MAX_RETRIES_PER_PHASE:
                     enforcement_retries += 1
@@ -881,7 +923,20 @@ class NexusLoop:
             approved = await self._audit_and_approve(tool_calls)
             if not approved:
                 self._last_run_failed = True
-                await self._emit_stage_event("auditing", "Tool execution blocked", "permission policy", "error")
+                await self._emit_stage_event("auditing", "Tool execution blocked", "permission policy", "blocked")
+                await self._emit_runtime_event(
+                    "guardrail.blocked",
+                    "Tool execution blocked",
+                    "blocked",
+                    event_id=f"guardrail_{run_id}_{turn}",
+                    parent_id=f"run_{run_id}",
+                    payload={
+                        "reason": "permission policy",
+                        "tools": [call.name for call in tool_calls],
+                    },
+                )
+                # Keep the legacy plan.failed event for existing clients that
+                # do not yet understand first-class blocked guardrail events.
                 await self._emit_runtime_event("plan.failed", "Plan blocked", "failed", event_id=f"plan_{run_id}", parent_id=f"run_{run_id}", error="permission policy")
                 denial = "Tool execution was blocked by the active permission policy."
                 messages.append({"role": "system", "content": f"[TOOL_BLOCKED] {denial}"})
@@ -892,13 +947,19 @@ class NexusLoop:
 
             await self._emit_runtime_event("run.status", "Executing tools", "running", event_id=f"run_{run_id}", payload={"state": "execution"})
             fresh_observations = await self._execute_tools(calls_to_execute) if calls_to_execute else []
+            fresh_results: Dict[Tuple[str, str], str] = {}
             if len(fresh_observations) == len(calls_to_execute):
                 for call, observation in zip(calls_to_execute, fresh_observations):
-                    tool_result_cache[tool_signature(call)] = observation
+                    fresh_results[tool_signature(call)] = observation
+                    # Keep failures in the next-turn context, but do not cache
+                    # them as a completed result. This lets Nexus retry with
+                    # changed parameters or select another tool.
+                    if not self._observation_is_failure(observation):
+                        tool_result_cache[tool_signature(call)] = observation
             observations = [
-                tool_result_cache[tool_signature(call)]
+                tool_result_cache.get(tool_signature(call), fresh_results.get(tool_signature(call)))
                 for call in tool_calls
-                if tool_signature(call) in tool_result_cache
+                if tool_signature(call) in tool_result_cache or tool_signature(call) in fresh_results
             ]
             last_observations = observations
             self._last_run_had_tool_execution = True
@@ -1159,7 +1220,7 @@ To serve as an intelligent partner — handling whatever needs to be done with a
                         skill_lines.append(f"  /{name}")
                 parts.append("\n".join(skill_lines))
         except Exception:
-            self.logger.warning("loop:1023 : suppressed error", exc_info=True)
+            self.logger.warning("loop : suppressed error", exc_info=True)
             pass
 
         result = "\n\n".join(parts)
@@ -1336,7 +1397,7 @@ To serve as an intelligent partner — handling whatever needs to be done with a
                                 lines.append(f"{role.upper()}: {content}")
                         return "\n".join(lines)
         except Exception:
-            self.logger.warning("loop:1200 : suppressed error", exc_info=True)
+            self.logger.warning("loop : suppressed error", exc_info=True)
             pass
         return ""
 
@@ -1353,7 +1414,7 @@ To serve as an intelligent partner — handling whatever needs to be done with a
                 self.permissions.set_mode(PermissionMode.PRE_AUTHORIZED)
                 self.permissions._pre_authorized_list = list(self.checklist)
         except Exception:
-            self.logger.warning("loop:1216 _init_permissions: suppressed error", exc_info=True)
+            self.logger.warning("loop _init_permissions: suppressed error", exc_info=True)
             pass
 
     def _load_knowledge_context(self, task_desc: str) -> str:
@@ -1383,7 +1444,7 @@ To serve as an intelligent partner — handling whatever needs to be done with a
                 if content:
                     parts.append(f"[{label}]:\n{content}")
             except Exception:
-                self.logger.warning("loop:1266 _load_project_docs: suppressed error", exc_info=True)
+                self.logger.warning("loop _load_project_docs: suppressed error", exc_info=True)
                 pass
         return "\n\n".join(parts)
 
@@ -1442,6 +1503,8 @@ To serve as an intelligent partner — handling whatever needs to be done with a
         if wants_news and wants_ai:
             return f"latest artificial intelligence news {today} headlines"
         if wants_news:
+            # Explicit "news on/about/for …" always wins over the looser
+            # subject-before-news pattern below.
             subject_match = re.search(
                 r"\bnews\b\s+(?:on|about|for|of|regarding)\s+(.+)$",
                 intent,
@@ -1450,6 +1513,23 @@ To serve as an intelligent partner — handling whatever needs to be done with a
             subject = subject_match.group(1).strip(" ?.!") if subject_match else ""
             if subject:
                 return f"latest news about {subject} {today}"
+            # Preserve subjects placed before the word "news", e.g.
+            # "Find one current NASA news headline".
+            leading_subject = re.search(
+                r"\b(?:find|show|give|tell\s+me)?\s*(?:one|the|a)?\s*"
+                r"(?:current|latest|today'?s)?\s*([a-z][\w.-]*(?:\s+[a-z][\w.-]*){0,3})\s+"
+                r"(?:news|headlines?)\b",
+                intent,
+                re.IGNORECASE,
+            )
+            if leading_subject:
+                subject = re.sub(
+                    r"\s+news$", "", leading_subject.group(1).strip(" ?.!,-"), flags=re.IGNORECASE
+                )
+                # Do not turn generic phrases like "current news" into a
+                # bogus topic, but retain real requested subjects such as NASA.
+                if subject and subject.lower() not in {"current", "latest", "today", "s"}:
+                    return f"latest {subject} news {today}"
             return f"latest news headlines {today}"
         return cleaned
 
@@ -1609,15 +1689,31 @@ To serve as an intelligent partner — handling whatever needs to be done with a
     # ─────────────────────────────────────────────────────────────────────────
 
     async def _create_plan_via_tool(self, task_desc: str) -> Optional[str]:
-        """Call the planning tool to write todo.md, then return its content."""
+        """Ask the active LLM for a concrete plan, then persist it via planning."""
         try:
             entry = self.tool_registry.get("planning")
             if not entry:
                 self.logger.debug("planning tool not registered, skipping plan")
                 return None
-            result = await self.tool_registry.execute("planning", goal=task_desc)
+            # A malformed/empty model answer gets one clean retry.  We never
+            # manufacture a generic plan in its place.
+            plan_spec = await self._generate_plan_spec(task_desc)
+            if not plan_spec:
+                plan_spec = await self._generate_plan_spec(task_desc)
+            result = await self.tool_registry.execute(
+                "planning", goal=task_desc, plan_spec=plan_spec,
+            )
             if not result.success:
-                self.logger.debug(f"planning tool failed: {result.error}")
+                retry_spec = await self._generate_plan_spec(task_desc)
+                if retry_spec:
+                    result = await self.tool_registry.execute(
+                        "planning", goal=task_desc, plan_spec=retry_spec,
+                    )
+            if not result.success:
+                self.logger.warning("planning tool failed; continuing without a plan: %s", result.error)
+                await self._emit_stage_event(
+                    "planning", "Planning failed", "Nexus will continue without a saved plan", "failed",
+                )
                 return None
             todo_path = os.path.join(self.root, "todo.md") if self.root else "todo.md"
             if os.path.isfile(todo_path):
@@ -1626,6 +1722,42 @@ To serve as an intelligent partner — handling whatever needs to be done with a
         except Exception as e:
             self.logger.debug(f"plan creation failed: {e}")
         return None
+
+    async def _generate_plan_spec(self, task_desc: str) -> Optional[Dict[str, Any]]:
+        """Generate an execution plan from the selected model, never from UI text."""
+        prompt = f"""You are the NEXUS planning tool. Create a concrete execution plan for this exact task:
+
+{task_desc}
+
+Return JSON only, with no markdown and no explanation.
+Use one of these shapes:
+{{"plan_type":"simple","steps":["specific step", "specific step", "specific step"]}}
+{{"plan_type":"phased","phases":[{{"title":"phase title","subgoals":["specific subgoal"]}}]}}
+
+Rules:
+- Use a simple numbered plan for normal requests (3 to 7 steps).
+- Use phased planning only for genuinely large, multi-part implementation work.
+- Every step must be specific to this request. Do not use generic filler such as
+  "identify the outcome", "carry out the work", "verify the result", or "deliver the answer".
+- Do not claim tools, sources, files, or results that have not been chosen or obtained.
+- For current information, state the subject, recency/date check, and source validation needed.
+- Do not expose private reasoning; write only actionable work items."""
+        try:
+            generated = await asyncio.to_thread(self._call_model_for_prompt, prompt)
+            if not generated or self._is_provider_error_text(generated):
+                return None
+            cleaned = str(generated).strip()
+            cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE)
+            start, end = cleaned.find("{"), cleaned.rfind("}")
+            if start < 0 or end <= start:
+                return None
+            spec = json.loads(cleaned[start:end + 1])
+            if not isinstance(spec, dict):
+                return None
+            return spec
+        except Exception as exc:
+            self.logger.info("LLM plan generation unavailable: %s", exc)
+            return None
 
     # ─────────────────────────────────────────────────────────────────────────
     # ③ INFERENCE — DUAL STREAM
@@ -1814,6 +1946,21 @@ To serve as an intelligent partner — handling whatever needs to be done with a
         return "Work completed and verified.\n\n" + "\n".join(f"- {item}" for item in evidence[:5])
 
     @staticmethod
+    def _is_raw_tool_result_dump(response: str) -> bool:
+        """True when a model copied tool transport text into the final answer."""
+        text = str(response or "").strip()
+        if not text:
+            return False
+        lower = text.lower()
+        if "[web_search]:" in lower or "web search results for:" in lower:
+            return True
+        # Search providers can return long redirect links. Those belong in the
+        # expandable Web search card, never in the concise chat answer.
+        if "bing.com/news/apiclick" in lower:
+            return True
+        return len(re.findall(r"https?://", text)) >= 4
+
+    @staticmethod
     def _deterministic_failure_summary(observations: List[str]) -> str:
         evidence = [str(item).strip()[:2000] for item in observations if str(item).strip()]
         if not evidence:
@@ -1848,7 +1995,7 @@ To serve as an intelligent partner — handling whatever needs to be done with a
                 if classifier(text):
                     return True
             except Exception:
-                self.logger.warning("loop:1735 _is_provider_error_text: suppressed error", exc_info=True)
+                self.logger.warning("loop _is_provider_error_text: suppressed error", exc_info=True)
                 pass
         head = text[:500].lower()
         patterns = (
@@ -1874,13 +2021,27 @@ To serve as an intelligent partner — handling whatever needs to be done with a
             result = await self._run_tool(call)
         except Exception:
             raise
+        kind = self._work_kind_for_call(call.name, call.params)
+        target = self._work_target_for_call(call.name, call.params)
+        completed_payload: Dict[str, Any] = {
+            "tool": call.name,
+            "target": target,
+            # Keep the completed card useful even if the transport receives
+            # this lifecycle event after the lower-level tool event.
+            "output": str(result)[:20000],
+        }
+        if kind == "search":
+            completed_payload["query"] = str(call.params.get("query") or target)
+            completed_payload["sources"] = list(dict.fromkeys(
+                re.findall(r"https?://[^\s)\]]+", str(result))
+            ))[:20]
         await self._emit_runtime_event(
             "plan.step.completed",
-            self._work_action_for_call(self._work_kind_for_call(call.name, call.params), call.name, call.params),
+            self._work_action_for_call(kind, call.name, call.params),
             "success",
             event_id=event_id,
             parent_id=f"run_{run_id}",
-            payload={"tool": call.name, "target": self._work_target_for_call(call.name, call.params)},
+            payload=completed_payload,
         )
         return result
 
@@ -1961,6 +2122,7 @@ To serve as an intelligent partner — handling whatever needs to be done with a
         status: str = "running",
         *,
         items: Optional[List[str]] = None,
+        duration_ms: Optional[float] = None,
     ) -> None:
         """Publish safe execution telemetry without exposing private reasoning."""
         payload: Dict[str, Any] = {
@@ -1978,6 +2140,8 @@ To serve as an intelligent partner — handling whatever needs to be done with a
             payload["items"] = items
             payload["preview"] = "\n".join(f"{index}. {item}" for index, item in enumerate(items, start=1))
             payload["result"] = payload["preview"]
+        if duration_ms is not None:
+            payload["duration_ms"] = duration_ms
         await self._emit_work_event(payload)
 
     async def _emit_work_event(self, payload: Dict[str, Any]) -> None:
@@ -2255,6 +2419,16 @@ To serve as an intelligent partner — handling whatever needs to be done with a
             logger.warning("orchestrators/loop.py:2036 suppressed error", exc_info=True)
         return ""
 
+    @staticmethod
+    def _todo_matches_task(todo_text: str, task_desc: str) -> bool:
+        """Only replay a saved plan when its task title matches this request."""
+        match = re.search(r"^\s*task\s*name\s*:\s*(.+)$", str(todo_text or ""), re.IGNORECASE | re.MULTILINE)
+        if not match:
+            return False
+        plan_task = re.sub(r"\s+", " ", match.group(1).strip().lower())
+        current_task = re.sub(r"\s+", " ", str(task_desc or "").strip().lower())
+        return bool(plan_task and current_task and (plan_task == current_task or plan_task in current_task or current_task in plan_task))
+
     async def _verify_execution(self, messages: List[Dict[str, str]]) -> Tuple[bool, Optional[str]]:
         """Scan last observation for errors and build failure vaccine."""
         if not messages:
@@ -2293,7 +2467,7 @@ To serve as an intelligent partner — handling whatever needs to be done with a
                     {"vaccine": vaccine, "errors": error_lines}
                 )
             except Exception:
-                self.logger.warning("loop:2155 : suppressed error", exc_info=True)
+                self.logger.warning("loop : suppressed error", exc_info=True)
                 pass
             return False, vaccine
 
@@ -2359,7 +2533,7 @@ To serve as an intelligent partner — handling whatever needs to be done with a
             user_msg = messages[0].get("content", "") if messages else ""
             await self.memory_manager.sync_all(user_msg, last_resp)
         except Exception:
-            self.logger.warning("loop:2222 : suppressed error", exc_info=True)
+            self.logger.warning("loop : suppressed error", exc_info=True)
             pass
 
         # Write session bus
@@ -2394,7 +2568,7 @@ To serve as an intelligent partner — handling whatever needs to be done with a
                 0.0, {"task": task_desc}
             )
         except Exception:
-            self.logger.warning("loop:2253 async _evolve_log: suppressed error", exc_info=True)
+            self.logger.warning("loop async _evolve_log: suppressed error", exc_info=True)
             pass
 
     async def _evolve_self_improve(self, messages: List[Dict[str, str]]):
@@ -2406,7 +2580,7 @@ To serve as an intelligent partner — handling whatever needs to be done with a
                 for action in record.actions[:3]:
                     await asyncio.to_thread(self.evolution_log.improvement, action)
         except Exception:
-            self.logger.warning("loop:2264 async _evolve_self_improve: suppressed error", exc_info=True)
+            self.logger.warning("loop async _evolve_self_improve: suppressed error", exc_info=True)
             pass
 
     async def _evolve_gap_forge(self):
@@ -2419,7 +2593,7 @@ To serve as an intelligent partner — handling whatever needs to be done with a
                 await self._fill_gap(gap)
                 self.logger.info(f"[EVOLVE:GAP] Filled: {gap.get('type')} '{gap.get('name')}'")
             except Exception:
-                self.logger.warning("loop:2276 async _evolve_gap_forge: suppressed error", exc_info=True)
+                self.logger.warning("loop async _evolve_gap_forge: suppressed error", exc_info=True)
                 pass
         self._gaps_found.clear()
 
@@ -2438,7 +2612,7 @@ To serve as an intelligent partner — handling whatever needs to be done with a
                 with open(fb_path, "w", encoding="utf-8") as f:
                     json.dump(feedback, f, indent=2)
         except Exception:
-            self.logger.warning("loop:2294 async _evolve_hive_feedback: suppressed error", exc_info=True)
+            self.logger.warning("loop async _evolve_hive_feedback: suppressed error", exc_info=True)
             pass
 
     async def _evolve_memory_crystallize(self, messages: List[Dict[str, str]]):
@@ -2459,7 +2633,7 @@ To serve as an intelligent partner — handling whatever needs to be done with a
                     f"Session learnings: {'; '.join(learnings[:3])}"
                 )
         except Exception:
-            self.logger.warning("loop:2314 async _evolve_memory_crystallize: suppressed error", exc_info=True)
+            self.logger.warning("loop async _evolve_memory_crystallize: suppressed error", exc_info=True)
             pass
 
         # Always save + sync memory
@@ -2521,7 +2695,7 @@ If no gaps, return: {{"gaps": []}}
                 else:
                     self._gaps_found.append(gap)
         except Exception:
-            self.logger.warning("loop:2373 : suppressed error", exc_info=True)
+            self.logger.warning("loop : suppressed error", exc_info=True)
             pass
 
     async def _fill_gap(self, gap: Dict[str, Any]):
@@ -2550,7 +2724,7 @@ If no gaps, return: {{"gaps": []}}
             await self._fill_gap(gap)
             self.logger.info(f"[EVOLVE:GAP-FILLED] {gap.get('type')} '{gap.get('name')}' retried successfully")
         except Exception:
-            self.logger.warning("loop:2401 async _retry_gap: suppressed error", exc_info=True)
+            self.logger.warning("loop async _retry_gap: suppressed error", exc_info=True)
             pass
 
     # ── Curator ──────────────────────────────────────────────────────────
@@ -2600,7 +2774,7 @@ If no gaps, return: {{"gaps": []}}
                 with open(ckpt_path, "r", encoding="utf-8") as f:
                     return json.load(f)
         except Exception:
-            self.logger.warning("loop:2449 load_checkpoint: suppressed error", exc_info=True)
+            self.logger.warning("loop load_checkpoint: suppressed error", exc_info=True)
             pass
         return None
 
@@ -2625,7 +2799,7 @@ If no gaps, return: {{"gaps": []}}
                     }
                     f.write(json.dumps(entry) + "\n")
         except Exception:
-            self.logger.warning("loop:2473 _log_mission_replay: suppressed error", exc_info=True)
+            self.logger.warning("loop _log_mission_replay: suppressed error", exc_info=True)
             pass
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -2765,11 +2939,39 @@ If no gaps, return: {{"gaps": []}}
         for obj in self._extract_raw_json_objects(response):
             self._append_call(calls, obj)
         if not calls:
+            calls.extend(self._extract_colon_function_tool_calls(response))
+        if not calls:
             for call in self._extract_dsml_tool_calls(response):
                 calls.append(call)
             for call in self._extract_compact_xml_tool_calls(response):
                 calls.append(call)
         return [self._canonicalize_tool_call(call) for call in calls]
+
+    def _extract_colon_function_tool_calls(self, text: str) -> List[ToolCall]:
+        """Parse provider envelopes such as ``<function: web_search>``.
+
+        Accept the malformed ``value=\"text</param>`` form emitted by some
+        OpenAI-compatible providers as well as normal quoted values.
+        """
+        calls: List[ToolCall] = []
+        if not text or "<function:" not in text.lower():
+            return calls
+        function_pattern = re.compile(
+            r"<function:\s*([\w.-]+)\s*>([\s\S]*?)(?:</function>|$)",
+            re.IGNORECASE,
+        )
+        param_pattern = re.compile(
+            r"<param\s+name=[\"']([^\"']+)[\"']\s+value=[\"']?([\s\S]*?)(?:[\"']?\s*/?>|</param>)",
+            re.IGNORECASE,
+        )
+        for name, body in function_pattern.findall(text):
+            params: Dict[str, Any] = {}
+            for param_name, raw_value in param_pattern.findall(body):
+                params[param_name] = self._coerce_dsml_value(
+                    html.unescape(raw_value).strip().strip('\"')
+                )
+            calls.append(ToolCall(name.strip(), params))
+        return calls
 
     def _extract_inline_tool_calls(self, text: str) -> List[ToolCall]:
         """Extract word({...}) inline tool calls like web_search({"query": "cats"})."""
@@ -2950,6 +3152,16 @@ If no gaps, return: {{"gaps": []}}
             r"<(tool_use|tool_calls|tool_call|function_calls|function_call|invoke|invocation)>[\s\S]*?</\1>", "", stripped,
             flags=re.IGNORECASE | re.DOTALL,
         )
+        # Some providers emit the canonical tool name directly as an XML
+        # element (for example ``<web_search>...</web_search>``).  These are
+        # transport envelopes, not user-facing prose, so remove the complete
+        # block before a final response is streamed.
+        stripped = re.sub(
+            r"<(?:web_search|code_search|reading|creating|modifying|deleting|bash|http_client|git_ops|test_runner|planning|hive|browser|search|knowledge|reasoning|task|system|deep_research|shortcuts|terminal|memory)[^>]*>[\s\S]*?</(?:web_search|code_search|reading|creating|modifying|deleting|bash|http_client|git_ops|test_runner|planning|hive|browser|search|knowledge|reasoning|task|system|deep_research|shortcuts|terminal|memory)>",
+            "",
+            stripped,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
         stripped = re.sub(
             r"<invoke\s+name=\"\w+\">[\s\S]*?</invoke>", "", stripped,
             flags=re.IGNORECASE | re.DOTALL,
@@ -2967,6 +3179,16 @@ If no gaps, return: {{"gaps": []}}
         # Provider function-call format: <function=name>{json} or <function=name>...</function>
         stripped = re.sub(
             r"<function=\w+>(?:[\s\S]*?</function>)?", "", stripped,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        # DeepSeek/OpenAI-compatible function envelopes. Strip the whole block
+        # so protocol text can never become a chat response.
+        stripped = re.sub(
+            r"<function:\s*[\w.-]+>\s*[\s\S]*?(?:</function>|$)", "", stripped,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        stripped = re.sub(
+            r"<function\s*>\s*[\s\S]*?</function>", "", stripped,
             flags=re.IGNORECASE | re.DOTALL,
         )
         # Remove standalone JSON tool calls like {"action": "tool", "params": {...}}
@@ -3001,6 +3223,21 @@ If no gaps, return: {{"gaps": []}}
             return "".join(result)
         stripped = _strip_standalone_json(stripped)
         return stripped
+
+    @staticmethod
+    def _contains_tool_protocol(response: str) -> bool:
+        """Identify provider tool envelopes, but never ordinary explanatory prose."""
+        return bool(re.search(
+            r"<function(?:\s*(?:=|:)\s*[\w.-]+)?\s*>|<(?:tool_use|tool_calls|tool_call|invoke|web_search|code_search|reading|creating|modifying|deleting|bash|http_client|git_ops|test_runner|planning|hive|browser|search|knowledge|reasoning|task|system|deep_research|shortcuts|terminal|memory)\b",
+            str(response or ""),
+            flags=re.IGNORECASE,
+        ))
+
+    @staticmethod
+    def _observation_is_failure(observation: Any) -> bool:
+        """Only failed execution observations are eligible for a retry."""
+        text = str(observation or "").strip().lower()
+        return bool(re.match(r"^\[[^\]]+\]:\s*error\s*[—:-]", text))
 
     def _extract_dotted_tool_calls(self, text: str) -> List[ToolCall]:
         """Parse provider syntax such as ``file_ops.create({\"path\": ...})``."""
@@ -3207,8 +3444,10 @@ If no gaps, return: {{"gaps": []}}
     # ─────────────────────────────────────────────────────────────────────────
 
     def _compact_memory(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        """When messages > COMPACT_THRESHOLD, summarize old ones, keep last N."""
-        if len(messages) <= self.COMPACT_THRESHOLD:
+        """Compact by both message count and an operator-configurable token budget."""
+        estimated_tokens = sum(len(str(message.get("content", ""))) for message in messages) // 4
+        over_budget = estimated_tokens >= int(self.CONTEXT_TOKEN_LIMIT * self.COMPACT_TOKEN_RATIO)
+        if len(messages) <= self.COMPACT_THRESHOLD and not over_budget:
             return messages
         system  = messages[0] if messages and messages[0].get("role") == "system" else None
         history = messages[1:] if system else messages
@@ -3225,6 +3464,7 @@ If no gaps, return: {{"gaps": []}}
 
     def _summarize_compacted_messages(self, messages: List[Dict[str, str]]) -> str:
         goals, progress = [], []
+        evidence = []
         for msg in messages:
             r = msg.get("role")
             c = msg.get("content", "")[:300]
@@ -3232,11 +3472,15 @@ If no gaps, return: {{"gaps": []}}
                 goals.append(c)
             elif r == "assistant":
                 progress.append(c)
+            elif r in {"tool", "system"} and c.strip():
+                evidence.append(c)
         lines = ["[CONTEXT_COMPACTED] Summary of prior conversation:"]
         for goal in goals:
             lines.append(f"- Goal: {goal}")
         for item in progress:
             lines.append(f"- Progress: {item}")
+        for item in evidence[-8:]:
+            lines.append(f"- Evidence/state: {item}")
         return "\n".join(lines)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -3282,7 +3526,7 @@ If no gaps, return: {{"gaps": []}}
                     if disk_mem != self.memory:
                         self.memory = disk_mem
         except Exception:
-            self.logger.warning("loop:2834 sync_memory: suppressed error", exc_info=True)
+            self.logger.warning("loop sync_memory: suppressed error", exc_info=True)
             pass
 
     def _write_session_bus(self, _messages=None):
@@ -3293,7 +3537,7 @@ If no gaps, return: {{"gaps": []}}
             with open(session_file, "w", encoding="utf-8") as f:
                 json.dump(self.memory, f, indent=2)
         except Exception:
-            self.logger.warning("loop:2844 _write_session_bus: suppressed error", exc_info=True)
+            self.logger.warning("loop _write_session_bus: suppressed error", exc_info=True)
             pass
 
     # ─────────────────────────────────────────────────────────────────────────

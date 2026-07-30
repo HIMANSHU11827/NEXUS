@@ -183,6 +183,7 @@ def _apply_command_alias(argv: list[str]) -> list[str]:
     invoked_as = Path(argv[0]).stem.lower()
     command_aliases = {
         "nexus-tui": "--tui",
+        "nexus-shell": "--shell",
         "nexus-gui": "--gui",
         "nexus-server": "--server",
         "nexus-api": "--server",
@@ -254,6 +255,7 @@ def _make_parser() -> argparse.ArgumentParser:
     )
     group = p.add_mutually_exclusive_group()
     group.add_argument("--tui", action="store_true", help="Start TUI (default)")
+    group.add_argument("--shell", action="store_true", help="Start the compatibility shell (falls back to Ink TUI when legacy shell is unavailable)")
     group.add_argument("--gui", action="store_true", help="Start GUI + backend")
     group.add_argument("--server", action="store_true", help="Start API server only")
     group.add_argument("--gateway", action="store_true", help="Start gateway")
@@ -456,6 +458,16 @@ def _run_ink_tui(project_root: str, console) -> int:
             backend_proc.terminate()
 
 
+def _run_rich_shell() -> int:
+    """Compatibility entrypoint for the removed Rich shell.
+
+    The legacy ``shell/`` implementation is no longer shipped, so keep the
+    documented command usable by routing it through the maintained Ink client.
+    """
+    from rich.console import Console
+    return _run_ink_tui(_setup_environment(), Console())
+
+
 def _first_run_choice(console, panel, box) -> str:
     from rich.console import Group
     from rich.live import Live
@@ -630,6 +642,10 @@ def boot():
         from gateway.main import run as run_gateway
         run_gateway()
         return
+
+    if args.shell:
+        return_code = _run_rich_shell()
+        raise SystemExit(return_code)
 
     if args.server:
         _print_banner(console)

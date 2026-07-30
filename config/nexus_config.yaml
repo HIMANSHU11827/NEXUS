@@ -1,4 +1,0 @@
-runtime:
-  permission_mode: auto
-  permission_allowlist: []
-  sandbox_tier: no_sandbox

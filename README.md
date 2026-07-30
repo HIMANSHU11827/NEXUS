@@ -1,4 +1,4 @@
-# NEXUS AI v1.0.0
+# NEXUS AI v2.1.0
 
 **Local-first autonomous AI agent framework** — *"The Operating System of Intelligence"*
 
@@ -32,11 +32,17 @@ $env:DEEPSEEK_API_KEY = "..."
 
 | Interface | Command | Technology | Status |
 |-----------|---------|------------|--------|
-| TUI | `python -m nexus` | Ink + `gui.api` backend | **Stable** |
-| GUI | `python -m nexus --gui` | React 19 + Vite + `gui.api` | **Beta** |
-| Shell | `python -m nexus --shell` | Rich (legacy) | **Stable** |
-| Server API | `python -m nexus --server` | FastAPI on port 8000 | **Stable** |
-| Gateway | `python -m nexus --gateway` | Telegram, Discord, WhatsApp, Slack | **Beta** |
+| TUI | `python -m nexus` | Ink (React 19) + backend | **Stable** |
+| GUI | `python -m nexus --gui` | React 18 + Vite + FastAPI | **Stable** |
+| Shell | `python -m nexus --shell` | Rich (legacy compat shim) | **Legacy** |
+| Server API | `python -m nexus --server` | FastAPI on port 8000 (v2.1.0) | **Stable** |
+| Gateway | `python -m nexus --gateway` | Telegram, Discord, WhatsApp, Slack, Signal, Matrix + more | **Beta** |
+
+### GUI chat output
+
+The React GUI renders assistant responses as readable Markdown in both live chats and restored history. Headings, bold text, lists, links, inline code, fenced code blocks, and GitHub-style tables are displayed as native UI elements; raw Markdown markers are not shown as plain chat text. Tables scroll horizontally when a result is wider than the chat panel.
+
+See [`docs/GUI_ARCHITECTURE.md`](docs/GUI_ARCHITECTURE.md#chat-rendering) for the rendering and history behavior.
 
 ---
 
@@ -46,22 +52,29 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for full details.
 
 | Layer | Components | Status |
 |-------|-----------|--------|
-| **Core** | `nexus/` (boot, events), `orchestrators/loop.py` (agent loop), `kernel/` (singleton) | **Stable** |
-| **API** | `server/` (FastAPI), `gui/api.py` (GUI backend) | **Stable** |
-| **Providers** | 30+ LLM providers (OpenAI, Anthropic, DeepSeek, Ollama, etc.) | **Stable** |
-| **Tools** | 19 tool types (bash, reading, creating, modifying, deleting, code_search, web_search, hive, deep_research, etc.) | **Stable** |
-| **Memory** | `memory/` — persistent JSON memory manager | **Stable** |
-| **RAG** | `rag/` — BM25 + hybrid vector retrieval (FAISS) | **Beta** |
-| **Sandbox** | `sandbox/` — 3-tier command sandbox + risk scoring | **Stable** |
-| **Safety** | `safety/` — safety policies, threat pattern detection | **Stable** |
-| **Plugins** | `plugins/` — plugin system with trust model | **Beta** |
-| **Skills** | `skills/` — skill registry with SKILL.md format | **Stable** |
-| **MCP** | `mcp/` — MCP stdio client/server integration | **Beta** |
-| **Voice** | `voice/` — whisper.cpp + KittenTTS | **Beta** |
-| **Evolution** | `evolution/` — self-improvement modules (tool_forge, skill_forge, memory_forge, etc.) | **Experimental** |
-| **Hive** | `hive/` — multi-agent sub-engine (spawn_agent, spawn_hive, consolidate_hive) | **Beta** |
-| **Gateway** | `gateway/` — Telegram, Discord, WhatsApp, Slack bots | **Beta** |
-| **Security** | `security/` — secret scanner, `authentication/` — OAuth + token auth | **Stable** |
+| **Boot** | `nexus/` (boot, events, commands, runtime) | **Stable** |
+| **Agent Loop** | `orchestrators/loop.py` — `NexusLoop` (3555 lines, rebuilt) | **Stable** |
+| **Kernel** | `kernel/` — thread-safe singleton, 19 lazy-loaded subsystems | **Stable** |
+| **API** | `server/` (FastAPI v2.1.0), `gui/api.py` (GUI backend) | **Stable** |
+| **Providers** | 45+ LLM providers with OAuth, health, auto-heal, fallback chains | **Stable** |
+| **Tools** | 19 registered tools (BaseTool + ToolRegistry + .jsnol discovery) | **Stable** |
+| **Intelligence** | `intelligence/` — MoE Router + NATE 5-layer fused tool engine | **Beta** |
+| **Reasoning** | `reasoning/` — HyperReasoningEngine (planner/critic/verifier) | **Beta** |
+| **Memory** | `memory/` — multi-source MemoryManager with parallel prefetch/sync | **Stable** |
+| **RAG** | `rag/` — BM25 + SimHash hybrid + Atlas deep indexing | **Beta** |
+| **Sandbox** | `sandbox/` — 3-tier command sandbox + risk scoring + failure memory | **Stable** |
+| **Safety** | `safety/` — sovereign laws + logic prover | **Stable** |
+| **Security** | `security/` — secret scanner, threat patterns, MCP security | **Stable** |
+| **Authentication** | `authentication/` — OAuth 2.0 (Google, GitHub) + token auth | **Stable** |
+| **Plugins** | `plugins/` — plugin system with hooks, trust model, tool registration | **Beta** |
+| **Skills** | `skills/` — skill registry with SKILL.md format (6 installed) | **Stable** |
+| **MCP** | `mcp/` — MCP stdio client/server/tool integration | **Beta** |
+| **Voice** | `voice/` — 4 STT backends + KittenTTS + VAD | **Beta** |
+| **Hive** | `hive/` — multi-agent sub-engine (spawn, consolidate, blackboard) | **Beta** |
+| **Gateway** | `gateway/` — 10-platform messaging gateway | **Beta** |
+| **Evolution** | `evolution/` — self-improvement (6 forges + VersionManager) | **Beta** |
+| **GUI** | `gui/` — React 18 + Vite + TypeScript (rebuilt from scratch) | **Stable** |
+| **TUI** | `tui/` — Ink (React 19) TUI with 130+ slash commands | **Stable** |
 
 ---
 
@@ -93,15 +106,16 @@ Environment variables take precedence. See `config/provider.yml` for all configu
 
 ## Tool Execution
 
-Tools are discovered from `tools/<name>/` directories via `.jsnol` metadata files and registered by `ToolRegistry`. Each tool exposes JSON schema for LLM function calling.
+Tools are discovered from `tools/<name>/` directories via `.jsnol` metadata files and registered by `ToolRegistry`. Each tool exposes JSON schema for LLM function calling and extends `BaseTool`.
 
-**19 available tools**: bash, code_search, creating, deep_research, deleting, git_ops, hive, knowledge, memory, modifying, planning, reading, reasoning, shortcuts, system, task, terminal, test_runner, web_search
+**19 registered tools**: bash, code_search, creating, deep_research, deleting, git_ops, hive, knowledge, memory, modifying, planning, reading, reasoning (stub), shortcuts, system (partial), task, terminal, test_runner, web_search
 
 **Security model**:
 - **3-tier sandbox**: `NO_SANDBOX` / `NORMAL` / `DOCKER`
-- **Risk scoring**: `CommandRiskScorer` evaluates each command before execution
+- **Risk scoring**: `CommandRiskScorer` (8 regex rules, 16 safe prefixes, block threshold 80)
 - **Permission modes**: auto, ai_decide, ask_all, checklist
-- **Threat detection**: `tools/threat_patterns.py` blocks dangerous patterns
+- **Threat detection**: `tools/threat_patterns.py` — 55 regex patterns across 3 scopes
+- **Failure memory**: `sandbox/failure_memory.py` — append-only JSONL failure log
 
 ---
 
@@ -122,32 +136,33 @@ Environment variables take precedence: `NEXUS_API_HOST`, `NEXUS_API_PORT`, `NEXU
 ## Project Structure
 
 ```
-nexus/              Boot loader, canonical event system (~50 event types)
-server/             FastAPI HTTP/SSE server (port 8000)
-orchestrators/      Agent loop, workflow engine, legacy architect
-providers/          30+ LLM provider implementations
-tools/              19 tool types with .jsnol metadata + handler scripts
-gui/                React 19 + Vite + TypeScript frontend (port 5173)
-tui/                Ink-based TUI (v2.0.0)
-shell/              Legacy Rich-based shell
-hive/               Sub-agent engine (spawn_agent, spawn_hive, consolidate_hive)
-kernel/             Central singleton with lazy-loaded subsystems
-memory/             Persistent memory manager
-rag/                BM25 + hybrid vector retrieval
-sandbox/            3-tier command sandbox + risk scoring
-safety/             Safety policy evaluation
-plugins/            Plugin system with trust model
-skills/             Skill registry
-mcp/                MCP stdio client/server
-voice/              Voice mode (whisper.cpp + KittenTTS)
-gateway/            Multi-platform gateway bots
-evolution/          Self-improvement modules
-intelligence/       MoE router, local brain, NATE tool engine
-reasoning/          Hyper-reasoning engine
-authentication/     OAuth 2.0 / PKCE / Device Code + token auth
-config/             YAML/JSON configuration loader
-tests/              Test suite
-scripts/            Helper scripts (GUI launcher, export, training)
+nexus/              Boot loader, events, commands, runtime, run context
+server/             FastAPI HTTP/SSE server (port 8000, v2.1.0)
+orchestrators/      NexusLoop agent loop (3555 lines, rebuilt)
+providers/          45+ LLM provider implementations + OAuth
+tools/              19 registered tools with .jsnol + BaseTool
+gui/                React 18 + Vite + TypeScript frontend (port 5173, rebuilt)
+tui/                Ink-based TUI (React 19, 5000+ lines)
+shell/              Legacy Rich-based compat shim
+hive/               Sub-agent engine (spawn, consolidate, blackboard)
+kernel/             Central singleton (19 lazy-loaded subsystems)
+memory/             Multi-source MemoryManager (parallel prefetch/sync)
+rag/                BM25 + SimHash hybrid + Atlas deep indexing
+sandbox/            3-tier sandbox + risk scoring + failure memory
+safety/             Sovereign laws + logic prover
+security/           Secret scanner + release hygiene
+authentication/     OAuth 2.0 (Google, GitHub) + token auth
+plugins/            Plugin system with hooks + trust model
+skills/             Skill registry with SKILL.md format
+mcp/                MCP stdio client/server/tool integration
+voice/              Voice pipeline (4 STT backends + KittenTTS)
+gateway/            10-platform messaging gateway
+evolution/          Self-improvement (6 forges + VersionManager)
+intelligence/       MoE router + NATE 5-layer tool engine
+reasoning/          HyperReasoningEngine
+config/             YAML/JSON/env configuration loader
+tests/              42+ test files (126/127 passing)
+scripts/            Helper scripts
 deploy/             Docker deployment
 ```
 
@@ -180,11 +195,12 @@ pip install -e ".[dev]"
 
 ## Known Limitations
 
-- `orchestrators/architect.py` is legacy with stub imports
-- `evolution/` has partial implementations: `ensemble`, `horizons`, `hyper_kernel`, `omni_kernel`, `researcher` are stubs (constructor-only classes)
-- No WebSocket — SSE + polling is used for streaming
-- GUI panel status is **Beta** — some panels may show placeholder content
-- Gateway adapters (Telegram, Discord, WhatsApp, Slack) are functional but under active iteration
+- `orchestrators/architect.py` and `mission_control.py` — removed (legacy), planning uses `todo.md` + `planning` tool
+- `intelligence/moa.py` (MixtureOfArchitects) and `intelligence/local_brain.py` (NexusLocalBrain) are stubs
+- `tools/reasoning/` handler is a template stub — needs real LLM-based chain-of-thought
+- `tools/system/` is partial — `disk` and `process` actions not implemented
+- `evolution/` has stub modules: `ensemble`, `omni_kernel`, `researcher` (constructors only)
+- No WebSocket — SSE + polling used for streaming
 
 ---
 

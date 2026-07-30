@@ -1,6 +1,6 @@
 {
   "name": "hive",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Spawn dedicated sub-agents for complex multi-step tasks — each sub-agent runs as an isolated LLM call with a specific persona",
   "entry": "scripts/hive.py",
   "class": "HiveTool",

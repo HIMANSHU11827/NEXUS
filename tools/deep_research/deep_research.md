@@ -1,5 +1,5 @@
 # deep_research Tool
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 Deep research tool that spawns dedicated research sub-agents to investigate a topic thoroughly across multiple angles.
 

@@ -1,6 +1,6 @@
 {
   "name": "shortcuts",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Quick utility helpers: list, pwd, tree, info, find",
   "entry": "scripts/shortcuts.py",
   "class": "ShortcutsTool",

@@ -2,7 +2,7 @@
 
 Test suites, fixtures, mock data, and quality assurance infrastructure for the entire codebase.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Running Tests
 `powershell

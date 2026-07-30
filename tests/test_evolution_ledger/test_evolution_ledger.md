@@ -1,5 +1,5 @@
 # Test Evolution Ledger
-**Version:** 1.0.0 — auto-bumped via `VersionManager` on refine.
+**Version:** 2.0.0 — auto-bumped via `VersionManager` on refine.
 
 Tests for the `EvolutionLedger` module (`evolution.ledger.ledger`), covering:
 

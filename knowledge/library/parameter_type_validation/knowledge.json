@@ -1,9 +1,0 @@
-{
-  "title": "parameter_type_validation",
-  "content": "Tool 'web_search' failed because parameter 'max_results' was not an integer; NEXUS should enforce parameter type validation at runtime.",
-  "key_concepts": [],
-  "tags": [],
-  "version": "1.0.0",
-  "created_at": 1784311661.3152738,
-  "updated_at": 1784311661.3152738
-}

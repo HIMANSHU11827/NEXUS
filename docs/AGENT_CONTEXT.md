@@ -1,34 +1,23 @@
-> _(Architectural reference — may not reflect latest code changes)_
+# Agent Context
 
-# Agent Context Files
+NEXUS generates compact repository context for coding agents via `docs/NEXUS.md` — the platform persona/soul file.
 
-NEXUS generates a compact repository instruction file for coding agents:
+## How It Works
 
-- `NEXUS.md` — project memory and structural briefing for agents and humans.
+- `docs/NEXUS.md` serves as the identity document — loaded by `NexusLoop._load_soul_md()` during grounding
+- Context sources: `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `.cursor/rules/*.mdc` — loaded by `_load_prompt_files()`
+- `_scan_and_filter_context()` applies threat scanning before context enters the model
+- `_identity_context()` returns NEXUS identity for identity questions
+- `_workstyle_context()` returns workstyle guidance for real tasks
+- Context compaction: `_compact_memory()` at `COMPACT_THRESHOLD=20` keeps `COMPACT_KEEP=6` most recent turns
 
-The generator uses the local code graph at `workspace/code_graph.json` and falls back to building the graph when no graph exists. This keeps the context grounded in real repository structure instead of hand-written guesses.
+## Context Loading (Parallel)
 
-## Commands
-
-Preview:
-
-```powershell
-python -c "from core.code_intelligence.agent_context import AgentContextGenerator; print(AgentContextGenerator('.').generate('NEXUS.md'))"
-```
-
-Write:
-
-```powershell
-python -c "from core.code_intelligence.agent_context import AgentContextGenerator; print([r.to_dict() for r in AgentContextGenerator('.').write(force=True)])"
-```
-
-Through the NEXUS tool registry:
-
-```python
-registry.execute("agent_context", command="preview", target="NEXUS.md")
-registry.execute("agent_context", command="write", targets=["NEXUS.md"], force=True)
-```
-
-## Why It Exists
-
-Modern coding-agent workflows benefit from a predictable, concise repository briefing: architecture, verification commands, tool boundaries, generated-file exclusions, and safety posture. NEXUS keeps that briefing refreshed from its own structural graph so external agents can start with useful context and fewer wasteful discovery passes.
+All context sources loaded concurrently in `_ground_context()`:
+1. Soul file (docs/NEXUS.md)
+2. Prompt files (AGENTS.md, CLAUDE.md, etc.)
+3. Knowledge context (via RAG retrieval)
+4. Project docs (via Atlas engine)
+5. Tool descriptions (via NATE or ToolRegistry)
+6. Stable prompt tier (via `_build_stable_prompt()`)
+7. Progressive rules (via `_load_progressive_rules()`)

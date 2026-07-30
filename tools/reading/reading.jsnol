@@ -1,6 +1,6 @@
 {
   "name": "reading",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Read file contents",
   "entry": "scripts/reading.py",
   "class": "ReadingTool",

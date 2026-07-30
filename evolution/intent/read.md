@@ -2,7 +2,7 @@
 
 NexusIntentEngine — intent forecasting for likely next tests, security checks, and repo refresh work.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Features
 - forecast(context) — Predict likely next actions

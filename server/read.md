@@ -1,8 +1,8 @@
 # Server
 
-FastAPI HTTP server — standalone API for external/OpenAI-compatible requests. The GUI and default Ink TUI use `gui.api`.
+FastAPI HTTP server (v2.1.0) — standalone API for external/OpenAI-compatible requests. Powers the React GUI backend.
 
-**Version:** 1.0.0
+**Version:** 2.1.0
 
 ## Entry
 ```powershell
@@ -11,12 +11,22 @@ python -m nexus --server
 Serves on 127.0.0.1:8000 by default.
 
 ## API Endpoints
-- /api/sessions/ — Session management
-- /api/chat/ — Chat and streaming
-- /api/runs/ — Durable run-context inspection with public work-event summaries
-- /api/work-events/ — Cursor replay for persisted public canonical work events
-- /api/providers/ — Provider health
-- /api/tools/ — Tool execution
-- /api/permissions/ — Permission mode, allowlist, and recent decisions
-- /api/permissions/decisions — Scrubbed permission decision log
-- /api/graph/ — Unified graph queries
+- `/api/health`, `/api/state`, `/api/version` — System health & status
+- `/api/sessions/` — Session CRUD
+- `/api/chat/` — Chat with SSE streaming + canonical events
+- `/api/history`, `/api/runs/` — Session history & run context
+- `/api/work-events/` — Cursor replay for persisted canonical work events
+- `/v1/chat/completions`, `/v1/models` — OpenAI-compatible endpoints
+- `/api/providers/` — Provider health & listing
+- `/api/tools/`, `/api/skills/`, `/api/plugins/`, `/api/mcp/` — Registry queries
+- `/api/agents/`, `/api/features/` — Agent & feature management
+- `/api/files/list` — Workspace file browser
+- `/api/permissions/`, `/api/permissions/decisions` — Permission mode & decisions
+- `/api/mode`, `/api/model`, `/api/provider`, `/api/agent`, `/api/goal` — Runtime settings
+- `/api/sandbox` — Sandbox tier management
+- `/api/command` — Slash command execution
+- `/api/run` — Bash command execution (restricted)
+- `/api/tasks` — Task CRUD
+- `/api/auth/*` — Authentication (token + OAuth)
+- `/api/voice/*` — Voice mode control
+- `/api/engine/*` — Engine management (compile, reload, train)

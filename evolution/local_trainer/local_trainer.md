@@ -1,5 +1,5 @@
 # Local Trainer
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 Local fine-tuning system for embedding + LLM models. Triggered by NATE when routing quality dips. Outputs GGUF for efficient local inference.
 

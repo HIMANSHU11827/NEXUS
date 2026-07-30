@@ -1,6 +1,6 @@
 {
   "name": "skill_forge",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Skill forge \u2014 creates procedural skill memories in skills/",
   "entry": "scripts/forge.py",
   "class": "SkillForge"

@@ -2,4 +2,4 @@
 
 Sub-agent orchestration supporting single, parallel, and hive modes for complex task decomposition.
 
-**Version:** 1.0.0
+**Version:** 2.0.0

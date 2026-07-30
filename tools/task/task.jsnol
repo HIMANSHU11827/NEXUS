@@ -1,6 +1,6 @@
 {
   "name": "task",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Create, track, manage, and complete tasks with dependencies",
   "entry": "scripts/task.py",
   "class": "TaskTool",

@@ -1,12 +1,17 @@
 {
   "name": "planning",
-  "version": "1.3.0",
-  "description": "Write a TODO LIST plan to todo.md — phase headers only, no hardcoded tasks",
+  "version": "2.0.0",
+  "description": "Create and maintain simple or phased task-specific plans in todo.md",
   "entry": "scripts/planning.py",
   "class": "PlanningTool",
   "params": {
-    "goal": {"type": "string", "description": "Goal or task to plan", "required": true},
-    "context": {"type": "string", "description": "Additional context for the plan"}
+    "goal": {"type": "string", "description": "Goal or task to plan; required for action=create"},
+    "plan_spec": {"type": "object", "description": "Validated LLM-generated plan JSON with plan_type plus steps or phases"},
+    "action": {"type": "string", "description": "create, add, complete, or update", "default": "create"},
+    "item": {"type": "string", "description": "Todo item for add or complete"},
+    "phase": {"type": "string", "description": "Phase name for adding a phased sub-goal"},
+    "old_text": {"type": "string", "description": "Existing text for action=update"},
+    "new_text": {"type": "string", "description": "Replacement text for action=update"}
   },
   "category": "planning"
 }

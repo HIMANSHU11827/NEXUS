@@ -2,7 +2,7 @@
 
 Access control and permission management — roles, policies, and authorization rules.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Permission Policies
 - DEFAULT / APPROVE — human approval required when no explicit allow rule matches

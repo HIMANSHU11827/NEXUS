@@ -301,7 +301,7 @@ def _trim_loops():
             try:
                 evicted = _LOOPS.pop(k)
             except KeyError:
-                logger.warning("server/__init__.py:255 suppressed error", exc_info=True)
+                logger.warning("server/__init__.py suppressed error", exc_info=True)
             else:
                 _schedule_loop_close(evicted)
 
@@ -1358,6 +1358,61 @@ def get_work_events(request: Request, session_id: str = "default", limit: int = 
     events = list_work_events(session_id, limit=limit, turn_id=turn_id, after_sequence=after_sequence)
     next_sequence = max((int(event.get("sequence") or 0) for event in events), default=after_sequence)
     return {"events": events, "after_sequence": after_sequence, "next_sequence": next_sequence}
+
+
+@app.post("/api/work-events/run-command-stream")
+async def run_work_command_stream(request: Request):
+    """Run a workspace command and stream its real output to the GUI."""
+    data = await request.json()
+    sid = safe_session_id(str(data.get("session_id") or "terminal"))
+    command = str(data.get("command") or data.get("target") or "").strip()
+    profile = str(data.get("profile") or "pwsh").strip().lower()
+    if not command:
+        raise HTTPException(status_code=400, detail="Command is required")
+    if len(command) > 4000:
+        raise HTTPException(status_code=413, detail="Command is too large")
+    if profile not in {"pwsh", "cmd", "bash", "wsl"}:
+        raise HTTPException(status_code=400, detail="Unsupported terminal profile")
+
+    started = _append_work_event(sid, {
+        "kind": "command", "type": "command", "action": "Run command",
+        "title": "Run command", "target": command, "command": command,
+        "profile": profile, "status": "running",
+    })
+
+    async def event_stream():
+        output_parts: list[str] = []
+
+        def sse(payload: Dict[str, Any]) -> str:
+            return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+        yield sse({"type": "start", "event": started, "command": command, "profile": profile})
+        try:
+            from sandbox.sandbox_manager import SovereignSandbox
+            sandbox = SovereignSandbox(_PROJECT_ROOT)
+            async for text in sandbox.stream_execute(command, _PROJECT_ROOT):
+                output_parts.append(text)
+                yield sse({"type": "chunk", "stream": "stderr" if text.startswith("[SANDBOX_") else "stdout", "text": text})
+            output = "".join(output_parts)
+            exit_code = sandbox.last_exit_code if sandbox.last_exit_code is not None else 0
+            status = "done" if exit_code == 0 else "error"
+            completed = _append_work_event(sid, {
+                **started, "id": f"{started.get('id')}_result", "status": status,
+                "stdout": output, "stderr": "", "output": output,
+                "exit_code": exit_code, "completed_at": time.time(),
+            })
+            yield sse({"type": "done", "status": status, "event": completed, "output": output, "exit_code": exit_code})
+        except Exception as exc:
+            message = str(exc)
+            completed = _append_work_event(sid, {
+                **started, "id": f"{started.get('id')}_result", "status": "error",
+                "stdout": "", "stderr": message, "output": message,
+                "completed_at": time.time(),
+            })
+            yield sse({"type": "chunk", "stream": "stderr", "text": message})
+            yield sse({"type": "done", "status": "error", "event": completed, "output": message})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 # ── New CLI Backend Endpoints ────────────────────────────────────────────────

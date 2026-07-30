@@ -3,24 +3,35 @@
 ## Project
 **C:\Users\himan\Desktop\NEXUS AI**
 
-Custom local-first autonomous AI agent framework. Python backend + React/TypeScript GUI + Python TUI.
+Custom local-first autonomous AI agent framework. Python backend + React/TypeScript GUI + Ink TUI.
 
 ## Project Structure
-- `nexus/` — Boot loader, canonical event system (`CanonicalEvent`, `EVENT_TYPES`)
-- `server/` — FastAPI HTTP/SSE server (port 8000)
-- `orchestrators/` — `loop.py` (main agent loop), `architect.py` (legacy)
-- `providers/` — 30+ LLM provider implementations (OpenAI, Anthropic, Ollama, etc.)
-- `tools/` — Tool registry with `.jsnol` metadata discovery (deep_research/, hive/ added)
-- `hive/` — Sub-agent engine (`NexusHiveEngine`) — spawn_agent, spawn_hive, consolidate_hive
-- `gui/` — React 19 + Vite + TypeScript GUI (port 5173)
-- `tui/` — Ink-based TUI launched by default
-- `shell/` — legacy Rich-based shell
-- `mcp/` — MCP server integration
-- `plugins/` — Plugin system with lifecycle hooks
-- `skills/` — Skill system with SKILL.md format
-- `memory/` — Multi-source MemoryManager
-- `sandbox/` — 3-tier command sandbox + risk scoring
-- `kernel/` — Central singleton with lazy-loaded subsystems
+- `nexus/` — Boot loader, canonical event system (`CanonicalEvent`, ~50 `EVENT_TYPES`)
+- `server/` — FastAPI HTTP/SSE server (port 8000, v2.1.0)
+- `orchestrators/` — `loop.py` (NexusLoop, 3555 lines — rebuilt, stable)
+- `providers/` — 45+ LLM provider implementations with OAuth and fallback
+- `tools/` — 19 registered tools with `.jsnol` metadata discovery (BaseTool + ToolRegistry)
+- `hive/` — Sub-agent engine (`NexusHiveEngine`) — spawn, consolidate, blackboard
+- `gui/` — React 18 + Vite + TypeScript GUI (port 5173) — rebuilt from scratch
+- `tui/` — Ink-based TUI (React 19, 5000+ lines) launched by default
+- `shell/` — Legacy Rich-based compatibility shim
+- `mcp/` — MCP stdio client/server integration (NEXUSMCPServer + MCPClient + MCPTool)
+- `plugins/` — Plugin system with lifecycle hooks, trust model, tool registration
+- `skills/` — Skill registry with SKILL.md frontmatter format (6 installed skills)
+- `memory/` — Multi-source MemoryManager with parallel prefetch + sync
+- `sandbox/` — 3-tier command sandbox (NO_SANDBOX/NORMAL/DOCKER) + risk scoring
+- `kernel/` — Central singleton with 19 lazy-loaded subsystems
+- `rag/` — BM25 + SimHash hybrid retrieval with Atlas deep indexing
+- `safety/` — Sovereign laws + logic prover + threat pattern scanning
+- `voice/` — Full voice pipeline (STT with 4 backends + KittenTTS + VAD)
+- `gateway/` — 10-platform messaging gateway (Telegram, Discord, WhatsApp, Slack, etc.)
+- `evolution/` — Self-improvement system with 6 forges + VersionManager
+- `intelligence/` — MoE Router + NATE 5-layer fused tool engine
+- `reasoning/` — HyperReasoningEngine (planner/critic/verifier)
+- `authentication/` — OAuth 2.0 (Google, GitHub) + token auth + gateway auth
+- `security/` — Secret scanner + release hygiene
+- `config/` — YAML/JSON/env configuration with NexusConfigLoader
+- `tests/` — 42+ test files (126/127 passing)
 
 ## Windows Setup
 ```powershell
@@ -32,16 +43,18 @@ pip install -e .
 
 ## Run Commands
 - **TUI** (default): `python -m nexus` — Ink TUI + backend
-- **Rich shell**: `python -m nexus --shell` — legacy Rich shell, in-process
-- **GUI** : `python -m nexus --gui` — React 19 + Vite + backend
+- **Rich shell**: `python -m nexus --shell` — legacy Rich shell (compat shim)
+- **GUI** : `python -m nexus --gui` — React 18 + Vite + backend
 - **Server**: `python -m nexus --server` — FastAPI on :8000
-- **Gateway**: `python -m nexus --gateway` — Telegram, Discord, WhatsApp, Slack
+- **Gateway**: `python -m nexus --gateway` — Telegram, Discord, WhatsApp, Slack, Signal, etc.
 - **Setup**: `python -m nexus --setup` — Setup wizard
+- **Quick**: `python -m nexus --quick` — Quick start with defaults
 - **Help**: `python -m nexus --help` — All options
 
 ## Test Commands
 - `python -m pytest tests/ -v`
 - `cd gui && npm run build`
+- `cd tui && npx tsx nexus-tui.tsx`
 
 ## Event Model
 Canonical events in `nexus/events.py`. ~50 event types covering run, message, plan, phase, tool, command, file, search, web, test, subagent lifecycles. Events flow via `work_event_sink` callback. Streamed to GUI via SSE.
@@ -49,25 +62,15 @@ Canonical events in `nexus/events.py`. ~50 event types covering run, message, pl
 ## Security Notes
 - Command risk scoring in `sandbox/risk.py`
 - 3-tier sandbox: NO_SANDBOX / NORMAL / DOCKER
-- Threat pattern detection in `tools/threat_patterns.py`
+- Threat pattern detection in `tools/threat_patterns.py` (55 regex patterns, 3 scopes)
 - Plugin trust model in `plugins/trust.py`
+- Sovereign safety laws in `safety/laws.py` + LogicProver
 - No unsafe defaults; ask before destructive commands
 
-## Fixed Issues (historical — most are now stable)
-- `/api/files/list` endpoint, `kernel/__init__.py` subsystem loading, `orchestrators/architect.py` import stubs
-- `gui/` — removed fake dino templates, connected TerminalPanel to SSE, added error states/retry to FileExplorer
-- `server/` auth middleware — `/api/state` added to public skip list
-- 4 silent try/except blocks now log warnings; 15 dev artifacts deleted
-- 10 event model E2E smoke tests + 5 API smoke tests
-- `orchestrators/loop.py` — SCAState enum + state machine references removed
-- `shell/__init__.py` — interactive lists, tab completion, event icons, turn separator, Done panel, prompt improvements
-- `hive/engine.py` — full sub-agent implementation (spawn, consolidate, blackboard, live signals, events)
-- `tools/deep_research/` and `tools/hive/` tools created
-
 ## Known Limitations
-- `orchestrators/architect.py` is legacy with stub imports for missing modules
-- `kernel/__init__.py` references ~20 lazy-loaded subsystems that may not exist
-- `hive/engine.py` sub-agents need a configured LLM provider to actually run (fallback chain: MoE router → direct provider → openai localhost)
-- Some tools in `tools/<name>/` have metadata but no actual handler scripts
-- `evolution/` subsystem is largely stubs — `ensemble` (hardcoded stub), `horizons`, `hyper_kernel`, `omni_kernel`, `researcher` (constructors only)
+- `orchestrators/architect.py` and `mission_control.py` removed (legacy) — planning uses `todo.md` + `planning` tool
+- `intelligence/moa.py` (MixtureOfArchitects) and `intelligence/local_brain.py` (NexusLocalBrain) are stubs
+- `tools/reasoning/` handler is a template stub — needs real LLM-based chain-of-thought implementation
+- `tools/system/` is partial — `disk` and `process` actions not implemented
+- `evolution/` has some stub modules: `ensemble`, `omni_kernel`, `researcher` (constructors only)
 - No WebSocket yet — uses SSE + polling

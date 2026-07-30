@@ -26,6 +26,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-asyncio>=0.24",
 ]
 browser = [
     "playwright>=1.50",
@@ -106,3 +107,4 @@ ignore = ["E501", "E402", "E701", "F401", "I001", "E702", "E741"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+asyncio_mode = "auto"

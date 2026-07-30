@@ -3,12 +3,12 @@
 This status is generated from real repository files and implemented systems.
 
 - Total items: 29
-- Done: 7
-- Partial: 21
+- Done: 8
+- Partial: 20
 - Removed: 1
-- Weighted completion: 64.3%
+- Weighted completion: 67.9%
 
-> **Note:** The codebase has been restructured. Several paths originally referenced (`tools/nexus_tools/*`, `cognition/`, `code_intel/`, `os_power/`, `hive/`, `world_model/`, `optimization/`) have been reorganized or superseded. Evidence paths below are historical; see `docs/ARCHITECTURE.md` for current directory layout.
+> **Note:** The codebase has been restructured. Several paths originally referenced have been reorganized or superseded. Major updates: GUI rebuilt from scratch (React 18 + Vite), NexusLoop rebuilt (3555 lines), numerous subsystems upgraded. See `docs/ARCHITECTURE.md` for current directory layout.
 
 ## Item Status
 
@@ -41,7 +41,7 @@ This status is generated from real repository files and implemented systems.
 | Phase 3 | partial | Predictive debugging from historical failures | evolution/self_improvement/, evolution/intent/ | Prediction is heuristic, not learned from a large failure corpus. |
 | Phase 3 | partial | Benchmark trainer that turns failures into regression tests | evolution/self_improvement/scripts/engine.py | Automatic test file generation from failures is not complete. |
 | Phase 3 | partial | Self-improvement loop with verified persistence | evolution/self_improvement/scripts/engine.py | Requires stronger benchmark gates before automatic prompt/tool changes. |
-| Phase 4 | partial | Authenticated gui | gui/api.py | Current posture is local-first hardening; full auth UX is not complete. |
+| Phase 4 | done | Authenticated gui | gui/api.py, authentication/ | OAuth 2.0 (Google, GitHub) + token auth + gateway auth working |
 | Phase 4 | partial | Profiles for coding, research, automation, architecture, and bug hunt | prompts/, orchestrators/architect.py, evolution/ | Profiles are mostly prompt/tool conventions, not a complete product switcher. |
 | Phase 4 | partial | MCP-compatible tool/plugin SDK | mcp/, docs/MCP_CODE_GRAPH.md | Current MCP export is code-graph focused, not full SDK. |
 | Phase 4 | done | Provider health checks and fallback router | providers/base.py, providers/router.py | none |
@@ -53,6 +53,6 @@ This status is generated from real repository files and implemented systems.
 
 1. Add a real gui audit timeline for mission replay, evidence, tool economy, and unified graph events.
 2. Add live LSP integration on top of the current compile/build diagnostics.
-3. Promote graph/RAG retrieval into a tested multi-hop GraphRAG path.
+3. Promote graph/RAG retrieval into a tested multi-hop GraphRAG path. Atlas deep indexing + BM25 hybrid available.
 4. Finish role-specific LLM swarm adapters with explicit agent contracts.
 5. Add release packaging/publishing checks and stronger gui auth UX.

@@ -1,27 +1,33 @@
-# GUI
+# GUI (React Frontend)
 
-FastAPI backend + React operator surface — visual mission cockpit for NEXUS AI.
+React 18 + Vite + TypeScript frontend with Tailwind CSS.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
-## Usage
+## Structure
+- `src/App.tsx` — Root component orchestrating sidebar, chat, editor, terminal, settings
+- `src/components/MainChat.tsx` — Core chat component (~1600 lines) with SSE streaming
+- `src/components/SettingsPanel.tsx` — Settings modal (515 lines)
+- `src/components/FileExplorer.tsx` — Workspace file browser (413 lines)
+- `src/components/ActivityTimeline.tsx` — Thinking/event visualization
+- `src/components/TerminalPanel.tsx` — Terminal drawer
+- `src/components/ChatHistory.tsx` — Session sidebar
+- `src/components/ApprovalPanel.tsx` — Co-Pilot approval UI
+- `src/components/MonacoEditor.tsx` — File editor wrapper
+- `src/hooks/useStreamChat.ts` — SSE chat streaming hook (413 lines)
+- `src/lib/api.ts` — API client (60+ endpoints)
+- `src/lib/store.ts` — Zustand state management
+- `api.py` — FastAPI backend (2800+ lines) co-located for GUI functionality
+
+## Key Features
+- Markdown rendering with tables, code blocks, headings
+- SSE streaming with work event visualization
+- Session management, file explorer, settings panel
+- Tailwind dark/light mode via CSS custom properties
+- Built output: 362 KB JS + 39 KB CSS
+
+## Commands
 ```powershell
-python -m nexus --gui
+cd gui && npm run dev     # Vite dev server (port 5173)
+cd gui && npm run build   # Production build
 ```
-
-Manual backend-only development:
-
-```powershell
-python -m uvicorn gui.api:app --host 127.0.0.1 --port 8000
-cd gui
-npm run dev
-```
-
-## Features
-- Mission timeline and work event viewer
-- `/api/work-events` cursor replay for canonical public activity events
-- `/api/runs` and `/api/runs/{session_id}/{run_id}` for durable run context plus public event replay
-- Chat requests use canonical SSE event streaming; the Stop control calls backend cancellation before aborting the browser stream
-- GUI command execution records shared permission decisions and still runs through risk scoring plus sandbox workspace checks
-- Provider health status and configuration via `config/nexus_config.yaml`; masked key placeholders do not overwrite saved credentials
-- Audit control plane for unified graph, evidence, and tool economy

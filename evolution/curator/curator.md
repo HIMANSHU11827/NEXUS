@@ -1,6 +1,6 @@
 # Skill Curator
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 Background skill lifecycle manager for NEXUS AI. Runs during idle periods to auto-archive stale skills, manage pin states, and consolidate duplicates.
 

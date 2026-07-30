@@ -1,5 +1,5 @@
 # Web Search Tool
-**Version:** 1.2.0
+**Version:** 2.0.0
 
 Search the web by query or fetch a URL.
 

@@ -109,6 +109,18 @@ The FastAPI server provides all REST endpoints consumed by the React GUI. Most a
 
 Work events are stored as JSONL (`workspace/work_events/{session_id}.jsonl`). Each event tracks file reads/writes, command runs, tool calls, and mission milestones with timestamps.
 
+### Chat Rendering
+
+Assistant messages are rendered by `gui/src/components/MainChat.tsx` using a safe, component-based Markdown renderer. The renderer keeps provider output readable while avoiding HTML injection:
+
+- headings (`#` through `######`)
+- bold text, inline code, and links
+- ordered and unordered lists
+- GitHub-style tables with header rows, alignment markers, alternating rows, and horizontal scrolling
+- fenced code blocks with a dedicated code viewer
+
+User messages remain plain text. Assistant Markdown is rendered both for live responses and when a session is restored from history, so formatting does not disappear after refresh. Raw Markdown markers are not displayed as chat prose.
+
 ## Frontend (`gui/src/`)
 
 | File | Purpose |
@@ -121,6 +133,7 @@ Work events are stored as JSONL (`workspace/work_events/{session_id}.jsonl`). Ea
 | `components/ActivityBar.tsx` | Activity feed panel |
 | `components/CanvasPanel.tsx` | Canvas/visualization panel |
 | `components/ProviderPanel.tsx` | Provider management panel |
+| `components/MainChat.tsx` | Chat composer, history, activity cards, and assistant Markdown/table rendering |
 
 ## Security
 
