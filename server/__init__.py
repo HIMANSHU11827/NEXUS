@@ -181,7 +181,7 @@ app.add_middleware(
 )
 
 # ── Auth middleware ─────────────────────────────────────────────────
-from authentication import AuthUser, check_auth
+from authentication import AuthUser, check_auth, is_loopback_request
 
 _WINDOWS_RESERVED = frozenset({"con", "prn", "aux", "nul", "com1", "com2", "com3", "com4",
     "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
@@ -208,9 +208,10 @@ async def auth_middleware(request: Request, call_next):
     # NEXUS_ALLOW_LOCAL_ANON is an explicit opt-in used by local/test clients
     # (and the pytest suite via TestClient, whose peer host is the literal
     # string "testclient" rather than a real loopback address). It is OFF by
-    # default and MUST stay that way; anonymous access is only ever granted
-    # when an operator deliberately sets the flag.
-    if os.environ.get("NEXUS_ALLOW_LOCAL_ANON", "false").lower() == "true":
+    # default and MUST stay that way. When enabled it is ALSO restricted to
+    # genuine loopback peers — without that, the flag would silently disable
+    # auth for any client that could reach the port (LAN, tunnels, bridges).
+    if os.environ.get("NEXUS_ALLOW_LOCAL_ANON", "false").lower() == "true" and is_loopback_request(request):
         request.state.user = AuthUser(provider="local", sub="dashboard", name="Local User")
         return await call_next(request)
 
