@@ -268,9 +268,13 @@ def test_ink_stop_aborts_the_real_stream_and_retry_uses_original_prompt():
     assert "completeRunningActivities('cancelled')" in interactive
     # /retry replays the last user prompt exactly, and never a slash command
     retry_block = interactive.split("command === '/retry'", 1)[1][:900]
-    assert "message.role === 'user'" in retry_block
-    assert "handleSubmit(lastUserPrompt)" in retry_block
-    assert "lastUserPrompt.startsWith('/')" in retry_block
+    # Retry now resolves the original prompt through resolveRetryPrompt()
+    # (pure helper that rejects blanks and slash commands), then re-submits it.
+    assert "resolveRetryPrompt(history)" in retry_block
+    assert "handleSubmit(retryPrompt)" in retry_block
+    # Empty / slash-command history yields a clear "nothing to retry" path
+    # instead of re-submitting a slash command.
+    assert "no previous prompt to retry" in interactive
     assert "{name: '/retry'" in interactive
 
 
