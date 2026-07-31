@@ -30,7 +30,12 @@ function App() {
 
   useEffect(() => {
     const theme = localStorage.getItem('nexus-theme') || 'light'
-    document.documentElement.classList.toggle('dark', theme === 'dark')
+    document.documentElement.classList.remove('dark', 'theme-grey', 'theme-glass', 'theme-green', 'theme-blue', 'theme-purple')
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark')
+    } else if (theme !== 'light') {
+      document.documentElement.classList.add(`theme-${theme}`)
+    }
     checkBackend()
     loadSessionsFromServer()
     // The GUI can finish loading before the freshly restarted API is ready.
