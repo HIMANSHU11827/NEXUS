@@ -3284,6 +3284,13 @@ If no gaps, return: {{"gaps": []}}
                 if tail:
                     chunk_queue.put(("chunk", tail))
                 chunk_queue.put(("done", ""))
+            except StopIteration:
+                # A generator-backed provider that ends by raising
+                # StopIteration is a normal end-of-stream, not a failure.
+                tail = scrubber.flush()
+                if tail:
+                    chunk_queue.put(("chunk", tail))
+                chunk_queue.put(("done", ""))
             except Exception as e:
                 chunk_queue.put(("error", str(e)))
             finally:
@@ -3325,7 +3332,16 @@ If no gaps, return: {{"gaps": []}}
                 kwargs["provider"] = provider
             if model:
                 kwargs["model"] = model
-            fallback = self.brain.generate(**kwargs)
+            # PEP 479: a StopIteration escaping an async generator is re-raised
+            # as an opaque "async generator raised StopIteration" RuntimeError,
+            # which loses the real cause and kills the turn. An exhausted or
+            # generator-backed provider must surface as a normal empty result
+            # so the loop's own retry/fallback path can handle it.
+            try:
+                fallback = self.brain.generate(**kwargs)
+            except StopIteration:
+                self.logger.warning("Provider generate() exhausted with no output")
+                return
             if fallback and getattr(self.brain, "_looks_like_provider_error", lambda x: False)(fallback):
                 raise RuntimeError(f"Provider request failed: {fallback}")
             if fallback:
