@@ -8,6 +8,7 @@ import {render, Box, Text, useApp, useInput} from 'ink';
 import TextInput from 'ink-text-input';
 import {detectChoiceQuestion, formatChoiceQuestionForChat} from './choice-question.js';
 import {renderTerminalMarkdown} from './terminal-markdown.js';
+import {resolveRetryPrompt} from './retry.js';
 
 // ── [NEXUS CONFIG]
 const configuredApi = process.env.NEXUS_API?.trim();
@@ -4637,16 +4638,15 @@ const App = () => {
             if (command === '/retry') {
                 // Retry must reuse the ORIGINAL user prompt, never a rebuilt or
                 // truncated one, and must not resend slash commands.
-                const lastUser = [...history].reverse().find(message => message.role === 'user' && String(message.content || '').trim());
-                const lastUserPrompt = String(lastUser?.content || '').trim();
-                if (!lastUserPrompt || lastUserPrompt.startsWith('/')) {
+                const retryPrompt = resolveRetryPrompt(history);
+                if (!retryPrompt) {
                     pushCommand('no previous prompt to retry');
                     return true;
                 }
                 if (chatAbortControllerRef.current) {
                     chatAbortControllerRef.current.abort();
                 }
-                void handleSubmit(lastUserPrompt);
+                void handleSubmit(retryPrompt);
                 return true;
             }
 
