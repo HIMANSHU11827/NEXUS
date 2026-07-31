@@ -1,8 +1,11 @@
 """Self-improvement training script."""
+import logging
 import os
 import sys
 
 from evolution.self_improvement import SelfImprovementEngine
+
+logger = logging.getLogger(__name__)
 
 
 def main(steps: int = 50) -> None:
@@ -11,9 +14,20 @@ def main(steps: int = 50) -> None:
     if record:
         status_path = os.path.join(".", "config", "self_improvement_status.json")
         import json
-        os.makedirs(os.path.dirname(status_path), exist_ok=True)
-        with open(status_path, "w") as f:
-            json.dump({"status": "completed", "steps": steps, "score": record.score}, f)
+
+        # Route the status write through the runtime guard so a bad root/config
+        # can never point self-improvement at a protected core module.
+        try:
+            from utils.runtime_guard import guarded_write_text
+
+            guarded_write_text(
+                status_path,
+                json.dumps(
+                    {"status": "completed", "steps": steps, "score": record.score}
+                ),
+            )
+        except Exception as exc:
+            logger.warning("self-improvement status write guarded/skipped: %s", exc)
         print(f"Training completed: {steps} steps, score={record.score}")
     else:
         print("Training completed: no improvements found.")

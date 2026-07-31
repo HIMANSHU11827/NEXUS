@@ -74,9 +74,20 @@ Return JSON with:
             return None
 
     def _log(self, record: ImprovementRecord):
+        """Append an improvement record to the JSONL log.
+
+        The write is routed through ``utils.runtime_guard.guarded_jsonl_append``
+        so that even a malformed ``root`` configuration can never cause the
+        self-improvement system to rewrite a protected core module at runtime.
+        Any guard violation (or other IO error) is logged and swallowed — the
+        self-improvement loop is non-fatal to the running agent.
+        """
         try:
-            with open(self.log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(asdict(record)) + "\n")
+            from utils.runtime_guard import guarded_jsonl_append
+
+            guarded_jsonl_append(self.log_path, asdict(record))
         except Exception:
-            logger.warning("evolution/self_improvement/scripts/engine.py:80 _log: suppressed error", exc_info=True)
-            pass
+            logger.warning(
+                "evolution/self_improvement/scripts/engine.py:_log: suppressed error",
+                exc_info=True,
+            )

@@ -6,12 +6,25 @@ lines). This module provides a cheap, monkey-patch-free guard that evolution /
 self-improvement call paths invoke before touching any file.
 
 Usage:
-    from utils.runtime_guard import assert_not_rewriting_core, protected_core_writes
+    from utils.runtime_guard import (
+        assert_not_rewriting_core,
+        guarded_write_text,
+        guarded_append_text,
+        guarded_jsonl_append,
+        protected_core_writes,
+    )
 
     assert_not_rewriting_core(path)          # raises PermissionError if protected
 
-    with protected_core_writes():            # scoped marker + violation logging
+    guarded_write_text(path, "...")           # write, blocks core paths
+    guarded_append_text(path, "...")          # append, blocks core paths
+    guarded_jsonl_append(path, record)        # append JSONL line, blocks core paths
+
+    with protected_core_writes():             # scoped marker + violation logging
         ...evolution work...
+
+The guard is active by default. Set ``NEXUS_DISABLE_RUNTIME_GUARD=1`` (or call
+``set_enabled(False)``) to bypass it for legitimate maintenance.
 """
 
 from __future__ import annotations
@@ -30,6 +43,34 @@ PROTECTED_DIRS = ("orchestrators", "kernel", "nexus", "server")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 PathLike = Union[str, "os.PathLike[str]"]
+
+# Master kill-switch so legitimate maintenance / test harnesses can disable the
+# guard. It is ON by default; set NEXUS_DISABLE_RUNTIME_GUARD=1/true/yes/on to
+# bypass it. The guard is deliberately opt-out, not opt-in.
+_ENABLED = os.environ.get("NEXUS_DISABLE_RUNTIME_GUARD", "").lower() not in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+
+def set_enabled(value: bool) -> bool:
+    """Enable/disable the guard globally. Returns the previous state.
+
+    Useful for tests and for legitimate one-off maintenance that must touch a
+    protected module with the operator's explicit consent.
+    """
+    global _ENABLED
+    previous = _ENABLED
+    _ENABLED = bool(value)
+    logger.info("[RUNTIME_GUARD] enabled=%s (was %s)", _ENABLED, previous)
+    return previous
+
+
+def is_enabled() -> bool:
+    """Current global enable state of the guard."""
+    return _ENABLED
 
 
 class CoreRewriteBlocked(PermissionError):
@@ -60,7 +101,12 @@ def assert_not_rewriting_core(path: PathLike, operation: str = "write") -> str:
     Returns the fspath unchanged when the write is allowed so callers can do::
 
         with open(assert_not_rewriting_core(p), "w") as f: ...
+
+    Honors the global enable flag (see :func:`set_enabled`); when disabled this
+    is a no-op pass-through so legitimate maintenance can be performed.
     """
+    if not _ENABLED:
+        return os.fspath(path)
     p = os.fspath(path)
     if is_core_path(p):
         msg = (
@@ -83,6 +129,61 @@ def guarded_unlink(path: PathLike) -> None:
     """``os.unlink`` wrapper that blocks deletion of core source files."""
     assert_not_rewriting_core(path, operation="unlink")
     os.unlink(path)
+
+
+def guarded_write_text(
+    path: PathLike, content: str, *, encoding: str = "utf-8", errors=None
+) -> int:
+    """Write *content* to *path* (create parent dirs), blocking core paths.
+
+    Returns the number of characters written. Raises :class:`CoreRewriteBlocked`
+    if *path* resolves under a protected core directory.
+    """
+    p = assert_not_rewriting_core(path, operation="write_text")
+    parent = os.path.dirname(os.path.abspath(p))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(p, "w", encoding=encoding, errors=errors) as f:
+        return f.write(content)
+
+
+def guarded_append_text(
+    path: PathLike, content: str, *, encoding: str = "utf-8", errors=None
+) -> int:
+    """Append *content* to *path* (create parent dirs), blocking core paths.
+
+    Returns the number of characters appended. Raises :class:`CoreRewriteBlocked`
+    if *path* resolves under a protected core directory. This is the helper
+    evolution / self-improvement loggers should use for their JSONL appenders.
+    """
+    p = assert_not_rewriting_core(path, operation="append_text")
+    parent = os.path.dirname(os.path.abspath(p))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(p, "a", encoding=encoding, errors=errors) as f:
+        return f.write(content)
+
+
+def guarded_jsonl_append(path: PathLike, record) -> int:
+    """Serialize *record* (dict/dataclass/JSON-serializable) and append as one
+    JSONL line to *path*, blocking core paths.
+
+    Returns the number of characters written. Raises :class:`CoreRewriteBlocked`
+    if *path* resolves under a protected core directory.
+    """
+    import json as _json
+
+    try:
+        text = _json.dumps(record, ensure_ascii=False)
+    except TypeError:
+        # Fall back to dataclass / object field extraction.
+        try:
+            from dataclasses import asdict
+
+            text = _json.dumps(asdict(record), ensure_ascii=False)
+        except Exception:
+            text = _json.dumps(str(record), ensure_ascii=False)
+    return guarded_append_text(path, text + "\n")
 
 
 @contextmanager
