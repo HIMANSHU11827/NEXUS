@@ -70,8 +70,9 @@ class BasePlatformAdapter(ABC):
         pass
 
     async def send_image(self, chat_id: str, image_url: str, caption: Optional[str] = None) -> SendResult:
-        """Send an image. Default implementation sends as text URL."""
-        return await self.send_text(chat_id, f"{caption + '\n' if caption else ''}{image_url}")
+        """Send an image. Default implementation sends as text URL.""" 
+        prefix = f"{caption}\n" if caption else ""
+        return await self.send_text(chat_id, f"{prefix}{image_url}")
 
     async def send_typing(self, chat_id: str):
         """Optional: Send typing indicator."""

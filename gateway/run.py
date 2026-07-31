@@ -21,6 +21,12 @@ _PLATFORM_ENV_MAP: Dict[str, List[List[str]]] = {
     "mattermost": [["MATTERMOST_URL"], ["MATTERMOST_TOKEN"]],
     "email": [["SMTP_HOST"], ["SMTP_USER"]],
     "sms": [["TWILIO_ACCOUNT_SID"], ["TWILIO_AUTH_TOKEN"], ["TWILIO_FROM_NUMBER"]],
+    "irc": [["IRC_NICK"]],
+    "line": [["LINE_CHANNEL_ACCESS_TOKEN", "LINE_CHANNEL_TOKEN"]],
+    "teams": [["TEAMS_WEBHOOK_URL"], ["TEAMS_TENANT_ID"], ["TEAMS_CLIENT_ID"]],
+    "google_chat": [["GOOGLE_CHAT_WEBHOOK_URL"], ["GOOGLE_CHAT_SPACE", "GOOGLE_CHAT_KEY"]],
+    "wecom": [["WECOM_WEBHOOK"], ["WECOM_CORPID", "WECOM_AGENTID", "WECOM_SECRET"]],
+    "feishu": [["FEISHU_WEBHOOK"], ["FEISHU_APP_ID", "FEISHU_APP_SECRET"]],
 }
 
 

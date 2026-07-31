@@ -11,6 +11,8 @@ from importlib import import_module
 __all__ = [
     "DiscordAdapter",
     "EmailAdapter",
+    "IRCAdapter",
+    "LineAdapter",
     "MattermostAdapter",
     "MatrixAdapter",
     "MetaAdapter",
@@ -19,6 +21,10 @@ __all__ = [
     "SlackAdapter",
     "TelegramAdapter",
     "WhatsAppAdapter",
+    "TeamsAdapter",
+    "GoogleChatAdapter",
+    "WeComAdapter",
+    "FeishuAdapter",
 ]
 
 _ADAPTER_MAP = {
@@ -32,6 +38,12 @@ _ADAPTER_MAP = {
     "mattermost": ("gateway.platforms.mattermost", "MattermostAdapter"),
     "email": ("gateway.platforms.email", "EmailAdapter"),
     "sms": ("gateway.platforms.sms", "SMSAdapter"),
+    "irc": ("gateway.platforms.irc", "IRCAdapter"),
+    "line": ("gateway.platforms.line", "LineAdapter"),
+    "teams": ("gateway.platforms.teams", "TeamsAdapter"),
+    "google_chat": ("gateway.platforms.google_chat", "GoogleChatAdapter"),
+    "wecom": ("gateway.platforms.wecom", "WeComAdapter"),
+    "feishu": ("gateway.platforms.feishu", "FeishuAdapter"),
 }
 
 _CLASS_TO_PLATFORM = {class_name: platform for platform, (_module, class_name) in _ADAPTER_MAP.items()}
