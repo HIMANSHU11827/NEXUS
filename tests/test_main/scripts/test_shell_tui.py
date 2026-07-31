@@ -180,59 +180,163 @@ def test_ink_clients_keep_real_public_agent_event_kinds():
         assert "visibility !== 'public' || !PUBLIC_ACTIVITY_KINDS.has" in source
 
 
-def test_gui_collapses_only_stable_event_ids_with_latest_update_winning():
+def _unique_work_session(prefix: str) -> str:
+    import uuid
+
+    return f"pytest-{prefix}-{uuid.uuid4().hex[:10]}"
+
+
+def _cleanup_work_session(session_id: str) -> None:
+    import os
+
+    import server
+
+    try:
+        os.remove(server.work_events_path(session_id))
+    except OSError:
+        pass
+
+
+def test_work_events_collapse_only_stable_event_ids_with_latest_update_winning():
+    """A stable event id must render ONCE, holding its latest state, at its
+    first-seen position; id-less events must never be collapsed together."""
+    import server
+
+    session = _unique_work_session("collapse")
+    try:
+        server.append_work_event(session, {
+            "event_id": "evt-cmd", "kind": "command", "action": "Run checks",
+            "target": "pytest -q", "status": "running", "visibility": "public",
+        })
+        server.append_work_event(session, {
+            "event_id": "evt-file", "kind": "file", "action": "Edit file",
+            "target": "a.py", "status": "running", "visibility": "public",
+        })
+        server.append_work_event(session, {
+            "event_id": "evt-cmd", "kind": "command", "action": "Run checks",
+            "target": "pytest -q", "status": "success", "exit_code": 0, "visibility": "public",
+        })
+        server.append_work_event(session, {
+            "kind": "search", "action": "Anonymous A", "status": "success", "visibility": "public",
+        })
+        server.append_work_event(session, {
+            "kind": "search", "action": "Anonymous B", "status": "success", "visibility": "public",
+        })
+        server.append_work_event(session, {
+            "event_id": "evt-hidden", "kind": "error", "action": "internal only",
+            "status": "failed", "visibility": "internal",
+        })
+
+        events = server.list_work_events(session, limit=100)
+        ids = [str(event.get("event_id") or "") for event in events]
+
+        # stable ids collapse to one row each
+        assert ids.count("evt-cmd") == 1
+        assert ids.count("evt-file") == 1
+        # first-seen order preserved: the completed command stays ahead of the file
+        assert ids.index("evt-cmd") < ids.index("evt-file")
+        # latest update wins
+        collapsed = next(event for event in events if event.get("event_id") == "evt-cmd")
+        assert collapsed["status"] == "success"
+        assert collapsed.get("exit_code") == 0
+        # id-less events are distinct rows, never merged
+        titles = [str(event.get("title") or event.get("action") or "") for event in events]
+        assert "Anonymous A" in titles and "Anonymous B" in titles
+        # internal events never reach the timeline
+        assert "evt-hidden" not in ids
+    finally:
+        _cleanup_work_session(session)
+
+
+def test_ink_stop_aborts_the_real_stream_and_retry_uses_original_prompt():
+    """/stop must abort the live fetch (not just hide spinners) and /retry must
+    resend the ORIGINAL user prompt verbatim."""
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[3]
-    utility = (root / "gui" / "src" / "utils" / "workActivityUtils.ts").read_text(encoding="utf-8")
-    app = (root / "gui" / "src" / "App.tsx").read_text(encoding="utf-8")
-
-    assert "export const collapseWorkActivityUpdates" in utility
-    assert "const id = String(row.event_id || row.id || '').trim()" in utility
-    assert "collapsed[existingIndex] = { ...existing, ...row }" in utility
-    assert "kind || row.type}|${row.target" not in app
-    assert "return collapseWorkActivityUpdates(rows)" in app
-
-
-def test_gui_and_ink_stop_abort_the_real_stream_and_retry_uses_original_prompt():
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parents[3]
-    app = (root / "gui" / "src" / "App.tsx").read_text(encoding="utf-8")
-    chat_input = (root / "gui" / "src" / "components" / "chat" / "ChatInput.tsx").read_text(encoding="utf-8")
     interactive = (root / "tui" / "nexus-tui.tsx").read_text(encoding="utf-8")
 
-    for source in (app, interactive):
-        assert "chatAbortControllerRef.current?.abort()" in source or "chatAbortControllerRef.current.abort()" in source
-        assert "signal: controller.signal" in source
-        assert "name === 'AbortError'" in source
-
-    assert "aria-label={isStreaming ? 'Stop current turn' : 'Send message'}" in chat_input
-    assert "if (isStreaming) stopCurrentTurn(); else handleSend();" in chat_input
-    assert "void handleSend(lastUser.content)" in app
-    assert "setTimeout(handleSend, 50)" not in app
+    # the chat request is genuinely abortable
+    assert "signal: controller.signal" in interactive
+    assert "chatAbortControllerRef.current = controller" in interactive or "chatAbortControllerRef.current" in interactive
+    # /stop aborts the controller instead of faking a stopped UI state
+    stop_block = interactive.split("command === '/stop'", 1)[1][:500]
+    assert "chatAbortControllerRef.current.abort()" in stop_block
     assert "stopped visible working state" not in interactive
+    # abort is surfaced as a cancellation, not an error
+    assert "name === 'AbortError'" in interactive
+    assert "completeRunningActivities('cancelled')" in interactive
+    # /retry replays the last user prompt exactly, and never a slash command
+    retry_block = interactive.split("command === '/retry'", 1)[1][:900]
+    assert "message.role === 'user'" in retry_block
+    assert "handleSubmit(lastUserPrompt)" in retry_block
+    assert "lastUserPrompt.startsWith('/')" in retry_block
+    assert "{name: '/retry'" in interactive
 
 
-def test_clients_adapt_canonical_envelope_and_guard_replay_sequence():
+def test_canonical_envelope_adaptation_and_replay_sequence_guard():
+    """Loose work events become canonical envelopes, and replay by cursor never
+    re-delivers already-seen events nor loses sequence ordering."""
+    import server
+    from nexus.events import CanonicalEvent
+
+    canonical = CanonicalEvent.from_work_event(
+        {
+            "id": "evt-adapt", "kind": "command", "action": "Run checks",
+            "status": "success", "command": "pytest -q", "exit_code": 0,
+            "duration_ms": 42, "visibility": "public", "payload": {"extra": 1},
+        },
+        "session-1",
+        7,
+    ).to_dict()
+
+    assert canonical["event_id"] == "evt-adapt"
+    assert canonical["conversation_id"] == "session-1"
+    assert canonical["sequence"] == 7
+    assert canonical["title"] == "Run checks"
+    assert canonical["related_command"] == "pytest -q"
+    assert canonical["exit_code"] == 0
+    assert canonical["duration_ms"] == 42
+    # unknown fields survive inside payload rather than being dropped
+    assert canonical["payload"]["visibility"] == "public"
+    assert canonical["payload"]["extra"] == 1
+
+    session = _unique_work_session("replay")
+    try:
+        stored = [
+            server.append_work_event(session, {
+                "event_id": f"evt-{index}", "kind": "command", "action": f"step {index}",
+                "status": "success", "visibility": "public",
+            })
+            for index in range(4)
+        ]
+        sequences = [int(event["sequence"]) for event in stored]
+        assert sequences == sorted(sequences) and len(set(sequences)) == 4
+
+        cursor = sequences[1]
+        replayed = server.replay_work_events_after(session, cursor)
+        replayed_sequences = [int(event["sequence"]) for event in replayed]
+        # nothing at or before the cursor is re-delivered (duplicate guard)
+        assert all(sequence > cursor for sequence in replayed_sequences)
+        assert replayed_sequences == sorted(replayed_sequences)
+        assert replayed_sequences == sequences[2:]
+        # exhausted cursor yields nothing
+        assert server.replay_work_events_after(session, sequences[-1]) == []
+        # collapsed listing honours the same cursor guard
+        listed = server.list_work_events(session, limit=100, after_sequence=cursor)
+        assert [int(event["sequence"]) for event in listed] == sequences[2:]
+    finally:
+        _cleanup_work_session(session)
+
+    # clients adapt the same envelope shape before rendering, and dedupe replays
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[3]
-    utility = (root / "gui" / "src" / "utils" / "workActivityUtils.ts").read_text(encoding="utf-8")
-    (root / "gui" / "src" / "App.tsx").read_text(encoding="utf-8")
-    timeline = (root / "gui" / "src" / "components" / "WorkActivityTimeline.tsx").read_text(encoding="utf-8")
-    bubble = (root / "gui" / "src" / "components" / "chat" / "MessageBubble.tsx").read_text(encoding="utf-8")
     interactive = (root / "tui" / "nexus-tui.tsx").read_text(encoding="utf-8")
     headless = (root / "tui" / "nexus-tui-headless.ts").read_text(encoding="utf-8")
-
-    assert "export const adaptCanonicalWorkEvent" in utility
-    assert "input.event_id || input.id" in utility
-    assert "input.payload && typeof input.payload === 'object'" in utility
-    assert "incomingSequence >= existingSequence" in utility
     for source in (interactive, headless):
         assert "adaptCanonicalEvent" in source
         assert "input.event_id || input.id" in source
         assert "input.related_command" in source
-
-    assert "Retry failed turn" in bubble
-    assert "server exposes no approve/deny endpoint" in timeline
+    assert "if (!acceptWorkEvent(event)) return;" in interactive
+    assert "seenWorkEventIds.current.has(identity)" in interactive

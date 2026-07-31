@@ -11,6 +11,25 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture(autouse=True)
+def _enforce_auth():
+    """These tests assert the API denies anonymous requests by default.
+
+    The gui test subtree opts into NEXUS_ALLOW_LOCAL_ANON, but this module
+    must verify the real 401 path, so we force the flag off for every test
+    here regardless of process-level env state.
+    """
+    import os
+
+    prev = os.environ.get("NEXUS_ALLOW_LOCAL_ANON")
+    os.environ["NEXUS_ALLOW_LOCAL_ANON"] = "false"
+    yield
+    if prev is None:
+        os.environ.pop("NEXUS_ALLOW_LOCAL_ANON", None)
+    else:
+        os.environ["NEXUS_ALLOW_LOCAL_ANON"] = prev
+
+
+@pytest.fixture(autouse=True)
 def _global_mocks():
     """Patch heavy deps at their source before any server import."""
     patches = [

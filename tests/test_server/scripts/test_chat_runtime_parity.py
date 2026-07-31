@@ -102,6 +102,7 @@ def test_server_run_context_endpoints_list_and_read_runs(tmp_path, monkeypatch):
     from server import app
 
     monkeypatch.setattr(server, "_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(server, "_RUN_ROOT", str(tmp_path))
     monkeypatch.setattr(server, "_WORK_EVENTS_DIR", str(tmp_path / "work_events"))
     server._WORK_EVENT_SEQUENCES.clear()
     context = start_run_context(

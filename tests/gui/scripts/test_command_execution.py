@@ -1,7 +1,24 @@
 from fastapi.testclient import TestClient
 
+import authentication
 from gui import api
 from permissions import PermissionMode, PermissionSystem
+
+
+_TEST_DASHBOARD_TOKEN = "test-dashboard-token-command-execution"
+
+
+def _authed_client(monkeypatch) -> TestClient:
+    """Return a TestClient that authenticates like a real dashboard client.
+
+    The API is protected by ``server.auth_middleware`` -> ``authentication.check_auth``.
+    Rather than disabling that protection, the tests present a valid bearer token,
+    exercising the same code path a real authenticated caller uses.
+    """
+    monkeypatch.setattr(authentication, "_AUTH_TOKEN", _TEST_DASHBOARD_TOKEN)
+    client = TestClient(api.app)
+    client.headers.update({"Authorization": f"Bearer {_TEST_DASHBOARD_TOKEN}"})
+    return client
 
 
 def _clean_permissions():
@@ -19,7 +36,7 @@ def _clean_permissions():
 def test_command_stream_uses_real_executor_and_exit_code(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "_WORK_EVENTS_DIR", str(tmp_path))
     api._LOOPS.clear()
-    client = TestClient(api.app)
+    client = _authed_client(monkeypatch)
 
     response = client.post(
         "/api/work-events/run-command-stream",
@@ -41,7 +58,7 @@ def test_command_stream_uses_shared_permission_decision_log(tmp_path, monkeypatc
     try:
         monkeypatch.setattr(api, "_WORK_EVENTS_DIR", str(tmp_path))
         api._LOOPS.clear()
-        client = TestClient(api.app)
+        client = _authed_client(monkeypatch)
 
         response = client.post(
             "/api/work-events/run-command-stream",

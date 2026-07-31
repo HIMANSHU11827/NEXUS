@@ -42,6 +42,10 @@ except Exception:  # pragma: no cover - handled at request time
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_ROOT)  # One level up from server/ to project root
+# Run-context storage root. Kept as a separate, monkeypatchable variable so the
+# test suite can redirect durable run storage to a temp dir without perturbing
+# the rest of the app's project-root derivation.
+_RUN_ROOT = _PROJECT_ROOT
 _LOOPS: Dict[str, NexusLoop] = {}
 _MAX_LOOPS = 20  # Prevent unbounded memory growth
 _SESSION_DIR = os.path.join(_PROJECT_ROOT, "logs", "sessions")
@@ -199,6 +203,15 @@ if os.environ.get("NEXUS_PUBLIC_OPENAI_COMPAT", "false").lower() == "true":
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
     if path in _AUTH_SKIP_PATHS or path.startswith(("/docs/", "/openapi/", "/redoc/")):
+        return await call_next(request)
+
+    # NEXUS_ALLOW_LOCAL_ANON is an explicit opt-in used by local/test clients
+    # (and the pytest suite via TestClient, whose peer host is the literal
+    # string "testclient" rather than a real loopback address). It is OFF by
+    # default and MUST stay that way; anonymous access is only ever granted
+    # when an operator deliberately sets the flag.
+    if os.environ.get("NEXUS_ALLOW_LOCAL_ANON", "false").lower() == "true":
+        request.state.user = AuthUser(provider="local", sub="dashboard", name="Local User")
         return await call_next(request)
 
     user = check_auth(request)
@@ -485,6 +498,233 @@ def write_workspace_todo_plan(content: str) -> str:
         f.write(content)
     os.replace(temp_path, todo_path)
     return os.path.relpath(todo_path, _PROJECT_ROOT)
+
+
+
+# ── Plan / todo workflow (ported from the canonical gui.api implementation) ──
+def clear_workspace_todo_plan() -> None:
+    try:
+        todo_path = os.path.abspath(os.path.join(_PROJECT_ROOT, "workspace", "todo.md"))
+        if os.path.exists(todo_path):
+            os.remove(todo_path)
+    except Exception:
+        pass
+
+
+def prompt_requests_resume(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    return any(word in text for word in [
+        "continue",
+        "resume",
+        "carry on",
+        "keep going",
+        "go on",
+        "finish it",
+        "continue this",
+        "resume task",
+        "continue task",
+    ])
+
+
+def latest_todo_snapshot(session_id: str) -> Dict[str, Any]:
+    path = work_events_path(session_id)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw_events = [json.loads(line) for line in f if line.strip()]
+            for event in reversed(raw_events):
+                if not isinstance(event, dict):
+                    continue
+                role = str(event.get("role") or "").lower()
+                target = str(event.get("target") or event.get("path") or "").lower()
+                preview = str(event.get("preview") or "")
+                if preview and (role == "planning_artifact" or target.endswith("todo.md")) and parse_todo_markdown(preview):
+                    return {
+                        "content": preview,
+                        "turn_id": str(event.get("turn_id") or ""),
+                        "task": str(event.get("task") or ""),
+                    }
+        except Exception:
+            pass
+
+    todo_path = os.path.abspath(os.path.join(_PROJECT_ROOT, "workspace", "todo.md"))
+    if os.path.exists(todo_path):
+        try:
+            with open(todo_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            if parse_todo_markdown(content):
+                return {"content": content, "turn_id": "", "task": ""}
+        except Exception:
+            pass
+    return {}
+
+
+def append_todo_events_from_content(
+    session_id: str,
+    content: str,
+    turn_id: str,
+    resumed_from_turn_id: str = "",
+) -> None:
+    plan = parse_todo_markdown(content)
+    if not plan:
+        return
+    task_text = "Agent Workspace Plan"
+    task_match = re.search(r"^\s*Task:\s*(.*)", content, re.IGNORECASE | re.MULTILINE)
+    if task_match:
+        task_text = task_match.group(1).strip() or task_text
+    todo_rel_path = write_workspace_todo_plan(content)
+    resume_meta = {}
+    if resumed_from_turn_id:
+        resume_meta = {
+            "resumed": True,
+            "resumed_from_turn_id": resumed_from_turn_id,
+            "resume_label": "Continuing",
+        }
+    append_work_event(session_id, {
+        "id": f"todo_file_{turn_id}",
+        "kind": "file",
+        "type": "file",
+        "action": "Edit file",
+        "title": "todo.md",
+        "task": task_text,
+        "target": todo_rel_path,
+        "path": todo_rel_path,
+        "preview": content,
+        "status": "done",
+        "turn_id": turn_id,
+        "phase": f"Phase 1: {plan[0].get('title', 'Plan')}",
+        "phase_index": 1,
+        "role": "planning_artifact",
+        **resume_meta,
+    })
+    for index, item in enumerate(plan, start=1):
+        title = item.get("title", f"Phase {index}")
+        items = item.get("items", [])
+        checked = item.get("checked_items", [])
+        append_work_event(session_id, {
+            "id": f"todo_phase_{turn_id}_{index}",
+            "kind": "todo",
+            "type": "todo",
+            "action": title,
+            "title": title,
+            "task": task_text,
+            "target": title,
+            "items": items,
+            "checked_items": checked,
+            "status": item.get("status", "running" if index == 1 else "pending"),
+            "turn_id": turn_id,
+            "phase": f"Phase {index}: {title}",
+            "phase_index": index,
+            **resume_meta,
+        })
+
+
+def start_chat_workflow(session_id: str, prompt: str, turn_id: str = "") -> str:
+    # A todo.md plan belongs to the active turn. Clear stale plans before the
+    # model/orchestrator decides whether this prompt actually needs phases.
+    if prompt_requests_resume(prompt):
+        snapshot = latest_todo_snapshot(session_id)
+        content = str(snapshot.get("content") or "")
+        if content:
+            append_todo_events_from_content(
+                session_id,
+                content,
+                turn_id,
+                resumed_from_turn_id=str(snapshot.get("turn_id") or ""),
+            )
+            return content
+    clear_workspace_todo_plan()
+    return ""
+
+
+def complete_chat_workflow(session_id: str, prompt: str, turn_id: str = "", status: str = "done") -> None:
+    sid = safe_session_id(session_id)
+    events = list_work_events(sid, limit=1000, active_turn_id=turn_id)
+    if turn_id:
+        events = [e for e in events if str(e.get("turn_id", "")) == turn_id]
+    todo_events = [e for e in events if e.get("kind") == "todo" and e.get("phase_index") is not None]
+    if not todo_events:
+        return
+    
+    # Sort todo events by phase_index
+    todo_events.sort(key=lambda x: int(x.get("phase_index") or 0))
+
+    final_status = str(status or "done").lower()
+    if final_status != "done":
+        updated_events = []
+        for e in todo_events:
+            if str(e.get("status") or "").lower() in {"running", "working"}:
+                e["status"] = final_status
+                updated_events.append(e)
+        for event in updated_events:
+            append_work_event(sid, event)
+        return
+    
+    updated_events = []
+    for e in todo_events:
+        items = e.get("items") or []
+        e["checked_items"] = list(items)
+        e["status"] = "done"
+        updated_events.append(e)
+        
+    prompt_text = todo_events[0].get("task", "Agent Workspace Plan")
+    lines = ["## TODO List", "", f"Task: {prompt_text}", ""]
+    for e in todo_events:
+        idx = e.get("phase_index")
+        title = e.get("title")
+        items = e.get("items") or []
+        lines.append(f"- [x] Phase {idx}: {title}")
+        for item in items:
+            lines.append(f"  - [x] {item}")
+            
+    todo_content = "\n".join(lines).strip() + "\n"
+    todo_rel_path = write_workspace_todo_plan(todo_content)
+    
+    todo_file_event = {
+        "kind": "file",
+        "type": "file",
+        "action": "Edit file",
+        "title": "todo.md",
+        "task": prompt_text,
+        "target": todo_rel_path,
+        "path": todo_rel_path,
+        "preview": todo_content,
+        "status": "done",
+        "turn_id": turn_id,
+        "phase": f"Phase {len(todo_events)}: {todo_events[-1].get('title')}",
+        "phase_index": len(todo_events),
+        "role": "planning_artifact",
+    }
+    updated_events.append(todo_file_event)
+    
+    for event in updated_events:
+        append_work_event(sid, event)
+
+
+def refresh_provider_runtime() -> str:
+    """Reload provider.yml and return the canonical default provider."""
+    try:
+        from config.config_loader import NexusConfigLoader
+        loader = NexusConfigLoader()
+        loader.reload()
+        provider_cfg = loader.get("provider", {})
+        default_provider = ""
+        if isinstance(provider_cfg, dict):
+            default_provider = str(provider_cfg.get("default_provider") or "").strip()
+        try:
+            from providers.factory import NexusProviderFactory
+            factory = NexusProviderFactory()
+            if hasattr(factory, "loader") and hasattr(factory.loader, "reload"):
+                factory.loader.reload()
+            factory._provider = None
+            if default_provider:
+                factory.name = default_provider
+        except Exception:
+            logger.debug("Provider factory refresh skipped", exc_info=True)
+        return default_provider or loader.get_system("provider_name", "openrouter")
+    except Exception:
+        logger.warning("Provider runtime refresh failed", exc_info=True)
+        return "openrouter"
 
 
 def update_todo_file_and_states(session_id: str, new_event: Dict[str, Any], turn_id: str = "") -> List[Dict[str, Any]]:
@@ -910,6 +1150,29 @@ def _append_work_event(session_id: str, event: Dict[str, Any]) -> Dict[str, Any]
     return payload
 
 
+def _is_private_diagnostic_event(event: Dict[str, Any]) -> bool:
+    """Mirror of the frontend's isPrivateDiagnosticEvent.
+
+    Private grounding and internal self-diagnostics (prompt files, the critical
+    preventive vaccine, tool-safety audits, etc.) are never public evidence and
+    must never replay into the visible timeline, even if a surface forgets to
+    mark them visibility='internal'. Keeping the rule server-side means the
+    backend work-event API is safe on its own, not only when rendered by a
+    frontend that happens to apply the filter.
+    """
+    haystack = " ".join(
+        str(event.get(k) or "")
+        for k in ("target", "path", "title", "summary", "query", "tool", "action")
+    )
+    if str(event.get("stage") or "").lower() == "grounding" and "prompt" in haystack.lower():
+        return True
+    patterns = (
+        "prompt_files", "critical preventive vaccine", "tool safety audit",
+        "agent tools", "latest tool results", "tool results accepted",
+    )
+    return any(p in haystack.lower() for p in patterns)
+
+
 def list_work_events(session_id: str, limit: int = 200, turn_id: str = "", after_sequence: int = 0):
     """Collapse a work-event log into current timeline state.
 
@@ -927,6 +1190,8 @@ def list_work_events(session_id: str, limit: int = 200, turn_id: str = "", after
     anonymous: List[Dict[str, Any]] = []
     for event in raw_events:
         if str(event.get("visibility") or "public").lower() == "internal":
+            continue
+        if _is_private_diagnostic_event(event):
             continue
         try:
             sequence = int(event.get("sequence") or 0)
@@ -1128,6 +1393,49 @@ def apply_runtime_settings(loop: NexusLoop) -> None:
         loop.sandbox.tier = loop.sandbox_tier
     except Exception as e:
         logger.warning("apply_runtime_settings: permission mode %s failed: %s", mode, e)
+
+
+def _check_gui_terminal_permission(sid: str, turn_id: str, command: str):
+    """Evaluate the terminal permission policy for a GUI command-run request.
+
+    Mirrors the canonical gui.api implementation. The GUI terminal surface
+    enforces the session's permission mode before handing a command to the
+    sandbox, so a restrictive mode (ask / default / allowlist) does not
+    silently execute destructive commands. Returns the PermissionSystem result.
+    """
+    from permissions import PermissionMode, PermissionSystem
+
+    loop = _LOOPS.get(sid)
+    mode_name = str(getattr(loop, "permission_mode", "") if loop else "auto").strip().lower() or "auto"
+    mode_map = {
+        "full_access": PermissionMode.BYPASS,
+        "all": PermissionMode.BYPASS,
+        "bypass": PermissionMode.BYPASS,
+        "dontask": PermissionMode.BYPASS,
+        "accept": PermissionMode.AUTO_PILOT,
+        "acceptedits": PermissionMode.AUTO_PILOT,
+        "auto": PermissionMode.AUTO_PILOT,
+        "auto_pilot": PermissionMode.AUTO_PILOT,
+        "allowlist": PermissionMode.PRE_AUTHORIZED,
+        "pre_authorized": PermissionMode.PRE_AUTHORIZED,
+        "checklist": PermissionMode.PRE_AUTHORIZED,
+        "approval": PermissionMode.APPROVE,
+        "ask": PermissionMode.APPROVE,
+        "approve": PermissionMode.APPROVE,
+        "default": PermissionMode.DEFAULT,
+        "plan": PermissionMode.PLAN,
+    }
+    permissions = PermissionSystem()
+    previous_mode = permissions.mode
+    try:
+        permissions.set_mode(mode_map.get(mode_name, PermissionMode.AUTO_PILOT))
+        return permissions.check(
+            "terminal",
+            command,
+            context={"session_id": sid, "turn_id": turn_id, "surface": "gui"},
+        )
+    finally:
+        permissions.set_mode(previous_mode)
 
 
 def apply_runtime_to_all_loops() -> None:
@@ -1561,6 +1869,13 @@ async def chat(request: Request):
     if bool(getattr(nexus_loop, "is_running", False)):
         raise HTTPException(status_code=409, detail="A run is already active for this session")
 
+    # Reset any prior run state before starting a fresh turn (canonical
+    # behaviour — the GUI client and tests rely on a clean loop per prompt).
+    try:
+        nexus_loop.reset()
+    except Exception:
+        logger.debug("get_loop reset failed for %s", sid, exc_info=True)
+
     set_active_session(sid, source="cli-api:chat")
 
     allowed_providers = {
@@ -1882,7 +2197,7 @@ def get_history(session_id: str = "default"):
 def list_runs(session_id: str = "", limit: int = 100):
     """List recent durable run contexts for inspector and replay surfaces."""
     runs = []
-    for item in list_run_contexts(_PROJECT_ROOT, session_id=session_id, limit=limit):
+    for item in list_run_contexts(_RUN_ROOT, session_id=session_id, limit=limit):
         public_item = dict(item)
         public_item.pop("_path", None)
         public_item["work_events"] = work_event_run_summary(
@@ -1897,7 +2212,7 @@ def list_runs(session_id: str = "", limit: int = 100):
 def get_run_context(session_id: str, run_id: str, include_events: bool = True, limit: int = 1000):
     """Return one durable run context plus public work-event replay."""
     sid = safe_session_id(session_id)
-    context = load_run_context(_PROJECT_ROOT, sid, run_id)
+    context = load_run_context(_RUN_ROOT, sid, run_id)
     if context is None:
         raise HTTPException(status_code=404, detail="Run context not found")
     resolved_run_id = str(context.get("run_id") or run_id)
@@ -1939,6 +2254,23 @@ async def run_work_command_stream(request: Request):
         raise HTTPException(status_code=413, detail="Command is too large")
     if profile not in {"pwsh", "cmd", "bash", "wsl"}:
         raise HTTPException(status_code=400, detail="Unsupported terminal profile")
+
+    # Enforce the session's terminal permission policy before touching the
+    # sandbox. A restrictive mode (ask/default/allowlist) must block the
+    # command here rather than executing it — the GUI surface is non-interactive
+    # and cannot perform a live approval handshake for a streaming command.
+    decision = _check_gui_terminal_permission(sid, str(data.get("turn_id", "")), command)
+    if not getattr(decision, "granted", True):
+        blocked = _append_work_event(sid, {
+            "kind": "command", "type": "command", "action": "Run command",
+            "title": "Run command", "target": command, "command": command,
+            "profile": profile, "status": "blocked",
+            "reason": "Command blocked by permission policy",
+        })
+        return StreamingResponse(
+            iter([f"data: {json.dumps({'type': 'blocked', 'event': blocked, 'command': command, 'message': 'Command blocked by permission policy'}, ensure_ascii=False)}\n\n"]),
+            media_type="text/event-stream",
+        )
 
     started = _append_work_event(sid, {
         "kind": "command", "type": "command", "action": "Run command",

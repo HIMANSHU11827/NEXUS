@@ -1,4 +1,5 @@
 """Shared fixtures for NEXUS evolution tests."""
+import os
 import subprocess
 import sys
 from pathlib import Path

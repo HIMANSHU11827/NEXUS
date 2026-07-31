@@ -678,6 +678,67 @@ class TestAgentExecutionContract:
         assert "OpenRouter API key" not in output
         assert loop._last_run_failed is False
 
+    def test_verified_multi_step_work_executes_new_tools_and_emits_public_progress(self, tmp_path, monkeypatch):
+        """A verified tool result must not prevent the next real tool step."""
+        loop = NexusLoop(root_dir=str(tmp_path))
+        captured = []
+        loop.work_event_sink = captured.append
+        monkeypatch.setattr(loop, "_requires_real_tooling", lambda _task: True)
+
+        async def ground(task):
+            return [{"role": "user", "content": task}]
+
+        responses = iter([
+            "<progress>I will search the current sources first.</progress>search-step",
+            "<progress>The search found the file. I am opening it now.</progress>read-step",
+            "<progress>This confirms the issue. I am editing the code.</progress>edit-step",
+            "<progress>The change is ready. I am running tests.</progress>test-step",
+            "Completed: changed the file and verified the tests passed.",
+        ])
+
+        async def model(_messages, **_kwargs):
+            yield next(responses)
+
+        calls = {
+            "search-step": ToolCall("web_search", {"query": "current sources"}, "search"),
+            "read-step": ToolCall("reading", {"path": "README.md"}, "read"),
+            "edit-step": ToolCall("file_ops", {"action": "edit", "path": "README.md"}, "edit"),
+            "test-step": ToolCall("bash", {"command": "python -m pytest"}, "test"),
+        }
+        executed = []
+
+        async def execute(step_calls):
+            executed.extend(call.name for call in step_calls)
+            return [f"[{call.name}]: complete" for call in step_calls]
+
+        async def verify(*_args):
+            return {"success": True, "vaccine": ""}
+
+        monkeypatch.setattr(loop, "_ground_context", ground)
+        monkeypatch.setattr(loop, "_stream_model", model)
+        monkeypatch.setattr(loop, "_extract_tool_calls", lambda response: [calls[response]] if response in calls else [])
+        monkeypatch.setattr(loop, "_audit_and_approve", lambda _calls: asyncio.sleep(0, result=True))
+        monkeypatch.setattr(loop, "_execute_tools", execute)
+        monkeypatch.setattr(loop, "_verify_all_parallel", verify)
+        monkeypatch.setattr(loop, "_save_checkpoint", lambda *_args: None)
+        monkeypatch.setattr(loop, "_log_mission_replay", lambda *_args: None)
+        monkeypatch.setattr(loop, "_write_session_bus", lambda *_args: None)
+        monkeypatch.setattr(loop, "_start_background_finalization", lambda *_args: None)
+
+        output = asyncio.run(loop.run("research, inspect, edit, and test"))
+
+        assert executed == ["web_search", "reading", "file_ops", "bash"]
+        assert output.startswith("Completed:")
+        assert [event["payload"]["text"] for event in captured if event.get("event_type") == "assistant.progress"] == [
+            "I will search the current sources first.",
+            "The search found the file. I am opening it now.",
+            "This confirms the issue. I am editing the code.",
+            "The change is ready. I am running tests.",
+        ]
+        completed_run = next(event for event in captured if event.get("event_type") == "run.completed")
+        assert isinstance(completed_run.get("duration_ms"), (int, float))
+        assert completed_run["duration_ms"] >= 0
+
     def test_failed_command_closes_phase_message_and_run_as_failed(self, tmp_path, monkeypatch):
         loop = NexusLoop(root_dir=str(tmp_path))
         captured = []
