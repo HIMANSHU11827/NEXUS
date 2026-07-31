@@ -5,6 +5,7 @@ import time
 from typing import Dict, Iterator, List, Optional
 
 from providers.base import NexusBaseProvider
+from providers.reliability import redact_secrets
 
 logger = logging.getLogger("NEXUS_OPENROUTER")
 
@@ -18,16 +19,17 @@ class OpenRouterProvider(NexusBaseProvider):
     def __init__(self):
         super().__init__("openrouter", "https://openrouter.ai/api/v1/chat/completions")
         if not self.model:
-            self.model = os.environ.get("NEXUS_PROVIDER_OPENROUTER_MODEL", "openrouter/free")
+            self.model = os.environ.get("NEXUS_PROVIDER_OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
         self._base_model = self.model
 
+        # Real, verified OpenRouter free-tier model slugs. (Invented slugs such as
+        # 'openrouter/free' or 'poolside/laguna-xs.2:free' 400 and kill the mesh.)
         self.fallback_models = [
-            "openrouter/free",
-            "nvidia/nemotron-3-nano-30b-a3b:free",
-            "poolside/laguna-xs.2:free",
-            "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
-            "meta-llama/llama-3.2-3b-instruct:free",
-            "nousresearch/hermes-3-llama-3.1-405b:free"
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "deepseek/deepseek-r1-distill-llama-70b:free",
+            "meta-llama/llama-3.1-8b-instruct:free",
+            "google/gemma-2-9b-it:free",
+            "microsoft/phi-3-mini-128k-instruct:free",
         ]
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -61,14 +63,17 @@ class OpenRouterProvider(NexusBaseProvider):
                         return data["choices"][0]["message"]["content"]
                     continue
                 
-                if response.status_code == 429 and i < len(models_to_try) - 1:
-                    logger.warning(f"[MESH_RIPPLE]: Model '{model_name}' rate limited. Rippling...")
+                if response.status_code in (408, 429, 500, 502, 503, 504) and i < len(models_to_try) - 1:
+                    logger.warning(f"[MESH_RIPPLE]: Model '{model_name}' returned {response.status_code}. Rippling...")
                     continue
                     
-                return f"Error: OpenRouter API returned {response.status_code}. {response.text}"
+                return (
+                    f"Error: OpenRouter API returned status {response.status_code}. "
+                    f"{redact_secrets(response.text)[:500]}"
+                )
             except Exception as e:
                 if i < len(models_to_try) - 1: continue
-                return f"Error: Failed to reach OpenRouter. {str(e)}"
+                return f"Error: Failed to reach OpenRouter. {redact_secrets(e)[:500]}"
         return "Error: All models in the AGI Mesh are currently unavailable."
 
     def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
@@ -131,13 +136,16 @@ class OpenRouterProvider(NexusBaseProvider):
                     yield f"\n[MESH_RIPPLE]: '{model_name}' returned status {response.status_code}. Switching to '{models_to_try[i+1]}'...\n"
                     continue
                 
-                yield f"Error: {response.status_code}. {response.text[:200]}..."
+                yield (
+                    f"Error: OpenRouter API returned status {response.status_code}. "
+                    f"{redact_secrets(response.text)[:200]}..."
+                )
                 return
             except Exception as e:
                 if i < len(models_to_try) - 1:
-                    yield f"\n[MESH_RIPPLE]: '{model_name}' failed ({str(e)}). Switching to '{models_to_try[i+1]}'...\n"
+                    yield f"\n[MESH_RIPPLE]: '{model_name}' failed ({redact_secrets(e)[:200]}). Switching to '{models_to_try[i+1]}'...\n"
                     continue
-                yield f"Error in stream: {str(e)}"
+                yield f"Error in stream: {redact_secrets(e)[:500]}"
                 return
 
 

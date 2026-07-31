@@ -2056,12 +2056,73 @@ Rules:
                     },
                 )
                 if not result.granted:
+                    # Co-Pilot (ask) mode is a QUESTION, not a refusal. Before
+                    # the approval broker existed this branch silently denied
+                    # every tool, so ask-mode looked like a broken agent that
+                    # refused to act. Ask the human, then honour the answer.
+                    if str(getattr(result, "source", "")) == "mode:manual_approval":
+                        approved = await self._await_human_approval(tc.name, action, result)
+                        if approved:
+                            continue
                     self.logger.warning("Permission denied for %s: %s", tc.name, result.reason)
                     return False
             except Exception as exc:
                 self.logger.exception("Permission audit failed for %s: %s", tc.name, exc)
                 return False
         return True
+
+    async def _await_human_approval(self, tool_name: str, action: str, result: Any) -> bool:
+        """Ask a human to approve one tool call and wait for the answer.
+
+        Emits a `tool.approval_request` work event (which every surface already
+        renders) and blocks only this run until a decision arrives or the
+        request times out. A timeout or missing surface denies, so an
+        unattended session can never auto-approve itself.
+        """
+        try:
+            from permissions.approval_broker import (
+                DECISION_ALLOW,
+                DECISION_ALLOW_ALWAYS,
+                get_approval_broker,
+            )
+        except Exception:
+            return False
+
+        broker = get_approval_broker()
+        request = broker.open(
+            session_id=self.session_id,
+            tool_name=tool_name,
+            action=action,
+            reason=str(getattr(result, "reason", "") or ""),
+            turn_id=self._current_turn_id or "",
+            timeout_s=float(getattr(self, "approval_timeout_s", 300.0) or 300.0),
+        )
+        await self._emit_work_event(request.to_event())
+
+        decision = await broker.wait(request.request_id)
+        granted = decision in (DECISION_ALLOW, DECISION_ALLOW_ALWAYS)
+
+        if decision == DECISION_ALLOW_ALWAYS:
+            # "Always allow" must persist, or the user is asked again forever.
+            try:
+                self.permissions.add_rule(tool_name, "*", granted=True)
+            except Exception:
+                self.logger.debug("Could not persist allow rule for %s", tool_name, exc_info=True)
+
+        await self._emit_work_event({
+            "id": request.request_id,
+            "event_type": "tool.approval_request",
+            "kind": "approval",
+            "status": "done" if granted else "failed",
+            "request_id": request.request_id,
+            "turn_id": self._current_turn_id or "",
+            "tool": tool_name,
+            "action": action,
+            "title": f"{'Approved' if granted else 'Denied'} {tool_name}",
+            "target": action,
+            "decision": decision,
+        })
+        return granted
 
     # ─────────────────────────────────────────────────────────────────────────
     # ⑤ EXECUTION — ALL PARALLEL

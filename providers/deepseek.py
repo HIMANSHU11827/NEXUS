@@ -4,6 +4,7 @@ import os
 from typing import Dict, Iterator, List, Optional
 
 from providers.base import NexusBaseProvider
+from providers.reliability import redact_secrets
 
 
 class DeepSeekProvider(NexusBaseProvider):
@@ -28,6 +29,8 @@ class DeepSeekProvider(NexusBaseProvider):
         self.model = self._thinking_model if enabled else self._base_model
 
     def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
+        if not self.validate_api_key():
+            raise RuntimeError("deepseek: missing or invalid API key")
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs}
         try:
@@ -35,13 +38,18 @@ class DeepSeekProvider(NexusBaseProvider):
             if response.status_code == 200:
                 data = response.json()
                 return data["choices"][0]["message"]["content"]
-            result = f"Error: DeepSeek API returned {response.status_code}. {response.text}"
-            logging.error(result)
+            result = (
+                f"Error: DeepSeek API returned status {response.status_code}. "
+                f"{redact_secrets(response.text)[:500]}"
+            )
+            logging.error("DeepSeek API error status=%s", response.status_code)
             return result
         except Exception as e:
-            return f"Error: Failed to reach DeepSeek. {str(e)}"
+            return f"Error: Failed to reach DeepSeek. {redact_secrets(e)[:500]}"
 
     def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
+        if not self.validate_api_key():
+            raise RuntimeError("deepseek: missing or invalid API key")
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs, "stream": True}
         try:
@@ -75,8 +83,11 @@ class DeepSeekProvider(NexusBaseProvider):
                 if in_thinking:
                     yield "</thinking>"
             else:
-                yield f"Error: {response.status_code}. {response.text}"
+                yield (
+                    f"Error: DeepSeek API returned status {response.status_code}. "
+                    f"{redact_secrets(response.text)[:500]}"
+                )
         except Exception as e:
-            yield f"Error in DeepSeek stream: {str(e)}"
+            yield f"Error in DeepSeek stream: {redact_secrets(e)[:500]}"
 
 

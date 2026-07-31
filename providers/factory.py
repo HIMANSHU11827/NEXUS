@@ -5,6 +5,7 @@ import os
 from typing import Any, Optional
 
 from utils.singleton import ThreadSafeSingleton
+from providers.reliability import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,7 @@ class NexusProviderFactory(ThreadSafeSingleton):
             provider_name = str(provider_config.get("default_provider") or "").strip()
         self.group = self.loader.get_system("provider_group", "cloud")
         self.name = provider_name or self.loader.get_system("provider_name", "openrouter")
+        self._consecutive_errors = 0
 
     def _load_provider_instance(self, target_name: str) -> Any:
         if target_name in MAPPINGS:
@@ -152,7 +154,10 @@ class NexusProviderFactory(ThreadSafeSingleton):
         try:
             provider_id = str(name or "").strip()
             inst_config = self.loader.get_provider_config(provider_id)
-            parent = inst_config.get("parent_provider")
+            # NexusConfigLoader.get_provider_config() *pops* parent_provider while
+            # merging, so it is never present in inst_config. Read the raw
+            # provider block to recover the parent implementation name.
+            parent = inst_config.get("parent_provider") or self._raw_parent(provider_id)
             target_name = str(parent if parent else provider_id).lower()
 
             provider = self._load_provider_instance(target_name)
@@ -170,7 +175,13 @@ class NexusProviderFactory(ThreadSafeSingleton):
                 if hasattr(provider, "headers"):
                     provider.headers["Authorization"] = f"Bearer {key}"
             elif parent and provider:
-                parent_key = _configured_api_key(inst_config.get("api_key"))
+                # Read the PARENT provider's configured key (the intent of this
+                # branch) — not the same child value that already evaluated falsy.
+                try:
+                    parent_cfg = self.loader.get_provider_config(target_name) or {}
+                    parent_key = _configured_api_key(parent_cfg.get("api_key")) or _resolve_api_key(target_name)
+                except Exception:
+                    parent_key = None
                 if parent_key:
                     provider.api_key = parent_key
                     if hasattr(provider, "headers"):
@@ -181,8 +192,21 @@ class NexusProviderFactory(ThreadSafeSingleton):
             return provider
 
         except Exception as e:
-            logger.error("Failed to initialize requested provider %s: %s", name, e)
+            logger.error("Failed to initialize requested provider %s: %s", name, redact_secrets(e))
             return None
+
+    def _raw_parent(self, provider_id: str) -> Optional[str]:
+        """Return providers.<id>.parent_provider straight from the raw config."""
+        try:
+            cfg = self.loader.get("provider", {}) or {}
+            providers = cfg.get("providers", {}) if isinstance(cfg, dict) else {}
+            entry = providers.get(provider_id) if isinstance(providers, dict) else None
+            if isinstance(entry, dict):
+                parent = entry.get("parent_provider")
+                return str(parent) if parent else None
+        except Exception:
+            logger.debug("factory: could not read parent_provider for %s", provider_id, exc_info=True)
+        return None
 
     def resolve_with_fallback(self, name: str, profile: Optional[str] = None, attempt: int = 0) -> Any:
         provider = self.get_provider_by_name("cloud", name, profile)
@@ -216,10 +240,49 @@ class NexusProviderFactory(ThreadSafeSingleton):
         return None
 
     def get_provider(self) -> Any:
-        """Returns the active provider based on MASTER CONFIG."""
-        if not self._provider:
-            self._provider = self.get_provider_by_name(self.group, self.name)
+        """Returns the active provider, iterating the fallback chain.
+
+        Tries each provider in ``fallback_chain`` (starting at the configured
+        default) and returns the first one that constructs with a usable API key.
+        This makes the system resilient: a dead/expired key on the default provider
+        automatically falls through to the next configured provider instead of
+        silently emitting empty output.
+        """
+        if self._provider and self._consecutive_errors < 3:
+            return self._provider
+        try:
+            cfg = self.loader.get("provider", {})
+            chain = cfg.get("fallback_chain", []) if isinstance(cfg, dict) else []
+            default = str(cfg.get("default_provider") or "").strip()
+            candidates = []
+            if default:
+                candidates.append(default)
+            for n in chain:
+                if n not in candidates:
+                    candidates.append(n)
+            for name in candidates:
+                provider = self.get_provider_by_name(self.group, name)
+                if provider is not None and getattr(provider, "api_key", None):
+                    self._provider = provider
+                    self._consecutive_errors = 0
+                    return provider
+        except Exception:
+            logger.warning("providers/factory.py: get_provider fallback failed", exc_info=True)
+        self._provider = self.get_provider_by_name(self.group, self.name)
         return self._provider
+
+    def reset(self) -> None:
+        """Drop any cached provider so the next ``get_provider`` re-resolves
+        (used after a key refresh or persistent provider failure)."""
+        self._provider = None
+        self._consecutive_errors = 0
+
+    def mark_provider_error(self) -> None:
+        """Record a failed provider call; after a few consecutive failures the
+        cached provider is invalidated so a fallback/refresh can take effect."""
+        self._consecutive_errors = getattr(self, "_consecutive_errors", 0) + 1
+        if self._consecutive_errors >= 3:
+            self._provider = None
 
     def get_provider_by_id(self, provider_id: str) -> Any:
         """Loads and returns a specific provider by its ID."""

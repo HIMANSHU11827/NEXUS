@@ -6,6 +6,12 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
+from providers.reliability import classify_failure, redact_secrets
+
+# A provider marked unhealthy is excluded from the mesh only for this long;
+# without a decay window a single transient failure banned it permanently.
+DEGRADED_TTL_SECONDS = 60.0
+
 
 @dataclass
 class ProviderCapability:
@@ -62,21 +68,20 @@ class ProviderHealthRegistry:
 
     def is_degraded(self, provider_id: str) -> bool:
         health = self._health.get(provider_id)
-        return bool(health and not health.healthy)
+        if not health or health.healthy:
+            return False
+        return (time.time() - health.checked_at) < DEGRADED_TTL_SECONDS
 
     @staticmethod
     def normalize_error(error: Exception | str) -> str:
-        text = str(error)
-        lowered = text.lower()
-        if "401" in text or "unauthorized" in lowered or "api key" in lowered:
-            return "AUTH_ERROR: provider rejected credentials"
-        if "timeout" in lowered or "timed out" in lowered:
-            return "TIMEOUT: provider did not respond before deadline"
-        if "rate" in lowered and "limit" in lowered:
-            return "RATE_LIMIT: provider quota or rate limit hit"
-        if "connection" in lowered or "network" in lowered:
-            return "NETWORK_ERROR: provider connection failed"
-        return text[:500]
+        """Classify and redact. Never returns raw credential material."""
+        classification = classify_failure(
+            error if isinstance(error, BaseException) else None,
+            body=None if isinstance(error, BaseException) else error,
+        )
+        detail = redact_secrets(classification.message)[:400]
+        return f"{classification.failure_class.value.upper()}: {detail}" if detail \
+            else classification.failure_class.value.upper()
 
 
 class ProviderCapabilityRegistry:

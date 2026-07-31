@@ -984,6 +984,14 @@ def get_loop(session_id: str = "default") -> NexusLoop:
         except Exception as e:
             logger.warning("get_loop: failed to load memory for session %s: %s", sid, e)
         apply_runtime_settings(loop)
+        # Every loop persists its structured work events by default. Without a
+        # baseline sink, activity produced outside an active /api/chat stream
+        # (background runs, gateway turns, resumed work) was silently dropped
+        # and never reached the timeline or the durable log.
+        def default_sink(payload: Dict[str, Any], _sid: str = sid) -> Dict[str, Any]:
+            return append_work_event(_sid, payload)
+
+        loop.work_event_sink = default_sink
         _LOOPS[sid] = loop
         _trim_loops()
     return _LOOPS[sid]
@@ -2165,6 +2173,55 @@ def list_provider_config():
 def list_features():
     """List runtime feature flags from nexus_config.yaml."""
     return {"features": _config_summary()["features"]}
+
+
+@app.post("/api/approve")
+async def approve_tool_request(request: Request):
+    """Resolve a pending Co-Pilot (ask-mode) tool approval.
+
+    The GUI has always POSTed here from useStreamChat.respondApproval(), but
+    no backend route existed, so ask-mode approvals went nowhere and the run
+    stalled until it timed out. Decisions are brokered by
+    permissions.approval_broker so any surface can answer.
+    """
+    from permissions.approval_broker import get_approval_broker, normalize_decision
+
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    request_id = str(data.get("request_id") or "").strip()
+    if not request_id:
+        raise HTTPException(status_code=400, detail="request_id is required")
+
+    decision = normalize_decision(data.get("decision"))
+    matched = get_approval_broker().resolve(request_id, decision)
+    return {"ok": True, "request_id": request_id, "decision": decision, "matched": matched}
+
+
+@app.get("/api/approve/pending")
+def list_pending_approvals(session_id: str = ""):
+    """Outstanding approvals, so a reconnecting client can re-render them."""
+    from permissions.approval_broker import get_approval_broker
+
+    return {"pending": get_approval_broker().pending(safe_session_id(session_id) if session_id else "")}
+
+
+@app.get("/api/files/read")
+def read_workspace_file(path: str = ""):
+    """Stream a single workspace file for the GUI file explorer / download.
+
+    The frontend (FileExplorer.tsx, lib/api.ts) has always linked to this
+    route, but no backend implemented it, so every preview/download 404'd.
+    Path containment is enforced by safe_workspace_read_path().
+    """
+    resolved = safe_workspace_read_path(path)
+    from fastapi.responses import FileResponse
+    return FileResponse(
+        resolved,
+        filename=os.path.basename(resolved),
+        media_type="application/octet-stream",
+    )
 
 
 @app.post("/api/files/list")

@@ -3,6 +3,20 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
+from providers.reliability import (
+    CircuitBreakerRegistry,
+    CircuitOpenError,
+    Classification,
+    FailureClass,
+    ProviderCallError,
+    RetryPolicy,
+    Strategy,
+    call_with_reliability,
+    classify_failure,
+    redact_secrets,
+)
+from providers.model_capabilities import ModelCapabilityRegistry
+
 logger = logging.getLogger("NEXUS_ROUTER")
 
 class ModelRouter:
@@ -28,8 +42,52 @@ class ModelRouter:
         self.health = ProviderHealthRegistry()
         from providers.health import ProviderCapabilityRegistry
         self.capabilities = ProviderCapabilityRegistry()
+
+        # Reliability layer: retry policy + per-provider circuit breakers.
+        reliability_cfg = {}
+        try:
+            provider_cfg = self.factory.loader.get("provider", {}) or {}
+            if isinstance(provider_cfg, dict):
+                reliability_cfg = provider_cfg.get("reliability", {}) or {}
+        except Exception:
+            logger.debug("router: reliability config unavailable, using defaults", exc_info=True)
+        self.retry_policy = RetryPolicy.from_config(reliability_cfg.get("retry"))
+        self._breakers = CircuitBreakerRegistry.from_config(reliability_cfg.get("circuit_breaker"))
+        self._model_capabilities = ModelCapabilityRegistry.from_loader(getattr(self.factory, "loader", None))
+        self.last_failure: Optional[Classification] = None
+
         from cognition.intent_engine import IntentEngine
         self.intent_engine = IntentEngine(self)
+
+    @property
+    def breakers(self) -> "CircuitBreakerRegistry":
+        """Per-provider circuit breakers, created on demand.
+
+        Lazy so that a ModelRouter built without ``__init__`` (tests, partial
+        restores, deserialized instances) still has a working reliability layer
+        instead of raising AttributeError mid-stream.
+        """
+        registry = getattr(self, "_breakers", None)
+        if registry is None:
+            registry = CircuitBreakerRegistry.from_config(None)
+            self._breakers = registry
+        return registry
+
+    @breakers.setter
+    def breakers(self, value: "CircuitBreakerRegistry") -> None:
+        self._breakers = value
+
+    @property
+    def model_capabilities(self) -> "ModelCapabilityRegistry":
+        registry = getattr(self, "_model_capabilities", None)
+        if registry is None:
+            registry = ModelCapabilityRegistry.from_loader(getattr(getattr(self, "factory", None), "loader", None))
+            self._model_capabilities = registry
+        return registry
+
+    @model_capabilities.setter
+    def model_capabilities(self, value: "ModelCapabilityRegistry") -> None:
+        self._model_capabilities = value
 
     def set_mode(self, mode: str):
         """Sets the intelligence mode: LOCAL (Trainable), CLOUD (Fixed), HYBRID, AUTO."""
@@ -123,24 +181,86 @@ class ModelRouter:
 
         # Cloud/local mesh with capability-aware fallback.
         fallback_mesh = self._fallback_mesh(messages=messages)
-        
+
         if self.provider:
+            provider_id = self._provider_id(self.provider)
             try:
-                start = time.time()
                 self.total_cloud_calls += 1
-                if hasattr(self.provider, "validate_api_key") and not self.provider.validate_api_key():
-                    raise RuntimeError("provider has no valid credentials or local backend")
-                result = self.provider.generate(messages=messages, **kwargs)
-                if self._looks_like_provider_error(result):
-                    raise RuntimeError(result)
-                self.health.mark_success(getattr(self.provider, "provider_name", type(self.provider).__name__), (time.time() - start) * 1000)
-                return result
+                return self._invoke(self.provider, provider_id, messages, **kwargs)
             except Exception as e:
-                self.health.mark_failure(getattr(self.provider, "provider_name", type(self.provider).__name__), e)
-                logger.warning(f"Primary brain ({type(self.provider).__name__}) failed: {e}")
+                logger.warning(
+                    "Primary brain (%s) failed: %s",
+                    type(self.provider).__name__, redact_secrets(e),
+                )
                 return self._generate_with_fallbacks(messages, fallback_mesh, **kwargs)
-        
+
         return self._generate_with_fallbacks(messages, fallback_mesh, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Reliability-aware invocation helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _provider_id(provider: Any) -> str:
+        return str(
+            getattr(provider, "_provider_id", "")
+            or getattr(provider, "provider_name", "")
+            or type(provider).__name__
+        )
+
+    def _apply_model_limits(self, provider: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Clamp caller kwargs to the *specific model's* documented limits."""
+        provider_id = self._provider_id(provider)
+        model = str(kwargs.get("model") or getattr(provider, "model", "") or "")
+        capability = self.model_capabilities.get(provider_id, model)
+        adjusted = dict(kwargs)
+        adjusted["max_tokens"] = capability.clamp_max_tokens(kwargs.get("max_tokens"))
+        if kwargs.get("tools") and not capability.tools:
+            adjusted.pop("tools", None)
+            adjusted.pop("tool_choice", None)
+            logger.info("model '%s' has no tool support; tools stripped from request", model)
+        return adjusted
+
+    def _invoke(self, provider: Any, provider_id: str, messages: List[Dict[str, str]],
+                streaming: bool = False, **kwargs) -> str:
+        """Single provider call guarded by retry/backoff + circuit breaker."""
+        if hasattr(provider, "validate_api_key") and not provider.validate_api_key():
+            classification = classify_failure(body="missing or invalid api key")
+            self.last_failure = classification
+            self.health.mark_failure(provider_id, classification.failure_class.value)
+            raise ProviderCallError(classification, provider_id)
+
+        call_kwargs = self._apply_model_limits(provider, kwargs)
+        start = time.time()
+
+        def _on_failure(classification: Classification, attempt: int) -> None:
+            self.last_failure = classification
+            self.health.mark_failure(provider_id, classification.failure_class.value)
+
+        try:
+            result = call_with_reliability(
+                provider_id,
+                provider.generate,
+                messages=messages,
+                policy=self.retry_policy,
+                breakers=self.breakers,
+                on_attempt_failure=_on_failure,
+                **call_kwargs,
+            )
+        except TypeError:
+            # Provider does not accept the clamped kwargs (e.g. no max_tokens
+            # parameter) — retry once with the caller's original kwargs.
+            result = call_with_reliability(
+                provider_id,
+                provider.generate,
+                messages=messages,
+                policy=self.retry_policy,
+                breakers=self.breakers,
+                on_attempt_failure=_on_failure,
+                **kwargs,
+            )
+        self.health.mark_success(provider_id, (time.time() - start) * 1000)
+        return result
 
     def _fallback_mesh(self, messages: Optional[List[Dict[str, str]]] = None, *, streaming: bool = False) -> List[str]:
         """Return provider IDs ordered by capability and recent health."""
@@ -163,7 +283,10 @@ class ModelRouter:
             vision=needs_vision,
             prefer_local=prefer_local,
         )
-        return selected or ordered
+        mesh = selected or ordered
+        # Never dispatch to a provider whose breaker is open.
+        allowed = [c for c in mesh if self.breakers.allows(c)]
+        return allowed or [c for c in ordered if self.breakers.allows(c)]
 
     @staticmethod
     def _looks_like_provider_error(result: Any) -> bool:
@@ -175,21 +298,35 @@ class ModelRouter:
     def _generate_with_fallbacks(self, messages: List[Dict[str, str]], fallback_mesh: List[str], **kwargs) -> str:
         last_error = "No responsive brain found in mesh."
         for fallback_id in fallback_mesh:
+            if not self.breakers.allows(fallback_id):
+                logger.info("⛔ [MESH_SKIP]: circuit open for %s", fallback_id)
+                continue
             try:
-                logger.info(f"🔄 [MESH_RECOVERY]: Attempting fallback to {fallback_id}...")
+                logger.info("🔄 [MESH_RECOVERY]: Attempting fallback to %s...", fallback_id)
                 fallback_provider = self.factory.get_provider_by_id(fallback_id)
-                if fallback_provider and fallback_provider.validate_api_key():
-                    start = time.time()
-                    res = fallback_provider.generate(messages=messages, **kwargs)
-                    if self._looks_like_provider_error(res):
-                        raise RuntimeError(res)
-                    self.health.mark_success(fallback_id, (time.time() - start) * 1000)
-                    logger.info(f"✅ [MESH_RECOVERY]: Success via {fallback_id}")
-                    return res
-            except Exception as fallback_error:
-                self.health.mark_failure(fallback_id, fallback_error)
-                last_error = self.health.normalize_error(fallback_error)
+                if not fallback_provider:
+                    continue
+                res = self._invoke(fallback_provider, fallback_id, messages, **kwargs)
+                logger.info("✅ [MESH_RECOVERY]: Success via %s", fallback_id)
+                return res
+            except CircuitOpenError as exc:
+                last_error = redact_secrets(exc)
+            except ProviderCallError as exc:
+                last_error = redact_secrets(exc)
+                if exc.classification.failure_class is FailureClass.AUTH_ERROR:
+                    # Credentials are broken for this provider: no point retrying
+                    # it, move straight on to the next provider in the mesh.
+                    logger.info("🔑 [MESH_SKIP]: %s rejected credentials", fallback_id)
+            except Exception as fallback_error:  # noqa: BLE001
+                classification = classify_failure(fallback_error)
+                self.last_failure = classification
+                self.health.mark_failure(fallback_id, classification.failure_class.value)
+                last_error = redact_secrets(classification.message) or classification.failure_class.value
         return f"Error: {last_error}"
+
+    def breaker_status(self) -> Dict[str, Any]:
+        """Circuit breaker snapshot for diagnostics/telemetry."""
+        return self.breakers.all()
 
     def stream_generate(self, messages: Optional[List[Dict[str, str]]] = None, prompt: str = "", system_prompt: str = "", **kwargs):
         if messages is None:
@@ -211,27 +348,38 @@ class ModelRouter:
         if self.provider:
             self.total_cloud_calls += 1
             emitted_any = False
+            primary_id = self._provider_id(self.provider)
+            breaker = self.breakers.get(primary_id)
             try:
                 start = time.time()
+                breaker.before_call()
                 if hasattr(self.provider, "validate_api_key") and not self.provider.validate_api_key():
-                    raise RuntimeError("provider has no valid credentials or local backend")
+                    raise RuntimeError("provider rejected credentials: missing or invalid api key")
+                stream_kwargs = self._apply_model_limits(self.provider, kwargs)
                 if hasattr(self.provider, "stream_generate"):
-                    for chunk in self.provider.stream_generate(messages=messages, **kwargs):
+                    for chunk in self.provider.stream_generate(messages=messages, **stream_kwargs):
                         if self._looks_like_provider_error(chunk):
                             raise RuntimeError(str(chunk))
                         emitted_any = True
                         yield chunk
                 else:
-                    result = self.provider.generate(messages=messages, **kwargs)
+                    result = self.provider.generate(messages=messages, **stream_kwargs)
                     if self._looks_like_provider_error(result):
                         raise RuntimeError(str(result))
                     emitted_any = True
                     yield result
-                self.health.mark_success(getattr(self.provider, "provider_name", type(self.provider).__name__), (time.time() - start) * 1000)
+                breaker.record_success()
+                self.health.mark_success(primary_id, (time.time() - start) * 1000)
             except Exception as e:
-                provider_id = getattr(self.provider, "provider_name", type(self.provider).__name__)
-                self.health.mark_failure(provider_id, e)
-                last_error = self.health.normalize_error(e)
+                provider_id = primary_id
+                classification = (
+                    e.classification if isinstance(e, ProviderCallError) else classify_failure(e)
+                )
+                if not isinstance(e, CircuitOpenError):
+                    breaker.record_failure()
+                self.last_failure = classification
+                self.health.mark_failure(provider_id, classification.failure_class.value)
+                last_error = redact_secrets(classification.message) or classification.failure_class.value
                 # Once bytes from a provider have reached the caller, switching
                 # providers would splice two unrelated answers into one stream.
                 if emitted_any:
@@ -239,27 +387,41 @@ class ModelRouter:
                     return
                 for fallback_id in self._fallback_mesh(messages=messages, streaming=True):
                     fallback_emitted = False
+                    fb_breaker = self.breakers.get(fallback_id)
+                    if not fb_breaker.allows():
+                        continue
                     try:
+                        fb_breaker.before_call()
                         fallback_provider = self.factory.get_provider_by_id(fallback_id)
                         if fallback_provider and fallback_provider.validate_api_key():
                             start = time.time()
+                            fb_kwargs = self._apply_model_limits(fallback_provider, kwargs)
                             if hasattr(fallback_provider, "stream_generate"):
-                                for chunk in fallback_provider.stream_generate(messages=messages, **kwargs):
+                                for chunk in fallback_provider.stream_generate(messages=messages, **fb_kwargs):
                                     if self._looks_like_provider_error(chunk):
                                         raise RuntimeError(str(chunk))
                                     fallback_emitted = True
                                     yield chunk
                             else:
-                                result = fallback_provider.generate(messages=messages, **kwargs)
+                                result = fallback_provider.generate(messages=messages, **fb_kwargs)
                                 if self._looks_like_provider_error(result):
                                     raise RuntimeError(str(result))
                                 fallback_emitted = True
                                 yield result
+                            fb_breaker.record_success()
                             self.health.mark_success(fallback_id, (time.time() - start) * 1000)
                             return
                     except Exception as fallback_error:
-                        self.health.mark_failure(fallback_id, fallback_error)
-                        last_error = self.health.normalize_error(fallback_error)
+                        fb_classification = (
+                            fallback_error.classification
+                            if isinstance(fallback_error, ProviderCallError)
+                            else classify_failure(fallback_error)
+                        )
+                        if not isinstance(fallback_error, CircuitOpenError):
+                            fb_breaker.record_failure()
+                        self.last_failure = fb_classification
+                        self.health.mark_failure(fallback_id, fb_classification.failure_class.value)
+                        last_error = redact_secrets(fb_classification.message) or fb_classification.failure_class.value
                         if fallback_emitted:
                             break
                 yield f"[PROVIDER_ERROR]: {last_error}"
