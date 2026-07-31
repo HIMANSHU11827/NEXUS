@@ -3,73 +3,131 @@ import logging
 import os
 from typing import Optional
 
-from telebot.async_telebot import AsyncTeleBot
-from telebot.types import Message
-
 from gateway.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 
 logger = logging.getLogger(__name__)
 
+# Optional dependency: the adapter must be importable (and env-gated) even when
+# pyTelegramBotAPI is not installed, so it never breaks test collection or the
+# gateway import graph. This mirrors the HAS_SLACK guard used by the Slack adapter.
+try:  # pragma: no cover - exercised by import availability
+    from telebot.async_telebot import AsyncTeleBot
+    from telebot.types import Message
+    HAS_TELEBOT = True
+except Exception:  # pragma: no cover - optional dependency absent
+    AsyncTeleBot = None  # type: ignore[assignment]
+    Message = None  # type: ignore[assignment]
+    HAS_TELEBOT = False
+    logger.warning(
+        "pyTelegramBotAPI not installed — Telegram adapter disabled. "
+        "Install with: pip install pytelegrambotapi"
+    )
+
+
 class TelegramAdapter(BasePlatformAdapter):
+    """NEXUS Telegram Adapter (telebot / AsyncTeleBot).
+
+    Env-gated: ``connect()`` returns ``False`` unless a bot token is present in
+    ``TELEGRAM_BOT_TOKEN`` (or the ``TELEGRAM_TOKEN`` alias) and the SDK is
+    importable. Incoming messages are normalised into ``MessageEvent`` objects
+    without any dependency on a live network connection, which keeps the handler
+    logic fully unit-testable.
     """
-    NEXUS Telegram Adapter.
-    Uses telebot (AsyncTeleBot) to interface with the Telegram Bot API.
-    """
-    
+
+    HAS_TELEBOT = HAS_TELEBOT
+
     def __init__(self, token: str = ""):
         super().__init__("telegram")
-        self.token = token or os.getenv("TELEGRAM_BOT_TOKEN", "") or os.getenv("TELEGRAM_TOKEN", "")
-        self.bot: Optional[AsyncTeleBot] = None
+        self.token = (
+            token
+            or os.getenv("TELEGRAM_BOT_TOKEN", "")
+            or os.getenv("TELEGRAM_TOKEN", "")
+        )
+        self.bot = None
+        self._poll_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> bool:
-        if not self.token:
+        if AsyncTeleBot is None:
+            logger.error("Telegram adapter unavailable: pyTelegramBotAPI not installed")
             return False
-        
+        if not self.token:
+            logger.error("Telegram adapter unavailable: TELEGRAM_BOT_TOKEN not set")
+            return False
+
         try:
             self.bot = AsyncTeleBot(self.token)
-            
-            @self.bot.message_handler(func=lambda message: True)
-            async def wrap_message(message: Message):
-                event = MessageEvent(
-                    text=message.text or "",
-                    sender_id=str(message.from_user.id),
-                    chat_id=str(message.chat.id),
-                    platform="telegram",
-                    message_id=str(message.message_id),
-                    reply_to_id=str(message.reply_to_message.message_id) if message.reply_to_message else None,
-                    raw_data=message
-                )
-                
-                # Determine message type
-                if message.content_type == 'photo':
-                    event.message_type = MessageType.PHOTO
-                elif message.content_type == 'voice':
-                    event.message_type = MessageType.VOICE
-                
-                if self._on_message:
-                    await self._on_message(event)
-
-            # Start polling in a background task
-            asyncio.create_task(self.bot.infinity_polling())
+            self._register_handlers()
+            # Run the long-lived poll loop as a background task so connect() can
+            # return immediately. _safe_poll swallows network errors so a failed
+            # reconnect never crashes the gateway runner.
+            self._poll_task = asyncio.ensure_future(self._safe_poll())
             return True
-        except Exception as e:
+        except Exception as e:  # pragma: no cover - defensive
             logger.error(f"Telegram connection failed: {e}")
             return False
 
+    def _register_handlers(self):
+        @self.bot.message_handler(func=lambda message: True)
+        async def _wrap_message(message):
+            await self._handle_incoming(message)
+
+    async def _safe_poll(self):
+        try:
+            await self.bot.infinity_polling()
+        except Exception as e:  # pragma: no cover - network dependent
+            logger.warning(f"Telegram polling stopped: {e}")
+
+    async def _handle_incoming(self, message: "Message"):
+        """Normalise a raw telebot ``Message`` into a NEXUS ``MessageEvent``."""
+        from_user = getattr(message, "from_user", None)
+        chat = getattr(message, "chat", None)
+        event = MessageEvent(
+            text=getattr(message, "text", None) or "",
+            sender_id=str(getattr(from_user, "id", "")) if from_user else "",
+            chat_id=str(getattr(chat, "id", "")) if chat else "",
+            platform="telegram",
+            message_id=str(getattr(message, "message_id", "")),
+            reply_to_id=(
+                str(getattr(message.reply_to_message, "message_id", ""))
+                if getattr(message, "reply_to_message", None) else None
+            ),
+            raw_data=message,
+        )
+
+        content_type = getattr(message, "content_type", "text")
+        if content_type == "photo":
+            event.message_type = MessageType.PHOTO
+        elif content_type == "voice":
+            event.message_type = MessageType.VOICE
+
+        if self._on_message:
+            result = self._on_message(event)
+            if asyncio.iscoroutine(result):
+                await result
+
     async def disconnect(self):
-        if self.bot:
-            await self.bot.stop_polling()
+        if self.bot is not None:
+            try:
+                await self.bot.stop_polling()
+            except Exception:  # pragma: no cover - network dependent
+                pass
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            self._poll_task = None
 
     async def send_text(self, chat_id: str, text: str, reply_to: Optional[str] = None) -> SendResult:
-        if not self.bot:
+        if self.bot is None:
             return SendResult(success=False, error="Bot not connected")
-        
         try:
             msg = await self.bot.send_message(chat_id, text, reply_to_message_id=reply_to)
-            return SendResult(success=True, message_id=str(msg.message_id))
+            return SendResult(success=True, message_id=str(getattr(msg, "message_id", "")))
         except Exception as e:
             return SendResult(success=False, error=str(e))
 
     async def send_typing(self, chat_id: str):
-        if self.bot:
+        if self.bot is None:
+            return
+        try:
             await self.bot.send_chat_action(chat_id, "typing")
+        except Exception:  # pragma: no cover - network dependent
+            pass

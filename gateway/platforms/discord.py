@@ -3,71 +3,128 @@ import logging
 import os
 from typing import Optional
 
-import discord
-
 from gateway.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 
 logger = logging.getLogger(__name__)
 
+# Optional dependency: the adapter stays importable (and env-gated) even when
+# discord.py is missing, so it cannot break test collection or the gateway graph.
+try:  # pragma: no cover - exercised by import availability
+    import discord
+    HAS_DISCORD = True
+except Exception:  # pragma: no cover - optional dependency absent
+    discord = None  # type: ignore[assignment]
+    HAS_DISCORD = False
+    logger.warning(
+        "discord.py not installed — Discord adapter disabled. "
+        "Install with: pip install discord.py"
+    )
+
+
 class DiscordAdapter(BasePlatformAdapter):
+    """NEXUS Discord Adapter (discord.py).
+
+    Env-gated: ``connect()`` returns ``False`` unless a bot token is present in
+    ``DISCORD_BOT_TOKEN`` (or the ``DISCORD_TOKEN`` alias) and the SDK is
+    importable. Incoming messages are normalised into ``MessageEvent`` objects,
+    which keeps the handler logic fully unit-testable without a live gateway.
     """
-    NEXUS Discord Adapter.
-    Uses discord.py to interface with the Discord Bot API.
-    """
-    
+
+    HAS_DISCORD = HAS_DISCORD
+
     def __init__(self, token: str = ""):
         super().__init__("discord")
-        self.token = token or os.getenv("DISCORD_BOT_TOKEN", "") or os.getenv("DISCORD_TOKEN", "")
-        intents = discord.Intents.default()
-        intents.message_content = True
-        self.client = discord.Client(intents=intents)
+        self.token = (
+            token
+            or os.getenv("DISCORD_BOT_TOKEN", "")
+            or os.getenv("DISCORD_TOKEN", "")
+        )
+        self.client = None
+        self._run_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> bool:
-        if not self.token:
+        if discord is None:
+            logger.error("Discord adapter unavailable: discord.py not installed")
             return False
-            
-        @self.client.event
-        async def on_message(message):
-            if message.author == self.client.user:
-                return
-                
-            event = MessageEvent(
-                text=message.content,
-                sender_id=str(message.author.id),
-                chat_id=str(message.channel.id),
-                platform="discord",
-                message_id=str(message.id),
-                raw_data=message
+        if not self.token:
+            logger.error("Discord adapter unavailable: DISCORD_BOT_TOKEN not set")
+            return False
+
+        try:
+            intents = discord.Intents.default()
+            intents.message_content = True
+            self.client = discord.Client(intents=intents)
+
+            @self.client.event
+            async def on_message(message):
+                # Ignore our own messages (and other bots if configured).
+                me = getattr(self.client, "user", None)
+                author = getattr(message, "author", None)
+                if me is not None and author is not None and author == me:
+                    return
+                await self._handle_incoming(message)
+
+            @self.client.event
+            async def on_ready():
+                logger.info(f"NEXUS Discord Adapter online as {self.client.user}")
+
+            # Start the Discord client as a background task so connect() returns.
+            self._run_task = asyncio.ensure_future(self.client.start(self.token))
+            return True
+        except Exception as e:  # pragma: no cover - defensive
+            logger.error(f"Discord connection failed: {e}")
+            return False
+
+    async def _handle_incoming(self, message):
+        """Normalise a raw discord.py ``Message`` into a NEXUS ``MessageEvent``."""
+        event = MessageEvent(
+            text=getattr(message, "content", ""),
+            sender_id=str(getattr(message.author, "id", "")),
+            chat_id=str(getattr(message.channel, "id", "")),
+            platform="discord",
+            message_id=str(getattr(message, "id", "")),
+            raw_data=message,
+        )
+
+        attachments = getattr(message, "attachments", None) or []
+        if attachments:
+            event.media_urls = [getattr(a, "url", "") for a in attachments]
+            event.message_type = (
+                MessageType.PHOTO
+                if any(
+                    (getattr(a, "content_type", "") or "").startswith("image/")
+                    for a in attachments
+                )
+                else MessageType.DOCUMENT
             )
-            
-            # Check for attachments
-            if message.attachments:
-                event.message_type = MessageType.PHOTO if any(a.content_type.startswith('image/') for a in message.attachments) else MessageType.DOCUMENT
-                event.media_urls = [a.url for a in message.attachments]
-                
-            if self._on_message:
-                await self._on_message(event)
 
-        @self.client.event
-        async def on_ready():
-            logger.info(f"NEXUS Discord Adapter online as {self.client.user}")
-
-        # Start Discord client in a background task
-        asyncio.create_task(self.client.start(self.token))
-        return True
+        if self._on_message:
+            result = self._on_message(event)
+            if asyncio.iscoroutine(result):
+                await result
 
     async def disconnect(self):
-        await self.client.close()
+        if self.client is not None:
+            try:
+                await self.client.close()
+            except Exception:  # pragma: no cover - network dependent
+                pass
+        if self._run_task is not None:
+            self._run_task.cancel()
+            self._run_task = None
 
     async def send_text(self, chat_id: str, text: str, reply_to: Optional[str] = None) -> SendResult:
+        if self.client is None:
+            return SendResult(success=False, error="Client not connected")
         try:
             channel = self.client.get_channel(int(chat_id))
-            if not channel:
+            if channel is None:
                 channel = await self.client.fetch_channel(int(chat_id))
-            
+            if channel is None:
+                return SendResult(success=False, error=f"Channel {chat_id} not found")
+
             if reply_to:
                 try:
-                    # Fetch the message to reply to
                     original_msg = await channel.fetch_message(int(reply_to))
                     msg = await original_msg.reply(text)
                 except Exception as reply_err:
@@ -76,15 +133,17 @@ class DiscordAdapter(BasePlatformAdapter):
             else:
                 msg = await channel.send(text)
 
-            return SendResult(success=True, message_id=str(msg.id))
+            return SendResult(success=True, message_id=str(getattr(msg, "id", "")))
         except Exception as e:
             return SendResult(success=False, error=str(e))
 
     async def send_typing(self, chat_id: str):
+        if self.client is None:
+            return
         try:
             channel = self.client.get_channel(int(chat_id))
-            if channel:
+            if channel is not None:
                 await channel.typing()
-        except Exception:
-            logger.warning("gateway/platforms/discord.py:87 async send_typing: suppressed error", exc_info=True)
+        except Exception:  # pragma: no cover - network dependent
+            logger.warning("gateway/platforms/discord.py:send_typing: suppressed error", exc_info=True)
             pass
