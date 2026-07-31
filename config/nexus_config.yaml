@@ -1,0 +1,6 @@
+runtime:
+  permission_mode: auto
+  permission_allowlist: []
+  sandbox_tier: no_sandbox
+  model: deepseek-v4-flash
+  provider: deepseek

@@ -68,8 +68,20 @@ class HiveTool(BaseTool):
 
             if mode == "single":
                 agent = await hive.spawn_agent(task=task, persona=persona, parent_run_id=parent_run_id)
-                while agent.status in ("pending", "running"):
-                    await asyncio.sleep(0.1)
+                # Await the underlying agent task with a hard timeout instead of
+                # an unbounded 0.1s busy-wait (a stalled provider would hang forever).
+                task_fut = hive._agent_tasks.get(agent.agent_id)
+                try:
+                    if task_fut is not None:
+                        await asyncio.wait_for(asyncio.shield(task_fut), timeout=hive.consolidation_timeout)
+                    else:
+                        while agent.status in ("pending", "running"):
+                            await asyncio.sleep(0.1)
+                except asyncio.TimeoutError:
+                    return ToolResult(
+                        success=False,
+                        error=f"Sub-agent {agent.agent_id} timed out after {hive.consolidation_timeout:g}s",
+                    )
 
                 if agent.status == "success":
                     return ToolResult(

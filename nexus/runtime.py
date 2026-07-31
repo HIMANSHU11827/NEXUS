@@ -49,6 +49,7 @@ class ChatRunRequest:
     max_tokens: Optional[int]
     turn_id: str
     source: str = ""
+    messages: Optional[list] = None
 
 
 def build_chat_request(
@@ -70,4 +71,5 @@ def build_chat_request(
         max_tokens=parse_max_tokens(raw_max_tokens),
         turn_id=safe_turn_id(data.get("turn_id", "")),
         source=str(data.get("source", default_source) or default_source),
+        messages=data.get("messages"),
     )

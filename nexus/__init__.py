@@ -259,6 +259,7 @@ def _make_parser() -> argparse.ArgumentParser:
     group.add_argument("--gui", action="store_true", help="Start GUI + backend")
     group.add_argument("--server", action="store_true", help="Start API server only")
     group.add_argument("--gateway", action="store_true", help="Start gateway")
+    group.add_argument("--autonomous", action="store_true", help="Start the 24/7 durable task-queue driver (pulls tasks and runs them forever)")
     group.add_argument("--setup", action="store_true", help="Run setup wizard")
     group.add_argument("--quick", action="store_true", help="Quick start with defaults")
     group.add_argument("--reset", action="store_true", help="Reset config to factory defaults")
@@ -444,7 +445,7 @@ def _run_ink_tui(project_root: str, console) -> int:
         backend_proc = None
     else:
         backend_proc = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "gui.api:app", "--host", "127.0.0.1", "--port", "8000"],
+            [sys.executable, "-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", "8000"],
             cwd=project_root,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -668,7 +669,7 @@ def boot():
         _kill_windows_port(5173)
 
         proc = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "gui.api:app", "--host", "127.0.0.1", "--port", "8000"],
+            [sys.executable, "-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", "8000"],
             cwd=project_root,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -678,6 +679,18 @@ def boot():
             subprocess.run(["npm", "run", "dev"], cwd=os.path.join(project_root, "gui"))
         finally:
             proc.terminate()
+        return
+
+    if args.autonomous:
+        _print_banner(console)
+        console.print("[bold green]Starting 24/7 Autonomous Queue Driver...[/bold green]")
+        console.print("[dim]Tasks are pulled from the durable queue and executed forever.[/dim]")
+        console.print("[dim]Enqueue with:  python -m queue.enqueue \"your task\"[/dim]")
+        from queue.driver import run_forever
+        try:
+            asyncio.run(run_forever(workers=1))
+        except KeyboardInterrupt:
+            pass
         return
 
     raise SystemExit(_run_ink_tui(project_root, console))

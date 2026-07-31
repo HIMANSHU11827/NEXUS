@@ -316,6 +316,21 @@ def get_session_user(request) -> Optional[AuthUser]:
     return None
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"})
+
+
+def is_loopback_request(request) -> bool:
+    """True only when the peer address is a genuine loopback address.
+
+    Anything we cannot positively identify as loopback is treated as remote.
+    """
+    client = getattr(request, "client", None)
+    host = getattr(client, "host", None)
+    if not isinstance(host, str):
+        return False
+    return host.strip().lower() in _LOOPBACK_HOSTS
+
+
 def check_auth(request) -> Optional[AuthUser]:
     """Check auth via session cookie first, then Authorization header.
 
@@ -326,14 +341,16 @@ def check_auth(request) -> Optional[AuthUser]:
     if user is not None:
         return user
 
-    # 2. Try Authorization header
-    auth_header = request.headers.get("Authorization", "")
+    # 2. Try Authorization header (case-insensitive header lookup)
+    auth_header = request.headers.get("Authorization", "") or request.headers.get("authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header[7:]
         if validate_dashboard_token(token):
             return AuthUser(provider="token", sub="dashboard", name="Token User")
 
-    # 3. Allow access only if explicitly enabled in env
-    if os.environ.get("NEXUS_ALLOW_LOCAL_ANON", "false").lower() == "true":
+    # 3. Anonymous local access: opt-in AND restricted to loopback peers.
+    #    Without the loopback check this flag silently disabled auth for every
+    #    client that could reach the port (LAN, tunnels, container bridges).
+    if os.environ.get("NEXUS_ALLOW_LOCAL_ANON", "false").lower() == "true" and is_loopback_request(request):
         return AuthUser(provider="local", sub="dashboard", name="Local User")
     return None

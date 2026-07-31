@@ -1,12 +1,130 @@
 providers:
   deepseek:
-    model: deepseek-v4-flash
+    model: deepseek-chat
     endpoint: https://api.deepseek.com/chat/completions
     temperature: 0.7
     max_tokens: 8192
     api_key: ${DEEPSEEK_API_KEY}
+  openrouter:
+    model: openrouter/auto
+    endpoint: https://openrouter.ai/api/v1/chat/completions
+    temperature: 0.7
+    max_tokens: 8192
+    api_key: ${OPENROUTER_API_KEY}
 version: 1.1.0
 default_provider: deepseek
 fallback_chain:
 - deepseek
+- openrouter
 
+# --------------------------------------------------------------------------
+# Reliability: retry/backoff and circuit breaker (providers/reliability.py)
+# --------------------------------------------------------------------------
+reliability:
+  retry:
+    max_attempts: 3
+    base_delay: 0.5
+    max_delay: 30.0
+    multiplier: 2.0
+    jitter: 0.25
+    respect_retry_after: true
+    max_retry_after: 120.0
+  circuit_breaker:
+    failure_threshold: 3
+    cooldown: 30.0
+    half_open_max_calls: 1
+    success_threshold: 1
+
+# --------------------------------------------------------------------------
+# Per-model capabilities and limits (providers/model_capabilities.py)
+# Precedence: models[exact] > models[glob] > providers[id] > defaults
+# --------------------------------------------------------------------------
+model_capabilities:
+  defaults:
+    context_window: 8192
+    max_output_tokens: 2048
+    tools: false
+    vision: false
+    streaming: true
+    structured_output: false
+  providers:
+    deepseek:
+      context_window: 65536
+      max_output_tokens: 8192
+      tools: true
+      streaming: true
+      structured_output: true
+    openrouter:
+      context_window: 128000
+      max_output_tokens: 8192
+      tools: true
+      streaming: true
+    openai:
+      context_window: 128000
+      max_output_tokens: 16384
+      tools: true
+      vision: true
+      streaming: true
+      structured_output: true
+    anthropic:
+      context_window: 200000
+      max_output_tokens: 8192
+      tools: true
+      vision: true
+      streaming: true
+    gemini:
+      context_window: 1000000
+      max_output_tokens: 8192
+      tools: true
+      vision: true
+      streaming: true
+    groq:
+      context_window: 131072
+      max_output_tokens: 8192
+      tools: true
+      streaming: true
+    ollama:
+      context_window: 32768
+      max_output_tokens: 4096
+      streaming: true
+    lm_studio:
+      context_window: 32768
+      max_output_tokens: 4096
+      streaming: true
+  models:
+    deepseek-chat:
+      context_window: 65536
+      max_output_tokens: 8192
+      tools: true
+      structured_output: true
+    deepseek-reasoner:
+      context_window: 65536
+      max_output_tokens: 8192
+      tools: false
+      structured_output: false
+    gpt-4o-mini:
+      context_window: 128000
+      max_output_tokens: 16384
+      tools: true
+      vision: true
+      structured_output: true
+    "*llama-3.3-70b*":
+      context_window: 131072
+      max_output_tokens: 8192
+      tools: true
+    "*llama-3.1-8b*":
+      context_window: 131072
+      max_output_tokens: 4096
+      tools: true
+    "*gemma-2-9b*":
+      context_window: 8192
+      max_output_tokens: 2048
+      tools: false
+    "*phi-3-mini-128k*":
+      context_window: 128000
+      max_output_tokens: 4096
+      tools: false
+    "*deepseek-r1*":
+      context_window: 64000
+      max_output_tokens: 8192
+      tools: false

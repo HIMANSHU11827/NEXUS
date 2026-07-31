@@ -36,7 +36,7 @@ case "$MODE" in
   api)
     echo "Starting NEXUS API on http://127.0.0.1:8000 ..."
     stop_port 8000
-    "$VENV_PYTHON" -m uvicorn gui.api:app --host 127.0.0.1 --port 8000 > "$LOGS_DIR/api-$RUN_STAMP.log" 2>&1 &
+    "$VENV_PYTHON" -m uvicorn server:app --host 127.0.0.1 --port 8000 > "$LOGS_DIR/api-$RUN_STAMP.log" 2>&1 &
     echo "API PID: $!"
     if wait_ok "http://127.0.0.1:8000/api/health" 20; then
       echo "API ready."
@@ -62,7 +62,7 @@ case "$MODE" in
     echo "Starting NEXUS (API + GUI)..."
     stop_port 8000
     stop_port 5173
-    "$VENV_PYTHON" -m uvicorn gui.api:app --host 127.0.0.1 --port 8000 > "$LOGS_DIR/api-$RUN_STAMP.log" 2>&1 &
+    "$VENV_PYTHON" -m uvicorn server:app --host 127.0.0.1 --port 8000 > "$LOGS_DIR/api-$RUN_STAMP.log" 2>&1 &
     API_PID=$!
     echo "API PID: $API_PID"
     if wait_ok "http://127.0.0.1:8000/api/health" 20; then
@@ -93,7 +93,7 @@ case "$MODE" in
     echo "Starting NEXUS in NETWORK mode (accessible from any device)..."
     stop_port 8000
     stop_port 5173
-    "$VENV_PYTHON" -m uvicorn gui.api:app --host 0.0.0.0 --port 8000 > "$LOGS_DIR/api-$RUN_STAMP.log" 2>&1 &
+    "$VENV_PYTHON" -m uvicorn server:app --host 0.0.0.0 --port 8000 > "$LOGS_DIR/api-$RUN_STAMP.log" 2>&1 &
     API_PID=$!
     export NEXUS_DASHBOARD_LOCAL_ONLY=false
     if wait_ok "http://127.0.0.1:8000/api/health" 20; then

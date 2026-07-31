@@ -77,7 +77,7 @@ function restoreActivity(events: Record<string, unknown>[] | undefined): Timelin
       command: typeof raw.related_command === 'string' ? raw.related_command : typeof details.command === 'string' ? details.command : undefined,
       path: typeof files[0] === 'string' ? files[0] : typeof raw.path === 'string' ? raw.path : undefined,
       cwd: typeof details.cwd === 'string' ? details.cwd : undefined,
-      summary: typeof raw.summary === 'string' ? raw.summary : undefined,
+      summary: typeof raw.summary === 'string' ? raw.summary : typeof details.text === 'string' ? details.text : undefined,
       output: typeof raw.output === 'string' ? raw.output : typeof raw.result === 'string' ? raw.result : typeof details.output === 'string' ? details.output : typeof details.result === 'string' ? details.result : undefined,
       error: raw.error && typeof raw.error === 'object' && typeof (raw.error as Record<string, unknown>).message === 'string' ? String((raw.error as Record<string, unknown>).message) : undefined,
       exitCode: typeof rawExitCode === 'number' ? rawExitCode : undefined,
@@ -115,7 +115,10 @@ function restoreActivity(events: Record<string, unknown>[] | undefined): Timelin
         ? appendOutput(existingOutput, chunk)
         : (!event.output || existingOutput && event.output.length < existingOutput.length ? existingOutput : event.output),
       lines: isAppend && chunk ? [...(existing.lines || []), chunk] : existing.lines,
-      startTime: existing.startTime || event.startTime,
+      // Lifecycle events reuse one stable ID. Keep the timestamp from the
+      // original started event so restored history can show the true elapsed
+      // time when the final completed event did not include duration_ms.
+      startTime: existing.startTime || event.startTime || existing.timestamp,
     }
   }
   return restored

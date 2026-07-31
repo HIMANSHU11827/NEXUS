@@ -61,7 +61,7 @@ $OldPythonPath = $env:PYTHONPATH
 try {
   Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
   Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
-  $cmd = 'cmd.exe /c "cd /d "' + $Root + '" && "' + $VenvPython + '" -m uvicorn gui.api:app --host 127.0.0.1 --port ' + $ApiPort + ' > "' + $ApiOutLog + '" 2> "' + $ApiErrLog + '""'
+  $cmd = 'cmd.exe /c "cd /d "' + $Root + '" && "' + $VenvPython + '" -m uvicorn server:app --host 127.0.0.1 --port ' + $ApiPort + ' > "' + $ApiOutLog + '" 2> "' + $ApiErrLog + '""'
   Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList $cmd | Out-Null
 } finally {
   if ($null -ne $OldPythonHome) { $env:PYTHONHOME = $OldPythonHome } else { Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue }

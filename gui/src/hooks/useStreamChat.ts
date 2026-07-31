@@ -35,6 +35,7 @@ export interface TimelineEvent {
   items?: string[]
   planType?: 'simple' | 'advanced'
   phases?: Array<{ title: string; subgoals: string[] }>
+  sequence?: number
 }
 
 export type SectionKey =
@@ -87,15 +88,54 @@ function completedTypeForStatus(type: string, status: TimelineEvent['status']): 
   return `${base}.${status === 'success' ? 'completed' : status}`
 }
 
+// ── Live-state safety caps ────────────────────────────────────────────────
+// A long autonomous run emits an unbounded number of lifecycle records and a
+// command such as a full test suite can stream megabytes of stdout. Both are
+// held in React state, so without a hard bound the browser tab grows until it
+// stalls. Keep the newest window only — the tail is what the user is reading.
+export const MAX_LIVE_WORK_EVENTS = 500
+export const MAX_LIVE_OUTPUT_CHARS = 256 * 1024
+export const MAX_LIVE_OUTPUT_LINES = 500
+export const LIVE_OUTPUT_TRUNCATION_NOTICE = '… earlier output omitted …\n'
+
+export function boundLiveEvents(events: TimelineEvent[]): TimelineEvent[] {
+  const limit = MAX_LIVE_WORK_EVENTS
+  return events.length <= limit ? events : events.slice(-limit)
+}
+
+export function boundedLiveOutput(value: string | undefined): string | undefined {
+  if (!value || value.length <= MAX_LIVE_OUTPUT_CHARS) return value
+  return `${LIVE_OUTPUT_TRUNCATION_NOTICE}${value.slice(-MAX_LIVE_OUTPUT_CHARS)}`
+}
+
+function boundedLiveLines(lines: string[] | undefined): string[] | undefined {
+  if (!lines || lines.length <= MAX_LIVE_OUTPUT_LINES) return lines
+  return lines.slice(-MAX_LIVE_OUTPUT_LINES)
+}
+
+/**
+ * Replay guard. Cursor replays and live SSE can deliver the same stable event
+ * twice, and a slow replay frame must never overwrite newer live state. When
+ * both records carry a canonical `sequence`, only accept the update when
+ * `incomingSequence >= existingSequence`; ties still apply so a re-delivered
+ * terminal record can enrich the row it already produced.
+ */
+export function acceptsSequencedUpdate(existing: TimelineEvent | undefined, incoming: TimelineEvent): boolean {
+  const existingSequence = existing?.sequence
+  const incomingSequence = incoming.sequence
+  if (typeof existingSequence !== 'number' || typeof incomingSequence !== 'number') return true
+  return incomingSequence >= existingSequence
+}
+
 function appendActivityOutput(current: string | undefined, chunk: string): string | undefined {
   if (!chunk) return current
   if (current?.endsWith(chunk)) return current
-  return `${current || ''}${chunk}`
+  return boundedLiveOutput(`${current || ''}${chunk}`)
 }
 
 function completedActivityOutput(current: string | undefined, finalValue: string | undefined): string | undefined {
   if (!finalValue) return current
-  return !current || finalValue.length >= current.length ? finalValue : current
+  return boundedLiveOutput(!current || finalValue.length >= current.length ? finalValue : current)
 }
 
 export function useStreamChat() {
@@ -107,6 +147,7 @@ export function useStreamChat() {
   })
   const ctrlRef = useRef<AbortController | null>(null)
   const sessionIdRef = useRef<string | null>(null)
+  const messagesRef = useRef<Array<{ role: string; content: string }>>([])
 
   const send = useCallback(async (sessionId: string, prompt: string, options?: { showThinking?: boolean; reasoningEffort?: string }) => {
     const ctrl = new AbortController()
@@ -121,6 +162,14 @@ export function useStreamChat() {
     })
 
     try {
+      const ctrl = ctrlRef.current
+      // Client-side timeout: if the backend stalls (no SSE data for minutes),
+      // abort instead of hanging the GUI forever on "isProcessing".
+      const timeoutMs = 90000
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+      // Carry conversation history to the backend so the agent keeps context
+      // across turns instead of starting blank every time.
+      const history = messagesRef.current.slice(-12)
       const res = await fetch('/api/chat', {
         method: 'POST',
         credentials: 'include',
@@ -128,6 +177,7 @@ export function useStreamChat() {
         body: JSON.stringify({
           session_id: sessionId,
           prompt,
+          messages: history,
           stream: true,
           canonical_events: true,
           show_thinking: options?.showThinking ?? false,
@@ -135,6 +185,7 @@ export function useStreamChat() {
         }),
         signal: ctrl.signal,
       })
+      clearTimeout(timer)
 
       if (!res.ok) {
         const body = await res.json().catch(() => ({ detail: res.statusText }))
@@ -211,7 +262,7 @@ export function useStreamChat() {
                 command: raw.related_command || raw.command || details.command,
                 path: raw.related_files?.[0] || raw.path || details.path,
                 cwd: raw.cwd || details.cwd,
-                summary: raw.summary || raw.display?.summary,
+                summary: raw.summary || raw.display?.summary || details.text,
                 output: raw.output || raw.result || details.output || details.result || details.preview,
                 error: raw.error?.message,
                 exitCode: typeof rawExitCode === 'number' ? rawExitCode : undefined,
@@ -236,6 +287,7 @@ export function useStreamChat() {
                   .map((phase: { title?: unknown; subgoals?: unknown }) => ({ title: typeof phase.title === 'string' ? phase.title : 'Phase', subgoals: Array.isArray(phase.subgoals) ? phase.subgoals.filter((goal: unknown): goal is string => typeof goal === 'string') : [] }))
                   : undefined,
                 startTime: raw.start_time ? raw.start_time * 1000 : undefined,
+                sequence: typeof raw.sequence === 'number' ? raw.sequence : undefined,
               }
 
               const isAppend = Boolean(raw.append || payload.append)
@@ -266,14 +318,16 @@ export function useStreamChat() {
                   if (!existing) {
                     return {
                       ...s,
-                      events: [...s.events, {
+                      events: boundLiveEvents([...s.events, {
                         ...event,
                         status: 'running',
-                        output: chunk || event.output,
+                        output: boundedLiveOutput(chunk || event.output),
                         lines: chunk ? [chunk] : [],
-                      }],
+                      }]),
                     }
                   }
+                  // Stale replay frames never clobber newer live state.
+                  if (!acceptsSequencedUpdate(existing, event)) return s
                   const output = appendActivityOutput(existing.output || existing.lines?.join(''), chunk)
                   return {
                     ...s,
@@ -284,7 +338,7 @@ export function useStreamChat() {
                           status: 'running',
                           startTime: e.startTime || event.startTime || e.timestamp,
                           output,
-                          lines: chunk ? [...(e.lines || []), chunk] : e.lines,
+                          lines: boundedLiveLines(chunk ? [...(e.lines || []), chunk] : e.lines),
                         }
                       : e),
                   }
@@ -302,6 +356,8 @@ export function useStreamChat() {
                     (!completionTarget || [e.command, e.path, e.query, e.tool, e.skill, e.subagent].includes(completionTarget))
                   )
                   if (matched) {
+                    // Stale replay frames never clobber newer live state.
+                    if (!acceptsSequencedUpdate(matched, event)) return s
                     const startedAt = matched.startTime || matched.timestamp
                     const durationMs = event.durationMs ?? matched.durationMs ?? Math.max(0, event.timestamp - startedAt)
                     return {
@@ -326,17 +382,27 @@ export function useStreamChat() {
                               lineEnd: event.lineEnd ?? e.lineEnd,
                               durationMs,
                               startTime: startedAt,
+                              sequence: event.sequence ?? e.sequence,
                             }
                           : e
                       ),
                     }
                   }
-                  return { ...s, events: [...s.events, { ...event, status }] }
+                  return { ...s, events: boundLiveEvents([...s.events, { ...event, status }]) }
                 })
                 return
               }
 
-              setState(s => ({ ...s, events: [...s.events, event] }))
+              setState(s => {
+                // Stable-id dedupe: the latest update for a known event wins
+                // instead of appending a duplicate row.
+                const existing = s.events.find(e => e.id === event.id)
+                if (existing) {
+                  if (!acceptsSequencedUpdate(existing, event)) return s
+                  return { ...s, events: s.events.map(e => e.id === event.id ? { ...e, ...event } : e) }
+                }
+                return { ...s, events: boundLiveEvents([...s.events, event]) }
+              })
             } catch {}
           } else if (frame.event === 'error') {
             setState(s => ({ ...s, error: frame.data || 'Stream error' }))
@@ -349,7 +415,15 @@ export function useStreamChat() {
               const payload = JSON.parse(frame.data)
               if (payload && typeof payload.content === 'string') text = payload.content
             } catch {}
-            if (text) setState(s => ({ ...s, content: s.content + text }))
+            if (text) {
+              setState(s => ({ ...s, content: s.content + text }))
+              // Keep a rolling transcript so the next /api/chat call can send
+              // real conversation history back to the backend.
+              messagesRef.current = [
+                ...messagesRef.current.slice(-11),
+                { role: 'assistant', content: text },
+              ]
+            }
           }
         },
         () => {

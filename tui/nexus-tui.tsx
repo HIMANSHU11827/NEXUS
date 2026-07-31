@@ -495,6 +495,7 @@ const COMMANDS = [
     {name: '/statusline', description: 'Show status line settings'},
     {name: '/stickers', description: 'Show sticker support'},
     {name: '/stop', description: 'Stop current thinking stream'},
+    {name: '/retry', description: 'Retry the last user prompt verbatim'},
     {name: '/tasks', description: 'List tasks', aliases: ['/bashes']},
     {name: '/team-onboarding', description: 'Generate local onboarding recap'},
     {name: '/teleport', description: 'Show teleport support', aliases: ['/tp']},
@@ -4630,6 +4631,22 @@ const App = () => {
                     return true;
                 }
                 chatAbortControllerRef.current.abort();
+                return true;
+            }
+
+            if (command === '/retry') {
+                // Retry must reuse the ORIGINAL user prompt, never a rebuilt or
+                // truncated one, and must not resend slash commands.
+                const lastUser = [...history].reverse().find(message => message.role === 'user' && String(message.content || '').trim());
+                const lastUserPrompt = String(lastUser?.content || '').trim();
+                if (!lastUserPrompt || lastUserPrompt.startsWith('/')) {
+                    pushCommand('no previous prompt to retry');
+                    return true;
+                }
+                if (chatAbortControllerRef.current) {
+                    chatAbortControllerRef.current.abort();
+                }
+                void handleSubmit(lastUserPrompt);
                 return true;
             }
 

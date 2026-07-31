@@ -49,17 +49,17 @@ setup:
 	cd $(ROOT)/tui && $(NPM_CMD) install
 
 api:
-	$(VENV_PY) -m uvicorn gui.api:app --host 127.0.0.1 --port 8000 --reload
+	$(VENV_PY) -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 
 gui:
 	cd $(ROOT)/gui && $(NPM_CMD) run dev
 
 run:
-	$(VENV_PY) -m uvicorn gui.api:app --host 127.0.0.1 --port 8000 & \
+	$(VENV_PY) -m uvicorn server:app --host 127.0.0.1 --port 8000 & \
 	cd $(ROOT)/gui && $(NPM_CMD) run dev
 
 network:
-	NEXUS_DASHBOARD_LOCAL_ONLY=false $(VENV_PY) -m uvicorn gui.api:app --host 0.0.0.0 --port 8000 & \
+	NEXUS_DASHBOARD_LOCAL_ONLY=false $(VENV_PY) -m uvicorn server:app --host 0.0.0.0 --port 8000 & \
 	cd $(ROOT)/gui && $(NPM_CMD) run dev -- --host 0.0.0.0
 
 terminal:

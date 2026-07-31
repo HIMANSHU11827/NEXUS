@@ -63,11 +63,23 @@ class NexusMoERouter:
 
     def _get_task_config(self, messages: List[Dict[str, str]]) -> dict:
         task_cfg = self._load_task_routing()
-        cfg = {}
+        if not task_cfg:
+            return {}
+        # Classify the task from the latest user message and select that task's
+        # config (per-task routing). Fall back to the first entry if no match.
+        text = ""
+        for m in reversed(messages or []):
+            if m.get("role") == "user":
+                text = (m.get("content") or "").lower()
+                break
+        # Pick the task whose key appears in the prompt (longest/most-specific match)
+        matched = None
         for task, c in task_cfg.items():
-            cfg.update(c)
-            break
-        return cfg
+            if task and task.lower() in text:
+                if matched is None or len(task) > len(matched):
+                    matched = task
+        chosen = matched or next(iter(task_cfg))
+        return dict(task_cfg.get(chosen, {}))
 
     def set_override(self, provider: str, profile: Optional[str] = None):
         self.provider_override = provider
@@ -172,14 +184,14 @@ class NexusMoERouter:
             if model_override and hasattr(provider, "model"):
                 provider.model = model_override
 
+            saw_chunk = False
+            error_probe = ""
             try:
                 chunk_iter = (
                     provider.stream_chat(messages, **kwargs)
                     if hasattr(provider, "stream_chat")
                     else provider.stream_generate(messages=messages, **kwargs)
                 )
-                saw_chunk = False
-                error_probe = ""
                 for chunk in chunk_iter:
                     text = str(chunk or "")
                     if not text:

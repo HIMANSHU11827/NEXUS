@@ -60,12 +60,38 @@ class MemoryManager:
         max_session_lines: int = 6,
     ) -> None:
         self.root = os.path.abspath(root_dir)
-        self.session_id = session_id or f"session_{uuid.uuid4().hex[:8]}"
+        if session_id:
+            self.session_id = session_id
+        else:
+            # Default to the most-recently-modified session file so a fresh process
+            # resumes the real conversation instead of inventing a random id that
+            # can never be looked up (which made NEXUS "forget everything").
+            self.session_id = self._resolve_latest_session_id()
         self.max_session_lines = max_session_lines
         self._memory: List[Dict[str, str]] = []
         self._pool = ThreadPoolExecutor(max_workers=2)
         self._opencode_memory_dir = os.path.join(self.root, ".opencode", "memory")
         self._in_memory: Dict[str, str] = {}  # key -> text
+
+    @staticmethod
+    def _resolve_latest_session_id(root: Optional[str] = None) -> str:
+        """Pick the most-recently-modified session file so a fresh process resumes
+        the real conversation instead of inventing an unresolvable random id."""
+        if root:
+            sess_dir = os.path.join(os.path.abspath(root), "logs", "sessions")
+            if os.path.isdir(sess_dir):
+                try:
+                    files = [
+                        os.path.join(sess_dir, f)
+                        for f in os.listdir(sess_dir)
+                        if f.endswith(".json") and not f.startswith(".")
+                    ]
+                    if files:
+                        latest = max(files, key=os.path.getmtime)
+                        return os.path.splitext(os.path.basename(latest))[0]
+                except Exception:
+                    pass
+        return f"session_{uuid.uuid4().hex[:8]}"
 
     # ─── Public API ───────────────────────────────────────────────────
 
@@ -184,15 +210,38 @@ class MemoryManager:
         return ""
 
     def _sync_session(self, user_message: str, response: str) -> None:
-        """Append to session history and persist."""
+        """Append to session history and persist.
+
+        Seeds from the existing on-disk history first so a fresh process does not
+        truncate the session file to only its own turns (the loop also writes this
+        same file via _write_session_bus — this merge avoids clobbering it).
+        """
         if not user_message and not response:
             return
         try:
+            path = os.path.join(self.root, "logs", "sessions", f"{self.session_id}.json")
+            # Always merge with the on-disk history first so we never clobber the
+            # loop's own session file (it also writes this same path via
+            # _write_session_bus). Only merge entries we don't already hold.
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as fh:
+                        existing = json.load(fh)
+                    if isinstance(existing, list):
+                        have = {
+                            (m.get("role"), m.get("content"))
+                            for m in self._memory
+                            if isinstance(m, dict)
+                        }
+                        for m in existing:
+                            if isinstance(m, dict) and (m.get("role"), m.get("content")) not in have:
+                                self._memory.append(m)
+                except Exception:
+                    pass
             if user_message:
                 self._memory.append({"role": "user", "content": user_message})
             if response:
                 self._memory.append({"role": "assistant", "content": response})
-            path = os.path.join(self.root, "logs", "sessions", f"{self.session_id}.json")
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(self._memory, f, indent=2)

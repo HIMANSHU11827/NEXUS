@@ -169,7 +169,16 @@ class SkillCurator:
             last_active = usage.get("last_activity_at")
             state = usage.get("state", "active")
 
-            if state == "active" and last_active is not None:
+            # Skills that have never been used (last_activity_at is None) are
+            # treated as stale from their creation time so they can be archived
+            # instead of lingering forever.
+            if state == "active":
+                if last_active is None:
+                    created = usage.get("created_at") or now
+                    try:
+                        last_active = float(created)
+                    except (TypeError, ValueError):
+                        last_active = now
                 days_since = (now - float(last_active)) / 86400
                 if days_since > self.stale_after_days:
                     result = self.archive_skill(name)

@@ -166,8 +166,11 @@ class NexusAtlasRAG(ThreadSafeSingleton):
             chunks.append(text[i : i + size])
         return chunks
 
-    def store_document(self, filename: str, content: str, mtime: float = 0.0) -> None:
-        """Store a document in the RAG index."""
+    def store_document(self, filename: str, content: str, mtime: float = 0.0, save: bool = True) -> None:
+        """Store a document in the RAG index.
+        When indexing a whole workspace, pass save=False and call _save_index() once
+        afterwards — otherwise each file triggers a full JSON dump + IDF rebuild (O(N^2)).
+        """
         keys_to_del = [
             k for k, v in self._doc_store.items() if v.get("file") == filename
         ]
@@ -198,7 +201,8 @@ class NexusAtlasRAG(ThreadSafeSingleton):
             if self.turbo_engine:
                 self.turbo_engine.add_document(chunk_id, chunk, {"file": filename})
 
-        self._save_index()
+        if save:
+            self._save_index()
 
     def index_workspace(
         self, root_dir: Optional[str] = None, file_path: Optional[str] = None
@@ -240,19 +244,67 @@ class NexusAtlasRAG(ThreadSafeSingleton):
                             with open(
                                 path, "r", encoding="utf-8", errors="ignore"
                             ) as f_obj:
-                                self.store_document(rel, f_obj.read(), mtime)
+                                self.store_document(rel, f_obj.read(), mtime, save=False)
                                 count += 1
                         except (OSError, IOError):
                             pass
 
         if count > 0:
             self._save_index()
-            
+
         print(f"[RAG_3.3]: BM25 Index Complete. {count} files updated.")
         return f"Refreshed {count} documents."
 
+    def ensure_indexed(self) -> None:
+        """Lazily build a *curated* knowledge index once, on first retrieval.
+
+        We deliberately do NOT os.walk the entire repo (33k+ files incl. .venv —
+        that is slow and pollutes the index with vendored code). Instead we index
+        the high-signal knowledge sources: docs/, root-level *.md, config/, and the
+        README. This is fast, runs once, and gives _load_knowledge_context real
+        content instead of an empty string.
+        """
+        if getattr(self, "_ensured", False):
+            return
+        self._ensured = True
+        targets = []
+        # docs/ directory (architecture, guides)
+        docs_dir = os.path.join(self.root, "docs")
+        if os.path.isdir(docs_dir):
+            for fn in sorted(os.listdir(docs_dir)):
+                if fn.endswith((".md", ".txt")):
+                    targets.append(os.path.join(docs_dir, fn))
+        # root-level markdown + key files
+        for fn in ("README.md", "NEXUS.md", "AGENTS.md", "CLAUDE.md"):
+            p = os.path.join(self.root, fn)
+            if os.path.isfile(p):
+                targets.append(p)
+        # config/ directory
+        cfg_dir = os.path.join(self.root, "config")
+        if os.path.isdir(cfg_dir):
+            for fn in sorted(os.listdir(cfg_dir)):
+                if fn.endswith((".md", ".txt", ".yml", ".yaml", ".json")):
+                    targets.append(os.path.join(cfg_dir, fn))
+        if not targets:
+            return
+        for p in targets:
+            try:
+                rel = os.path.relpath(p, self.root).replace("\\", "/")
+                with open(p, "r", encoding="utf-8", errors="strict") as fh:
+                    text = fh.read()
+                if not text.strip():
+                    continue
+                self.store_document(rel, text, os.path.getmtime(p), save=False)
+            except Exception:
+                # skip binary / undecodable files silently
+                continue
+        if self._doc_store:
+            self._save_index()
+
     def retrieve_as_text(self, query: str, top_k: int = 5) -> str:
         """Retrieve top-k relevant documents for a query using BM25 with inverted index."""
+        if not self._doc_store:
+            self.ensure_indexed()
         if not self._doc_store:
             return "RAG store empty."
         q_tokens = self._tokenize(query)

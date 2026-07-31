@@ -1,4 +1,4 @@
-import { Send, Copy, Check, CheckCircle2, StopCircle, Loader2, Globe, Terminal, FileEdit, Search, Code, XCircle, ChevronDown, ChevronRight, ExternalLink, Mic, MicOff, Volume2, VolumeX, Cpu, ShieldCheck, MonitorUp, MonitorOff, Headphones, FolderOpen, Plus } from 'lucide-react'
+import { Send, Copy, Check, CheckCircle2, StopCircle, Loader2, Globe, Terminal, FileEdit, Search, Code, XCircle, ChevronDown, ChevronRight, ExternalLink, Mic, MicOff, Volume2, VolumeX, Cpu, ShieldCheck, MonitorUp, MonitorOff, Headphones, FolderOpen, Plus, GitBranch } from 'lucide-react'
 import { createElement, useState, useRef, useEffect, useCallback, type ReactNode } from 'react'
 import { useStore, type Message } from '../lib/store'
 import { api } from '../lib/api'
@@ -263,42 +263,79 @@ function CodeBlock({ code, language }: { code: string; language?: string }) {
 function MessageEntry({ msg }: { msg: Message }) {
   const isUser = msg.role === 'user'
   const [copied, setCopied] = useState(false)
+  const hasActivity = !isUser && Boolean(msg.activity?.length)
+  const [activityExpanded, setActivityExpanded] = useState(false)
+  const totalWorkDuration = hasActivity ? runDuration(msg.activity!) : undefined
 
   return (
-    <div className="mb-5 group" data-testid="message-bubble">
-      <div className="text-xs font-medium text-muted-foreground mb-1.5">
-        {isUser ? 'You' : 'Nexus'}
-      </div>
-      {isUser ? (
-        <p className="text-sm leading-relaxed text-foreground whitespace-pre-wrap">{msg.content}</p>
-      ) : (
-        <>
-          {msg.activity && msg.activity.length > 0 && <EventActivity events={msg.activity} />}
-          <div className="text-sm leading-relaxed text-foreground/85">
-            {extractCodeBlocks(msg.content).map((part, i) =>
-              part.type === 'code'
-                ? <CodeBlock key={i} code={part.content} language={part.language} />
-                : <MarkdownText key={i} text={part.content} />
-            )}
+    <div className={`mb-5 flex group ${isUser ? 'justify-end' : 'justify-start'}`} data-testid="message-bubble">
+      <div className={`max-w-[min(86%,760px)] ${isUser ? 'items-end' : 'items-start'} flex flex-col`}>
+        <div className={`mb-1.5 px-1 text-xs font-medium ${isUser ? 'text-primary' : 'text-muted-foreground'}`}>
+          {isUser ? 'You' : 'Nexus'}
+        </div>
+        {hasActivity && hasRenderableActivity(msg.activity!) && (
+          <div className="mb-3 w-full">
+            <button
+              type="button"
+              onClick={() => setActivityExpanded(expanded => !expanded)}
+              aria-expanded={activityExpanded}
+              className="flex w-full items-center gap-1 border-b border-border/60 px-1 pb-1.5 text-left text-sm text-muted-foreground transition hover:text-foreground"
+            >
+              {activityExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+              <span>{totalWorkDuration ? `Worked for ${formatDuration(totalWorkDuration)}` : 'Work details'}</span>
+            </button>
+            {activityExpanded && <div className="pt-2"><EventActivity events={msg.activity!} /></div>}
           </div>
-        </>
-      )}
-      <div className="flex items-center gap-1 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
-        <button
-          onClick={() => { navigator.clipboard.writeText(msg.content); setCopied(true); setTimeout(() => setCopied(false), 1400) }}
-          aria-label="Copy message"
-          title="Copy message"
-          className="flex items-center justify-center size-5 rounded text-muted-foreground/40 hover:text-muted-foreground hover:bg-secondary transition"
-        >
-          {copied ? <Check size={11} /> : <Copy size={11} />}
-        </button>
-        <span className="text-[10px] text-muted-foreground/30">{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+        )}
+        <div className={`relative rounded-lg border px-4 pb-5 pt-1.5 shadow-sm ${isUser
+          ? 'rounded-lg border-slate-200 bg-white text-slate-900 shadow-slate-900/10 dark:border-slate-700 dark:bg-slate-100 dark:text-slate-900'
+          : 'rounded-lg border-border/80 bg-card/70 text-foreground/90'
+        }`}>
+          {isUser ? (
+            <p className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</p>
+          ) : (
+            <>
+              <div className="text-sm leading-relaxed">
+                {extractCodeBlocks(msg.content).map((part, i) =>
+                  part.type === 'code'
+                    ? <CodeBlock key={i} code={part.content} language={part.language} />
+                    : <MarkdownText key={i} text={part.content} />
+                )}
+              </div>
+            </>
+          )}
+          <div className="absolute bottom-1 left-3 hidden items-center gap-1 rounded bg-background/85 px-1 transition-opacity group-hover:flex">
+            <button
+              onClick={() => { navigator.clipboard.writeText(msg.content); setCopied(true); setTimeout(() => setCopied(false), 1400) }}
+              aria-label="Copy message"
+              title="Copy message"
+              className="flex size-5 items-center justify-center rounded text-muted-foreground/40 transition hover:bg-secondary hover:text-muted-foreground"
+            >
+              {copied ? <Check size={11} /> : <Copy size={11} />}
+            </button>
+            <span className="text-[10px] text-muted-foreground/45">{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+          </div>
+        </div>
+        {!isUser && hasActivity && (
+          <div className="mt-2 flex w-full justify-end border-t border-border/60 pt-2">
+            <button
+              type="button"
+              disabled
+              title="A restorable file checkpoint is not available for this run."
+              className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground/60"
+            >
+              <span>Restore Checkpoint</span>
+              <GitBranch size={14} />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )
 }
 
 function eventIcon(type: string) {
+  if (type.startsWith('agent.thinking') || type.startsWith('thinking') || type.startsWith('thought')) return Cpu
   if (type.startsWith('command') || type.startsWith('terminal')) return Terminal
   if (type.startsWith('file')) return FileEdit
   if (type.startsWith('search') || type.startsWith('web') || type.startsWith('browse') || type.startsWith('browser')) return Search
@@ -317,7 +354,8 @@ function formatDuration(ms?: number): string {
 }
 
 function toolLabel(event: TimelineEvent): string {
-  if (event.type.startsWith('command') || event.type.startsWith('terminal')) return 'Terminal'
+  if (event.type.startsWith('agent.thinking') || event.type.startsWith('thinking') || event.type.startsWith('thought')) return 'Thought'
+  if (event.type.startsWith('command') || event.type.startsWith('terminal')) return 'Run command'
   if (event.type.startsWith('web') || event.type.startsWith('search')) return 'Web search'
   if (event.type.startsWith('browse') || event.type.startsWith('browser')) return 'Browser'
   if (event.type.startsWith('file')) {
@@ -576,6 +614,42 @@ function RunningTimer({ startTime }: { startTime?: number }) {
   return <span className="animate-pulse">{formatDuration(elapsed)}</span>
 }
 
+function LiveRunStatus({ events, onStop }: { events: TimelineEvent[]; onStop: () => void }) {
+  const startedAt = useRef(Date.now())
+  const [elapsed, setElapsed] = useState(0)
+  useEffect(() => {
+    const tick = () => setElapsed(Math.max(0, Date.now() - startedAt.current))
+    tick()
+    const id = setInterval(tick, 250)
+    return () => clearInterval(id)
+  }, [])
+
+  const activeEvent = [...events].reverse().find(event =>
+    isExternalEvent(event) && (event.status === 'running' || event.status === 'pending')
+  )
+  const label = activeEvent
+    ? `${toolLabel(activeEvent)} is ${activeEvent.status === 'pending' ? 'queued' : 'running'}`
+    : 'Nexus is working'
+
+  return (
+    <div role="status" aria-live="polite" className="mb-2 flex items-center gap-2 text-xs font-semibold text-foreground/80">
+      <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/10">
+        <Loader2 size={14} className="animate-spin text-primary" aria-hidden="true" />
+      </span>
+      <span>{label}</span>
+      <span className="tabular-nums text-muted-foreground/70">· {formatDuration(elapsed)}</span>
+      <span className="flex items-center gap-0.5" aria-hidden="true">
+        <i className="h-1 w-1 rounded-full bg-primary animate-pulse" />
+        <i className="h-1 w-1 rounded-full bg-primary animate-pulse [animation-delay:150ms]" />
+        <i className="h-1 w-1 rounded-full bg-primary animate-pulse [animation-delay:300ms]" />
+      </span>
+      <button type="button" onClick={onStop} className="ml-1 rounded border border-border/70 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:border-destructive/40 hover:text-destructive">
+        Stop
+      </button>
+    </div>
+  )
+}
+
 function ToolEventItem({ event }: { event: TimelineEvent }) {
   const [expanded, setExpanded] = useState(false)
   const Icon = eventIcon(event.type)
@@ -595,15 +669,21 @@ function ToolEventItem({ event }: { event: TimelineEvent }) {
     event.sources?.length || event.lineStart !== undefined || event.lineEnd !== undefined || event.summary ||
     event.target || event.action || event.tool || event.skill || event.subagent || event.server || event.mcpTool || event.title
   )
+  const isThought = event.type.startsWith('agent.thinking') || event.type.startsWith('thinking') || event.type.startsWith('thought')
+  const cardClass = isThought
+    ? 'border-dashed bg-background/35'
+    : isTerminalEvent(event)
+      ? 'bg-secondary/35 border-border/70'
+      : 'bg-secondary/55 border-border/50'
 
   return (
-    <div className="min-w-0 rounded-md bg-secondary/55 border border-border/50" style={{ animation: 'nexus-fade-in 0.2s ease-out' }}>
+    <div className={`min-w-0 rounded-lg border ${cardClass}`} style={{ animation: 'nexus-fade-in 0.2s ease-out' }}>
       <button
         type="button"
         onClick={() => hasDetails && setExpanded(value => !value)}
         aria-expanded={hasDetails ? expanded : undefined}
         aria-label={`${expanded ? 'Collapse' : 'Expand'} ${label} details`}
-        className={`flex w-full items-center gap-1.5 px-2 py-1 text-left text-[11px] ${hasDetails ? 'cursor-pointer hover:bg-foreground/[0.035] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/50' : 'cursor-default'}`}
+        className={`flex w-full items-center gap-1.5 px-1.5 py-0.5 text-left text-[10px] ${hasDetails ? 'cursor-pointer hover:bg-foreground/[0.035] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/50' : 'cursor-default'}`}
         title={isFileEvent(event) ? undefined : event.summary || detail}
       >
         <span className="shrink-0 text-muted-foreground/50">{hasDetails ? (expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />) : <span className="block size-3" />}</span>
@@ -613,7 +693,7 @@ function ToolEventItem({ event }: { event: TimelineEvent }) {
             : isDone ? <CheckCircle2 size={12} className="text-emerald-600/70" />
             : <Icon size={12} className="text-muted-foreground/55" />}
         </span>
-        <span className="font-semibold text-foreground/75 shrink-0">{label}</span>
+        <span className="shrink-0 font-semibold text-foreground/85">{label}</span>
         {detail && <span className="truncate font-mono text-muted-foreground/60" title={detail}>· {detail}</span>}
         <span className={`ml-auto shrink-0 text-[10px] ${isFailed ? 'text-destructive/70' : 'text-muted-foreground/50'}`}>
           {statusLabel}{' · '}{isRunning ? <RunningTimer startTime={event.startTime || event.timestamp} /> : duration || '—'}
@@ -626,13 +706,52 @@ function ToolEventItem({ event }: { event: TimelineEvent }) {
 
 // Only show public execution evidence. Internal planning and private thinking
 // never enter this feed, and raw output chunks stay with their parent action.
-const EXTERNAL_PREFIXES = ['plan.', 'tool.', 'command.', 'terminal.', 'file.', 'search.', 'web.', 'browse.', 'browser.', 'git.', 'test.', 'skill.', 'plugin.', 'mcp.', 'hive.', 'subagent.', 'code.', 'generate.']
+const EXTERNAL_PREFIXES = ['assistant.progress', 'plan.', 'tool.', 'command.', 'terminal.', 'file.', 'search.', 'web.', 'browse.', 'browser.', 'git.', 'test.', 'skill.', 'plugin.', 'mcp.', 'hive.', 'subagent.', 'code.', 'generate.', 'agent.thinking', 'thinking.', 'thought.', 'approval.', 'retry.', 'error.']
+
+// Public activity allowlist. An event whose canonical type is unknown is still
+// shown when the backend labelled it with one of these public work kinds, so a
+// real approval prompt, retry, or failure can never be silently dropped.
+export const PUBLIC_ACTIVITY_KINDS = ['file', 'command', 'search', 'browser', 'mcp', 'skill', 'plugin', 'hive', 'todo', 'approval', 'retry', 'error']
+
+// Private grounding and internal self-diagnostics are never public evidence and
+// must never replay into the visible timeline.
+const PRIVATE_EVENT_PATTERNS = [
+  /prompt_files/i,
+  /critical preventive vaccine/i,
+  /tool safety audit/i,
+  /agent tools/i,
+  /latest tool results/i,
+  /tool results accepted/i,
+]
+
+export function isPrivateDiagnosticEvent(event: TimelineEvent): boolean {
+  const haystack = [event.target, event.path, event.title, event.summary, event.query, event.tool]
+    .filter(Boolean)
+    .join(' ')
+  if (String(event.stage || '').toLowerCase() === 'grounding' && /prompt/i.test(haystack)) return true
+  return PRIVATE_EVENT_PATTERNS.some(pattern => pattern.test(haystack))
+}
+
+// Failures, approval prompts, and retries are the events a user most needs.
+// They stay in the feed even when their canonical type is unfamiliar.
+export function isActionableEvent(event: TimelineEvent): boolean {
+  const kind = String(event.kind || event.type || '').toLowerCase()
+  return kind.includes('approval') || kind.includes('retry') || kind.includes('error')
+    || event.status === 'failed'
+}
+
+export function actionableEventDetail(event: TimelineEvent, fallbackTarget = ''): string {
+  return event.error || event.summary || fallbackTarget
+}
 
 function isExternalEvent(event: TimelineEvent): boolean {
   // Internal provider/prompt bookkeeping stays hidden. Public execution events
   // retain their stage so a live plan, search, file, or command card is never
   // lost simply because the backend provided a phase label.
-  if (event.visibility === 'internal') return false
+  if (String(event.visibility || '').toLowerCase() === 'internal') return false
+  if (isPrivateDiagnosticEvent(event)) return false
+  if (isActionableEvent(event)) return true
+  if (event.kind && PUBLIC_ACTIVITY_KINDS.includes(String(event.kind).toLowerCase())) return true
   if (event.type.endsWith('.stdout') || event.type.endsWith('.stderr') || event.type.endsWith('.output') || event.type.endsWith('.result')) return false
   return EXTERNAL_PREFIXES.some(p => event.type.startsWith(p))
 }
@@ -654,6 +773,10 @@ function deduplicateEvents(events: TimelineEvent[]): TimelineEvent[] {
   const map = new Map<string, TimelineEvent>()
 
   for (const ev of events) {
+    if (ev.type === 'assistant.progress') {
+      map.set(`assistant.progress|${ev.id}`, ev)
+      continue
+    }
     const baseType = ev.type
       .replace('.started', '')
       .replace('.completed', '')
@@ -675,13 +798,46 @@ function deduplicateEvents(events: TimelineEvent[]): TimelineEvent[] {
   return Array.from(map.values())
 }
 
+function hasRenderableActivity(events: TimelineEvent[]): boolean {
+  return deduplicateEvents(events.filter(isExternalEvent)).length > 0
+}
+
+function runDuration(events: TimelineEvent[]): number | undefined {
+  const completedRun = events.find(event =>
+    event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled'
+  )
+  if (completedRun?.durationMs !== undefined) return completedRun.durationMs
+  if (completedRun?.startTime !== undefined) {
+    return Math.max(0, completedRun.timestamp - completedRun.startTime)
+  }
+
+  const startedRun = events.find(event => event.type === 'run.started')
+  const terminalEvent = events.find(event =>
+    event.type === 'message.completed' || event.type === 'message.failed' || event.type === 'run.completed' || event.type === 'run.failed'
+  )
+  if (startedRun && terminalEvent) return Math.max(0, terminalEvent.timestamp - startedRun.timestamp)
+  return undefined
+}
+
+function PublicProgress({ event }: { event: TimelineEvent }) {
+  const text = event.summary || event.output
+  if (!text) return null
+  return (
+    <div className="rounded-lg border border-border/80 bg-card/70 px-4 py-2 text-sm leading-relaxed text-foreground/90 shadow-sm">
+      <MarkdownText text={text} />
+    </div>
+  )
+}
+
 function EventActivity({ events }: { events: TimelineEvent[] }) {
   const visible = deduplicateEvents(events.filter(isExternalEvent))
   if (visible.length === 0) return null
   return (
-    <div className="mb-4 nexus-event-line" style={{ animation: 'nexus-fade-in 0.25s ease-out' }}>
+    <div className="mb-3 space-y-2 nexus-event-line" style={{ animation: 'nexus-fade-in 0.25s ease-out' }}>
       {visible.map(ev => (
-        <ToolEventItem key={ev.id} event={ev} />
+        <div key={ev.id} className="space-y-1">
+          {ev.type === 'assistant.progress' ? <PublicProgress event={ev} /> : <ToolEventItem event={ev} />}
+        </div>
       ))}
     </div>
   )
@@ -689,7 +845,7 @@ function EventActivity({ events }: { events: TimelineEvent[] }) {
 
 export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => void }) {
   const { addMessage, getActiveSession, activeSessionId, createSession, backendAvailable } = useStore()
-  const { content, events, isProcessing, error, send, cancel, reset, pendingApproval, respondApproval } = useStreamChat()
+  const { content, events, thinkingText, isThinking, thinkingDone, isProcessing, error, send, cancel, reset, pendingApproval, respondApproval } = useStreamChat()
   const [input, setInput] = useState('')
   const [isListening, setIsListening] = useState(false)
   const [speechEnabled, setSpeechEnabled] = useState(() => localStorage.getItem('nexus-speech-enabled') === 'true')
@@ -836,12 +992,27 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
 
   useEffect(() => {
     if (hasStreamed.current && !isProcessing && content && activeSessionId && content !== lastSavedContent.current) {
-      addMessage(activeSessionId, 'assistant', content, events)
+      // Keep the safe, backend-sanitized thought marker with the completed
+      // assistant turn so historical chats show the same activity cards as a
+      // live run. The backend never sends private chain-of-thought here.
+      const completedActivity = thinkingText
+        ? [...events, {
+            id: `thought-${activeSessionId}-${Date.now()}`,
+            type: 'agent.thinking.completed',
+            section: 'thinking' as const,
+            title: 'Thought',
+            status: 'success' as const,
+            timestamp: Date.now(),
+            summary: thinkingText.slice(0, 240),
+            visibility: 'public',
+          }]
+        : events
+      addMessage(activeSessionId, 'assistant', content, completedActivity)
       speakResponse(content)
       hasStreamed.current = false
       lastSavedContent.current = content
     }
-  }, [isProcessing, content, events, activeSessionId, addMessage, speakResponse])
+  }, [isProcessing, content, events, thinkingText, activeSessionId, addMessage, speakResponse])
 
   useEffect(() => () => {
     recognitionRef.current?.abort()
@@ -1069,18 +1240,22 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
                 finishes, the same rows are stored with the assistant message above. */}
             {isProcessing && (
               <div className="mb-5" style={{ animation: 'nexus-fade-in 0.25s ease-out' }}>
-                <div role="status" aria-live="polite" className="flex items-center gap-2 text-xs font-semibold text-foreground/80 mb-1.5">
-                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/10">
-                    <Loader2 size={14} className="animate-spin text-primary" aria-hidden="true" />
-                  </span>
-                  <span>Nexus is working</span>
-                  <span className="flex items-center gap-0.5" aria-hidden="true">
-                    <i className="h-1 w-1 rounded-full bg-primary animate-pulse" />
-                    <i className="h-1 w-1 rounded-full bg-primary animate-pulse [animation-delay:150ms]" />
-                    <i className="h-1 w-1 rounded-full bg-primary animate-pulse [animation-delay:300ms]" />
-                  </span>
-                </div>
+                <LiveRunStatus events={events} onStop={cancel} />
                 
+                {(isThinking || thinkingDone) && thinkingText && (
+                  <div className="mb-2 overflow-hidden rounded-lg border border-dashed border-border bg-secondary/25">
+                    <div className="flex items-center gap-2 px-3 py-2 text-left text-[11px]">
+                      <Cpu size={12} className={isThinking ? 'animate-pulse text-muted-foreground' : 'text-muted-foreground/70'} />
+                      <span className="font-semibold text-foreground/80">Thought</span>
+                      {isThinking && <Loader2 size={11} className="animate-spin text-muted-foreground/60" />}
+                      {thinkingDone && <CheckCircle2 size={11} className="text-emerald-600/70" />}
+                    </div>
+                    <div className="border-t border-border/50 px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground/75">
+                      {thinkingText.slice(0, 240)}{thinkingText.length > 240 ? '…' : ''}
+                    </div>
+                  </div>
+                )}
+
                 {/* Events during processing — live stream */}
                 {isProcessing && events.length > 0 && (
                   <div className="mb-1"><EventActivity events={events} /></div>
@@ -1121,7 +1296,7 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
         {backgroundRuns.length > 0 && <div className="mb-1 border border-border bg-secondary/25 text-[11px] text-muted-foreground"><button type="button" onClick={() => setBackgroundExpanded(value => !value)} aria-expanded={backgroundExpanded} className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-secondary/45">{backgroundExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}{activeBackgroundRuns.length > 0 ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}<span>{activeBackgroundRuns.length > 0 ? `${activeBackgroundRuns.length} Background running` : `${backgroundRuns.length} Background history`}</span></button>{backgroundExpanded && <div className="border-t border-border px-3 py-2">{activeBackgroundRuns.length > 0 && <div className="mb-2 flex items-center justify-between gap-2"><span>Real command or agent work is running in the background.</span><div className="flex shrink-0 items-center gap-1"><button type="button" onClick={() => setBackgroundSteerOpen(value => !value)} className="border border-border bg-background px-2 py-1 font-medium text-foreground hover:bg-secondary">Steer</button><button type="button" onClick={cancel} className="border border-destructive/40 bg-destructive/5 px-2 py-1 font-medium text-destructive hover:bg-destructive/10">Stop</button></div></div>}{backgroundRuns.map(run => <div key={run.id} className="border-t border-border/60 py-1.5 first:border-t-0 first:pt-0"><div className="flex items-center gap-2"><span className="shrink-0">{run.status === 'running' || run.status === 'pending' ? <Loader2 size={12} className="animate-spin" /> : run.status === 'failed' ? <XCircle size={12} className="text-destructive" /> : <CheckCircle2 size={12} className="text-emerald-600" />}</span><span className="min-w-0 flex-1 truncate font-medium text-foreground" title={run.command || run.title}>{run.command || run.title || run.tool || 'Nexus background task'}</span><span className="shrink-0 text-[10px] capitalize">{run.status === 'success' ? 'Completed' : run.status}</span></div>{(run.summary || run.output || run.error) && <p className="ml-5 mt-1 whitespace-pre-wrap break-words text-[10px] text-muted-foreground">{(run.error || run.summary || run.output || '').slice(0, 320)}</p>}</div>)}{backgroundSteerOpen && <div className="mt-2 flex gap-1.5"><input autoFocus value={backgroundSteerText} onChange={event => setBackgroundSteerText(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') addBackgroundSteer(); if (event.key === 'Escape') setBackgroundSteerOpen(false) }} placeholder="Add a priority instruction…" className="min-w-0 flex-1 border border-border bg-background px-2 py-1.5 text-[11px] text-foreground outline-none focus:border-ring" aria-label="Steer background task" /><button type="button" onClick={addBackgroundSteer} disabled={!backgroundSteerText.trim()} className="border border-border bg-background px-2 py-1 font-medium text-foreground hover:bg-secondary disabled:opacity-40">Add</button><button type="button" onClick={() => { setBackgroundSteerOpen(false); setBackgroundSteerText('') }} className="border border-border bg-background px-2 py-1 hover:bg-secondary">Cancel</button></div>}{activeBackgroundRuns.length > 0 && <p className="mt-1.5 text-[10px] text-muted-foreground">The instruction is placed first in the queue and runs when current work finishes.</p>}</div>}</div>}
         {queuedTasks.length > 0 && <div className="mb-1 border border-border bg-secondary/25 text-[11px] text-muted-foreground"><button type="button" onClick={() => setQueueExpanded(value => !value)} aria-expanded={queueExpanded} className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-secondary/45">{queueExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}<Code size={12} /><span>{queuedTasks.length} Queued</span></button>{queueExpanded && <div className="border-t border-border px-3 py-1.5">{queuedTasks.map((task, index) => { const editing = editingQueuedId === task.id; return <div key={task.id} className="flex items-center gap-2 py-1.5"><span className="text-muted-foreground">{index + 1}.</span>{editing ? <input autoFocus value={editingQueuedPrompt} onChange={event => setEditingQueuedPrompt(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') saveQueuedTask(task.id); if (event.key === 'Escape') setEditingQueuedId(null) }} className="min-w-0 flex-1 border border-border bg-background px-1.5 py-1 text-[11px] text-foreground outline-none" aria-label="Edit queued request" /> : <span className="min-w-0 flex-1 truncate">{task.prompt}</span>}<div className="flex shrink-0 items-center gap-1">{editing ? <><button type="button" onClick={() => saveQueuedTask(task.id)} className="px-1.5 py-1 hover:bg-secondary">Save</button><button type="button" onClick={() => setEditingQueuedId(null)} className="px-1.5 py-1 hover:bg-secondary">Cancel</button></> : <><button type="button" onClick={() => steerQueuedTask(task)} className="px-1.5 py-1 hover:bg-secondary">Steer</button><button type="button" onClick={() => { setEditingQueuedId(task.id); setEditingQueuedPrompt(task.prompt) }} className="flex size-6 items-center justify-center hover:bg-secondary" aria-label={`Edit queued request: ${task.prompt}`}><FileEdit size={13} /></button><button type="button" onClick={() => removeQueuedTask(task.id)} className="flex size-6 items-center justify-center hover:bg-secondary" aria-label={`Delete queued request: ${task.prompt}`}><XCircle size={13} /></button></>}</div></div>})}</div>}</div>}
         {screenStream && <div className="mb-2 flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/5 px-2 py-1.5"><video ref={screenPreviewRef} autoPlay muted playsInline className="h-10 w-16 rounded object-cover" /><span className="min-w-0 flex-1 truncate text-[11px] font-medium text-blue-700 dark:text-blue-300">Screen sharing is active</span><button type="button" onClick={stopScreenShare} className="rounded px-2 py-1 text-[10px] font-medium text-blue-700 hover:bg-blue-500/10 dark:text-blue-300">Stop</button></div>}
-        <div className="relative rounded-md border border-border bg-secondary/90 p-2 shadow-[0_8px_28px_rgba(15,23,42,0.06)] transition focus-within:border-ring/50 focus-within:ring-2 focus-within:ring-ring/10">
+        <div className="relative rounded-md border border-border bg-secondary/90 p-1 shadow-[0_8px_28px_rgba(15,23,42,0.06)] transition focus-within:border-ring/50 focus-within:ring-2 focus-within:ring-ring/10">
           {showSlashMenu && <div className="absolute bottom-full left-0 right-0 z-30 mb-1 overflow-hidden border border-border bg-background shadow-xl" role="listbox" aria-label="Nexus commands">{matchingCommands.length > 0 ? <>{matchingCommands.map(command => <button key={command.name} type="button" role="option" onMouseDown={event => event.preventDefault()} onClick={() => { setInput(`/${command.name} `); window.setTimeout(() => textareaRef.current?.focus(), 0) }} className="flex w-full items-center gap-3 border-b border-border/60 px-3 py-2 text-left hover:bg-secondary last:border-b-0"><code className="w-24 shrink-0 text-xs font-medium text-foreground">/{command.name}</code><span className="truncate text-[11px] text-muted-foreground">{command.description}</span></button>)}<div className="px-3 py-1.5 text-[10px] text-muted-foreground">Choose a command, then add any details.</div></> : <div className="px-3 py-2 text-xs text-muted-foreground">No Nexus command found.</div>}</div>}
           <textarea
             ref={textareaRef}
@@ -1132,20 +1307,20 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
             data-testid="composer-input"
             placeholder={backendAvailable ? 'Type a message...' : 'Backend not connected — start with `python -m nexus --server`'}
             rows={1}
-            className="block min-h-[64px] max-h-[200px] w-full resize-none rounded-none border-0 bg-transparent px-2.5 py-2 pr-12 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/50 disabled:opacity-50"
+            className="block min-h-[40px] max-h-[160px] w-full resize-none rounded-none border-0 bg-transparent px-2 py-1 pr-11 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/50 disabled:opacity-50"
             disabled={isUploading}
           />
-          <div className="absolute right-3 top-3">
+          <div className="absolute right-2 top-2">
             {isProcessing ? (
-              <button onClick={cancel} aria-label="Stop response" title="Stop response" className="flex size-9 items-center justify-center rounded-sm bg-foreground text-background hover:opacity-80 transition"><StopCircle size={16} /></button>
+              <button onClick={cancel} aria-label="Stop response" title="Stop response" className="flex size-8 items-center justify-center rounded-sm bg-foreground text-background transition hover:opacity-80"><StopCircle size={15} /></button>
             ) : (
-              <button onClick={handleSend} aria-label="Send message" title="Send message" disabled={!input.trim() || !backendAvailable} className="flex size-9 items-center justify-center rounded-sm bg-foreground text-background hover:opacity-80 transition disabled:opacity-15 disabled:hover:opacity-15"><Send size={15} /></button>
+              <button onClick={handleSend} aria-label="Send message" title="Send message" disabled={!input.trim() || !backendAvailable} className="flex size-8 items-center justify-center rounded-sm bg-foreground text-background transition hover:opacity-80 disabled:opacity-15 disabled:hover:opacity-15"><Send size={14} /></button>
             )}
           </div>
           {(attachments.length > 0 || isUploading) && <div className="mx-2 mb-1 flex flex-wrap items-center gap-1.5">{attachments.map(item => <span key={item.path} className="flex max-w-52 items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[11px] text-foreground"><span className="truncate">{item.name}</span><button type="button" onClick={() => setAttachments(current => current.filter(attachment => attachment.path !== item.path))} aria-label={`Remove ${item.name}`} className="text-muted-foreground hover:text-foreground"><XCircle size={13} /></button></span>)}{isUploading && <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><Loader2 size={12} className="animate-spin" /> Uploading…</span>}</div>}
-          <div className="mt-1 flex items-center justify-between gap-2 border-t border-border/60 pt-1.5">
+          <div className="mt-0.5 flex items-center justify-between gap-2 border-t border-border/60 pt-0.5">
             <div className="order-2 flex min-w-0 items-center gap-0.5 overflow-x-auto">
-            <label className="flex h-8 max-w-32 items-center gap-1 rounded-lg px-1.5 text-muted-foreground hover:bg-foreground/5" title="Choose permission mode">
+            <label className="flex h-7 max-w-32 items-center gap-1 rounded-lg px-1 text-muted-foreground hover:bg-foreground/5" title="Choose permission mode">
               <ShieldCheck size={13} className="shrink-0" />
               <select
                 value={permissionMode}
@@ -1156,7 +1331,7 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
                 {permissionOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
               </select>
             </label>
-            <label className="flex h-8 max-w-36 items-center gap-1 rounded-lg px-1.5 text-muted-foreground hover:bg-foreground/5" title="Choose sandbox">
+            <label className="flex h-7 max-w-36 items-center gap-1 rounded-lg px-1 text-muted-foreground hover:bg-foreground/5" title="Choose sandbox">
               <ShieldCheck size={13} className="shrink-0" />
               <select
                 value={sandboxTier}
@@ -1173,13 +1348,13 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
                 {sandboxOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
               </select>
             </label>
-            {sandboxTier !== 'no_sandbox' && <button type="button" onClick={chooseSandboxFolder} title={sandboxRoot ? `Sandbox folder: ${sandboxRoot}` : 'Sandbox folder: Nexus workspace'} className="flex h-8 max-w-32 items-center gap-1 rounded-lg px-1.5 text-muted-foreground hover:bg-foreground/5 hover:text-foreground"><FolderOpen size={14} className="shrink-0" /><span className="max-w-20 truncate text-[11px]">{sandboxRoot ? sandboxRoot.replace(/\\/g, '/').split('/').filter(Boolean).pop() : 'Workspace'}</span></button>}
+            {sandboxTier !== 'no_sandbox' && <button type="button" onClick={chooseSandboxFolder} title={sandboxRoot ? `Sandbox folder: ${sandboxRoot}` : 'Sandbox folder: Nexus workspace'} className="flex h-7 max-w-32 items-center gap-1 rounded-lg px-1 text-muted-foreground hover:bg-foreground/5 hover:text-foreground"><FolderOpen size={14} className="shrink-0" /><span className="max-w-20 truncate text-[11px]">{sandboxRoot ? sandboxRoot.replace(/\\/g, '/').split('/').filter(Boolean).pop() : 'Workspace'}</span></button>}
             {savedModels.length > 0 && (
               <div className="relative">
                 <button type="button" onClick={() => {
                   const opening = !showModelPicker
                   setShowModelPicker(opening)
-                }} aria-expanded={showModelPicker} title="Saved model, thinking and effort" className="flex h-8 max-w-36 items-center gap-1 rounded-lg px-1.5 text-muted-foreground hover:bg-foreground/5 hover:text-foreground">
+                }} aria-expanded={showModelPicker} title="Saved model, thinking and effort" className="flex h-7 max-w-36 items-center gap-1 rounded-lg px-1 text-muted-foreground hover:bg-foreground/5 hover:text-foreground">
                   <Cpu size={13} className="shrink-0" />
                   <span className="max-w-24 truncate text-[11px]">{selectedModel || 'Models'}</span>
                   <ChevronDown size={12} />

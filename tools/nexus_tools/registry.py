@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import importlib.util
 import inspect
 import json
 import logging
@@ -10,11 +11,48 @@ import time
 from typing import Any, AsyncGenerator, Dict, Optional
 
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
+from tools.nexus_tools.result import (
+    DEFAULT_MAX_OUTPUT_CHARS,
+    STATUS_TIMEOUT,
+    ToolArgumentError,
+    ToolCallResult,
+    error_result,
+    normalize_result,
+    parse_tool_arguments,
+    start_envelope,
+)
 
 logger = logging.getLogger("NEXUS_TOOL_REGISTRY")
 
+#: Hard default wall-clock budget for a single tool call (milliseconds).
+DEFAULT_TOOL_TIMEOUT_MS = 300_000
+
 
 def _policy_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "yes", "on", "1"}:
+        return True
+    if normalized in {"false", "no", "off", "0"}:
+        return False
+    return default
+
+
+def _env_timeout_ms() -> int:
+    """Default per-call tool timeout, overridable via NEXUS_TOOL_TIMEOUT_MS."""
+    raw = os.environ.get("NEXUS_TOOL_TIMEOUT_MS")
+    if raw:
+        try:
+            value = int(float(raw))
+            if value >= 0:
+                return value
+        except (TypeError, ValueError):
+            logger.warning("Invalid NEXUS_TOOL_TIMEOUT_MS=%r; using default", raw)
+    return DEFAULT_TOOL_TIMEOUT_MS
+
+
+def _unused_policy_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
     normalized = str(value).strip().lower()
@@ -72,6 +110,16 @@ class ToolEntry:
         self.max_parallel = _policy_int(max_parallel, 1, 1)
         cooldown = self.execution.get("cooldown_ms", self.execution.get("cooldownMs", 0))
         self.cooldown_ms = _policy_int(cooldown, 0, 0)
+        timeout_ms = self.execution.get(
+            "timeout_ms",
+            self.execution.get("timeoutMs", schema.get("timeout_ms", _env_timeout_ms())),
+        )
+        self.timeout_ms = _policy_int(timeout_ms, _env_timeout_ms(), 0)
+        self.max_output_chars = _policy_int(
+            self.execution.get("max_output_chars", schema.get("max_output_chars", DEFAULT_MAX_OUTPUT_CHARS)),
+            DEFAULT_MAX_OUTPUT_CHARS,
+            0,
+        )
         self._semaphore = asyncio.Semaphore(self.max_parallel)
         self._cooldown_lock = asyncio.Lock()
         self._last_started_at = 0.0
@@ -203,26 +251,36 @@ class ToolRegistry:
                 scripts_dir = os.path.join(tool_dir, "scripts")
                 handler_cls = None
                 if os.path.isdir(scripts_dir):
-                    for script in sorted(
-                        s for s in os.listdir(scripts_dir)
-                        if s.endswith(".py") and not s.startswith("_")
-                    ):
-                        mod_name = script[:-3]
+                    # Honor .jsnol entry/class so the correct handler is loaded
+                    # (scanning for the first BaseTool subclass can pick the wrong
+                    # class when a module imports another tool class).
+                    entry_rel = meta.get("entry") or ""
+                    class_name = meta.get("class")
+                    if entry_rel:
+                        entry_path = os.path.join(tool_dir, entry_rel)
+                    else:
+                        # fall back to first .py if entry not declared
+                        py = sorted(
+                            s for s in os.listdir(scripts_dir)
+                            if s.endswith(".py") and not s.startswith("_")
+                        )
+                        entry_path = os.path.join(scripts_dir, py[0]) if py else None
+                    if entry_path and os.path.isfile(entry_path):
+                        mod_name = os.path.splitext(os.path.basename(entry_path))[0]
                         try:
-                            spec = importlib.util.spec_from_file_location(
-                                mod_name, os.path.join(scripts_dir, script)
-                            )
+                            spec = importlib.util.spec_from_file_location(mod_name, entry_path)
                             if spec and spec.loader:
                                 mod = importlib.util.module_from_spec(spec)
                                 spec.loader.exec_module(mod)
-                                for _, obj in inspect.getmembers(mod, inspect.isclass):
-                                    if issubclass(obj, BaseTool) and obj is not BaseTool:
-                                        handler_cls = obj
-                                        break
-                                if handler_cls:
-                                    break
+                                if class_name:
+                                    handler_cls = getattr(mod, class_name, None)
+                                else:
+                                    for _, obj in inspect.getmembers(mod, inspect.isclass):
+                                        if issubclass(obj, BaseTool) and obj is not BaseTool:
+                                            handler_cls = obj
+                                            break
                         except Exception:
-                            logger.warning(f"Could not load: {os.path.join(scripts_dir, script)}")
+                            logger.warning(f"Could not load: {entry_path}")
                 instance = handler_cls(root_dir=self.root) if handler_cls else None
                 requires_env = meta.get("requires_env", [])
                 check_fn_name = meta.get("check_fn", None)

@@ -232,7 +232,8 @@ class PermissionSystem(ThreadSafeSingleton):
                         context=context,
                     )
             dangerous_patterns = ["DROP TABLE", "DELETE FROM"]
-            if any(p.lower() in action.lower() for p in dangerous_patterns):
+            action_s = str(action or "")
+            if any(p.lower() in action_s.lower() for p in dangerous_patterns):
                 return self._result(
                     False,
                     "Auto mode blocked destructive data operation",
