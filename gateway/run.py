@@ -27,6 +27,14 @@ _PLATFORM_ENV_MAP: Dict[str, List[List[str]]] = {
     "google_chat": [["GOOGLE_CHAT_WEBHOOK_URL"], ["GOOGLE_CHAT_SPACE", "GOOGLE_CHAT_KEY"]],
     "wecom": [["WECOM_WEBHOOK"], ["WECOM_CORPID", "WECOM_AGENTID", "WECOM_SECRET"]],
     "feishu": [["FEISHU_WEBHOOK"], ["FEISHU_APP_ID", "FEISHU_APP_SECRET"]],
+    "yuanbao": [["YUANBAO_ACCESS_TOKEN", "YUANBAO_TOKEN"]],
+    "weixin": [["WX_APPID"], ["WX_APPSECRET"]],
+    "qqbot": [["QQBOT_APPID"], ["QQBOT_SECRET"]],
+    "dingtalk": [
+        ["DINGTALK_WEBHOOK_ACCESS_TOKEN", "DINGTALK_ROBOT_TOKEN", "DINGTALK_WEBHOOK"],
+        ["DINGTALK_APP_KEY", "DINGTALK_APP_SECRET"],
+    ],
+    "bluebubbles": [["BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_PASSWORD"]],
 }
 
 

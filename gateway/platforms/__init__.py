@@ -25,6 +25,10 @@ __all__ = [
     "GoogleChatAdapter",
     "WeComAdapter",
     "FeishuAdapter",
+    "YuanbaoAdapter",
+    "QQBotAdapter",
+    "DingtalkAdapter",
+    "BlueBubblesAdapter",
 ]
 
 _ADAPTER_MAP = {
@@ -44,6 +48,11 @@ _ADAPTER_MAP = {
     "google_chat": ("gateway.platforms.google_chat", "GoogleChatAdapter"),
     "wecom": ("gateway.platforms.wecom", "WeComAdapter"),
     "feishu": ("gateway.platforms.feishu", "FeishuAdapter"),
+    "yuanbao": ("gateway.platforms.yuanbao", "YuanbaoAdapter"),
+    "weixin": ("gateway.platforms.weixin", "WeixinAdapter"),
+    "qqbot": ("gateway.platforms.qqbot", "QQBotAdapter"),
+    "dingtalk": ("gateway.platforms.dingtalk", "DingtalkAdapter"),
+    "bluebubbles": ("gateway.platforms.bluebubbles", "BlueBubblesAdapter"),
 }
 
 _CLASS_TO_PLATFORM = {class_name: platform for platform, (_module, class_name) in _ADAPTER_MAP.items()}
