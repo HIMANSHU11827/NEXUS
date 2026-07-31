@@ -289,6 +289,13 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [pendingToggle, setPendingToggle] = useState('')
 
   useEffect(() => {
+    const saved = localStorage.getItem('nexus-theme') || 'light'
+    const themeClass = saved === 'dark' ? 'dark' : saved === 'light' ? '' : `theme-${saved}`
+    document.documentElement.classList.remove('dark', 'theme-grey', 'theme-glass', 'theme-green', 'theme-blue', 'theme-purple')
+    if (themeClass) document.documentElement.classList.add(themeClass)
+  }, [])
+
+  useEffect(() => {
     const loaders: Partial<Record<Section, () => Promise<unknown>>> = {
       providers: api.providers, skills: api.skills, tools: api.tools, plugins: api.plugins,
       mcp: api.mcp, hive: api.hives, gateway: api.gateways, cron: api.cronJobs,
@@ -315,7 +322,10 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
 
   const content = useMemo(() => {
     if (active === 'appearance') return <Appearance theme={theme} onTheme={value => {
-      setTheme(value); localStorage.setItem('nexus-theme', value); document.documentElement.classList.toggle('dark', value === 'dark')
+      setTheme(value); localStorage.setItem('nexus-theme', value);
+      document.documentElement.classList.remove('dark', 'theme-grey', 'theme-glass', 'theme-green', 'theme-blue', 'theme-purple')
+      const themeClass = value === 'dark' ? 'dark' : value === 'light' ? '' : `theme-${value}`
+      if (themeClass) document.documentElement.classList.add(themeClass)
     }} />
     if (active === 'shortcuts') return <KeyboardShortcuts />
     if (loading) return <p className="py-8 text-sm text-muted-foreground" role="status">Loading live Nexus data…</p>
@@ -380,7 +390,16 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
 }
 
 function Appearance({ theme, onTheme }: { theme: string; onTheme: (theme: string) => void }) {
-  return <div className="space-y-6"><div><h3 className="text-sm font-semibold">Color theme</h3><p className="mt-1 text-sm text-muted-foreground">Choose how Nexus looks in this browser.</p></div><div className="grid max-w-xl grid-cols-2 gap-3">{['light', 'dark'].map(choice => <button key={choice} onClick={() => onTheme(choice)} className={`rounded-lg border p-4 text-left transition ${theme === choice ? 'border-foreground bg-secondary ring-1 ring-foreground/20' : 'border-border hover:bg-secondary/60'}`}><p className="font-medium capitalize">{choice}</p><p className="mt-1 text-xs text-muted-foreground">{choice === 'light' ? 'Bright workspace' : 'Low-light workspace'}</p></button>)}</div></div>
+  const options = [
+    { value: 'light', label: 'Light', detail: 'Bright, clean workspace', bg: 'bg-white', dotDark: 'bg-gray-900', dotMid: 'bg-gray-300', dotLight: 'bg-gray-100' },
+    { value: 'dark', label: 'Dark', detail: 'Low-light, easy on the eyes', bg: 'bg-gray-900', dotDark: 'bg-gray-100', dotMid: 'bg-gray-500', dotLight: 'bg-gray-700' },
+    { value: 'grey', label: 'Grey', detail: 'Neutral grey tones', bg: 'bg-gray-100', dotDark: 'bg-gray-700', dotMid: 'bg-gray-400', dotLight: 'bg-gray-200' },
+    { value: 'glass', label: 'Glass', detail: 'Glassmorphism blur effect', bg: 'bg-white/40', dotDark: 'bg-sky-300', dotMid: 'bg-white/60', dotLight: 'bg-sky-100' },
+    { value: 'green', label: 'Green', detail: 'Calming green palette', bg: 'bg-green-900', dotDark: 'bg-green-100', dotMid: 'bg-green-400', dotLight: 'bg-green-700' },
+    { value: 'blue', label: 'Blue', detail: 'Cool blue workspace', bg: 'bg-blue-900', dotDark: 'bg-blue-100', dotMid: 'bg-blue-400', dotLight: 'bg-blue-700' },
+    { value: 'purple', label: 'Purple', detail: 'Creative purple mode', bg: 'bg-purple-900', dotDark: 'bg-purple-100', dotMid: 'bg-purple-400', dotLight: 'bg-purple-700' },
+  ] as const
+  return <div className="space-y-6"><div><h3 className="text-sm font-semibold">Color theme</h3><p className="mt-1 text-sm text-muted-foreground">Choose how Nexus looks in this browser. Themes apply instantly and are saved to this device.</p></div><div className="grid max-w-3xl grid-cols-2 gap-3 sm:grid-cols-3">{options.map(choice => <button key={choice.value} onClick={() => onTheme(choice.value)} className={`rounded-xl border p-4 text-left transition hover:border-foreground/60 ${theme === choice.value ? 'border-foreground bg-secondary ring-1 ring-foreground/25' : 'border-border'}`}><div className={`mb-3 flex items-center gap-1.5 rounded-lg border border-border/70 px-2 py-1.5 ${choice.bg}`}><span className={`h-3 w-3 rounded-full ${choice.dotDark}`} /><span className={`h-3 w-3 rounded-full ${choice.dotMid}`} /><span className={`h-3 w-3 rounded-full ${choice.dotLight}`} /></div><p className="font-medium capitalize">{choice.label}</p><p className="mt-1 text-xs text-muted-foreground">{choice.detail}</p>{theme === choice.value && <span className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-current" />Active</span>}</button>)}</div></div>
 }
 
 function ChatSettings({ state, sessions }: { state: Record<string, unknown>; sessions: number }) {
