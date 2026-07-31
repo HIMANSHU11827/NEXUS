@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -135,6 +136,14 @@ class NATE_Route:
 
     def _lazy_load_model(self):
         if self._model is not None:
+            return
+        # NATE uses a pure-NumPy embedding fallback (hashing + char trigrams) by
+        # default. The SentenceTransformer path is a heavy optional upgrade that
+        # is OFF unless explicitly opted in via NATE_USE_TRANSFORMERS=true — it
+        # pulls in torch/transformers and is known to crash (C stack overflow /
+        # access violation) on some Python builds. Default behaviour is NumPy only.
+        if os.environ.get("NATE_USE_TRANSFORMERS", "false").lower() != "true":
+            self._model = None
             return
         try:
             from sentence_transformers import SentenceTransformer

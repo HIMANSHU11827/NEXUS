@@ -6,11 +6,15 @@ from pathlib import Path
 
 import pytest
 
-# Check if sentence_transformers works (can cause C stack overflow on Python 3.14)
+# NATE runs on a pure-NumPy embedding fallback (hashing + char trigrams) and only
+# optionally upgrades to sentence_transformers/SentenceTransformer when present.
+# Per project direction NATE uses NumPy, NOT transformers, so the heavy
+# sentence_transformers dependency is intentionally NOT required — gate on numpy,
+# which the runtime always has. The SentenceTransformer path is a graceful opt-in.
 _nate_available = True
 try:
     result = subprocess.run(
-        [sys.executable, "-c", "import sentence_transformers; print('ok')"],
+        [sys.executable, "-c", "import numpy; print('ok')"],
         capture_output=True, text=True, timeout=15,
     )
     _nate_available = result.returncode == 0 and result.stdout.strip() == "ok"
@@ -21,7 +25,7 @@ if not _nate_available:
     _nate_dir = Path(__file__).resolve().parent / "test_nate"
     if _nate_dir.is_dir():
         import warnings
-        warnings.warn("sentence_transformers unavailable — skipping NATE tests")
+        warnings.warn("numpy unavailable — skipping NATE tests")
 
 # Ensure script subdirectories are discoverable by pytest
 _tests_dir = Path(__file__).resolve().parent
@@ -33,7 +37,7 @@ for subdir in _tests_dir.rglob("scripts"):
 if not _nate_available:
     def pytest_collection_modifyitems(config, items):
         _nate_dir = Path(__file__).resolve().parent / "test_nate"
-        skip_nate = pytest.mark.skip(reason="sentence_transformers unavailable (C stack overflow on Python 3.14)")
+        skip_nate = pytest.mark.skip(reason="numpy unavailable — NATE requires NumPy for its embedding fallback")
         for item in items:
             if str(item.fspath).startswith(str(_nate_dir)):
                 item.add_marker(skip_nate)
