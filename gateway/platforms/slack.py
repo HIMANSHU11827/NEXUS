@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from typing import Optional
+from typing import List, Optional
 
 from gateway.base import BasePlatformAdapter, MessageEvent, SendResult
 
@@ -11,21 +11,40 @@ try:
     from slack_sdk.socket_mode.aiohttp import SocketModeClient
     from slack_sdk.socket_mode.request import SocketModeRequest
     from slack_sdk.web.async_client import AsyncWebClient
+
     HAS_SLACK = True
 except ImportError:
     HAS_SLACK = False
+    SocketModeClient = None  # type: ignore
+    AsyncWebClient = None  # type: ignore
     logger.warning("slack-sdk not installed. Install with: pip install slack-sdk")
+
+# Env vars that, when present, mean the Slack gateway is configured.
+SLACK_REQUIRED_ENV = ("SLACK_BOT_TOKEN", "SLACK_TOKEN")
 
 
 class SlackAdapter(BasePlatformAdapter):
+    """NEXUS Slack Adapter.
+
+    Uses ``slack_sdk`` for chat posting and (optionally) Socket Mode for
+    inbound events. The adapter is **env-gated**: it only reports as configured
+    when ``slack_sdk`` is installed *and* a bot token is available, and
+    ``connect`` returns ``False`` otherwise so the gateway registers it lazily.
+    """
+
     name = "slack"
+    required_env = SLACK_REQUIRED_ENV
 
     def __init__(self, bot_token: str = "", app_token: str = ""):
         super().__init__("slack")
-        self.bot_token = bot_token or os.getenv("SLACK_BOT_TOKEN", "")
+        self.bot_token = bot_token or os.getenv("SLACK_BOT_TOKEN", "") or os.getenv("SLACK_TOKEN", "")
         self.app_token = app_token or os.getenv("SLACK_APP_TOKEN", "")
-        self._client: Optional[AsyncWebClient] = None
-        self._socket_client: Optional[SocketModeClient] = None
+        self._client: Optional["AsyncWebClient"] = None
+        self._socket_client: Optional["SocketModeClient"] = None
+
+    def is_configured(self) -> bool:
+        """True only when slack_sdk is importable and a bot token is present."""
+        return HAS_SLACK and bool(self.bot_token)
 
     async def connect(self) -> bool:
         if not HAS_SLACK:
@@ -45,24 +64,10 @@ class SlackAdapter(BasePlatformAdapter):
                 )
 
                 @self._socket_client.on("events_api")
-                async def handle_event(client: SocketModeClient, req: SocketModeRequest):
-                    payload = req.payload
-                    event = payload.get("event", {})
-                    if event.get("type") == "message" and event.get("subtype") is None:
-                        text = event.get("text", "")
-                        user = event.get("user", "")
-                        channel = event.get("channel", "")
-                        ts = event.get("ts", "")
-
-                        if user and channel and self._on_message:
-                            ev = MessageEvent(
-                                text=text,
-                                sender_id=user,
-                                chat_id=channel,
-                                platform="slack",
-                                message_id=ts,
-                            )
-                            await self._on_message(ev)
+                async def handle_event(client: "SocketModeClient", req: "SocketModeRequest"):
+                    event = self._parse_message_event(req.payload)
+                    if event is not None and self._on_message:
+                        await self._on_message(event)
 
                 asyncio.create_task(self._socket_client.connect())
             else:
@@ -77,6 +82,33 @@ class SlackAdapter(BasePlatformAdapter):
         if self._socket_client:
             await self._socket_client.close()
         self._client = None
+
+    @staticmethod
+    def _parse_message_event(payload: dict) -> Optional[MessageEvent]:
+        """Parse a Slack ``events_api`` payload into a MessageEvent.
+
+        Returns ``None`` for non-message events (e.g. bot messages, reactions,
+        channel joins). Pure / synchronous for unit testing.
+        """
+        if not isinstance(payload, dict):
+            return None
+        event = payload.get("event", {})
+        if event.get("type") != "message" or event.get("subtype") is not None:
+            return None
+        text = event.get("text", "")
+        user = event.get("user", "")
+        channel = event.get("channel", "")
+        ts = event.get("ts", "")
+        if not (user and channel):
+            return None
+        return MessageEvent(
+            text=text,
+            sender_id=user,
+            chat_id=channel,
+            platform="slack",
+            message_type="text",
+            message_id=ts,
+        )
 
     async def send_text(self, chat_id: str, text: str, reply_to: Optional[str] = None) -> SendResult:
         if not self._client:
@@ -110,5 +142,5 @@ class SlackAdapter(BasePlatformAdapter):
             try:
                 await self._client.reactions_add(channel=chat_id, name="thought_balloon", timestamp="")
             except Exception:
-                logger.warning("gateway/platforms/slack.py:112 async send_typing: suppressed error", exc_info=True)
+                logger.warning("gateway/platforms/slack.py async send_typing: suppressed error", exc_info=True)
                 pass

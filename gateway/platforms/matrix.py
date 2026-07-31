@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
@@ -17,6 +19,11 @@ try:
 except ImportError:
     HAS_MATRIX_NIO = False
     logger.warning("matrix-nio not installed. Install with: pip install matrix-nio")
+
+    # Fallback placeholders so the module imports cleanly (and type annotations
+    # resolve) even when matrix-nio is absent. The connect() path short-circuits
+    # on HAS_MATRIX_NIO before any of these are used at runtime.
+    AsyncClient = MatrixRoom = LoginResponse = RoomMessageText = object
 
 
 class MatrixAdapter(BasePlatformAdapter):

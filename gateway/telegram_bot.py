@@ -8,7 +8,10 @@ import asyncio
 import logging
 import os
 
-from telebot.async_telebot import AsyncTeleBot
+try:
+    from telebot.async_telebot import AsyncTeleBot
+except Exception:  # pragma: no cover - optional dependency
+    AsyncTeleBot = None  # type: ignore[assignment]
 
 from orchestrators.loop import NexusLoop
 
@@ -19,7 +22,7 @@ ALLOWED_USER_IDS = [int(x) for x in os.getenv("ALLOWED_TELEGRAM_IDS", "").split(
 # NEXUS Kernel
 loop = NexusLoop()
 
-bot = AsyncTeleBot(TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None
+bot = AsyncTeleBot(TELEGRAM_TOKEN) if (TELEGRAM_TOKEN and AsyncTeleBot is not None) else None
 
 
 async def send_welcome(message):

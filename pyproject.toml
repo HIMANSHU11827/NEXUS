@@ -21,6 +21,7 @@ dependencies = [
     "requests>=2.31",
     "sentence-transformers>=2.2",
     "uvicorn>=0.30",
+    "slack-sdk>=3.43.0",
 ]
 
 [project.optional-dependencies]
@@ -46,6 +47,10 @@ voice = [
     "torch>=2.2",
     "transformers>=4.35",
     "kittentts @ https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl",
+]
+gateway = [
+    "matrix-nio>=0.25",
+    "websockets>=12.0",
 ]
 
 [project.scripts]
