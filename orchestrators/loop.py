@@ -50,6 +50,10 @@ from sandbox.risk import CommandRiskScorer
 from sandbox.sandbox_manager import SandboxTier, SovereignSandbox
 from tools.threat_patterns import scan_content, scan_file
 from utils.context_scrubber import MessageSanitizer, StreamingContextScrubber
+from utils.runtime_guard import (
+    assert_not_rewriting_core,
+    protected_core_writes,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENUMS
@@ -166,6 +170,16 @@ class NexusLoop:
         self.checklist: Set[str] = {"view_file", "glob", "grep", "list_dir", "test_select", "tester"}
         self.operator_bypass_mode = os.environ.get("NEXUS_SOVEREIGN", "false").lower() == "true"
 
+        # Runtime feature toggles (env-overridable, default on unless noted).
+        # Turn reasoning/planning/evolution/hive on or off without code changes.
+        def _flag(name: str, default: bool = True) -> bool:
+            return os.environ.get(name, "true" if default else "false").lower() in ("1", "true", "yes", "on")
+        self.feature_reasoning = _flag("NEXUS_REASONING", True)
+        self.feature_planning  = _flag("NEXUS_PLANNING", True)
+        self.feature_evolution = _flag("NEXUS_EVOLUTION", True)
+        self.feature_hive      = _flag("NEXUS_HIVE", False)  # opt-in (also gated below)
+        self.thinking_mode     = self.feature_reasoning  # alias used elsewhere
+
         # Server / API compatibility attributes
         self.model             = ""
         self.provider_override = ""
@@ -182,16 +196,13 @@ class NexusLoop:
         self._last_run_had_tool_execution = False
         self._last_run_verified = False
         self._last_run_failed = False
-        self.MAX_TURNS = 10
-        self.MAX_CHAT_TURNS = 3
-        self.MAX_RETRIES_PER_PHASE = 3
         self.COMPACT_THRESHOLD = 20
         self.COMPACT_KEEP = 6
         # Hermes/OpenCode both treat context as a budget, not only a message
         # count. Keep the conservative message boundary for compatibility,
         # but also compact by an operator-configurable token estimate.
         try:
-            self.CONTEXT_TOKEN_LIMIT = max(8_000, int(os.environ.get("NEXUS_CONTEXT_LIMIT", "128000")))
+            self.CONTEXT_TOKEN_LIMIT = max(8_000, int(os.environ.get("NEXUS_CONTEXT_LIMIT", "2000000")))
         except ValueError:
             self.CONTEXT_TOKEN_LIMIT = 128_000
         self.COMPACT_TOKEN_RATIO = 0.75
@@ -302,7 +313,7 @@ class NexusLoop:
     # ENTRY POINTS
     # ─────────────────────────────────────────────────────────────────────────
 
-    async def run(self, task_desc: str, voice_mode: bool = False) -> str:
+    async def run(self, task_desc: str, voice_mode: bool = False, messages: Optional[list] = None) -> str:
         """Blocking helper — collects all streamed content and returns as string."""
         if voice_mode:
             # Sync memory with disk state to align with CLI frontend
@@ -352,6 +363,7 @@ class NexusLoop:
         max_tokens: Optional[int] = None,
         voice_mode: bool = False,
         turn_id: str = "",
+        messages: Optional[list] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Run one request at a time for this session-owned harness."""
         guard = getattr(self, "_run_guard", None)
@@ -377,10 +389,11 @@ class NexusLoop:
         self,
         task_desc: str,
         provider: Optional[str] = None,
-        model:    Optional[str] = None,
+        model: Optional[str] = None,
         max_tokens: Optional[int] = None,
         voice_mode: bool = False,
-        turn_id:  str = "",
+        turn_id: str = "",
+        messages: Optional[list] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Main entry point — streaming async generator.
@@ -398,6 +411,7 @@ class NexusLoop:
             max_tokens=max_tokens,
             voice_mode=voice_mode,
         )
+        self._incoming_messages = messages or []
 
         # One unified loop handles conversation and action requests. This
         # boundary guarantees an unexpected provider/tool failure still closes
@@ -683,6 +697,7 @@ class NexusLoop:
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """One unified model/tool loop with deterministic safety and verification."""
         run_id = self._current_turn_id or self.session_id
+        run_started_at = time.perf_counter()
         message_id = f"message_{run_id}"
         conversation_type = "conversation.updated" if self.memory else "conversation.created"
         await self._emit_runtime_event(conversation_type, "Conversation active", "success", event_id=f"conversation_{self.session_id}")
@@ -690,23 +705,53 @@ class NexusLoop:
         await self._emit_runtime_event("run.status", "Grounding context", "running", event_id=f"run_{run_id}", payload={"state": "grounding"})
         await self._emit_runtime_event("message.started", "Assistant response", "running", event_id=message_id, parent_id=f"run_{run_id}")
         requires_tools = self._requires_real_tooling(task_desc)
+        # Two distinct concepts that were previously conflated into one flag:
+        #   tools_allowed   — may this turn parse/execute tool calls at all?
+        #   requires_tools  — MUST this turn produce a tool call (enforcement)?
+        # Collapsing them meant that after the first verified tool step the loop
+        # stopped extracting tool calls entirely, so multi-step work executed only
+        # its first task. Verification now only clears the *enforcement* flag.
+        tools_allowed = requires_tools
         self._last_run_requires_tools = requires_tools
         self._last_run_had_tool_execution = False
         self._last_run_verified = not requires_tools
         self._last_run_failed = False
         messages = await self._ground_context(task_desc)
         await self._emit_stage_event("grounding", "Context ready", "rules, memory, skills, and code context", "done")
+
+        # Opt-in multi-agent hive: decompose the task, run sub-agents in parallel,
+        # fold the consolidated result into the prompt as extra context.
+        if self.feature_hive:
+            hive_ctx = await self._maybe_spawn_hive(task_desc)
+            if hive_ctx:
+                messages.append({
+                    "role": "system",
+                    "content": f"[HIVE_RESULT]:\n{hive_ctx[:6000]}",
+                })
+
         if self.active_goal and self.active_goal != task_desc:
             todo_path = os.path.join(self.root, "todo.md") if self.root else "todo.md"
             if os.path.isfile(todo_path):
                 os.remove(todo_path)
         self.active_goal = task_desc
+        self._trivial_task = bool(requires_tools) and self._is_trivial_task(task_desc)
         if requires_tools:
             messages.append({"role": "system", "content": self._tool_enforcement_message(task_desc)})
+            if self._trivial_task:
+                # Fast path: single-action request. Skip plan generation entirely
+                # (verification and permissions are untouched).
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "[TRIVIAL_TASK] This is a single-action request. Do not plan. "
+                        "Emit exactly one real tool call now, then report the result concisely."
+                    ),
+                })
+                await self._emit_stage_event("planning", "Plan skipped", "trivial single-action task", "done")
             # Each tool-backed request receives a fresh, task-specific plan.
             # Do not replay a global todo.md from an earlier run.
             planning_started_at = time.perf_counter()
-            plan_text = await self._create_plan_via_tool(task_desc)
+            plan_text = "" if self._trivial_task else await self._create_plan_via_tool(task_desc)
             planning_duration_ms = max(0, round((time.perf_counter() - planning_started_at) * 1000))
             if plan_text:
                 self.logger.info(f"Plan created: {len(plan_text)} chars")
@@ -743,275 +788,458 @@ class NexusLoop:
         last_observations: List[str] = []
         tool_result_cache: Dict[Tuple[str, str], str] = {}
 
-        for turn in range(1, self.MAX_TURNS + 1):
-            if self._abort_flag.is_set():
-                await self._emit_runtime_event("message.failed", "Assistant response cancelled", "cancelled", event_id=message_id, parent_id=f"run_{run_id}")
-                await self._emit_runtime_event("run.cancelled", "Run cancelled", "cancelled", event_id=f"run_{run_id}")
-                yield {"type": "status", "data": "\n[aborted]"}
-                return
+        # 24/7 robustness state. None of these are turn caps: the loop keeps
+        # working indefinitely and only escapes when it proves it is *stuck*
+        # (byte-identical failure repeating with zero new information).
+        turn = 0
+        IDENTICAL_FAILURE_STREAK = 3   # same vaccine text N times in a row
+        IDENTICAL_TOOLSET_STREAK = 2   # same fully-cached tool batch N times
+        last_vaccine_fingerprint: Optional[str] = None
+        identical_vaccine_streak = 0
+        last_batch_fingerprint: Optional[str] = None
+        cached_batch_streak = 0
+        last_error_fingerprint: Optional[str] = None
+        identical_error_streak = 0
 
-            await self._emit_stage_event("inference", "Calling model", "streaming provider response", "running")
-            await self.hooks.trigger("pre_llm_call", messages)
-
-            response = ""
+        while True:
+            turn += 1
             try:
-                stream_kwargs: Dict[str, Any] = {}
-                if max_tokens is not None:
-                    stream_kwargs["max_tokens"] = max_tokens
-                if provider:
-                    stream_kwargs["provider"] = provider
-                if model:
-                    stream_kwargs["model"] = model
-                async for chunk in self._stream_model(messages, **stream_kwargs):
-                    response += chunk
-            except RuntimeError:
-                if self._last_run_had_tool_execution and self._last_run_verified and not self._last_run_failed:
-                    last_response = self._deterministic_evidence_summary(last_observations)
-                    yield {"type": "content", "data": last_response}
-                    await self._emit_runtime_event("message.delta", "Assistant response", "running", event_id=message_id, parent_id=f"run_{run_id}", payload={"delta": last_response})
-                    messages.append({"role": "assistant", "content": last_response})
-                    break
-                raise
-            if self._abort_flag.is_set():
-                await self._emit_runtime_event("message.failed", "Assistant response cancelled", "cancelled", event_id=message_id, parent_id=f"run_{run_id}")
-                await self._emit_runtime_event("run.cancelled", "Run cancelled", "cancelled", event_id=f"run_{run_id}")
-                yield {"type": "status", "data": "\n[aborted]"}
-                return
-            await self.hooks.trigger("post_llm_call", response)
+                if self._abort_flag.is_set():
+                    await self._emit_runtime_event("message.failed", "Assistant response cancelled", "cancelled", event_id=message_id, parent_id=f"run_{run_id}")
+                    await self._emit_runtime_event("run.cancelled", "Run cancelled", "cancelled", event_id=f"run_{run_id}")
+                    yield {"type": "status", "data": "\n[aborted]"}
+                    return
 
-            # Providers sometimes repeat a raw function envelope after a tool
-            # has completed. This is not a final answer and must never cause an
-            # infinite duplicate-tool loop.
-            if self._last_run_had_tool_execution and self._contains_tool_protocol(response):
-                if finalization_retries < 1:
-                    finalization_retries += 1
+                await self._emit_stage_event("inference", "Calling model", "streaming provider response", "running")
+                await self.hooks.trigger("pre_llm_call", messages)
+
+                response = ""
+                try:
+                    stream_kwargs: Dict[str, Any] = {}
+                    if max_tokens is not None:
+                        stream_kwargs["max_tokens"] = max_tokens
+                    if provider:
+                        stream_kwargs["provider"] = provider
+                    if model:
+                        stream_kwargs["model"] = model
+                    async for chunk in self._stream_model(messages, **stream_kwargs):
+                        response += chunk
+                except RuntimeError:
+                    if self._last_run_had_tool_execution and self._last_run_verified and not self._last_run_failed:
+                        last_response = self._deterministic_evidence_summary(last_observations)
+                        yield {"type": "content", "data": last_response}
+                        await self._emit_runtime_event("message.delta", "Assistant response", "running", event_id=message_id, parent_id=f"run_{run_id}", payload={"delta": last_response})
+                        messages.append({"role": "assistant", "content": last_response})
+                        break
+                    raise
+                if self._abort_flag.is_set():
+                    await self._emit_runtime_event("message.failed", "Assistant response cancelled", "cancelled", event_id=message_id, parent_id=f"run_{run_id}")
+                    await self._emit_runtime_event("run.cancelled", "Run cancelled", "cancelled", event_id=f"run_{run_id}")
+                    yield {"type": "status", "data": "\n[aborted]"}
+                    return
+                await self.hooks.trigger("post_llm_call", response)
+
+                # Public progress notes: the model may prefix a turn with
+                # <progress>…</progress> to narrate what it is about to do. This is a
+                # user-facing status line (NOT private chain-of-thought) and is
+                # stripped from the response before any parsing/answer handling.
+                response, progress_notes = self._extract_progress_notes(response)
+                for note in progress_notes:
                     await self._emit_runtime_event(
-                        "retry", "Retrying final response", "running",
-                        event_id=f"retry_{run_id}_final_{finalization_retries}",
-                        parent_id=f"run_{run_id}",
-                        payload={"attempt": finalization_retries, "phase": "final_response"},
+                        "assistant.progress", note, "running",
+                        event_id=f"progress_{run_id}_{turn}_{len(note)}",
+                        parent_id=message_id,
+                        payload={"text": note},
                     )
-                    messages.append({"role": "assistant", "content": self._strip_internal_tool_protocol(response)})
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            "[FINAL_RESPONSE] The tool already ran. Return the user-facing result "
-                            "from TOOL_RESULTS now. Do not emit another tool call or protocol."
-                        ),
-                    })
-                    continue
-                last_response = self._deterministic_evidence_summary(last_observations)
-                yield {"type": "content", "data": last_response}
-                await self._emit_runtime_event(
-                    "message.delta", "Assistant response", "running",
-                    event_id=message_id, parent_id=f"run_{run_id}", payload={"delta": last_response},
-                )
-                messages.append({"role": "assistant", "content": last_response})
-                break
 
-            if self._last_run_had_tool_execution and self._is_provider_error_text(response):
-                if self._last_run_verified and not self._last_run_failed:
-                    last_response = self._deterministic_evidence_summary(last_observations)
-                else:
-                    last_response = self._deterministic_failure_summary(last_observations)
-                    self._last_run_failed = True
-                yield {"type": "content", "data": last_response}
-                await self._emit_runtime_event(
-                    "message.delta", "Assistant response", "running",
-                    event_id=message_id, parent_id=f"run_{run_id}", payload={"delta": last_response},
-                )
-                messages.append({"role": "assistant", "content": last_response})
-                break
-
-            if not response.strip():
-                last_response = "The model returned no response. Please retry."
-                self._last_run_failed = True
-                await self._emit_stage_event(
-                    "inference",
-                    "Model returned no response",
-                    "provider produced an empty response",
-                    "error",
-                )
-                yield {"type": "content", "data": last_response}
-                break
-
-            # Tool-looking text in a normal chat response is explanatory prose,
-            # not authorization to execute it. Only action-classified requests
-            # may enter the tool parser/auditor path.
-            tool_calls = self._extract_tool_calls(response) if requires_tools else []
-            if not tool_calls and requires_tools:
-                tool_calls = self._extract_action_fences(response)
-            if not tool_calls and requires_tools:
-                tool_calls = self._extract_required_tool_call(task_desc)
-            if not tool_calls and requires_tools:
-                tool_calls = self._extract_explicit_file_actions(task_desc)
-            if not tool_calls and requires_tools:
-                tool_calls = self._extract_explicit_run_commands(task_desc)
-            if not tool_calls:
-                if not requires_tools:
-                    response = self._strip_internal_tool_protocol(response).strip()
-                    if not response and self._last_run_had_tool_execution and finalization_retries < 1:
+                # Providers sometimes repeat a raw function envelope after a tool
+                # has completed. This is not a final answer and must never cause an
+                # infinite duplicate-tool loop.
+                if self._last_run_had_tool_execution and self._contains_tool_protocol(response):
+                    if finalization_retries < 1000000:
                         finalization_retries += 1
+                        await self._emit_runtime_event(
+                            "retry", "Retrying final response", "running",
+                            event_id=f"retry_{run_id}_final_{finalization_retries}",
+                            parent_id=f"run_{run_id}",
+                            payload={"attempt": finalization_retries, "phase": "final_response"},
+                        )
+                        messages.append({"role": "assistant", "content": self._strip_internal_tool_protocol(response)})
                         messages.append({
                             "role": "system",
                             "content": (
-                                "[FINAL_RESPONSE] Return the concise user-facing result now. "
-                                "Do not emit tool_use, JSON, XML, protocol markers, or another tool call. "
-                                "State only what the verified tool results prove."
+                                "[FINAL_RESPONSE] The tool already ran. Return the user-facing result "
+                                "from TOOL_RESULTS now. Do not emit another tool call or protocol."
                             ),
                         })
                         continue
-                    if not response and last_observations:
-                        response = "Work completed and verified.\n\n" + "\n".join(last_observations)
-                    if last_observations and (
-                        self._is_raw_tool_result_dump(response)
-                        or not self._final_response_contains_evidence(response, last_observations)
-                    ):
-                        response = self._deterministic_evidence_summary(last_observations)
-                if requires_tools and enforcement_retries < self.MAX_RETRIES_PER_PHASE:
-                    enforcement_retries += 1
+                    last_response = self._deterministic_evidence_summary(last_observations)
+                    yield {"type": "content", "data": last_response}
                     await self._emit_runtime_event(
-                        "retry",
-                        "Retrying tool-call generation",
-                        "running",
-                        event_id=f"retry_{run_id}_tool_{enforcement_retries}",
-                        parent_id=f"run_{run_id}",
-                        payload={"attempt": enforcement_retries, "phase": "tool_selection"},
+                        "message.delta", "Assistant response", "running",
+                        event_id=message_id, parent_id=f"run_{run_id}", payload={"delta": last_response},
                     )
+                    messages.append({"role": "assistant", "content": last_response})
+                    break
+
+                if self._last_run_had_tool_execution and self._is_provider_error_text(response):
+                    if self._last_run_verified and not self._last_run_failed:
+                        last_response = self._deterministic_evidence_summary(last_observations)
+                    else:
+                        last_response = self._deterministic_failure_summary(last_observations)
+                        self._last_run_failed = True
+                    yield {"type": "content", "data": last_response}
+                    await self._emit_runtime_event(
+                        "message.delta", "Assistant response", "running",
+                        event_id=message_id, parent_id=f"run_{run_id}", payload={"delta": last_response},
+                    )
+                    messages.append({"role": "assistant", "content": last_response})
+                    break
+
+                if not response.strip():
+                    last_response = "The model returned no response. Please retry."
+                    self._last_run_failed = True
+                    await self._emit_stage_event(
+                        "inference",
+                        "Model returned no response",
+                        "provider produced an empty response",
+                        "error",
+                    )
+                    yield {"type": "content", "data": last_response}
+                    break
+
+                # Tool-looking text in a normal chat response is explanatory prose,
+                # not authorization to execute it. Only action-classified requests
+                # may enter the tool parser/auditor path.
+                tool_calls = self._extract_tool_calls(response) if tools_allowed else []
+                if not tool_calls and tools_allowed:
+                    tool_calls = self._extract_action_fences(response)
+                if not tool_calls and requires_tools:
+                    tool_calls = self._extract_required_tool_call(task_desc)
+                if not tool_calls and requires_tools:
+                    tool_calls = self._extract_explicit_file_actions(task_desc)
+                if not tool_calls and requires_tools:
+                    tool_calls = self._extract_explicit_run_commands(task_desc)
+                if not tool_calls:
+                    if not requires_tools:
+                        response = self._strip_internal_tool_protocol(response).strip()
+                        if not response and self._last_run_had_tool_execution and finalization_retries < 1000000:
+                            finalization_retries += 1
+                            messages.append({
+                                "role": "system",
+                                "content": (
+                                    "[FINAL_RESPONSE] Return the concise user-facing result now. "
+                                    "Do not emit tool_use, JSON, XML, protocol markers, or another tool call. "
+                                    "State only what the verified tool results prove."
+                                ),
+                            })
+                            continue
+                        if not response and last_observations:
+                            response = "Work completed and verified.\n\n" + "\n".join(last_observations)
+                        if last_observations and (
+                            self._is_raw_tool_result_dump(response)
+                            or not self._final_response_contains_evidence(response, last_observations)
+                        ):
+                            response = self._deterministic_evidence_summary(last_observations)
+                    if requires_tools:
+                        enforcement_retries += 1
+                        await self._emit_runtime_event(
+                            "retry",
+                            "Retrying tool-call generation",
+                            "running",
+                            event_id=f"retry_{run_id}_tool_{enforcement_retries}",
+                            parent_id=f"run_{run_id}",
+                            payload={"attempt": enforcement_retries, "phase": "tool_selection"},
+                        )
+                        messages.append({"role": "assistant", "content": self._strip_internal_tool_protocol(response)})
+                        messages.append({"role": "system", "content": self._tool_enforcement_message(task_desc)})
+                        continue
+                    if requires_tools:
+                        self._last_run_failed = True
+                        last_response = (
+                            "I could not execute this task because the model did not produce a valid tool call. "
+                            "No action was performed and no result was created."
+                        )
+                        await self._emit_stage_event("execution", "No valid tool call", "task not executed", "error")
+                        await self._emit_runtime_event("plan.failed", "Plan could not be executed", "failed", event_id=f"plan_{run_id}", parent_id=f"run_{run_id}")
+                        yield {"type": "content", "data": last_response}
+                        messages.append({"role": "assistant", "content": last_response})
+                        break
+                    yield {"type": "content", "data": response}
+                    last_response = response
                     messages.append({"role": "assistant", "content": self._strip_internal_tool_protocol(response)})
-                    messages.append({"role": "system", "content": self._tool_enforcement_message(task_desc)})
-                    continue
-                if requires_tools:
+                    break
+
+                for call in tool_calls:
+                    if call.name == "web_search":
+                        call.params["query"] = self._normalize_web_query(
+                            str(call.params.get("query") or task_desc),
+                            task_desc,
+                        )
+
+                def tool_signature(call: ToolCall) -> Tuple[str, str]:
+                    return call.name, json.dumps(call.params, sort_keys=True, default=str)
+
+                calls_to_execute: List[ToolCall] = []
+                pending_signatures: Set[Tuple[str, str]] = set()
+                for call in tool_calls:
+                    signature = tool_signature(call)
+                    if signature not in tool_result_cache and signature not in pending_signatures:
+                        calls_to_execute.append(call)
+                        pending_signatures.add(signature)
+
+                # ANTI-LOOP: every proposed call is already satisfied by a cached
+                # result, so re-running this turn cannot produce new information.
+                # If the model proposes the *same* fully-cached batch again, force a
+                # final answer instead of spinning. Permissions/verification for any
+                # genuinely new call are untouched.
+                batch_fingerprint = hashlib.sha256(
+                    json.dumps(sorted(tool_signature(c) for c in tool_calls), default=str).encode("utf-8", "ignore")
+                ).hexdigest()
+                if tool_calls and not calls_to_execute:
+                    if batch_fingerprint == last_batch_fingerprint:
+                        cached_batch_streak += 1
+                    else:
+                        cached_batch_streak = 1
+                        last_batch_fingerprint = batch_fingerprint
+                    if cached_batch_streak >= IDENTICAL_TOOLSET_STREAK:
+                        await self._emit_runtime_event(
+                            "loop.short_circuit",
+                            "Repeated identical tool batch suppressed",
+                            "running",
+                            event_id=f"antiloop_{run_id}_{turn}",
+                            parent_id=f"run_{run_id}",
+                            payload={
+                                "repeats": cached_batch_streak,
+                                "tools": [c.name for c in tool_calls],
+                            },
+                        )
+                        cached_batch_streak = 0
+                        last_batch_fingerprint = None
+                        cached_observations = [
+                            tool_result_cache[tool_signature(c)]
+                            for c in tool_calls
+                            if tool_signature(c) in tool_result_cache
+                        ]
+                        if cached_observations:
+                            last_observations = cached_observations
+                        last_response = self._deterministic_evidence_summary(last_observations)
+                        yield {"type": "content", "data": last_response}
+                        await self._emit_runtime_event(
+                            "message.delta", "Assistant response", "running",
+                            event_id=message_id, parent_id=f"run_{run_id}",
+                            payload={"delta": last_response},
+                        )
+                        messages.append({"role": "assistant", "content": last_response})
+                        break
+                else:
+                    cached_batch_streak = 0
+                    last_batch_fingerprint = None
+
+                await self._emit_stage_event("auditing", "Checking tools and permissions", f"{len(tool_calls)} proposed tool call(s)", "running")
+                yield {"type": "tools_discovered", "tool_calls": [tc.to_dict() for tc in tool_calls]}
+                for call in calls_to_execute:
+                    await self._emit_tool_event(call, status="queued")
+
+                approved = await self._audit_and_approve(tool_calls)
+                if not approved:
+                    self._last_run_failed = True
+                    await self._emit_stage_event("auditing", "Tool execution blocked", "permission policy", "blocked")
+                    await self._emit_runtime_event(
+                        "guardrail.blocked",
+                        "Tool execution blocked",
+                        "blocked",
+                        event_id=f"guardrail_{run_id}_{turn}",
+                        parent_id=f"run_{run_id}",
+                        payload={
+                            "reason": "permission policy",
+                            "tools": [call.name for call in tool_calls],
+                        },
+                    )
+                    # Keep the legacy plan.failed event for existing clients that
+                    # do not yet understand first-class blocked guardrail events.
+                    await self._emit_runtime_event("plan.failed", "Plan blocked", "failed", event_id=f"plan_{run_id}", parent_id=f"run_{run_id}", error="permission policy")
+                    denial = "Tool execution was blocked by the active permission policy."
+                    messages.append({"role": "system", "content": f"[TOOL_BLOCKED] {denial}"})
+                    last_response = denial
+                    yield {"type": "content", "data": denial}
+                    break
+                await self._emit_stage_event("auditing", "Tools approved", f"{len(tool_calls)} tool call(s)", "done")
+
+                await self._emit_runtime_event("run.status", "Executing tools", "running", event_id=f"run_{run_id}", payload={"state": "execution"})
+                fresh_observations = await self._execute_tools(calls_to_execute) if calls_to_execute else []
+                fresh_results: Dict[Tuple[str, str], str] = {}
+                if len(fresh_observations) == len(calls_to_execute):
+                    for call, observation in zip(calls_to_execute, fresh_observations):
+                        fresh_results[tool_signature(call)] = observation
+                        # Keep failures in the next-turn context, but do not cache
+                        # them as a completed result. This lets Nexus retry with
+                        # changed parameters or select another tool.
+                        if not self._observation_is_failure(observation):
+                            tool_result_cache[tool_signature(call)] = observation
+                observations = [
+                    tool_result_cache.get(tool_signature(call), fresh_results.get(tool_signature(call)))
+                    for call in tool_calls
+                    if tool_signature(call) in tool_result_cache or tool_signature(call) in fresh_results
+                ]
+                last_observations = observations
+                self._last_run_had_tool_execution = True
+                yield {"type": "observations", "data": observations}
+                await self.hooks.trigger("post_tool_call", tool_calls, observations)
+                await self.kernel.plugins.trigger_hooks("post_tool_call", tool_calls, observations)
+                messages.append({"role": "assistant", "content": response})
+                messages.append({"role": "system", "content": "[TOOL_RESULTS]\n" + "\n".join(observations)})
+                await asyncio.to_thread(self._log_mission_replay, tool_calls, observations)
+
+                await self._emit_stage_event("verification", "Verifying tool results", "errors and targeted tests", "running")
+                verify = await self._verify_all_parallel(messages, tool_calls)
+                if self._last_run_failed:
+                    verify = {
+                        "success": False,
+                        "vaccine": verify.get("vaccine") or "One or more real tool executions failed.",
+                    }
+                await asyncio.to_thread(self._save_checkpoint, messages, task_desc, turn)
+                if not verify["success"] and verify["vaccine"]:
+                    await self._emit_stage_event("verification", "Verification found a problem", str(verify["vaccine"]), "error")
+                    verification_retries += 1
+                    # Dedupe-based stuck detection (NOT a retry cap). Nexus keeps
+                    # self-correcting forever as long as the failure keeps changing.
+                    # Only a byte-identical vaccine repeating back-to-back proves
+                    # no new information is being produced.
+                    vaccine_fingerprint = hashlib.sha256(
+                        str(verify["vaccine"]).strip().encode("utf-8", "ignore")
+                    ).hexdigest()
+                    if vaccine_fingerprint == last_vaccine_fingerprint:
+                        identical_vaccine_streak += 1
+                    else:
+                        identical_vaccine_streak = 1
+                        last_vaccine_fingerprint = vaccine_fingerprint
+                    if identical_vaccine_streak >= IDENTICAL_FAILURE_STREAK:
+                        await self._emit_runtime_event(
+                            "verification.stuck",
+                            "Identical verification failure repeated",
+                            "failed",
+                            event_id=f"verify_stuck_{run_id}_{turn}",
+                            parent_id=f"run_{run_id}",
+                            payload={
+                                "attempts": verification_retries,
+                                "repeats": identical_vaccine_streak,
+                                "vaccine": str(verify["vaccine"])[:500],
+                            },
+                        )
+                        self._last_run_failed = True
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                f"[VERIFICATION_STUCK] The identical failure repeated "
+                                f"{identical_vaccine_streak} times with no change:\n{verify['vaccine']}\n"
+                                "Stop retrying. Explain the unresolved failure clearly and state exactly "
+                                "what is blocking it."
+                            ),
+                        })
+                        requires_tools = False
+                        tools_allowed = False
+                        identical_vaccine_streak = 0
+                        last_vaccine_fingerprint = None
+                    else:
+                        await self._emit_runtime_event(
+                            "retry",
+                            "Retrying after verification failure",
+                            "running",
+                            event_id=f"retry_{run_id}_verification_{verification_retries}",
+                            parent_id=f"run_{run_id}",
+                            payload={
+                                "attempt": verification_retries,
+                                "phase": "verification",
+                                "identical_repeats": identical_vaccine_streak,
+                            },
+                        )
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                f"[SELF_CORRECT {verification_retries}] {verify['vaccine']}\n"
+                                "Fix the cause and re-run real tools. Change your approach or parameters — "
+                                "repeating the identical failing action will be treated as stuck."
+                            ),
+                        })
+                else:
+                    verification_retries = 0
+                    identical_vaccine_streak = 0
+                    last_vaccine_fingerprint = None
+                    # Enforcement off (the step succeeded, the model is free to
+                    # answer), but tools stay AVAILABLE so multi-step work can
+                    # continue to its next real action instead of stopping here.
+                    requires_tools = False
+                    self._last_run_verified = True
+                    await self._emit_stage_event("verification", "Verification passed", "tool results accepted", "done")
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "[STEP_VERIFIED] The real tools finished and verification passed. "
+                            "If the objective still has remaining work, continue with the next real tool call. "
+                            "If the objective is fully complete, reply with a concise result grounded only in TOOL_RESULTS "
+                            "and do not emit tool protocol."
+                        ),
+                    })
+                    if getattr(self, "_trivial_task", False):
+                        # Fast path: tool ran and verification passed — finish now
+                        # instead of spending another model turn.
+                        last_response = self._deterministic_evidence_summary(last_observations)
+                        yield {"type": "content", "data": last_response}
+                        await self._emit_runtime_event(
+                            "message.delta", "Assistant response", "running",
+                            event_id=message_id, parent_id=f"run_{run_id}",
+                            payload={"delta": last_response},
+                        )
+                        messages.append({"role": "assistant", "content": last_response})
+                        break
+                messages = self._compact_memory(messages)
+            except (asyncio.CancelledError, GeneratorExit):
+                raise
+            except Exception as loop_error:
+                # 24/7 SAFETY: a single bad turn must never kill the loop.
+                # Log it, surface it as a runtime event, and keep working.
+                # Only a byte-identical exception repeating back-to-back is
+                # treated as unrecoverable (dedupe guard, not a retry cap).
+                error_text = f"{type(loop_error).__name__}: {loop_error}"
+                self.logger.exception(f"[LOOP_TURN_ERROR] turn={turn} {error_text}")
+                error_fingerprint = hashlib.sha256(error_text.encode("utf-8", "ignore")).hexdigest()
+                if error_fingerprint == last_error_fingerprint:
+                    identical_error_streak += 1
+                else:
+                    identical_error_streak = 1
+                    last_error_fingerprint = error_fingerprint
+                await self._emit_runtime_event(
+                    "runtime.error",
+                    "Recovered from a turn error",
+                    "error",
+                    event_id=f"loop_error_{run_id}_{turn}",
+                    parent_id=f"run_{run_id}",
+                    payload={
+                        "turn": turn,
+                        "error": error_text[:1000],
+                        "identical_repeats": identical_error_streak,
+                    },
+                    error=error_text[:1000],
+                )
+                if identical_error_streak >= IDENTICAL_FAILURE_STREAK:
                     self._last_run_failed = True
                     last_response = (
-                        "I could not execute this task because the model did not produce a valid tool call. "
-                        "No action was performed and no result was created."
+                        "The run stopped because the same runtime error repeated "
+                        f"{identical_error_streak} times with no change:\n{error_text}"
                     )
-                    await self._emit_stage_event("execution", "No valid tool call", "task not executed", "error")
-                    await self._emit_runtime_event("plan.failed", "Plan could not be executed", "failed", event_id=f"plan_{run_id}", parent_id=f"run_{run_id}")
                     yield {"type": "content", "data": last_response}
                     messages.append({"role": "assistant", "content": last_response})
                     break
-                yield {"type": "content", "data": response}
-                last_response = response
-                messages.append({"role": "assistant", "content": self._strip_internal_tool_protocol(response)})
-                break
-
-            for call in tool_calls:
-                if call.name == "web_search":
-                    call.params["query"] = self._normalize_web_query(
-                        str(call.params.get("query") or task_desc),
-                        task_desc,
-                    )
-
-            def tool_signature(call: ToolCall) -> Tuple[str, str]:
-                return call.name, json.dumps(call.params, sort_keys=True, default=str)
-
-            calls_to_execute: List[ToolCall] = []
-            pending_signatures: Set[Tuple[str, str]] = set()
-            for call in tool_calls:
-                signature = tool_signature(call)
-                if signature not in tool_result_cache and signature not in pending_signatures:
-                    calls_to_execute.append(call)
-                    pending_signatures.add(signature)
-
-            await self._emit_stage_event("auditing", "Checking tools and permissions", f"{len(tool_calls)} proposed tool call(s)", "running")
-            yield {"type": "tools_discovered", "tool_calls": [tc.to_dict() for tc in tool_calls]}
-            for call in calls_to_execute:
-                await self._emit_tool_event(call, status="queued")
-
-            approved = await self._audit_and_approve(tool_calls)
-            if not approved:
-                self._last_run_failed = True
-                await self._emit_stage_event("auditing", "Tool execution blocked", "permission policy", "blocked")
-                await self._emit_runtime_event(
-                    "guardrail.blocked",
-                    "Tool execution blocked",
-                    "blocked",
-                    event_id=f"guardrail_{run_id}_{turn}",
-                    parent_id=f"run_{run_id}",
-                    payload={
-                        "reason": "permission policy",
-                        "tools": [call.name for call in tool_calls],
-                    },
-                )
-                # Keep the legacy plan.failed event for existing clients that
-                # do not yet understand first-class blocked guardrail events.
-                await self._emit_runtime_event("plan.failed", "Plan blocked", "failed", event_id=f"plan_{run_id}", parent_id=f"run_{run_id}", error="permission policy")
-                denial = "Tool execution was blocked by the active permission policy."
-                messages.append({"role": "system", "content": f"[TOOL_BLOCKED] {denial}"})
-                last_response = denial
-                yield {"type": "content", "data": denial}
-                break
-            await self._emit_stage_event("auditing", "Tools approved", f"{len(tool_calls)} tool call(s)", "done")
-
-            await self._emit_runtime_event("run.status", "Executing tools", "running", event_id=f"run_{run_id}", payload={"state": "execution"})
-            fresh_observations = await self._execute_tools(calls_to_execute) if calls_to_execute else []
-            fresh_results: Dict[Tuple[str, str], str] = {}
-            if len(fresh_observations) == len(calls_to_execute):
-                for call, observation in zip(calls_to_execute, fresh_observations):
-                    fresh_results[tool_signature(call)] = observation
-                    # Keep failures in the next-turn context, but do not cache
-                    # them as a completed result. This lets Nexus retry with
-                    # changed parameters or select another tool.
-                    if not self._observation_is_failure(observation):
-                        tool_result_cache[tool_signature(call)] = observation
-            observations = [
-                tool_result_cache.get(tool_signature(call), fresh_results.get(tool_signature(call)))
-                for call in tool_calls
-                if tool_signature(call) in tool_result_cache or tool_signature(call) in fresh_results
-            ]
-            last_observations = observations
-            self._last_run_had_tool_execution = True
-            yield {"type": "observations", "data": observations}
-            await self.hooks.trigger("post_tool_call", tool_calls, observations)
-            await self.kernel.plugins.trigger_hooks("post_tool_call", tool_calls, observations)
-            messages.append({"role": "assistant", "content": response})
-            messages.append({"role": "system", "content": "[TOOL_RESULTS]\n" + "\n".join(observations)})
-            await asyncio.to_thread(self._log_mission_replay, tool_calls, observations)
-
-            await self._emit_stage_event("verification", "Verifying tool results", "errors and targeted tests", "running")
-            verify = await self._verify_all_parallel(messages, tool_calls)
-            if self._last_run_failed:
-                verify = {
-                    "success": False,
-                    "vaccine": verify.get("vaccine") or "One or more real tool executions failed.",
-                }
-            await asyncio.to_thread(self._save_checkpoint, messages, task_desc, turn)
-            if not verify["success"] and verify["vaccine"]:
-                await self._emit_stage_event("verification", "Verification found a problem", str(verify["vaccine"]), "error")
-                verification_retries += 1
-                if verification_retries >= self.MAX_RETRIES_PER_PHASE:
-                    messages.append({"role": "system", "content": "[VERIFICATION_EXHAUSTED] Explain the unresolved failure clearly and stop."})
-                    requires_tools = False
-                else:
-                    await self._emit_runtime_event(
-                        "retry",
-                        "Retrying after verification failure",
-                        "running",
-                        event_id=f"retry_{run_id}_verification_{verification_retries}",
-                        parent_id=f"run_{run_id}",
-                        payload={"attempt": verification_retries, "phase": "verification"},
-                    )
-                    messages.append({"role": "system", "content": f"[SELF_CORRECT {verification_retries}/{self.MAX_RETRIES_PER_PHASE}] {verify['vaccine']}"})
-            else:
-                verification_retries = 0
-                requires_tools = False
-                self._last_run_verified = True
-                await self._emit_stage_event("verification", "Verification passed", "tool results accepted", "done")
                 messages.append({
                     "role": "system",
                     "content": (
-                        "[FINAL_RESPONSE] The real tools finished and verification passed. "
-                        "Continue the same assistant response with a concise result grounded only in TOOL_RESULTS. "
-                        "Do not emit tool protocol, request more tools, or start a new acknowledgement."
+                        f"[RUNTIME_ERROR] The previous turn raised: {error_text}\n"
+                        "Recover: change approach or parameters and continue the task."
                     ),
                 })
-            messages = self._compact_memory(messages)
-        else:
-            last_response = "Maximum agent turns reached before completion."
-            self._last_run_failed = True
-            yield {"type": "content", "data": last_response}
+                messages = self._compact_memory(messages)
+                continue
 
         terminal_status = "failed" if self._last_run_failed else "success"
         if self._last_run_failed:
@@ -1038,6 +1266,7 @@ class NexusLoop:
         await self._emit_runtime_event(
             "run.failed" if self._last_run_failed else "run.completed",
             "Run failed" if self._last_run_failed else "Run completed", terminal_status, event_id=f"run_{run_id}",
+            duration_ms=max(0.0, (time.perf_counter() - run_started_at) * 1000.0),
         )
         yield {"type": "status", "data": "\n[done]"}
         self._start_background_finalization(task_desc, messages)
@@ -1246,8 +1475,9 @@ To serve as an intelligent partner — handling whatever needs to be done with a
                 "project_docs": asyncio.to_thread(self._load_project_docs),
                 "knowledge": asyncio.to_thread(self._load_knowledge_context, task_desc),
             })
-        if needs_long_memory:
-            jobs["memory"] = self.memory_manager.prefetch_all(task_desc)
+        # Always prefetch memory (session history + failure vaccines are cheap and give the
+        # agent continuity on plain chat turns — not just when explicit memory keywords appear).
+        jobs["memory"] = self.memory_manager.prefetch_all(task_desc)
 
         async def load_source(name: str, awaitable: Any) -> Any:
             await self._emit_work_event({
@@ -1372,35 +1602,6 @@ To serve as an intelligent partner — handling whatever needs to be done with a
 
         return messages
 
-    def _load_session_memory(self) -> str:
-        """Load session memory from disk."""
-        try:
-            path = os.path.join(self.root, "logs", "sessions", f"{self.session_id}.json")
-            if not os.path.exists(path):
-                path = os.path.join(self.root, "logs", "session_memory.json")
-            if os.path.exists(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, list) and data:
-                        # summarize last 3 turns
-                        lines = []
-                        for m in data[-6:]:
-                            role = m.get("role", "")
-                            content = m.get("content", "")
-                            if role in ("user", "assistant"):
-                                if "[VOICE_MODE]:" in content:
-                                    if "\n\n[VOICE_MODE]:" in content:
-                                        content = content.split("\n\n[VOICE_MODE]:")[0]
-                                    else:
-                                        content = content.split("[VOICE_MODE]:")[0]
-                                content = content.strip()[:200]
-                                lines.append(f"{role.upper()}: {content}")
-                        return "\n".join(lines)
-        except Exception:
-            self.logger.warning("loop : suppressed error", exc_info=True)
-            pass
-        return ""
-
     def _init_permissions(self):
         """Initialize permission system based on current policy."""
         try:
@@ -1422,9 +1623,11 @@ To serve as an intelligent partner — handling whatever needs to be done with a
         try:
             atlas_path = os.path.join(self.root, "knowledge", "_nexus_logic_index.db")
             if not os.path.exists(atlas_path):
-                return ""
+                # BM25 index (docs/ + config + root markdown) is built lazily on first use
+                result = self.rag.retrieve_as_text(task_desc, top_k=5)
+                return result if result and "empty" not in result.lower() else ""
             # Use RAG engine to query knowledge
-            result = self.rag.retrieve_as_text(task_desc, top_k=2)
+            result = self.rag.retrieve_as_text(task_desc, top_k=5)
             return result if result and "No relevant" not in result else ""
         except Exception as e:
             self.logger.warning("_retrieve_knowledge: %s", e)
@@ -1532,6 +1735,37 @@ To serve as an intelligent partner — handling whatever needs to be done with a
                     return f"latest {subject} news {today}"
             return f"latest news headlines {today}"
         return cleaned
+
+    def _is_trivial_task(self, task_desc: str) -> bool:
+        """True for single-action tool requests (one file write/read/delete or one command).
+
+        Used only to skip plan generation and avoid extra model turns.
+        Verification and permission checks are unaffected.
+        """
+        low = " ".join((task_desc or "").strip().lower().split())
+        if not low or len(low) > 200:
+            return False
+        # Multi-step phrasing disqualifies the fast path.
+        if any(sig in low for sig in (
+            " and then", " then ", " after that", " also ", ";", "\n",
+            "each ", "every ", "all files", "refactor", "implement", "debug",
+            "fix ", "test ", "research", "analyze", "review", "deploy", "install",
+        )):
+            return False
+        single_action = (
+            "create a file", "create file", "make a file", "write a file",
+            "write to a file", "new file", "create a new file",
+            "delete a file", "delete file", "remove a file", "remove file",
+            "read a file", "read file", "read the file", "show me the file",
+            "cat file", "print the file",
+            "run the command", "run a command", "run this command",
+            "execute the command", "execute this command",
+        )
+        if not any(sig in low for sig in single_action):
+            return False
+        # Only one target/action mentioned.
+        verbs = sum(low.count(v) for v in ("create", "write", "delete", "remove", "read", "run", "execute"))
+        return verbs <= 2
 
     def _requires_real_tooling(self, task_desc: str) -> bool:
         low = task_desc.strip().lower()
@@ -1743,7 +1977,9 @@ Rules:
 - For current information, state the subject, recency/date check, and source validation needed.
 - Do not expose private reasoning; write only actionable work items."""
         try:
-            generated = await asyncio.to_thread(self._call_model_for_prompt, prompt)
+            generated = await asyncio.wait_for(
+                asyncio.to_thread(self._call_model_for_prompt, prompt), timeout=180
+            )
             if not generated or self._is_provider_error_text(generated):
                 return None
             cleaned = str(generated).strip()
@@ -1774,7 +2010,9 @@ Rules:
                 {"role": "system", "content": "You are NEXUS. Give a quick direct answer or acknowledgment. Be brief."},
                 {"role": "user",   "content": task_desc},
             ]
-            return await asyncio.to_thread(self._call_model, fast_messages)
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._call_model, fast_messages), timeout=180
+            )
         except Exception as e:
             self.logger.warning("_quick_respond: %s", e)
             return ""
@@ -2018,7 +2256,12 @@ Rules:
             payload={"tool": call.name, "target": self._work_target_for_call(call.name, call.params)},
         )
         try:
-            result = await self._run_tool(call)
+            tool_timeout = float(os.getenv("NEXUS_TOOL_TIMEOUT", "300"))
+            result = await asyncio.wait_for(self._run_tool(call), timeout=tool_timeout)
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"Tool '{call.name}' exceeded the {tool_timeout:g}s timeout and was aborted"
+            )
         except Exception:
             raise
         kind = self._work_kind_for_call(call.name, call.params)
@@ -2168,6 +2411,7 @@ Rules:
         parent_id: Optional[str] = None,
         payload: Optional[Dict[str, Any]] = None,
         error: str = "",
+        duration_ms: Optional[float] = None,
     ) -> None:
         """Central producer for canonical run/message/plan lifecycle events."""
         event: Dict[str, Any] = {
@@ -2185,6 +2429,8 @@ Rules:
         }
         if error:
             event["error"] = {"message": error}
+        if duration_ms is not None:
+            event["duration_ms"] = duration_ms
         await self._emit_work_event(event)
 
     async def _emit_tool_event(self, call: ToolCall, *, status: str, result: str = "", error: str = "", exit_code: Optional[int] = None) -> None:
@@ -2350,6 +2596,19 @@ Rules:
             scripts_dir = os.path.join(tool_dir, "scripts")
             if os.path.isdir(scripts_dir):
                 from tools.nexus_tools.base_tool import BaseTool
+                # Load the tool's .jsnol metadata so params/execution policy are honored
+                # (passing schema={} voids required-param validation and tool policy).
+                schema = {}
+                for jsnol_candidate in (
+                    os.path.join(tool_dir, f"{name}.jsnol"),
+                    os.path.join(tool_dir, ".jsnol"),
+                ):
+                    if os.path.isfile(jsnol_candidate):
+                        try:
+                            schema = json.loads(open(jsnol_candidate, encoding="utf-8").read())
+                        except Exception:
+                            schema = {}
+                        break
                 for script in sorted(s for s in os.listdir(scripts_dir) if s.endswith(".py") and not s.startswith("_")):
                     try:
                         spec = importlib.util.spec_from_file_location(name, os.path.join(scripts_dir, script))
@@ -2361,7 +2620,7 @@ Rules:
                                 if issubclass(cls, BaseTool) and cls is not BaseTool:
                                     instance = cls(root_dir=self.root)
                                     from tools.nexus_tools.registry import ToolEntry
-                                    entry = ToolEntry(name=name, schema={}, instance=instance)
+                                    entry = ToolEntry(name=name, schema=schema, instance=instance)
                                     self.tool_registry._tools[name] = entry
                                     self.logger.info(f"[AUTO-DISCOVER] Loaded tool: {name}")
                                     return entry
@@ -2397,7 +2656,6 @@ Rules:
             self._verify_execution(messages),          # Error scan + vaccine
             self._run_targeted_tests(tool_calls),      # Auto test selection
             asyncio.to_thread(self._read_todo_md),
-            self._fill_gap_during_session(messages[-1].get("content", "") if messages else ""),
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -2530,8 +2788,9 @@ Rules:
 
         # MemoryManager sync — persists to .opencode/memory/ + session + forge
         try:
-            user_msg = messages[0].get("content", "") if messages else ""
-            await self.memory_manager.sync_all(user_msg, last_resp)
+            # Use the real user task, NOT messages[0] (which is the system prompt).
+            real_user = next((m.get("content", "") for m in messages if m.get("role") == "user"), task_desc)
+            await self.memory_manager.sync_all(real_user or task_desc, last_resp)
         except Exception:
             self.logger.warning("loop : suppressed error", exc_info=True)
             pass
@@ -2574,11 +2833,33 @@ Rules:
     async def _evolve_self_improve(self, messages: List[Dict[str, str]]):
         """Step 2: SelfImprovementEngine — analyze session, extract top 3 actions."""
         try:
-            se     = SelfImprovementEngine(self.root)
-            record = await asyncio.to_thread(se.analyze_session, messages)
-            if record and record.actions:
-                for action in record.actions[:3]:
-                    await asyncio.to_thread(self.evolution_log.improvement, action)
+            with protected_core_writes("_evolve_self_improve"):
+                se     = SelfImprovementEngine(self.root)
+                record = await asyncio.to_thread(se.analyze_session, messages)
+                if record and record.actions:
+                    for action in record.actions[:3]:
+                        await asyncio.to_thread(self.evolution_log.improvement, action)
+                    # Persist actions to the durable, consumable backlog so
+                    # self-improvement output is no longer write-only.
+                    try:
+                        from evolution.backlog import queue_improvement_action
+
+                        for action in record.actions[:3]:
+                            await asyncio.to_thread(
+                                queue_improvement_action,
+                                {
+                                    "action": action,
+                                    "source": "self_improvement.analyze_session",
+                                    "session_id": getattr(record, "session_id", "") or "",
+                                    "score": getattr(record, "score", None),
+                                    "summary": (getattr(record, "summary", "") or "")[:300],
+                                },
+                                self.root,
+                            )
+                    except Exception:
+                        self.logger.warning(
+                            "loop async _evolve_self_improve: backlog queue failed", exc_info=True
+                        )
         except Exception:
             self.logger.warning("loop async _evolve_self_improve: suppressed error", exc_info=True)
             pass
@@ -2596,6 +2877,50 @@ Rules:
                 self.logger.warning("loop async _evolve_gap_forge: suppressed error", exc_info=True)
                 pass
         self._gaps_found.clear()
+
+    async def _maybe_spawn_hive(self, task_desc: str) -> Optional[str]:
+        """Opt-in multi-agent decomposition: when NEXUS_HIVE=1 and the task looks
+        complex, split it into persona'd subtasks, run them as parallel sub-agents
+        (each with its own slice of work), and return the consolidated result as an
+        extra context block. Never replaces the main loop — augments it.
+
+        Returns the consolidated text, or None if hive is off / decomposition failed.
+        """
+        if not self.feature_hive:
+            return None
+        try:
+            engine = self.hive  # lazy NexusHiveEngine(self.root)
+            try:
+                engine.set_tool_registry(self.tool_registry)
+            except Exception:
+                pass
+
+            def _llm(messages):
+                from providers.factory import NexusProviderFactory
+                f = NexusProviderFactory()
+                p = f.get_provider_by_name("cloud", "deepseek") if hasattr(f, "get_provider_by_name") else None
+                if p is None:
+                    p = f.get_provider()
+                if p is None:
+                    raise RuntimeError("no provider")
+                out = p.generate(messages[-1]["content"], messages[0]["content"], None) if hasattr(p, "generate") else None
+                return str(out) if out else ""
+            engine.set_llm_call(_llm)
+
+            subs = await engine.decompose_task(task_desc, _llm)
+            if not subs:
+                return None
+            hive_id, _agents = await engine.spawn_hive([(t, persona) for t, persona in subs])
+            consolidated = await engine.consolidate_hive(hive_id, llm_call=_llm)
+            if consolidated:
+                await self._emit_runtime_event(
+                    "hive.done", f"Hive completed {len(subs)} sub-agents", "success",
+                    payload={"subtasks": len(subs)},
+                )
+            return consolidated or None
+        except Exception as e:
+            self.logger.warning("hive spawn failed (ignored): %s", e)
+            return None
 
     async def _evolve_hive_feedback(self, messages: List[Dict[str, str]]):
         """Step 4: Hive worker performance scoring by ARCHITECT."""
@@ -2702,19 +3027,32 @@ If no gaps, return: {{"gaps": []}}
         """Execute a single gap fill immediately."""
         gtype = gap.get("type", "")
         name  = gap.get("name", "unknown")
+        # RUNTIME GUARD: never let a gap-fill target a core source file.
         try:
-            if gtype == "missing_tool":
-                forge = ToolForge(self.root)
-                await asyncio.to_thread(forge.forge, {"name": name, "description": gap.get("reason", "")})
-            elif gtype == "missing_skill":
-                forge = SkillForge(self.root)
-                await asyncio.to_thread(forge.forge, name, gap.get("reason", ""))
-            elif gtype == "memory_candidate":
-                forge = MemoryForge(self.root)
-                await asyncio.to_thread(forge.forge, name, gap.get("reason", ""))
-            elif gtype == "knowledge_gap":
-                forge = KnowledgeForge(self.root)
-                await asyncio.to_thread(forge.forge, name, gap.get("reason", ""))
+            for candidate in (gap.get("path"), gap.get("target"), name):
+                if isinstance(candidate, str) and candidate.strip():
+                    assert_not_rewriting_core(
+                        os.path.join(self.root, candidate)
+                        if not os.path.isabs(candidate) else candidate,
+                        operation=f"gap_fill({gtype})",
+                    )
+        except PermissionError as e:
+            self.logger.error(f"[RUNTIME_GUARD] Gap fill blocked for '{name}': {e}")
+            return
+        try:
+            with protected_core_writes(f"_fill_gap:{gtype}"):
+                if gtype == "missing_tool":
+                    forge = ToolForge(self.root)
+                    await asyncio.to_thread(forge.forge, {"name": name, "description": gap.get("reason", "")})
+                elif gtype == "missing_skill":
+                    forge = SkillForge(self.root)
+                    await asyncio.to_thread(forge.forge, name, gap.get("reason", ""))
+                elif gtype == "memory_candidate":
+                    forge = MemoryForge(self.root)
+                    await asyncio.to_thread(forge.forge, name, gap.get("reason", ""))
+                elif gtype == "knowledge_gap":
+                    forge = KnowledgeForge(self.root)
+                    await asyncio.to_thread(forge.forge, name, gap.get("reason", ""))
         except Exception as e:
             self._gaps_found.append(gap)
             self.logger.debug(f"[EVOLVE] Gap fill failed for '{name}': {e}")
@@ -2827,7 +3165,21 @@ If no gaps, return: {{"gaps": []}}
         except Exception as e:
             self.logger.error(f"Model call failed: {e}")
             return ""
-        return full
+
+    async def _safe_model_call(self, messages: List[Dict], *, timeout: float = 180.0) -> str:
+        """Call the model off the event loop with a hard timeout so a slow/hanging
+        provider can never freeze the agent turn indefinitely.
+        """
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._call_model, messages), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            self.logger.error("Model call timed out after %.0fs", timeout)
+            return ""
+        except Exception as e:  # pragma: no cover - defensive
+            self.logger.error("Model call failed: %s", e)
+            return ""
 
     async def _stream_model(
         self,
@@ -3090,6 +3442,33 @@ If no gaps, return: {{"gaps": []}}
             "run_tests": "test_runner",
         }
         return ToolCall(aliases.get(name, name), params, call.call_id)
+
+    @staticmethod
+    def _progress_tag_pattern() -> "re.Pattern[str]":
+        return re.compile(r"<progress>(.*?)</progress>", re.DOTALL | re.IGNORECASE)
+
+    @classmethod
+    def _extract_progress_notes(cls, response: str) -> Tuple[str, List[str]]:
+        """Split public ``<progress>`` narration out of a model response.
+
+        Returns ``(response_without_tags, notes)``. Notes are short user-facing
+        status lines describing the next action — they are deliberately public
+        (unlike reasoning/thinking blocks, which are never surfaced). Unclosed or
+        empty tags are ignored and the text is left untouched.
+        """
+        text = str(response or "")
+        if "<progress>" not in text.lower():
+            return text, []
+        notes: List[str] = []
+
+        def _take(match: "re.Match[str]") -> str:
+            note = match.group(1).strip()
+            if note:
+                notes.append(note)
+            return ""
+
+        cleaned = cls._progress_tag_pattern().sub(_take, text)
+        return cleaned, notes
 
     @staticmethod
     def _strip_internal_tool_protocol(response: str) -> str:
@@ -3443,44 +3822,112 @@ If no gaps, return: {{"gaps": []}}
     # CONTEXT COMPACTION
     # ─────────────────────────────────────────────────────────────────────────
 
+    # Runtime control/context messages that are *history*, not standing instructions.
+    # These are emitted during a run (tool results, self-correction, errors) and must be
+    # compacted like any other history — otherwise the largest payloads grow unbounded.
+    _TRANSIENT_SYSTEM_PREFIXES = (
+        "[TOOL_RESULTS]", "[SELF_CORRECT", "[RUNTIME_ERROR]", "[TOOL_BLOCKED]",
+        "[FINAL_RESPONSE]", "TOOL_ENFORCEMENT", "[CURRENT_PLAN]",
+    )
+
+    def _is_transient_system(self, msg: Dict[str, str]) -> bool:
+        if msg.get("role") != "system":
+            return False
+        c = (msg.get("content", "") or "").lstrip()
+        return c.startswith(self._TRANSIENT_SYSTEM_PREFIXES)
+
     def _compact_memory(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        """Compact by both message count and an operator-configurable token budget."""
-        estimated_tokens = sum(len(str(message.get("content", ""))) for message in messages) // 4
-        over_budget = estimated_tokens >= int(self.CONTEXT_TOKEN_LIMIT * self.COMPACT_TOKEN_RATIO)
-        if len(messages) <= self.COMPACT_THRESHOLD and not over_budget:
+        """Context suppression that preserves instructions + task, compacts history.
+
+        Classification:
+          - PINNED (never compacted): ground-context system blocks (stable prompt,
+            rules, workstyle, project docs, prompt files, memory, knowledge, codebase,
+            tool schemas) and the FIRST user task message.
+          - COMPACTABLE: transient runtime system messages (tool results, self-correct,
+            runtime errors, tool-blocked, final-response, plan) PLUS all later
+            user/assistant/tool turns.
+
+        When the compactable portion exceeds the token budget (NEXUS_COMPACT_BUDGET,
+        default 120k) or message count > COMPACT_KEEP, the OLDEST compactable messages
+        are replaced by a single ordered summary while the most recent COMPACT_KEEP
+        stay verbatim. Original relative order is preserved (no hoisting), so a tool
+        result stays next to the assistant turn it answered.
+        """
+        if not messages:
             return messages
-        system  = messages[0] if messages and messages[0].get("role") == "system" else None
-        history = messages[1:] if system else messages
-        keep    = history[-self.COMPACT_KEEP:]
-        old     = history[:-self.COMPACT_KEEP]
 
-        summary     = self._summarize_compacted_messages(old)
+        pinned: List[Dict[str, str]] = []          # standing instructions
+        compactable: List[Dict[str, str]] = []      # history that may be summarized
+        first_user_pinned = False
+        for i, m in enumerate(messages):
+            role = m.get("role")
+            if role == "system" and not self._is_transient_system(m):
+                pinned.append(m)
+            elif role == "user" and not first_user_pinned:
+                # pin the original task verbatim
+                pinned.append(m)
+                first_user_pinned = True
+            else:
+                compactable.append(m)
+
+        estimated_tokens = sum(len(str(m.get("content", ""))) // 4 for m in compactable)
+        budget = int(os.environ.get("NEXUS_COMPACT_BUDGET", "120000")) or 120_000
+        if len(compactable) <= self.COMPACT_KEEP and estimated_tokens < budget:
+            return messages  # nothing to compact yet
+
+        if len(compactable) <= self.COMPACT_KEEP:
+            # few messages but over budget -> trim oversized individual messages instead
+            if estimated_tokens >= budget:
+                compactable = [
+                    {**m, "content": (m.get("content", "")[:4000] if len(str(m.get("content", ""))) > 4000 else m.get("content", ""))}
+                    for m in compactable
+                ]
+            return pinned + compactable
+
+        keep = compactable[-self.COMPACT_KEEP:]
+        old = compactable[:-self.COMPACT_KEEP]
+
+        summary = self._summarize_compacted_messages(old)
         summary_msg = {"role": "system", "content": summary}
-
-        result = [system] if system else []
-        result.append(summary_msg)
-        result.extend(keep)
-        return result
+        # pinned instructions first, then the compaction summary, then the most recent
+        # compactable messages IN ORIGINAL RELATIVE ORDER.
+        return pinned + [summary_msg] + keep
 
     def _summarize_compacted_messages(self, messages: List[Dict[str, str]]) -> str:
-        goals, progress = [], []
-        evidence = []
+        """Deterministic, fast structured compaction (no model call).
+
+        Preserves: the user's goals, key decisions, tool results/evidence, and errors —
+        so the agent keeps working from real context. The summary is tagged distinctly
+        and replaces (not stacks on) any prior summary on the next compaction.
+        """
+        goals, progress, evidence, errors = [], [], [], []
         for msg in messages:
             r = msg.get("role")
-            c = msg.get("content", "")[:300]
+            c = (msg.get("content", "") or "").strip()
+            if not c:
+                continue
+            # strip transient prefixes so the summary reads cleanly
             if r == "user":
-                goals.append(c)
+                goals.append(c[:500])
             elif r == "assistant":
-                progress.append(c)
-            elif r in {"tool", "system"} and c.strip():
-                evidence.append(c)
-        lines = ["[CONTEXT_COMPACTED] Summary of prior conversation:"]
-        for goal in goals:
-            lines.append(f"- Goal: {goal}")
-        for item in progress:
-            lines.append(f"- Progress: {item}")
-        for item in evidence[-8:]:
-            lines.append(f"- Evidence/state: {item}")
+                progress.append(c[:500])
+            elif r == "tool":
+                evidence.append(c[:600])
+            # transient system msgs already preserved as pinned? no — they are compactable,
+            # fold their substance into evidence so tool results survive compaction.
+            elif r == "system":
+                evidence.append(c[:400])
+            if "error" in c.lower() or "failed" in c.lower():
+                errors.append(c[:400])
+        lines = ["[CONTEXT_COMPACTED] Condensed summary of earlier turns (most recent state retained verbatim):"]
+        for g in goals[-6:]:
+            lines.append(f"- Goal: {g}")
+        for p in progress[-6:]:
+            lines.append(f"- Progress: {p}")
+        for e in evidence[-10:]:
+            lines.append(f"- Evidence/tool-result: {e}")
+        for e in errors[-4:]:
+            lines.append(f"- Error noted: {e}")
         return "\n".join(lines)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -3501,18 +3948,24 @@ If no gaps, return: {{"gaps": []}}
         """Load short-term memory from disk."""
         if session_id:
             self.session_id = session_id
-        try:
-            path = os.path.join(self.root, "logs", "sessions", f"{self.session_id}.json")
-            if not os.path.exists(path) and self.session_id == "default":
-                path = os.path.join(self.root, "logs", "session_memory.json")
-            if os.path.exists(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    self.memory = json.load(f)
-            else:
+            # keep the MemoryManager pointed at the same session, else its
+            # _prefetch_session reads a stale/old session file.
+            try:
+                self.memory_manager.session_id = session_id
+            except Exception:
+                pass
+            try:
+                path = os.path.join(self.root, "logs", "sessions", f"{self.session_id}.json")
+                if not os.path.exists(path) and self.session_id == "default":
+                    path = os.path.join(self.root, "logs", "session_memory.json")
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        self.memory = json.load(f)
+                else:
+                    self.memory = []
+            except Exception as e:
+                self.logger.warning("load_memory: %s", e)
                 self.memory = []
-        except Exception as e:
-            self.logger.warning("load_memory: %s", e)
-            self.memory = []
 
     def sync_memory(self):
         """High-performance sync — CLI/GUI cohesion."""

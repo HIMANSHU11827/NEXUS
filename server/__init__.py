@@ -14,7 +14,8 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from collections import deque
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,15 @@ _SESSION_DIR = os.path.join(_PROJECT_ROOT, "logs", "sessions")
 _WORK_EVENTS_DIR = os.path.join(_PROJECT_ROOT, "workspace", "work_events")
 _WORK_EVENT_SEQUENCE_LOCK = threading.Lock()
 _WORK_EVENT_SEQUENCES: Dict[str, int] = {}
+# Bounded-retention + cache state for the canonical work-event log. These were
+# previously only implemented in the parallel gui/api.py app, which meant the
+# server that actually runs in production had an unbounded, uncached log.
+_WORK_EVENT_APPEND_LOCK = threading.RLock()
+_WORK_EVENT_CACHE_LOCK = threading.RLock()
+_WORK_EVENT_CACHE: Dict[str, Tuple[Tuple[int, int], List[Dict[str, Any]], int]] = {}
+_WORK_EVENT_MAX_RECORDS = max(100, int(os.environ.get("NEXUS_WORK_EVENT_MAX_RECORDS", "10000")))
+_WORK_EVENT_MAX_BYTES = max(1024 * 1024, int(os.environ.get("NEXUS_WORK_EVENT_MAX_BYTES", str(50 * 1024 * 1024))))
+_THREAD_LOCAL = threading.local()
 _TASKS_PATH = os.path.join(_ROOT, "logs", "tasks.json")
 _CONFIG_PATH = os.path.join(_PROJECT_ROOT, "config", "nexus_config.yaml")
 _CLAUDE_SETTINGS_PATH = os.path.join(_PROJECT_ROOT, ".claude", "settings.json")
@@ -140,12 +150,30 @@ app.add_middleware(SessionMiddleware, secret_key=_session_secret, max_age=86400)
 # ── CORS middleware ─────────────────────────────────────────────────
 from fastapi.middleware.cors import CORSMiddleware
 
+_DEFAULT_CORS_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
+
+
+def _cors_origins() -> list:
+    """Explicit CORS allowlist. Wildcard is refused while credentials are on."""
+    raw = os.environ.get("NEXUS_CORS_ORIGINS", "").strip()
+    if not raw:
+        return list(_DEFAULT_CORS_ORIGINS)
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    safe = [o for o in origins if o != "*"]
+    if len(safe) != len(origins):
+        logger.warning(
+            "NEXUS_CORS_ORIGINS contained '*'; wildcard is ignored because "
+            "allow_credentials=True. Falling back to the explicit allowlist."
+        )
+    return safe or list(_DEFAULT_CORS_ORIGINS)
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With"],
 )
 
 # ── Auth middleware ─────────────────────────────────────────────────
@@ -343,6 +371,526 @@ def _next_work_event_sequence(path: str) -> int:
         return _WORK_EVENT_SEQUENCES[path]
 
 
+# ----------------------------------------------------------------------
+# Canonical work-event layer (ported from the retired gui/api.py app so the
+# server that actually runs owns ONE implementation: bounded retention,
+# signature-cached reads, canonical envelopes, cursor replay, live sink).
+# ----------------------------------------------------------------------
+
+def _work_event_log_signature(path: str) -> Tuple[int, int]:
+    try:
+        stat = os.stat(path)
+        return stat.st_mtime_ns, stat.st_size
+    except FileNotFoundError:
+        return 0, 0
+
+
+def _scan_work_event_log(path: str) -> Tuple[List[Dict[str, Any]], int]:
+    """Scan with bounded memory, retaining the tail plus older active lifecycles."""
+    tail = deque(maxlen=_WORK_EVENT_MAX_RECORDS)
+    active: Dict[str, Dict[str, Any]] = {}
+    record_count = 0
+    if not os.path.exists(path):
+        return [], 0
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                event = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            record_count += 1
+            tail.append(event)
+            event_id = str(event.get("event_id") or event.get("id") or "")
+            if not event_id:
+                continue
+            status = str(event.get("status") or "").lower()
+            if status in {"pending", "running", "queued", "started", "in_progress"}:
+                active[event_id] = event
+            else:
+                active.pop(event_id, None)
+    retained = list(tail)
+    retained_ids = {str(event.get("event_id") or event.get("id") or "") for event in retained}
+    retained.extend(event for event_id, event in active.items() if event_id not in retained_ids)
+    retained.sort(key=lambda event: int(event.get("sequence") or 0))
+    return retained, record_count
+
+
+def _cached_work_events(path: str) -> Tuple[List[Dict[str, Any]], int]:
+    signature = _work_event_log_signature(path)
+    with _WORK_EVENT_CACHE_LOCK:
+        cached = _WORK_EVENT_CACHE.get(path)
+        if cached and cached[0] == signature:
+            return cached[1], cached[2]
+    events, count = _scan_work_event_log(path)
+    with _WORK_EVENT_CACHE_LOCK:
+        _WORK_EVENT_CACHE[path] = (signature, events, count)
+    return events, count
+
+
+def _invalidate_work_event_cache(path: str) -> None:
+    with _WORK_EVENT_CACHE_LOCK:
+        _WORK_EVENT_CACHE.pop(path, None)
+
+
+def _compact_work_event_log_if_needed(path: str) -> None:
+    """Atomically compact oversized JSONL while keeping sequence cursors monotonic."""
+    events, record_count = _cached_work_events(path)
+    current_size = _work_event_log_signature(path)[1]
+    if record_count <= _WORK_EVENT_MAX_RECORDS and current_size <= _WORK_EVENT_MAX_BYTES:
+        return
+    encoded = [json.dumps(event, ensure_ascii=False) + "\n" for event in events]
+    # Active lifecycle evidence is lossless even if it alone exceeds a soft
+    # retention limit; avoid rewriting the same irreducible log every append.
+    if sum(len(line.encode("utf-8")) for line in encoded) >= current_size:
+        return
+    temporary = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
+            handle.writelines(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+    _invalidate_work_event_cache(path)
+
+
+def safe_workspace_read_path(raw_path: str) -> str:
+    value = str(raw_path or "").strip().strip('"').strip("'")
+    if not value:
+        raise HTTPException(status_code=400, detail="Path is required")
+    if not os.path.isabs(value):
+        value = os.path.join(_PROJECT_ROOT, value)
+    path = os.path.abspath(value)
+    root = os.path.abspath(_PROJECT_ROOT)
+    if os.path.commonpath([root, path]) != root:
+        raise HTTPException(status_code=400, detail="Path is outside the NEXUS workspace")
+    if not os.path.exists(path) or not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return path
+
+
+def write_workspace_todo_plan(content: str) -> str:
+    """Persist the visible agent plan as a real workspace file (atomic)."""
+    workspace_dir = os.path.join(_PROJECT_ROOT, "workspace")
+    os.makedirs(workspace_dir, exist_ok=True)
+    todo_path = os.path.abspath(os.path.join(workspace_dir, "todo.md"))
+    if os.path.commonpath([os.path.abspath(workspace_dir), todo_path]) != os.path.abspath(workspace_dir):
+        raise HTTPException(status_code=400, detail="Invalid todo path")
+    temp_path = f"{todo_path}.{uuid.uuid4().hex[:8]}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(temp_path, todo_path)
+    return os.path.relpath(todo_path, _PROJECT_ROOT)
+
+
+def update_todo_file_and_states(session_id: str, new_event: Dict[str, Any], turn_id: str = "") -> List[Dict[str, Any]]:
+    if new_event.get("role") == "planning_artifact" or new_event.get("kind") == "todo":
+        return []
+    sid = safe_session_id(session_id)
+    events = list_work_events(sid, limit=1000, turn_id=turn_id)
+    if turn_id:
+        events = [e for e in events if str(e.get("turn_id", "")) == turn_id]
+    todo_events = [e for e in events if e.get("kind") == "todo" and e.get("phase_index") is not None]
+    if not todo_events:
+        return []
+    
+    # Sort todo events by phase_index
+    todo_events.sort(key=lambda x: int(x.get("phase_index") or 0))
+    
+    kind = str(new_event.get("kind") or "").lower()
+    status = str(new_event.get("status") or "").lower()
+    if status == "success":
+        status = "done"
+    elif status == "failed":
+        status = "error"
+    target = str(new_event.get("target") or "").lower()
+    
+    # Find phase indexes by checking title keywords
+    research_idx = 1
+    impl_idx = 2
+    verify_idx = len(todo_events)
+    
+    for i, e in enumerate(todo_events, 1):
+        title_lower = str(e.get("title") or "").lower()
+        if any(w in title_lower for w in ["research", "spec", "analyze", "design", "plan"]):
+            research_idx = i
+        if any(w in title_lower for w in ["implement", "code", "write", "create", "build", "develop", "patch"]):
+            impl_idx = i
+        if any(w in title_lower for w in ["verify", "test", "check", "run", "compile"]):
+            verify_idx = i
+            
+    is_explicit = False
+    target_lower = str(target).lower()
+    basename = os.path.basename(target_lower)
+    for e in todo_events:
+        for item in (e.get("items") or []):
+            item_lower = str(item).lower()
+            if target_lower in item_lower or (basename and basename in item_lower):
+                is_explicit = True
+                break
+        if is_explicit:
+            break
+            
+    if target_lower.endswith("todo.md") or kind == "todo":
+        is_explicit = True
+
+    if not is_explicit:
+        return []
+
+    if kind in ["search", "rag"]:
+        active_phase_index = research_idx
+    elif kind == "file":
+        active_phase_index = impl_idx
+    elif kind == "command":
+        active_phase_index = verify_idx
+    else:
+        active_phase_index = research_idx
+        
+    updated_events = []
+    changes_made = False
+    
+    # Update checked items for the current active phase
+    for e in todo_events:
+        idx = int(e.get("phase_index") or 1)
+        if idx == active_phase_index and status == "done":
+            items = e.get("items") or []
+            checked_items = e.get("checked_items") or []
+            unchecked = [item for item in items if item not in checked_items]
+            if unchecked:
+                checked_items.append(unchecked[0])
+                e["checked_items"] = checked_items
+                changes_made = True
+
+    # Mark phases as done if all their items are checked
+    first_incomplete_idx = None
+    for e in todo_events:
+        idx = int(e.get("phase_index") or 1)
+        items = e.get("items") or []
+        checked = e.get("checked_items") or []
+        if len(checked) >= len(items) and len(items) > 0:
+            if e.get("status") != "done":
+                e["status"] = "done"
+                changes_made = True
+        else:
+            if first_incomplete_idx is None:
+                first_incomplete_idx = idx
+
+    actual_active_index = first_incomplete_idx if first_incomplete_idx is not None else len(todo_events)
+    
+    # Propagate state changes to the phases
+    for e in todo_events:
+        idx = int(e.get("phase_index") or 1)
+        current_status = e.get("status", "pending")
+        if idx < actual_active_index:
+            new_status = "done"
+        elif idx == actual_active_index:
+            new_status = "running"
+        else:
+            new_status = "pending"
+            
+        if new_status != current_status:
+            e["status"] = new_status
+            changes_made = True
+            
+        if changes_made or idx == active_phase_index:
+            updated_events.append(e)
+            
+    # Generate updated todo.md content
+    prompt_text = todo_events[0].get("task", "Agent Workspace Plan")
+    lines = ["## TODO List", "", f"Task: {prompt_text}", ""]
+    
+    for e in todo_events:
+        idx = e.get("phase_index")
+        title = e.get("title")
+        items = e.get("items") or []
+        checked = e.get("checked_items") or []
+        
+        phase_done = e.get("status") == "done"
+        phase_running = e.get("status") == "running"
+        
+        box = "[x]" if phase_done else "[/]" if phase_running else "[ ]"
+        lines.append(f"- {box} Phase {idx}: {title}")
+        
+        for item in items:
+            item_box = "[x]" if item in checked or phase_done else "[ ]"
+            lines.append(f"  - {item_box} {item}")
+            
+    todo_content = "\n".join(lines).strip() + "\n"
+    todo_rel_path = write_workspace_todo_plan(todo_content)
+    
+    # Build a file event for todo.md to update the editor preview on frontend
+    todo_file_event = {
+        "kind": "file",
+        "type": "file",
+        "action": "Edit file",
+        "title": "todo.md",
+        "task": prompt_text,
+        "target": todo_rel_path,
+        "path": todo_rel_path,
+        "preview": todo_content,
+        "status": "done",
+        "turn_id": turn_id,
+        "phase": f"Phase {actual_active_index}: {todo_events[actual_active_index-1].get('title') if actual_active_index <= len(todo_events) else 'Work'}",
+        "phase_index": actual_active_index,
+        "role": "planning_artifact",
+    }
+    
+    updated_events.append(todo_file_event)
+    
+    # Persist updated events to session work events log
+    for event in updated_events:
+        append_work_event(sid, event)
+        
+    return updated_events
+
+
+def normalize_work_event_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    event = dict(payload or {})
+    raw_kind = str(event.get("kind") or event.get("type") or "").lower()
+    raw_action = str(event.get("action") or event.get("title") or "").lower()
+    raw_tool = str(event.get("tool") or event.get("name") or "").lower()
+
+    if raw_kind == "artifact":
+        kind = "file"
+    elif "rag" in raw_kind or "rag" in raw_action or "retrieval" in raw_action or "atlas" in raw_tool:
+        kind = "rag"
+    elif "mcp" in raw_kind or "mcp" in raw_action or "mcp" in raw_tool:
+        kind = "mcp"
+    elif "browser" in raw_kind or "browser" in raw_action or "browser" in raw_tool:
+        kind = "browser"
+    elif any(token in raw_kind for token in ("search", "web")) or "search" in raw_action or any(token in raw_tool for token in ("search", "grep", "glob")):
+        kind = "search"
+    elif any(token in raw_kind for token in ("command", "bash", "terminal", "shell", "exec")) or event.get("command"):
+        kind = "command"
+    elif (
+        "file" in raw_kind
+        or "file" in raw_action
+        or "file" in raw_tool
+        or raw_kind in {"reading", "creating", "modifying", "deleting"}
+        or raw_tool in {"reading", "creating", "modifying", "deleting"}
+        or event.get("path")
+    ):
+        kind = "file"
+    elif "skill" in raw_kind:
+        kind = "skill"
+    elif "plugin" in raw_kind:
+        kind = "plugin"
+    elif "provider" in raw_kind:
+        kind = "provider"
+    elif any(token in raw_kind for token in ("hive", "subagent", "agent", "worker")):
+        kind = "hive"
+    elif "todo" in raw_kind:
+        kind = "todo"
+    else:
+        kind = raw_kind or "tool"
+
+    action = str(event.get("action") or event.get("title") or "").strip()
+    if not action:
+        if kind == "file":
+            file_tool = raw_tool or raw_kind
+            if file_tool == "reading":
+                action = "Read file"
+            elif file_tool == "creating":
+                action = "Create file"
+            elif file_tool == "modifying":
+                action = "Edit file"
+            elif file_tool == "deleting":
+                action = "Delete file"
+            elif any(token in raw_action for token in ("delete", "remove")):
+                action = "Delete file"
+            elif any(token in raw_action for token in ("create", "write")):
+                action = "Create file"
+            elif any(token in raw_action for token in ("read", "view")):
+                action = "Read file"
+            elif "update" in raw_action:
+                action = "Update file"
+            else:
+                action = "Edit file"
+        elif kind == "search":
+            action = "Searching"
+        elif kind == "rag":
+            action = "Read context"
+        elif kind == "mcp":
+            action = "Use MCP"
+        elif kind == "browser":
+            action = "Browse"
+        elif kind == "command":
+            action = "Run command"
+        elif kind == "skill":
+            action = "Use skill"
+        elif kind == "plugin":
+            action = "Use plugin"
+        elif kind == "provider":
+            action = "Check provider"
+        elif kind == "hive":
+            action = "Delegate task"
+        elif kind == "todo":
+            action = "Plan work"
+        else:
+            action = "Use tool"
+
+    target = (
+        event.get("target")
+        or event.get("path")
+        or event.get("command")
+        or event.get("query")
+        or event.get("tool")
+        or event.get("name")
+        or event.get("result")
+        or ""
+    )
+    event["kind"] = kind
+    event["type"] = kind
+    event["action"] = action
+    event.setdefault("title", action)
+    if target:
+        event["target"] = target
+    return event
+
+
+def append_work_event(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    event = normalize_work_event_payload(payload)
+    event.setdefault("id", f"evt_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}")
+    event["session_id"] = safe_session_id(session_id)
+    event.setdefault("created_at", time.time())
+    event.setdefault("type", event.get("kind") or event.get("tool") or "tool")
+    event.setdefault("title", event.get("action") or event.get("tool") or "Work event")
+    event.setdefault("target", event.get("path") or event.get("target") or event.get("command") or "")
+    event.setdefault("status", "running")
+    target = str(event.get("target") or event.get("path") or "")
+    if (event.get("kind") == "file" or event.get("type") == "file") and target:
+        try:
+            file_path = safe_workspace_read_path(target)
+            event["path"] = os.path.relpath(file_path, _PROJECT_ROOT)
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                event["preview"] = f.read(20000)
+        except Exception as exc:
+            event["preview_error"] = str(exc)
+    os.makedirs(_WORK_EVENTS_DIR, exist_ok=True)
+    path = work_events_path(session_id)
+    with _WORK_EVENT_APPEND_LOCK:
+        if event.get("sequence") is not None:
+            event["source_sequence"] = event["sequence"]
+        sequence = _next_work_event_sequence(path)
+        canonical = CanonicalEvent.from_work_event(event, event["session_id"], sequence).to_dict()
+        event["legacy_type"] = event.get("type")
+        event["legacy_status"] = event.get("status")
+        event.update(canonical)
+        # Compatibility aliases remain during the adapter migration; all new
+        # records still persist the complete canonical envelope above.
+        event["id"] = event["event_id"]
+        event["session_id"] = event["conversation_id"]
+        event["created_at"] = event["timestamp"]
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        _invalidate_work_event_cache(path)
+        _compact_work_event_log_if_needed(path)
+        
+    if hasattr(_THREAD_LOCAL, "appended_events"):
+        _THREAD_LOCAL.appended_events.append(event)
+        
+    if event.get("kind") not in ("todo", "planning_artifact") and event.get("role") != "planning_artifact":
+        try:
+            update_todo_file_and_states(session_id, event, event.get("turn_id", ""))
+        except Exception as e:
+            print(f"[API_ERROR]: Failed to update todo.md/states: {e}")
+            
+    return event
+
+
+def parse_todo_markdown(content: str) -> List[Dict[str, Any]]:
+    plan = []
+    current_phase = None
+    
+    for line in content.splitlines():
+        line_str = line.strip()
+        if not line_str:
+            continue
+            
+        # Match phase line: "- [ ] Phase 1: Research & Spec" or "- [x] Phase 2: Code" or "- [/] Phase 3..."
+        phase_match = re.match(r"^-\s*(?:\[([ x/])\]\s*)?Phase\s+(\d+):\s*(.*)", line_str, re.IGNORECASE)
+        if phase_match:
+            box = phase_match.group(1) or " "
+            phase_idx = int(phase_match.group(2))
+            title = phase_match.group(3).strip()
+            
+            status = "done" if box == "x" else "running" if box == "/" else "pending"
+            
+            current_phase = {
+                "phase_index": phase_idx,
+                "title": title,
+                "status": status,
+                "items": [],
+                "checked_items": []
+            }
+            plan.append(current_phase)
+            continue
+            
+        # Match sub-item line: "  - [ ] sub-task"
+        item_match = re.match(r"^\s*-\s*\[([ x/])\]\s*(.*)", line)
+        if item_match and current_phase:
+            box = item_match.group(1) or " "
+            item_text = item_match.group(2).strip()
+            current_phase["items"].append(item_text)
+            if box == "x":
+                current_phase["checked_items"].append(item_text)
+                
+    # Normalize phase indices so they are always sequential starting from 1
+    for idx, phase in enumerate(plan, start=1):
+        phase["phase_index"] = idx
+        
+    return plan
+
+
+def replay_work_events_after(session_id: str, after_sequence: int, limit: int = 200) -> List[Dict[str, Any]]:
+    """Replay the append-only canonical log without lifecycle-state dedupe."""
+    events: List[Dict[str, Any]] = []
+    path = work_events_path(session_id)
+    raw_events, _ = _cached_work_events(path)
+    for event in raw_events:
+        if str(event.get("visibility", "")).lower() == "internal":
+            continue
+        if int(event.get("sequence") or 0) > after_sequence:
+            events.append(event)
+            if len(events) >= max(1, min(limit, 1000)):
+                break
+    return events[:max(1, min(limit, 1000))]
+
+
+def bind_live_work_event_sink(loop: NexusLoop, session_id: str, turn_id: str, out_queue) -> tuple[Any, Any]:
+    """Multiplex structured loop events into persistence and the active stream."""
+    previous = loop.work_event_sink
+
+    def live_sink(payload: Dict[str, Any]) -> Dict[str, Any]:
+        enriched = dict(payload)
+        if turn_id:
+            enriched.setdefault("turn_id", turn_id)
+        event = append_work_event(session_id, enriched)
+        if str(event.get("visibility") or "public").lower() == "public":
+            out_queue.put(("event", event))
+        return event
+
+    loop.work_event_sink = live_sink
+    return previous, live_sink
+
+
+def encode_chat_stream_frame(event: str, payload: Any, *, legacy: bool = False) -> str:
+    """Serialize one chat transport record as valid SSE (or explicit legacy raw)."""
+    if legacy:
+        if event == "message":
+            return str(payload.get("content", "")) if isinstance(payload, dict) else str(payload)
+        if event == "work_event":
+            item = payload.get("event", payload) if isinstance(payload, dict) else payload
+            return f"[NEXUS_ACTIVITY]: {json.dumps(item, ensure_ascii=False)}\n"
+        return ""
+    body = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+    return f"event: {event}\ndata: {body}\n\n"
+
+
 def _append_work_event(session_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
     sid = safe_session_id(session_id)
     payload = dict(event)
@@ -363,30 +911,40 @@ def _append_work_event(session_id: str, event: Dict[str, Any]) -> Dict[str, Any]
 
 
 def list_work_events(session_id: str, limit: int = 200, turn_id: str = "", after_sequence: int = 0):
+    """Collapse a work-event log into current timeline state.
+
+    Each event id appears once, holding its LATEST persisted state, at the
+    position where it was FIRST seen. This is what the GUI timeline renders:
+    a running command that later completes must update in place rather than
+    appear twice or jump to the end. Reads go through the signature cache so
+    repeated polling does not rescan the whole log.
+    """
     path = work_events_path(session_id)
-    events = []
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(event, dict):
-                    continue
-                if str(event.get("visibility") or "public").lower() == "internal":
-                    continue
-                try:
-                    sequence = int(event.get("sequence") or 0)
-                except (TypeError, ValueError):
-                    sequence = 0
-                if sequence <= after_sequence:
-                    continue
-                if turn_id and str(event.get("turn_id") or event.get("run_id") or "") != str(turn_id):
-                    continue
-                events.append(event)
-    except FileNotFoundError:
-        return []
+    raw_events, _ = _cached_work_events(path)
+
+    order: List[str] = []
+    latest: Dict[str, Dict[str, Any]] = {}
+    anonymous: List[Dict[str, Any]] = []
+    for event in raw_events:
+        if str(event.get("visibility") or "public").lower() == "internal":
+            continue
+        try:
+            sequence = int(event.get("sequence") or 0)
+        except (TypeError, ValueError):
+            sequence = 0
+        if after_sequence and sequence <= after_sequence:
+            continue
+        if turn_id and str(event.get("turn_id") or event.get("run_id") or "") != str(turn_id):
+            continue
+        event_id = str(event.get("event_id") or event.get("id") or "")
+        if not event_id:
+            anonymous.append(event)
+            continue
+        if event_id not in latest:
+            order.append(event_id)
+        latest[event_id] = event
+
+    events = [latest[event_id] for event_id in order] + anonymous
     return events[-max(1, min(int(limit or 200), 1000)):]
 
 
@@ -916,7 +1474,7 @@ async def load_session(request: Request):
         loop = get_loop(sid)
         apply_runtime_settings(loop)
         set_active_session(sid, source="cli-api:load")
-        return {"status": "success", "id": loop.session_id, "history": _sanitize_history_messages(loop.memory)}
+        return {"status": "success", "id": loop.session_id, "history": _sanitize_history_messages(loop.memory, sid)}
     except HTTPException:
         raise
     except Exception as e:
@@ -1307,7 +1865,7 @@ def get_history(session_id: str = "default"):
     try:
         loop = get_loop(session_id)
         loop.sync_memory()
-        return _sanitize_history_messages(loop.memory)
+        return _sanitize_history_messages(loop.memory, safe_session_id(session_id))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
 
@@ -2414,20 +2972,54 @@ def _clean_visible_message_text(text: str) -> str:
     return cleaned.strip()
 
 
-def _sanitize_history_messages(messages: Any) -> list:
+def _sanitize_history_messages(messages: Any, session_id: str = "") -> list:
     if not isinstance(messages, list):
         return []
+    events_by_run: Dict[str, list] = {}
+    if session_id:
+        for event in list_work_events(session_id, limit=1000):
+            run_id = str(event.get("turn_id") or event.get("run_id") or "")
+            if run_id:
+                events_by_run.setdefault(run_id, []).append(event)
+
+    def completed_content(events: list) -> str:
+        for event in reversed(events):
+            event_type = str(event.get("event_type") or event.get("type") or "")
+            if event_type != "message.completed":
+                continue
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            nested = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+            content = payload.get("content") or nested.get("content")
+            if isinstance(content, str):
+                return _clean_visible_message_text(content)
+        return ""
+
     cleaned_messages = []
     for item in messages:
         if not isinstance(item, dict):
             continue
         role = str(item.get("role", "") or "")
         content = item.get("content", "")
-        cleaned_messages.append({
+        cleaned = {
             **item,
             "role": role,
             "content": _clean_visible_message_text(content) if role == "assistant" else str(content or ""),
-        })
+        }
+        if role == "assistant" and events_by_run:
+            run_id = str(item.get("turn_id") or item.get("run_id") or "")
+            activity = events_by_run.get(run_id, []) if run_id else []
+            # Older transcripts predate the turn_id field. Match their saved
+            # final response to the canonical terminal event so their real
+            # activity timeline can still be replayed accurately.
+            if not activity:
+                for candidate_run, candidate_events in events_by_run.items():
+                    if completed_content(candidate_events) == cleaned["content"]:
+                        run_id, activity = candidate_run, candidate_events
+                        break
+            if activity:
+                cleaned["turn_id"] = run_id
+                cleaned["work_events"] = activity
+        cleaned_messages.append(cleaned)
     return cleaned_messages
 
 
