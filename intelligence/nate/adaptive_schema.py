@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import threading
 import time
+import zlib
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -98,13 +100,15 @@ class NATE_Route:
     """
 
     STRAP_THRESHOLD = 0.85
-    NECESSITY_THRESHOLD = 0.30
+    NECESSITY_THRESHOLD = 0.22
     PATH1_THRESHOLD = 0.50
     RELATIVE_BONUS = 0.10
     DYNAMIC_K_MIN = 1
     DYNAMIC_K_MAX = 8
     SIM_DROP_THRESHOLD = 0.10
     FALLBACK_DIM = 512
+    TRIGRAM_WEIGHT = 0.1
+    MAX_FEEDBACK_HISTORY = 10
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
         self._model_name = model_name
@@ -116,6 +120,14 @@ class NATE_Route:
         self._clusters: Dict[int, List[int]] = {}
         self._cluster_centroids: Optional[np.ndarray] = None
         self._cluster_to_tool: Dict[int, int] = {}
+
+        # TF-IDF corpus state (pure-NumPy fallback embedding)
+        self._doc_freq: Dict[str, int] = {}
+        self._num_docs = 0
+        self._doc_terms: List[Dict[str, float]] = []
+        self._vocab: Dict[str, int] = {}
+        self._idf_weights: Dict[str, float] = {}
+        self._vocab_dim = 0
 
         # OATS feedback accumulators
         self._feedback_success: Dict[str, List[np.ndarray]] = {}
@@ -166,27 +178,107 @@ class NATE_Route:
         lowered = text.lower().replace("_", " ").replace("-", " ")
         return re.findall(r"[a-z0-9]+", lowered)
 
-    def _fallback_encode(self, text: str) -> np.ndarray:
-        vec = np.zeros(self.FALLBACK_DIM, dtype=np.float32)
-        tokens = self._tokenize(text)
-        if not tokens:
-            return vec
+    def _term_weights(self, text: str) -> Dict[str, float]:
+        """Raw term-frequency map: word tokens + character trigrams.
 
-        for token in tokens:
-            idx = hash(token) % self.FALLBACK_DIM
-            vec[idx] += 1.0
-
-            # Lightweight character n-grams improve fuzzy overlap without external models.
+        Out-of-vocabulary query terms (e.g. a synonym like 'forecast' when no
+        tool mentions it) are KEPT so their character trigrams can still overlap
+        the tool vocabulary and contribute a weak signal, rather than being
+        dropped entirely.
+        """
+        terms: Dict[str, float] = {}
+        for token in self._tokenize(text):
+            terms[f"tok:{token}"] = terms.get(f"tok:{token}", 0.0) + 1.0
             if len(token) >= 3:
                 for i in range(len(token) - 2):
-                    tri = token[i : i + 3]
-                    tri_idx = hash(f"tri:{tri}") % self.FALLBACK_DIM
-                    vec[tri_idx] += 0.25
+                    tri = f"tri:{token[i : i + 3]}"
+                    terms[tri] = terms.get(tri, 0.0) + self.TRIGRAM_WEIGHT
+        return terms
 
-        norm = np.linalg.norm(vec)
-        if norm > 0:
+    def _build_vocab(self) -> None:
+        """Build the shared vocabulary + smoothed IDF weights from tool docs."""
+        vocab: Dict[str, int] = {}
+        df: Dict[str, int] = {}
+        for terms in self._doc_terms:
+            seen: set = set()
+            for term in terms:
+                if term not in vocab:
+                    vocab[term] = len(vocab)
+                if term not in seen:
+                    seen.add(term)
+                    df[term] = df.get(term, 0) + 1
+        self._vocab = vocab
+        n_docs = max(self._num_docs, 1)
+        self._idf_weights = {
+            term: math.log((1.0 + n_docs) / (1.0 + cnt)) + 1.0 for term, cnt in df.items()
+        }
+        self._vocab_dim = len(vocab)
+
+    def _vectorize(self, terms: Dict[str, float]) -> np.ndarray:
+        """Vocab-indexed TF-IDF vector (no hashing collisions).
+
+        Only in-vocabulary terms contribute; out-of-vocabulary query terms
+        (e.g. gibberish, or a synonym with no subword overlap) are dropped so
+        they cannot spuriously collide with real tool vectors.
+        """
+        dim = max(getattr(self, "_vocab_dim", 0), 1)
+        vec = np.zeros(dim, dtype=np.float32)
+        if not terms:
+            return vec
+        for term, tf in terms.items():
+            if tf <= 0:
+                continue
+            idx = self._vocab.get(term, -1)
+            if idx < 0:
+                continue
+            idf = self._idf_weights.get(term, 1.0)
+            vec[idx] += (1.0 + math.log(tf)) * idf
+        norm = float(np.linalg.norm(vec))
+        if norm > 0 and math.isfinite(norm):
             vec = vec / norm
         return vec
+
+    def _fallback_encode(self, text: str) -> np.ndarray:
+        """Pure-NumPy TF-IDF embedding (no external models)."""
+        return self._vectorize(self._term_weights(text))
+
+    def _recompute_tool_embeddings(self) -> None:
+        """Re-encode every tool after the corpus IDF statistics changed.
+
+        Only used on the pure-NumPy path; caller must hold ``self._lock``.
+        """
+        if not self._doc_terms:
+            return
+        self._build_vocab()
+        self._tool_embeddings = np.vstack(
+            [self._vectorize(terms) for terms in self._doc_terms]
+        ).astype(np.float32)
+        self._reindex_locked()
+
+    def _reindex_locked(self) -> None:
+        """Rebuild the FAISS index from the current embedding matrix."""
+        if self._tool_embeddings is None:
+            self._index = None
+            return
+        if getattr(self, "_faiss", None) is not None:
+            self._index = self._faiss.IndexFlatIP(self._tool_embeddings.shape[1])
+            self._index.add(self._tool_embeddings)
+        else:
+            self._index = None
+
+    @staticmethod
+    def _top_k(scores: np.ndarray, k: int):
+        """Partition-based top-k (O(n)) followed by a sort of the k survivors."""
+        n = int(scores.shape[0])
+        k = max(0, min(int(k), n))
+        if k == 0:
+            return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float32)
+        if k < n:
+            cand = np.argpartition(-scores, k - 1)[:k]
+        else:
+            cand = np.arange(n)
+        order = cand[np.argsort(-scores[cand], kind="stable")]
+        return order, scores[order]
 
     def _encode_text(self, text: str) -> np.ndarray:
         self._lazy_load_model()
@@ -197,27 +289,31 @@ class NATE_Route:
 
     # ── Tool registration ────────────────────────────────────────────────
 
-    def register_tool(self, name: str, description: str) -> None:
+    def register_tool(self, name: str, description: str = "") -> None:
         """Register a tool with its description for embedding."""
         self._lazy_load_faiss()
         with self._lock:
             self._tool_names.append(name)
             self._tool_descriptions.append(description)
 
-            emb = self._encode_text(f"{name} {description}")
-            emb_2d = np.array([emb], dtype=np.float32)
+            doc = f"{name} {description}"
+            terms = self._term_weights(doc)
+            self._doc_terms.append(terms)
+            self._num_docs += 1
+            for term in terms:
+                self._doc_freq[term] = self._doc_freq.get(term, 0) + 1
 
-            if self._tool_embeddings is None:
-                self._tool_embeddings = emb_2d
+            self._lazy_load_model()
+            if self._model is None:
+                # TF-IDF weights depend on the whole corpus -> re-encode all tools.
+                self._recompute_tool_embeddings()
             else:
-                self._tool_embeddings = np.vstack([self._tool_embeddings, emb_2d])
-
-            if self._index is None:
-                dim = self._tool_embeddings.shape[1]
-                if self._faiss is not None:
-                    self._index = self._faiss.IndexFlatIP(dim)
-            if self._index is not None:
-                self._index.add(emb_2d)
+                emb_2d = np.array([self._encode_text(doc)], dtype=np.float32)
+                if self._tool_embeddings is None:
+                    self._tool_embeddings = emb_2d
+                else:
+                    self._tool_embeddings = np.vstack([self._tool_embeddings, emb_2d])
+                self._reindex_locked()
 
             self._rebuild_clusters()
 
@@ -234,6 +330,9 @@ class NATE_Route:
         assigned = [False] * n
         cluster_id = 0
 
+        # One fused matmul gives the full pairwise cosine matrix.
+        sim_matrix = self._tool_embeddings @ self._tool_embeddings.T
+
         for i in range(n):
             if assigned[i]:
                 continue
@@ -242,8 +341,7 @@ class NATE_Route:
             for j in range(i + 1, n):
                 if assigned[j]:
                     continue
-                sim = float(np.dot(self._tool_embeddings[i], self._tool_embeddings[j]))
-                if sim >= self.STRAP_THRESHOLD:
+                if float(sim_matrix[i, j]) >= self.STRAP_THRESHOLD:
                     members.append(j)
                     assigned[j] = True
             self._clusters[cluster_id] = members
@@ -255,7 +353,9 @@ class NATE_Route:
         centroids = []
         for cid, members in self._clusters.items():
             centroid = np.mean(self._tool_embeddings[members], axis=0)
-            centroid = centroid / np.linalg.norm(centroid)
+            norm = float(np.linalg.norm(centroid))
+            if norm > 0 and math.isfinite(norm):
+                centroid = centroid / norm
             centroids.append(centroid)
         self._cluster_centroids = np.array(centroids, dtype=np.float32)
 
@@ -296,36 +396,11 @@ class NATE_Route:
                 }
 
             q_emb = self._encode_text(query)
-            q_emb_2d = np.array([q_emb], dtype=np.float32)
 
-            # Search: cluster centroids first, then expand to tool indices
-            if self._cluster_centroids is not None and len(self._cluster_centroids) > 0:
-                if self._faiss is not None:
-                    c_idx = self._faiss.IndexFlatIP(self._cluster_centroids.shape[1])
-                    c_idx.add(self._cluster_centroids)
-                    c_scores_arr, c_idxs_arr = c_idx.search(q_emb_2d, len(self._cluster_centroids))
-                else:
-                    centroid_scores = np.dot(self._cluster_centroids, q_emb)
-                    c_idxs_arr = np.argsort(-centroid_scores)[None, :]
-                    c_scores_arr = centroid_scores[c_idxs_arr]
-                tool_list = []
-                for i in range(len(c_scores_arr[0])):
-                    cid = int(c_idxs_arr[0][i])
-                    for midx in self._clusters.get(cid, []):
-                        sim = float(np.dot(self._tool_embeddings[midx], q_emb))
-                        tool_list.append((sim, midx))
-                tool_list.sort(key=lambda x: -x[0])
-                scores = [s for s, _ in tool_list]
-                idxs = [i for _, i in tool_list]
-            else:
-                if self._index is not None:
-                    scores_arr, idxs_arr = self._index.search(q_emb_2d, len(self._tool_names))
-                    scores = scores_arr[0]
-                    idxs = idxs_arr[0]
-                else:
-                    raw_scores = np.dot(self._tool_embeddings, q_emb)
-                    idxs = np.argsort(-raw_scores)
-                    scores = raw_scores[idxs]
+            # Single fused matmul over all tool embeddings + partition top-k.
+            raw_scores = self._tool_embeddings @ q_emb
+            k = min(len(self._tool_names), max(self.DYNAMIC_K_MAX, 2) + 1)
+            idxs, scores = self._top_k(raw_scores, k)
 
             best_score = float(scores[0]) if len(scores) > 0 else 0.0
             second_score = float(scores[1]) if len(scores) > 1 else best_score
@@ -382,8 +457,9 @@ class NATE_Route:
                             # Add all members of the cluster
                             for m in self._clusters[cid]:
                                 m_name = self._tool_names[m]
-                                if m_name != name and (m_name, float(np.dot(self._tool_embeddings[m], q_emb)), display) not in tools:
-                                    tools.append((m_name, float(np.dot(self._tool_embeddings[m], q_emb)), display))
+                                m_score = float(raw_scores[m])
+                                if m_name != name and (m_name, m_score, display) not in tools:
+                                    tools.append((m_name, m_score, display))
                         continue
                 tools.append((name, float(score), name))
                 if name not in cluster_names:
@@ -431,30 +507,53 @@ class NATE_Route:
         """Record whether a tool was successful for a given query.
 
         OATS-style: embeddings interpolate toward success centroid over time.
+        Hardened: ignores blank tool names/queries and degenerate embeddings.
         """
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            logger.debug("NATE OATS: ignoring feedback with empty tool name")
+            return
+        if not isinstance(query, str) or not query.strip():
+            logger.debug("NATE OATS: ignoring empty query for %s", tool_name)
+            return
+
         q_emb = self._encode_text(query)
+        if q_emb is None or not np.all(np.isfinite(q_emb)) or float(np.linalg.norm(q_emb)) <= 1e-8:
+            logger.debug("NATE OATS: ignoring degenerate embedding for %s", tool_name)
+            return
+
         with self._lock:
             bucket = self._feedback_success if success else self._feedback_failure
-            if tool_name not in bucket:
-                bucket[tool_name] = []
-            bucket[tool_name].append(q_emb)
+            history = bucket.setdefault(tool_name, [])
+            history.append(np.asarray(q_emb, dtype=np.float32))
 
-            # Keep last 10
-            if len(bucket[tool_name]) > 10:
-                bucket[tool_name] = bucket[tool_name][-10:]
+            # Keep only the most recent MAX_FEEDBACK_HISTORY samples
+            if len(history) > self.MAX_FEEDBACK_HISTORY:
+                del history[: len(history) - self.MAX_FEEDBACK_HISTORY]
 
     def apply_oats_feedback(self, decay: float = 0.1) -> int:
         """Interpolate tool embeddings toward success centroid.
 
         Called periodically (e.g., every 50 queries) to improve routing.
-        Returns number of tools updated.
+        Returns number of tools updated. Hardened: decay is clamped to [0, 1],
+        non-finite/zero-norm updates are discarded, and the original embedding
+        is preserved when an update would be degenerate.
         """
+        try:
+            decay = float(decay)
+        except (TypeError, ValueError):
+            decay = 0.1
+        if not math.isfinite(decay):
+            decay = 0.1
+        decay = min(max(decay, 0.0), 1.0)
+
         with self._lock:
-            if self._tool_embeddings is None:
+            if self._tool_embeddings is None or decay == 0.0:
                 return 0
 
             updated = 0
             for i, name in enumerate(self._tool_names):
+                if i >= self._tool_embeddings.shape[0]:
+                    break
                 successes = self._feedback_success.get(name, [])
                 failures = self._feedback_failure.get(name, [])
 
@@ -470,19 +569,20 @@ class NATE_Route:
                 if failure_centroid is not None:
                     shift -= failure_centroid * (decay * 0.5)
 
-                if np.linalg.norm(shift) > 1e-8:
-                    self._tool_embeddings[i] = self._tool_embeddings[i] + shift
-                    self._tool_embeddings[i] = self._tool_embeddings[i] / np.linalg.norm(self._tool_embeddings[i])
-                    updated += 1
+                if not np.all(np.isfinite(shift)) or float(np.linalg.norm(shift)) <= 1e-8:
+                    continue
 
-            # Rebuild index
+                candidate = self._tool_embeddings[i] + shift
+                norm = float(np.linalg.norm(candidate))
+                if norm <= 1e-8 or not math.isfinite(norm):
+                    # Degenerate update — keep the previous embedding.
+                    continue
+                self._tool_embeddings[i] = (candidate / norm).astype(np.float32)
+                updated += 1
+
+            # Rebuild index + clusters from the updated matrix
             if updated > 0:
-                dim = self._tool_embeddings.shape[1]
-                if self._faiss is not None:
-                    self._index = self._faiss.IndexFlatIP(dim)
-                    self._index.add(self._tool_embeddings)
-                else:
-                    self._index = None
+                self._reindex_locked()
                 self._rebuild_clusters()
                 self._metrics["oats_updates"] += 1
 
