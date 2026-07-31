@@ -288,8 +288,8 @@ function MessageEntry({ msg }: { msg: Message }) {
           </div>
         )}
         <div className={`relative rounded-lg border px-4 pb-5 pt-1.5 shadow-sm ${isUser
-          ? 'rounded-lg border-slate-200 bg-white text-slate-900 shadow-slate-900/10 dark:border-slate-700 dark:bg-slate-100 dark:text-slate-900'
-          : 'rounded-lg border-border/80 bg-card/70 text-foreground/90'
+          ? 'border-border bg-background text-foreground shadow-foreground/10'
+          : 'border-border/80 bg-card/70 text-foreground/90'
         }`}>
           {isUser ? (
             <p className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</p>

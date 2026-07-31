@@ -4,6 +4,16 @@ export default {
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
   ],
+  safelist: [
+    'theme-grey',
+    'theme-glass',
+    'theme-green',
+    'theme-blue',
+    'theme-purple',
+    'theme-pink',
+    'theme-red',
+    'theme-orange',
+  ],
   darkMode: 'class',
   theme: {
     extend: {

@@ -30,7 +30,7 @@ function App() {
 
   useEffect(() => {
     const theme = localStorage.getItem('nexus-theme') || 'light'
-    document.documentElement.classList.remove('dark', 'theme-grey', 'theme-glass', 'theme-green', 'theme-blue', 'theme-purple')
+    document.documentElement.classList.remove('dark', 'theme-grey', 'theme-glass', 'theme-green', 'theme-blue', 'theme-purple', 'theme-pink', 'theme-red', 'theme-orange')
     if (theme === 'dark') {
       document.documentElement.classList.add('dark')
     } else if (theme !== 'light') {

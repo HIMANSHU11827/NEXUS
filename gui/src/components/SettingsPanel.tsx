@@ -323,7 +323,7 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   const content = useMemo(() => {
     if (active === 'appearance') return <Appearance theme={theme} onTheme={value => {
       setTheme(value); localStorage.setItem('nexus-theme', value);
-      document.documentElement.classList.remove('dark', 'theme-grey', 'theme-glass', 'theme-green', 'theme-blue', 'theme-purple')
+      document.documentElement.classList.remove('dark', 'theme-grey', 'theme-glass', 'theme-green', 'theme-blue', 'theme-purple', 'theme-pink', 'theme-red', 'theme-orange')
       const themeClass = value === 'dark' ? 'dark' : value === 'light' ? '' : `theme-${value}`
       if (themeClass) document.documentElement.classList.add(themeClass)
     }} />
@@ -407,7 +407,48 @@ function Appearance({ theme, onTheme }: { theme: string; onTheme: (theme: string
 
 function ChatSettings({ state, sessions }: { state: Record<string, unknown>; sessions: number }) {
   const running = Number(state.task_count || 0)
-  return <div className="space-y-4"><div><h3 className="text-sm font-semibold">Chat sessions</h3><p className="mt-1 text-sm text-muted-foreground">Conversation history is stored locally by the Nexus server and restored when you reopen a session.</p></div><div className="grid gap-3 sm:grid-cols-2"><InfoBlock title="Saved sessions" value={String(sessions)} detail="Sessions currently loaded in the GUI." /><InfoBlock title="Recorded tasks" value={String(running)} detail="Tasks reported by the running Nexus server." /></div><div className="rounded-lg border border-border bg-card p-4"><p className="text-sm font-medium">Message controls</p><p className="mt-1 text-sm text-muted-foreground">Enter sends a message. Shift + Enter adds a new line. Use Stop while a response is actively running.</p></div></div>
+  const savedModel = typeof state.selected_model === 'string' ? state.selected_model : undefined
+  const permissionMode = typeof state.permission_mode === 'string' ? state.permission_mode : undefined
+  const sandboxTier = typeof state.sandbox_tier === 'string' ? state.sandbox_tier : undefined
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-sm font-semibold">Chat</h3>
+        <p className="mt-1 text-sm text-muted-foreground">Manage local chat storage, input behavior, and runtime defaults reported by your Nexus server.</p>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <InfoBlock title="Saved sessions" value={String(sessions)} detail="Local chat sessions currently loaded in the GUI." />
+        <InfoBlock title="Recorded tasks" value={String(running)} detail="Tasks reported by the running Nexus server." />
+        <InfoBlock title="Default model" value={savedModel || 'Not set'} detail="Model used for new chat sessions." />
+      </div>
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className="rounded-xl border border-border bg-card p-4">
+          <p className="text-sm font-medium">Input behavior</p>
+          <p className="mt-1 text-sm text-muted-foreground">Enter sends a message. Shift + Enter adds a new line. Use Stop while a response is actively running.</p>
+          <div className="mt-3 flex items-center justify-between gap-3">
+            <span className="text-xs text-muted-foreground">Permission mode</span>
+            <span className="text-xs font-medium text-foreground">{permissionMode || 'Unknown'}</span>
+          </div>
+          <div className="mt-2 flex items-center justify-between gap-3">
+            <span className="text-xs text-muted-foreground">Sandbox tier</span>
+            <span className="text-xs font-medium text-foreground">{sandboxTier || 'Unknown'}</span>
+          </div>
+        </div>
+        <div className="rounded-xl border border-border bg-card p-4">
+          <p className="text-sm font-medium">History</p>
+          <p className="mt-1 text-sm text-muted-foreground">Conversation history is stored locally by the Nexus server and restored when you reopen a session.</p>
+          <div className="mt-3 flex items-center justify-between gap-3">
+            <span className="text-xs text-muted-foreground">Current session</span>
+            <span className="text-xs font-medium text-foreground">Active</span>
+          </div>
+          <div className="mt-2 flex items-center justify-between gap-3">
+            <span className="text-xs text-muted-foreground">Local backup</span>
+            <span className="text-xs font-medium text-foreground">Enabled</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function WorkspaceSettings({ state }: { state: Record<string, unknown> }) {
