@@ -207,7 +207,7 @@ async def test_health_endpoint(server_running):
     assert data["service"] == "nexus-api"
 
 
-@pytest_asyncio.fixture(scope="module")
+@pytest_asyncio.fixture(scope="function")
 async def authed_client(server_running):
     """Authenticate against the running server and return a client with a session cookie."""
     token = os.environ.get("NEXUS_DASHBOARD_TOKEN", "")
