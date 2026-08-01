@@ -191,6 +191,8 @@ class NexusLoop:
         self.current_plan: Optional[Dict[str, Any]] = None
         self.current_phase: int = 0
         self._retry_counts: Dict[str, int] = {}
+        self._tool_started_at: Dict[str, float] = {}
+        self._stage_started_at: Dict[str, float] = {}
         self._gaps_found: List[Dict[str, Any]] = []
         self._last_run_requires_tools = False
         self._last_run_had_tool_execution = False
@@ -935,12 +937,22 @@ class NexusLoop:
                             })
                             continue
                         if not response and last_observations:
-                            response = "Work completed and verified.\n\n" + "\n".join(last_observations)
+                            response = (
+                                self._deterministic_failure_summary(last_observations)
+                                if self._last_run_failed
+                                else "Work completed and verified.\n\n" + "\n".join(last_observations)
+                            )
                         if last_observations and (
                             self._is_raw_tool_result_dump(response)
                             or not self._final_response_contains_evidence(response, last_observations)
                         ):
-                            response = self._deterministic_evidence_summary(last_observations)
+                            # Never rewrite a short answer into a success claim when
+                            # a real tool failed (e.g. a non-zero command exit code).
+                            response = (
+                                self._deterministic_failure_summary(last_observations)
+                                if self._last_run_failed
+                                else self._deterministic_evidence_summary(last_observations)
+                            )
                     if requires_tools:
                         enforcement_retries += 1
                         await self._emit_runtime_event(
@@ -2215,8 +2227,31 @@ Rules:
         return observations
 
     @staticmethod
+    def _observations_contain_failure(observations: List[Any]) -> bool:
+        """Detect failed tool/command evidence so success summaries never lie."""
+        for raw in observations:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            if NexusLoop._observation_is_failure(text):
+                return True
+            for line in text.splitlines():
+                line_low = line.lower()
+                if re.match(r"^\[exit_code\]\s*:?\s*[1-9]\d*", line_low):
+                    return True
+                if any(kw in line_low for kw in (
+                    "error:", "exception:", "traceback:",
+                    "command exited with code", "command not found",
+                    "is not recognized", "failed:",
+                )):
+                    return True
+        return False
+
+    @staticmethod
     def _deterministic_evidence_summary(observations: List[str]) -> str:
         """Return a provider-independent final grounded only in real tool evidence."""
+        if NexusLoop._observations_contain_failure(observations):
+            return NexusLoop._deterministic_failure_summary(observations)
         combined = "\n".join(str(item) for item in observations)
         if "[web_search]" in combined:
             matches = re.findall(
@@ -2308,6 +2343,7 @@ Rules:
         """Tie each real tool execution to one real plan-step lifecycle."""
         run_id = self._current_turn_id or self.session_id
         event_id = f"plan_step_{run_id}_{call.call_id}"
+        started_at = time.time()
         await self._emit_runtime_event(
             "plan.step.started",
             self._work_action_for_call(self._work_kind_for_call(call.name, call.params), call.name, call.params),
@@ -2315,6 +2351,7 @@ Rules:
             event_id=event_id,
             parent_id=f"run_{run_id}",
             payload={"tool": call.name, "target": self._work_target_for_call(call.name, call.params)},
+            start_time=started_at,
         )
         try:
             tool_timeout = float(os.getenv("NEXUS_TOOL_TIMEOUT", "300"))
@@ -2339,6 +2376,7 @@ Rules:
             completed_payload["sources"] = list(dict.fromkeys(
                 re.findall(r"https?://[^\s)\]]+", str(result))
             ))[:20]
+        end_time = time.time()
         await self._emit_runtime_event(
             "plan.step.completed",
             self._work_action_for_call(kind, call.name, call.params),
@@ -2346,6 +2384,9 @@ Rules:
             event_id=event_id,
             parent_id=f"run_{run_id}",
             payload=completed_payload,
+            start_time=started_at,
+            end_time=end_time,
+            duration_ms=max(0.0, (end_time - started_at) * 1000.0),
         )
         return result
 
@@ -2446,6 +2487,16 @@ Rules:
             payload["result"] = payload["preview"]
         if duration_ms is not None:
             payload["duration_ms"] = duration_ms
+        if status in ("running", "queued"):
+            self._stage_started_at.setdefault(stage, time.time())
+            payload["start_time"] = self._stage_started_at[stage]
+        else:
+            started_at = self._stage_started_at.pop(stage, None)
+            if started_at:
+                payload["start_time"] = started_at
+                end_time = time.time()
+                payload["end_time"] = end_time
+                payload["duration_ms"] = max(0.0, (end_time - started_at) * 1000.0)
         await self._emit_work_event(payload)
 
     async def _emit_work_event(self, payload: Dict[str, Any]) -> None:
@@ -2473,6 +2524,8 @@ Rules:
         payload: Optional[Dict[str, Any]] = None,
         error: str = "",
         duration_ms: Optional[float] = None,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
     ) -> None:
         """Central producer for canonical run/message/plan lifecycle events."""
         event: Dict[str, Any] = {
@@ -2492,6 +2545,12 @@ Rules:
             event["error"] = {"message": error}
         if duration_ms is not None:
             event["duration_ms"] = duration_ms
+        elif start_time is not None and end_time is not None:
+            event["duration_ms"] = max(0.0, (end_time - start_time) * 1000.0)
+        if start_time is not None:
+            event["start_time"] = start_time
+        if end_time is not None:
+            event["end_time"] = end_time
         await self._emit_work_event(event)
 
     async def _emit_tool_event(self, call: ToolCall, *, status: str, result: str = "", error: str = "", exit_code: Optional[int] = None) -> None:
@@ -2537,6 +2596,17 @@ Rules:
             payload["result"] = error[:20000]
         if exit_code is not None:
             payload["exit_code"] = int(exit_code)
+        TERMINAL = ("done", "error", "failed", "cancelled", "blocked", "completed")
+        if status in ("running", "queued"):
+            self._tool_started_at.setdefault(call.call_id, time.time())
+            payload["start_time"] = self._tool_started_at[call.call_id]
+        else:
+            started_at = self._tool_started_at.pop(call.call_id, None)
+            if started_at:
+                payload["start_time"] = started_at
+                end_time = time.time()
+                payload["end_time"] = end_time
+                payload["duration_ms"] = max(0.0, (end_time - started_at) * 1000.0)
         await self._emit_work_event(payload)
 
     async def _emit_tool_chunk(
@@ -2567,6 +2637,7 @@ Rules:
                 "append": True,
                 "chunk": chunk,
                 "output": chunk,
+                "start_time": getattr(self, "_tool_started_at", {}).get(call.call_id),
                 "visibility": "public",
             })
 

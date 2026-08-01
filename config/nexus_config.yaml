@@ -1,6 +1,244 @@
 runtime:
   permission_mode: auto
   permission_allowlist: []
-  sandbox_tier: no_sandbox
+  sandbox_tier: normal
   model: deepseek-v4-flash
   provider: deepseek
+  thinking: true
+  additional_dirs: []
+safety:
+  permission_mode: automatic
+  sandbox_mode: workspace
+  command_policies:
+    safe_commands: allow
+    destructive_commands: deny
+    privilege_escalation: deny
+    system_shutdown: deny
+    system_restart: deny
+    disk_formatting: deny
+    partition_changes: deny
+    registry_modification: ask
+    boot_configuration: deny
+    user_account_changes: deny
+    firewall_changes: ask
+    security_tool_disabling: deny
+    credential_access: deny
+    process_injection: deny
+    persistence_creation: ask
+    scheduled_task_creation: ask
+    service_creation: ask
+    hidden_background_execution: ask
+    shell_profile_modification: ask
+    outside_workspace: ask
+    path_traversal: deny
+    unresolved_variables: ask
+    command_chaining: ask
+    command_pipelines: ask
+    output_redirection: ask
+    detached_processes: ask
+  file_policies:
+    read_file: allow
+    create_file: ask
+    modify_file: ask
+    delete_file: ask
+    rename_file: ask
+    move_file: ask
+    copy_file: ask
+    create_directory: ask
+    delete_directory: ask
+    change_permissions: ask
+    bulk_file_changes: ask
+    modify_binary_files: ask
+    modify_configuration_files: ask
+    modify_lock_files: ask
+    modify_generated_files: ask
+    modify_git_metadata: deny
+    modify_nexus_internal_files: ask
+  filesystem:
+    enforce_workspace_root: true
+    allow_additional_dirs: true
+    read_hidden_files: false
+    write_hidden_files: false
+    follow_symlinks: false
+    follow_junctions: false
+    access_network_drives: false
+    access_removable_drives: false
+    access_temp_dirs: false
+    access_system_dirs: false
+    access_user_profile: false
+    access_outside_roots: false
+  secret_protection:
+    detect_secrets: true
+    redact_logs: true
+    redact_model_context: true
+    block_private_keys: true
+    block_env_files: true
+    block_credential_files: true
+    block_auth_headers: true
+    block_cookies: true
+    block_tokens: true
+    block_passwords: true
+    block_cloud_credentials: true
+    block_ssh_credentials: true
+    block_browser_session_data: true
+    block_database_credentials: true
+    warn_before_reading_sensitive: true
+    warn_before_modifying_sensitive: true
+    filter_sensitive_terminal_output: true
+  network:
+    policy: ask
+    allowlist: []
+    blocklist: []
+    block_cloud_metadata: true
+    block_local_metadata: true
+    block_private_scanning: true
+    block_unsafe_redirects: true
+    block_credential_urls: true
+    block_unsupported_protocols: true
+  browser:
+    page_navigation: ask
+    form_filling: ask
+    file_upload: ask
+    file_download: ask
+    clipboard_access: ask
+    camera: deny
+    microphone: deny
+    location: deny
+    popups: deny
+    new_tabs: ask
+    authenticated_sessions: ask
+    local_development_urls: allow
+  mcp:
+    allow_servers: true
+    allow_local_servers: true
+    allow_external_servers: false
+    allow_read_actions: true
+    allow_write_actions: false
+    require_approval_unknown: true
+  package:
+    managers:
+    - npm
+    - pnpm
+    - yarn
+    - pip
+    - uv
+    - poetry
+    - cargo
+    - go
+    - apt
+    - brew
+    - winget
+    policies:
+      allow_install: ask
+      require_approval: true
+      allow_dev_dependencies: true
+      allow_global_install: false
+      allow_install_scripts: false
+      allow_post_install_scripts: false
+      allow_native_builds: false
+      allow_unsigned_packages: false
+      allow_lock_file_updates: true
+      allow_upgrades: ask
+      allow_registry_changes: false
+  process:
+    child_processes: allow
+    detached_processes: ask
+    background_tasks: ask
+    long_running_tasks: ask
+    scheduled_tasks: ask
+    services: ask
+    process_termination: ask
+    opening_applications: ask
+    shell_chaining: ask
+    command_pipelines: ask
+    redirected_output: ask
+  destructive:
+    require_approval: true
+    require_typed_confirmation: true
+    actions:
+      file_deletion: true
+      directory_deletion: true
+      bulk_overwrite: true
+      bulk_rename: true
+      git_clean: true
+      git_reset: true
+      database_deletion: true
+      database_migration: true
+      cache_clearing: true
+      index_clearing: true
+      package_removal: true
+      process_termination: true
+      workspace_disconnect: true
+      configuration_reset: true
+      memory_reset: true
+      credential_removal: true
+  checkpoints:
+    create_before_file_changes: true
+    create_before_destructive_commands: true
+    create_before_bulk_operations: true
+    require_for_critical_actions: true
+    verify_before_execution: true
+    retention_period_hours: 168
+    max_storage_mb: 1024
+    automatic_cleanup: true
+  protected_paths:
+  - pattern: .git/**
+    reason: Git internals
+    source: default
+    mandatory: true
+    read_policy: allow
+    write_policy: deny
+    delete_policy: deny
+  - pattern: .env
+    reason: Environment secrets
+    source: default
+    mandatory: true
+    read_policy: warn
+    write_policy: deny
+    delete_policy: deny
+  - pattern: .env.*
+    reason: Environment secrets
+    source: default
+    mandatory: true
+    read_policy: warn
+    write_policy: deny
+    delete_policy: deny
+  - pattern: '**/*.pem'
+    reason: Private keys
+    source: default
+    mandatory: true
+    read_policy: warn
+    write_policy: deny
+    delete_policy: deny
+  - pattern: '**/*.key'
+    reason: Private keys
+    source: default
+    mandatory: true
+    read_policy: warn
+    write_policy: deny
+    delete_policy: deny
+  - pattern: '**/.ssh/**'
+    reason: SSH credentials
+    source: default
+    mandatory: true
+    read_policy: deny
+    write_policy: deny
+    delete_policy: deny
+  - pattern: '**/*credential*'
+    reason: Credentials
+    source: default
+    mandatory: true
+    read_policy: warn
+    write_policy: deny
+    delete_policy: deny
+  - pattern: '**/*secret*'
+    reason: Secrets
+    source: default
+    mandatory: true
+    read_policy: warn
+    write_policy: deny
+    delete_policy: deny
+  temp_permissions: []
+  approval_history: []
+  safety_events: []
+  last_saved: 1785561465.6679864

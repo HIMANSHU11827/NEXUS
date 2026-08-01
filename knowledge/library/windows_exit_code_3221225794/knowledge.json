@@ -1,0 +1,9 @@
+{
+  "title": "Windows_exit_code_3221225794",
+  "content": "Exit code 3221225794 (0xC0000142) indicates DLL initialization failure on Windows, likely due to missing/corrupt system DLLs or incompatible environment; NEXUS lacks actionable troubleshooting and auto-remediation strategy for this specific OS-level error.",
+  "key_concepts": [],
+  "tags": [],
+  "version": "1.0.0",
+  "created_at": 1785514106.1850789,
+  "updated_at": 1785514106.1850798
+}

@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -39,6 +40,25 @@ try:
     import yaml
 except Exception:  # pragma: no cover - handled at request time
     yaml = None
+
+# Persistent Safety settings (Permission Mode / Sandbox Mode / policies). Kept
+# separate from the workspace selection; see safety.safety_store.
+from safety.safety_store import (  # noqa: E402
+    PERMISSION_MODES as _SAFETY_PERMISSION_MODES,
+    SANDBOX_MODES as _SAFETY_SANDBOX_MODES,
+    COMMAND_CATEGORIES as _SAFETY_COMMAND_CATEGORIES,
+    FILE_POLICY_CATEGORIES as _SAFETY_FILE_POLICY_CATEGORIES,
+    FILESYSTEM_OPTIONS as _SAFETY_FILESYSTEM_OPTIONS,
+    SECRET_PROTECTION_OPTIONS as _SAFETY_SECRET_PROTECTION_OPTIONS,
+    NETWORK_POLICIES as _SAFETY_NETWORK_POLICIES,
+    BROWSER_OPTIONS as _SAFETY_BROWSER_OPTIONS,
+    MCP_OPTIONS as _SAFETY_MCP_OPTIONS,
+    PACKAGE_OPTIONS as _SAFETY_PACKAGE_OPTIONS,
+    PACKAGE_MANAGERS as _SAFETY_PACKAGE_MANAGERS,
+    PROCESS_OPTIONS as _SAFETY_PROCESS_OPTIONS,
+    DESTRUCTIVE_ACTIONS as _SAFETY_DESTRUCTIVE_ACTIONS,
+    CHECKPOINT_OPTIONS as _SAFETY_CHECKPOINT_OPTIONS,
+)
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_ROOT)  # One level up from server/ to project root
@@ -73,6 +93,8 @@ _RUNTIME_SETTINGS = {
     "agent": "",
     "goal": "",
     "additional_dirs": [],
+    "workspace_root": "",
+    "thinking": True,
 }
 _RUNTIME_FEATURE_DEFAULTS = {
     "hive": True,
@@ -89,9 +111,35 @@ _VOICE_MODE = "off"
 _VOICE_STARTED_AT = 0.0
 _VOICE_LOG_PATH = os.path.join(_PROJECT_ROOT, "logs", "voice-runtime.log")
 
+# ── Workspace checkpoints ────────────────────────────────────────────────────
+# Per-message restore points: a snapshot of the workspace taken right before a
+# run's first tool executes, so the GUI can revert file changes made by a turn.
+# Stored outside the snapshot scope (the workspace/ dir is ignored while walking).
+_CHECKPOINTS_ROOT = os.path.join(_PROJECT_ROOT, "workspace", "checkpoints")
+# Heavy/generated/app-runtime paths never enter a checkpoint snapshot. This keeps
+# snapshots small and fast, and guarantees restore never touches those areas.
+_CHECKPOINT_SKIP_NAMES = frozenset({
+    ".git", ".venv", ".voice-venv", ".research", ".kilo", ".opencode", ".tmp",
+    ".cache", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".tox",
+    ".playwright-cli", ".playwright-mcp", ".nexus", "workspace", "models",
+    "bin", "logs", "graphify-out", "queue", "dist", "build", "node_modules",
+    "__pycache__", ".idea", ".vscode", ".next", "coverage", "htmlcov", "deploy",
+})
+_CHECKPOINT_SKIP_SUFFIXES = frozenset({
+    ".pyc", ".pyo", ".so", ".dll", ".exe", ".pyd", ".gguf", ".safetensors",
+    ".onnx", ".pt", ".pth", ".bin", ".pkl",
+})
+_CHECKPOINT_GUARD: Dict[str, str] = {}
+_CHECKPOINT_GUARD_LOCK = threading.Lock()
+_CHECKPOINT_RESTORE_LOCKS: Dict[str, "threading.Lock"] = {}
+_CHECKPOINT_RESTORE_LOCKS_LOCK = threading.Lock()
+_CHECKPOINT_STREAM_PUSHERS: Dict[str, Any] = {}
+_CHECKPOINT_STREAM_PUSHERS_LOCK = threading.Lock()
+
 @asynccontextmanager
 async def _app_lifespan(_app: FastAPI):
     """Join response-detached learning tasks before asyncio tears down."""
+    _warm_workspace_summary()
     yield
     await _drain_loop_finalizers(tuple(_LOOPS.values()))
 
@@ -1039,7 +1087,8 @@ def append_work_event(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any
             update_todo_file_and_states(session_id, event, event.get("turn_id", ""))
         except Exception as e:
             print(f"[API_ERROR]: Failed to update todo.md/states: {e}")
-            
+
+    _maybe_trigger_checkpoint(session_id, event)
     return event
 
 
@@ -1111,6 +1160,12 @@ def bind_live_work_event_sink(loop: NexusLoop, session_id: str, turn_id: str, ou
         if turn_id:
             enriched.setdefault("turn_id", turn_id)
         event = append_work_event(session_id, enriched)
+        run_key = str(enriched.get("run_id") or turn_id or "")
+        if run_key:
+            if str(enriched.get("event_type") or "") in ("run.completed", "run.failed", "run.cancelled"):
+                _unregister_checkpoint_pusher(run_key)
+            else:
+                _register_checkpoint_pusher(run_key, lambda evt: out_queue.put(("event", evt)))
         if str(event.get("visibility") or "public").lower() == "public":
             out_queue.put(("event", event))
         return event
@@ -1137,17 +1192,19 @@ def _append_work_event(session_id: str, event: Dict[str, Any]) -> Dict[str, Any]
     payload = dict(event)
     payload.setdefault("session_id", sid)
     path = work_events_path(sid)
-    if not payload.get("sequence"):
-        payload["sequence"] = _next_work_event_sequence(path)
-    else:
-        try:
-            sequence = int(payload.get("sequence") or 0)
-            with _WORK_EVENT_SEQUENCE_LOCK:
-                _WORK_EVENT_SEQUENCES[path] = max(_WORK_EVENT_SEQUENCES.get(path, 0), sequence)
-        except (TypeError, ValueError):
+    with _WORK_EVENT_APPEND_LOCK:
+        if not payload.get("sequence"):
             payload["sequence"] = _next_work_event_sequence(path)
-    with open(path, "a", encoding="utf-8", newline="\n") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        else:
+            try:
+                sequence = int(payload.get("sequence") or 0)
+                with _WORK_EVENT_SEQUENCE_LOCK:
+                    _WORK_EVENT_SEQUENCES[path] = max(_WORK_EVENT_SEQUENCES.get(path, 0), sequence)
+            except (TypeError, ValueError):
+                payload["sequence"] = _next_work_event_sequence(path)
+        with open(path, "a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    _maybe_trigger_checkpoint(sid, payload)
     return payload
 
 
@@ -1500,9 +1557,17 @@ def _load_runtime_preferences() -> None:
         if "sandbox_tier" in runtime:
             _RUNTIME_SETTINGS["sandbox_tier"] = _normalize_sandbox_tier(str(runtime.get("sandbox_tier") or "normal"))
             os.environ["NEXUS_SANDBOX_TIER"] = str(_RUNTIME_SETTINGS["sandbox_tier"])
+        if "thinking" in runtime:
+            _RUNTIME_SETTINGS["thinking"] = bool(runtime.get("thinking", True))
         allowlist = runtime.get("permission_allowlist")
         if isinstance(allowlist, list):
             _RUNTIME_SETTINGS["permission_allowlist"] = [str(item).strip() for item in allowlist if str(item).strip()]
+        if "additional_dirs" in runtime:
+            raw_dirs = runtime.get("additional_dirs")
+            if isinstance(raw_dirs, list):
+                _RUNTIME_SETTINGS["additional_dirs"] = [str(item).strip() for item in raw_dirs if str(item).strip()]
+        if "workspace_root" in runtime:
+            _RUNTIME_SETTINGS["workspace_root"] = str(runtime.get("workspace_root") or "").strip()
     except Exception:
         logger.warning("load_runtime_preferences: failed", exc_info=True)
 
@@ -1517,6 +1582,11 @@ def _save_runtime_preferences() -> None:
         runtime["permission_mode"] = _normalize_permission_mode(_RUNTIME_SETTINGS.get("mode") or "auto")
         runtime["permission_allowlist"] = _RUNTIME_SETTINGS.get("permission_allowlist") or []
         runtime["sandbox_tier"] = _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier") or "normal")
+        runtime["thinking"] = bool(_RUNTIME_SETTINGS.get("thinking", True))
+        runtime["additional_dirs"] = _RUNTIME_SETTINGS.get("additional_dirs") or []
+        workspace_root = str(_RUNTIME_SETTINGS.get("workspace_root") or "").strip()
+        if workspace_root:
+            runtime["workspace_root"] = workspace_root
         _save_nexus_config(config)
     except Exception:
         logger.warning("save_runtime_preferences: failed", exc_info=True)
@@ -2603,6 +2673,366 @@ async def list_files(request: Request):
     return {"files": files}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Workspace checkpoints (restore points for file-changing runs)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _safe_checkpoint_id(checkpoint_id: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]", "", str(checkpoint_id or ""))[:80]
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Invalid checkpoint id")
+    return cleaned
+
+
+def _should_skip_checkpoint_rel(rel: str) -> bool:
+    parts = str(rel or "").replace("\\", "/").split("/")
+    if any(part in _CHECKPOINT_SKIP_NAMES for part in parts):
+        return True
+    last = parts[-1] if parts else ""
+    if os.path.splitext(last)[1].lower() in _CHECKPOINT_SKIP_SUFFIXES:
+        return True
+    return last.lower() in _WINDOWS_RESERVED
+
+
+def _create_workspace_checkpoint(workspace_root: str, session_id: str, run_id: str, turn_id: str = "") -> Dict[str, Any]:
+    """Copy the snapshot-scope workspace into a new checkpoint dir."""
+    root = os.path.abspath(workspace_root or _workspace_root())
+    ckpt_id = uuid.uuid4().hex
+    ckpt_root = os.path.join(_CHECKPOINTS_ROOT, ckpt_id)
+    snapshot_root = os.path.join(ckpt_root, "snapshot")
+    os.makedirs(snapshot_root, exist_ok=True)
+    manifest: List[str] = []
+    file_count = 0
+    size_bytes = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        pruned = []
+        for name in sorted(dirnames):
+            rel_dir = os.path.relpath(os.path.join(dirpath, name), root).replace("\\", "/")
+            if not _should_skip_checkpoint_rel(rel_dir):
+                pruned.append(name)
+        dirnames[:] = pruned
+        for fn in sorted(filenames):
+            src = os.path.join(dirpath, fn)
+            if os.path.islink(src):
+                continue
+            rel = os.path.relpath(src, root).replace("\\", "/")
+            if _should_skip_checkpoint_rel(rel):
+                continue
+            dst = os.path.join(snapshot_root, rel)
+            try:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                size_bytes += os.path.getsize(src)
+                manifest.append(rel)
+                file_count += 1
+            except (OSError, shutil.Error):
+                continue
+    manifest.sort()
+    meta = {
+        "checkpoint_id": ckpt_id,
+        "session_id": safe_session_id(session_id),
+        "run_id": str(run_id or ""),
+        "turn_id": str(turn_id or run_id or ""),
+        "created_at": time.time(),
+        "file_count": file_count,
+        "size_bytes": size_bytes,
+        "workspace_root": root,
+    }
+    with open(os.path.join(ckpt_root, "metadata.json"), "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, ensure_ascii=False, indent=2)
+    with open(os.path.join(ckpt_root, "manifest.json"), "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, ensure_ascii=False, indent=2)
+    return meta
+
+
+def _load_checkpoint_meta(ckpt_root: str) -> Dict[str, Any]:
+    meta_path = os.path.join(ckpt_root, "metadata.json")
+    if not os.path.isfile(meta_path):
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+    try:
+        with open(meta_path, "r", encoding="utf-8") as fh:
+            meta = json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        raise HTTPException(status_code=400, detail="Checkpoint is corrupt: metadata unreadable")
+    if not isinstance(meta, dict) or not meta.get("checkpoint_id"):
+        raise HTTPException(status_code=400, detail="Checkpoint is corrupt: invalid metadata")
+    return meta
+
+
+def _restore_workspace_checkpoint(workspace_root: str, session_id: str, checkpoint_id: str) -> Dict[str, Any]:
+    ws_root = os.path.abspath(workspace_root or _workspace_root())
+    ckpt_root = os.path.join(_CHECKPOINTS_ROOT, _safe_checkpoint_id(checkpoint_id))
+    if not os.path.isdir(ckpt_root):
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+    meta = _load_checkpoint_meta(ckpt_root)
+    sid = safe_session_id(session_id or str(meta.get("session_id") or ""))
+    if meta.get("session_id") and str(meta["session_id"]) != sid:
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+    snapshot_root = os.path.join(ckpt_root, "snapshot")
+    manifest_path = os.path.join(ckpt_root, "manifest.json")
+    if not os.path.isdir(snapshot_root) or not os.path.isfile(manifest_path):
+        raise HTTPException(status_code=400, detail="Checkpoint is corrupt: snapshot or manifest missing")
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        raise HTTPException(status_code=400, detail="Checkpoint is corrupt: manifest unreadable")
+    if not isinstance(manifest, list):
+        raise HTTPException(status_code=400, detail="Checkpoint is corrupt: invalid manifest")
+
+    restored: List[str] = []
+    removed: List[str] = []
+    failures: List[Dict[str, str]] = []
+
+    def _safe_target(rel: str) -> str:
+        if not rel or os.path.isabs(rel):
+            raise ValueError("invalid path")
+        norm = os.path.normpath(rel)
+        if norm.startswith("..") or os.path.isabs(norm):
+            raise ValueError("invalid path")
+        target = os.path.abspath(os.path.join(ws_root, norm))
+        if not _is_within(ws_root, target):
+            raise ValueError("path escapes workspace")
+        return target
+
+    def _atomic_copy(src: str, dst: str) -> None:
+        tmp = f"{dst}.nexus-restore-{uuid.uuid4().hex[:8]}.tmp"
+        try:
+            shutil.copy2(src, tmp)
+            os.replace(tmp, dst)
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+
+    manifest_set = {str(item) for item in manifest}
+    for rel in manifest:
+        rel = str(rel)
+        try:
+            target = _safe_target(rel)
+            src = os.path.abspath(os.path.join(snapshot_root, rel))
+            if not _is_within(snapshot_root, src) or not os.path.isfile(src):
+                raise ValueError("snapshot file missing")
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            _atomic_copy(src, target)
+            restored.append(rel)
+        except Exception as exc:
+            failures.append({"path": rel, "error": str(exc)})
+
+    added: List[str] = []
+    for dirpath, dirnames, filenames in os.walk(ws_root):
+        pruned = []
+        for name in sorted(dirnames):
+            rel_dir = os.path.relpath(os.path.join(dirpath, name), ws_root).replace("\\", "/")
+            if not _should_skip_checkpoint_rel(rel_dir):
+                pruned.append(name)
+        dirnames[:] = pruned
+        for fn in filenames:
+            if fn.lower() in _WINDOWS_RESERVED or fn.endswith("."):
+                continue
+            full = os.path.join(dirpath, fn)
+            try:
+                rel = os.path.relpath(full, ws_root).replace("\\", "/")
+            except ValueError:
+                continue
+            if _should_skip_checkpoint_rel(rel):
+                continue
+            if rel in manifest_set:
+                continue
+            added.append(full)
+    for full in added:
+        try:
+            rel = os.path.relpath(full, ws_root).replace("\\", "/")
+        except ValueError:
+            continue
+        try:
+            os.remove(full)
+            removed.append(rel)
+        except Exception as exc:
+            failures.append({"path": rel, "error": str(exc)})
+
+    for dirpath, dirnames, filenames in os.walk(ws_root, topdown=False):
+        try:
+            if os.path.isdir(dirpath) and not os.listdir(dirpath):
+                rel_dir = os.path.relpath(dirpath, ws_root).replace("\\", "/")
+                if rel_dir != "." and not _should_skip_checkpoint_rel(rel_dir):
+                    os.rmdir(dirpath)
+        except (OSError, ValueError):
+            continue
+
+    return {
+        "checkpoint_id": _safe_checkpoint_id(checkpoint_id),
+        "session_id": sid,
+        "ok": len(failures) == 0,
+        "restored": len(restored),
+        "removed": len(removed),
+        "failed": len(failures),
+        "failures": failures,
+        "messages": [
+            f"Restored {len(restored)} file(s) and removed {len(removed)} added file(s) from {ws_root}."
+        ],
+        "workspace_root": ws_root,
+    }
+
+
+def _register_checkpoint_pusher(run_id: str, pusher: Any) -> None:
+    if not run_id:
+        return
+    with _CHECKPOINT_STREAM_PUSHERS_LOCK:
+        _CHECKPOINT_STREAM_PUSHERS[run_id] = pusher
+        if len(_CHECKPOINT_STREAM_PUSHERS) > 64:
+            for stale in list(_CHECKPOINT_STREAM_PUSHERS)[:32]:
+                _CHECKPOINT_STREAM_PUSHERS.pop(stale, None)
+
+
+def _unregister_checkpoint_pusher(run_id: str) -> None:
+    if not run_id:
+        return
+    with _CHECKPOINT_STREAM_PUSHERS_LOCK:
+        _CHECKPOINT_STREAM_PUSHERS.pop(run_id, None)
+
+
+def _emit_checkpoint_created(session_id: str, run_id: str, turn_id: str, meta: Dict[str, Any]) -> None:
+    event = {
+        "event_type": "checkpoint.created",
+        "kind": "checkpoint",
+        "type": "checkpoint",
+        "status": "done",
+        "title": "File checkpoint created",
+        "action": "Snapshot created",
+        "target": "workspace",
+        "id": f"ckpt_{turn_id}_{meta['checkpoint_id'][:8]}",
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "checkpoint_id": meta["checkpoint_id"],
+        "file_count": meta.get("file_count", 0),
+        "size_bytes": meta.get("size_bytes", 0),
+        "created_at": meta.get("created_at", time.time()),
+        "visibility": "public",
+    }
+    _append_work_event(session_id, event)
+    pusher = None
+    with _CHECKPOINT_STREAM_PUSHERS_LOCK:
+        pusher = _CHECKPOINT_STREAM_PUSHERS.get(run_id) or _CHECKPOINT_STREAM_PUSHERS.get(str(turn_id))
+    if pusher:
+        try:
+            pusher(event)
+        except Exception:
+            logger.debug("checkpoint.created live push failed", exc_info=True)
+
+
+def _maybe_trigger_checkpoint(session_id: str, event: Dict[str, Any]) -> None:
+    """Snapshot the workspace once per run, just before tools begin executing."""
+    try:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        nested = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        # Canonical envelopes expose the type as `type` (not `event_type`), and
+        # fold the loop's `state` inside `payload`; accept both shapes.
+        event_type = str(
+            event.get("event_type") or event.get("type")
+            or payload.get("event_type") or payload.get("type")
+            or nested.get("event_type") or nested.get("type") or ""
+        )
+        state = str(event.get("state") or payload.get("state") or nested.get("state") or "")
+        executing = event_type == "run.status" and state == "execution"
+        if not executing and event_type not in ("plan.step.started", "tool.queued"):
+            return
+        run_id = str(event.get("run_id") or event.get("turn_id") or "")
+        if not run_id:
+            return
+        with _CHECKPOINT_GUARD_LOCK:
+            status = _CHECKPOINT_GUARD.get(run_id)
+            if status in ("creating", "done"):
+                return
+            _CHECKPOINT_GUARD[run_id] = "creating"
+            if len(_CHECKPOINT_GUARD) > 512:
+                for stale in list(_CHECKPOINT_GUARD)[:256]:
+                    _CHECKPOINT_GUARD.pop(stale, None)
+        turn_id = str(event.get("turn_id") or run_id)
+        sid = safe_session_id(session_id)
+        ws_root = _workspace_root()
+
+        def worker() -> None:
+            try:
+                meta = _create_workspace_checkpoint(ws_root, sid, run_id, turn_id)
+                _emit_checkpoint_created(sid, run_id, turn_id, meta)
+            except Exception:
+                logger.warning("checkpoint creation failed for run %s", run_id, exc_info=True)
+            finally:
+                with _CHECKPOINT_GUARD_LOCK:
+                    _CHECKPOINT_GUARD[run_id] = "done"
+
+        threading.Thread(target=worker, name="checkpoint-snapshot", daemon=True).start()
+    except Exception:
+        logger.debug("checkpoint trigger failed", exc_info=True)
+
+
+@app.get("/api/checkpoints")
+def list_checkpoints(session_id: str = ""):
+    """List workspace checkpoints, newest first."""
+    sid = safe_session_id(session_id) if session_id else ""
+    results = []
+    if os.path.isdir(_CHECKPOINTS_ROOT):
+        for name in sorted(os.listdir(_CHECKPOINTS_ROOT), reverse=True):
+            ckpt_root = os.path.join(_CHECKPOINTS_ROOT, name)
+            if not os.path.isdir(ckpt_root):
+                continue
+            try:
+                meta = _load_checkpoint_meta(ckpt_root)
+            except HTTPException:
+                continue
+            if sid and str(meta.get("session_id") or "") != sid:
+                continue
+            results.append({
+                "checkpoint_id": str(meta["checkpoint_id"]),
+                "session_id": str(meta.get("session_id") or ""),
+                "run_id": str(meta.get("run_id") or ""),
+                "turn_id": str(meta.get("turn_id") or ""),
+                "created_at": meta.get("created_at", 0),
+                "file_count": meta.get("file_count", 0),
+                "size_bytes": meta.get("size_bytes", 0),
+            })
+    return {"checkpoints": results}
+
+
+@app.post("/api/checkpoints/{checkpoint_id}/restore")
+async def restore_checkpoint_endpoint(checkpoint_id: str, request: Request):
+    """Restore a workspace checkpoint. Per-file failures are reported, not fatal."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    sid = safe_session_id(str(body.get("session_id") or ""))
+    ckpt_id = _safe_checkpoint_id(checkpoint_id)
+    with _CHECKPOINT_RESTORE_LOCKS_LOCK:
+        lock = _CHECKPOINT_RESTORE_LOCKS.setdefault(ckpt_id, threading.Lock())
+        if len(_CHECKPOINT_RESTORE_LOCKS) > 256:
+            for stale in list(_CHECKPOINT_RESTORE_LOCKS)[:128]:
+                _CHECKPOINT_RESTORE_LOCKS.pop(stale, None)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=f"Restore already in progress for checkpoint {ckpt_id}")
+    try:
+        return await asyncio.to_thread(_restore_workspace_checkpoint, _workspace_root(), sid, ckpt_id)
+    finally:
+        lock.release()
+
+
+@app.delete("/api/checkpoints/{checkpoint_id}")
+def delete_checkpoint_endpoint(checkpoint_id: str, session_id: str = ""):
+    """Delete a stored checkpoint snapshot."""
+    sid = safe_session_id(session_id) if session_id else ""
+    ckpt_root = os.path.join(_CHECKPOINTS_ROOT, _safe_checkpoint_id(checkpoint_id))
+    if not os.path.isdir(ckpt_root):
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+    meta = _load_checkpoint_meta(ckpt_root)
+    if sid and str(meta.get("session_id") or "") != sid:
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+    shutil.rmtree(ckpt_root, ignore_errors=True)
+    return {"deleted": True}
+
+
 @app.post("/api/manage")
 async def manage_runtime(request: Request):
     """Real config-backed management for tools, skills, MCP, plugins, providers, and runtime features."""
@@ -2680,6 +3110,7 @@ async def manage_runtime(request: Request):
                 "agent": "",
                 "goal": "",
                 "additional_dirs": [],
+                "workspace_root": "",
             })
             _save_runtime_preferences()
             reset = _clear_runtime("reset requested")
@@ -2834,6 +3265,34 @@ async def manage_runtime(request: Request):
         _clear_runtime("config changed")
         return {"status": "success", "type": "config", "path": name, "value": _parse_config_value(value)}
 
+    if target_type == "runtime":
+        if action != "set":
+            raise HTTPException(status_code=400, detail="runtime supports only set")
+        if not isinstance(value, (list, str)) and name not in {"additional_dirs"}:
+            raise HTTPException(status_code=400, detail="runtime set expects a list value for additional_dirs")
+        if name == "additional_dirs":
+            if not isinstance(value, list):
+                raise HTTPException(status_code=400, detail="additional_dirs must be a list of paths")
+            cleaned = [str(item).strip() for item in value if str(item).strip()]
+            _RUNTIME_SETTINGS["additional_dirs"] = cleaned
+            _save_runtime_preferences()
+            apply_runtime_to_all_loops()
+            _record_workspace_activity("directory_set", f"{len(cleaned)} additional director{'' if len(cleaned) == 1 else 'ies'} configured", status="ok")
+            return {"status": "success", "type": "runtime", "name": "additional_dirs", "value": cleaned}
+        if name == "workspace_root":
+            target = str(value).strip() if isinstance(value, str) else ""
+            if target:
+                validated = _validate_workspace_path(target)
+                if not validated.get("valid"):
+                    raise HTTPException(status_code=400, detail=validated.get("reason", "Invalid workspace path"))
+                _RUNTIME_SETTINGS["workspace_root"] = validated.get("path", target)
+            else:
+                _RUNTIME_SETTINGS["workspace_root"] = ""
+            _save_runtime_preferences()
+            _record_workspace_activity("root_changed", _RUNTIME_SETTINGS["workspace_root"] or "unset", status="ok")
+            return {"status": "success", "type": "runtime", "name": "workspace_root", "value": _RUNTIME_SETTINGS["workspace_root"]}
+        raise HTTPException(status_code=400, detail=f"runtime set does not support: {name}")
+
     raise HTTPException(status_code=400, detail=f"Unsupported target type: {target_type}")
 
 
@@ -2910,7 +3369,9 @@ def get_status():
         "sandbox_tier": _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier", "normal")),
         "permission_modes": ["auto", "all", "allowlist", "ask"],
         "permission_allowlist": _RUNTIME_SETTINGS.get("permission_allowlist") or [],
+        "thinking": bool(_RUNTIME_SETTINGS.get("thinking", True)),
         "additional_dirs": _RUNTIME_SETTINGS.get("additional_dirs") or [],
+        "workspace_root": _PROJECT_ROOT,
         "health": "ok",
         "uptime": 0,
         "session_count": len(_LOOPS),
@@ -2932,6 +3393,11 @@ async def set_mode(request: Request):
     _RUNTIME_SETTINGS["mode"] = mode
     apply_runtime_to_all_loops()
     _save_runtime_preferences()
+    try:
+        from safety.safety_store import sync_permission_from_legacy
+        sync_permission_from_legacy(mode)
+    except Exception:
+        logger.warning("safety: could not sync permission mode from legacy mode %s", mode, exc_info=True)
     return {"status": "success", "mode": mode}
 
 
@@ -2982,6 +3448,11 @@ async def set_permissions(request: Request):
 
     apply_runtime_to_all_loops()
     _save_runtime_preferences()
+    try:
+        from safety.safety_store import sync_permission_from_legacy
+        sync_permission_from_legacy(mode)
+    except Exception:
+        logger.warning("safety: could not sync permission mode from /permissions", exc_info=True)
     return {"status": "success", "mode": mode, "allowlist": allowlist}
 
 
@@ -3114,7 +3585,438 @@ async def set_sandbox(request: Request):
     os.environ["NEXUS_SANDBOX_TIER"] = tier
     apply_runtime_to_all_loops()
     _save_runtime_preferences()
+    try:
+        from safety.safety_store import sync_sandbox_from_legacy
+        sync_sandbox_from_legacy(tier)
+    except Exception:
+        logger.warning("safety: could not sync sandbox mode from legacy tier %s", tier, exc_info=True)
     return {"status": "success", "tier": tier}
+
+
+@app.get("/api/thinking")
+def get_thinking():
+    """Return whether reasoning/thinking is enabled."""
+    return {"status": "success", "thinking": bool(_RUNTIME_SETTINGS.get("thinking", True))}
+
+
+@app.post("/api/thinking")
+async def set_thinking(request: Request):
+    """Enable or disable chain-of-thought reasoning for tool calls and replies."""
+    data = await request.json()
+    enabled = bool(data.get("enabled", True))
+    _RUNTIME_SETTINGS["thinking"] = enabled
+    _save_runtime_preferences()
+    return {"status": "success", "thinking": enabled}
+
+
+# ── Safety settings API ──────────────────────────────────────────────────────
+# Safety (Permission Mode / Sandbox Mode / policies) is stored separately from
+# the workspace selection. Saving Safety settings must never change the
+# workspace; opening Workspace settings must never lose Safety changes.
+
+def _safety_apply_runtime():
+    """Push the current Safety permission/sandbox modes into the runtime engine."""
+    from safety.safety_store import get_state, PERMISSION_TO_LEGACY, SANDBOX_TO_LEGACY
+    state = get_state(refresh=True)
+    legacy_mode = PERMISSION_TO_LEGACY.get(state.get("permission_mode"), "auto")
+    legacy_tier = SANDBOX_TO_LEGACY.get(state.get("sandbox_mode"), "normal")
+    _RUNTIME_SETTINGS["mode"] = legacy_mode
+    _RUNTIME_SETTINGS["sandbox_tier"] = legacy_tier
+    os.environ["NEXUS_SANDBOX_TIER"] = legacy_tier
+    apply_runtime_to_all_loops()
+    _save_runtime_preferences()
+    return {"permission_mode": state.get("permission_mode"), "sandbox_mode": state.get("sandbox_mode")}
+
+
+@app.get("/api/safety/summary")
+async def safety_summary():
+    """Short summary for the header bar (workspace, modes, counts)."""
+    try:
+        from safety.safety_store import get_state, summary
+        get_state(refresh=True)  # cross-process freshness (server may outlive a CLI edit)
+        return summary()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: summary failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+
+
+@app.get("/api/safety/settings")
+async def safety_settings():
+    """Full current Safety settings (no secrets ever included)."""
+    try:
+        from safety.safety_store import get_state
+        return get_state(refresh=True)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: settings failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+
+
+@app.get("/api/safety/meta")
+async def safety_meta():
+    """Static option lists for the Safety UI (modes, categories, policies)."""
+    def as_list(mapping):
+        if isinstance(mapping, dict):
+            return [{"id": key, **value} for key, value in mapping.items()]
+        return list(mapping)
+
+    try:
+        from safety.safety_store import _default_protected_paths, list_presets
+        default_paths = _default_protected_paths()
+        presets = list_presets()
+    except Exception:  # pragma: no cover - defensive
+        default_paths = []
+        presets = []
+
+    return {
+        "permission_modes": as_list(_SAFETY_PERMISSION_MODES),
+        "sandbox_modes": as_list(_SAFETY_SANDBOX_MODES),
+        "command_categories": as_list(_SAFETY_COMMAND_CATEGORIES),
+        "file_policy_categories": as_list(_SAFETY_FILE_POLICY_CATEGORIES),
+        "filesystem_options": as_list(_SAFETY_FILESYSTEM_OPTIONS),
+        "secret_protection_options": as_list(_SAFETY_SECRET_PROTECTION_OPTIONS),
+        "network_policies": as_list(_SAFETY_NETWORK_POLICIES),
+        "browser_options": as_list(_SAFETY_BROWSER_OPTIONS),
+        "mcp_options": as_list(_SAFETY_MCP_OPTIONS),
+        "package_options": as_list(_SAFETY_PACKAGE_OPTIONS),
+        "package_managers": as_list(_SAFETY_PACKAGE_MANAGERS),
+        "process_options": as_list(_SAFETY_PROCESS_OPTIONS),
+        "destructive_actions": as_list(_SAFETY_DESTRUCTIVE_ACTIONS),
+        "checkpoint_options": as_list(_SAFETY_CHECKPOINT_OPTIONS),
+        "default_protected_paths": default_paths,
+        "presets": presets,
+    }
+
+
+@app.post("/api/safety/save")
+async def safety_save(request: Request):
+    """Atomically save Safety settings. Never touches the workspace config."""
+    try:
+        data = await request.json()
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    try:
+        from safety.safety_store import save
+        result = save(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: save failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid settings"])))
+    if result.get("permission_changed") or result.get("sandbox_changed"):
+        _safety_apply_runtime()
+    result["workspace"] = _workspace_root
+    return result
+
+
+@app.post("/api/safety/reset")
+async def safety_reset(request: Request):
+    """Reset Safety settings to defaults (workspace selection untouched)."""
+    try:
+        data = await request.json()
+        confirm = bool((data or {}).get("confirm", False))
+    except Exception:
+        confirm = False
+    if not confirm:
+        raise HTTPException(status_code=400, detail="Reset requires confirm: true")
+    try:
+        from safety.safety_store import reset
+        result = reset()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: reset failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+    _safety_apply_runtime()
+    result["workspace"] = _workspace_root
+    return result
+
+
+@app.post("/api/safety/permission-mode")
+async def safety_set_permission_mode(request: Request):
+    """Set only the permission mode (7 modes). Sandbox + workspace untouched."""
+    data = await request.json()
+    mode = str((data or {}).get("mode", "")).strip()
+    try:
+        from safety.safety_store import set_permission_mode
+        result = set_permission_mode(mode)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: set permission mode failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid mode"])))
+    _safety_apply_runtime()
+    return result
+
+
+@app.post("/api/safety/sandbox-mode")
+async def safety_set_sandbox_mode(request: Request):
+    """Set only the sandbox mode (7 modes). Permission + workspace untouched."""
+    data = await request.json()
+    mode = str((data or {}).get("mode", "")).strip()
+    try:
+        from safety.safety_store import set_sandbox_mode
+        result = set_sandbox_mode(mode)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: set sandbox mode failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid mode"])))
+    _safety_apply_runtime()
+    return result
+
+
+@app.get("/api/safety/protected-paths")
+async def safety_protected_paths():
+    try:
+        from safety.safety_store import get_state
+        state = get_state(refresh=True)
+        return {"paths": state.get("protected_paths", []), "mandatory": state.get("mandatory_protected_paths", [])}
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: protected paths failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+
+
+@app.post("/api/safety/protected-paths")
+async def safety_add_protected_path(request: Request):
+    data = await request.json()
+    try:
+        from safety.safety_store import add_protected_path
+        result = add_protected_path(data or {})
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: add protected path failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid protected path"])))
+    return result
+
+
+@app.patch("/api/safety/protected-paths")
+async def safety_update_protected_path(request: Request):
+    data = await request.json()
+    pattern = str((data or {}).get("pattern", "")).strip()
+    if not pattern:
+        raise HTTPException(status_code=400, detail="pattern is required")
+    try:
+        from safety.safety_store import update_protected_path
+        result = update_protected_path(pattern, data or {})
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: update protected path failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid protected path"])))
+    return result
+
+
+@app.delete("/api/safety/protected-paths")
+async def safety_remove_protected_path(request: Request):
+    data = await request.json()
+    pattern = str((data or {}).get("pattern", "")).strip()
+    if not pattern:
+        raise HTTPException(status_code=400, detail="pattern is required")
+    try:
+        from safety.safety_store import remove_protected_path
+        result = remove_protected_path(pattern)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: remove protected path failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid protected path"])))
+    return result
+
+
+@app.post("/api/safety/protected-paths/test")
+async def safety_test_path(request: Request):
+    data = await request.json()
+    path = str((data or {}).get("path", "")).strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    try:
+        from safety.safety_store import test_path
+        return test_path(path)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: test path failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+
+
+@app.post("/api/safety/protected-paths/reset")
+async def safety_reset_protected_paths(request: Request):
+    data = await request.json()
+    confirm = bool((data or {}).get("confirm", False))
+    if not confirm:
+        raise HTTPException(status_code=400, detail="Reset requires confirm: true")
+    try:
+        from safety.safety_store import reset_protected_paths
+        return reset_protected_paths()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: reset protected paths failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+
+
+@app.get("/api/safety/temp-permissions")
+async def safety_temp_permissions():
+    try:
+        from safety.safety_store import list_temp_permissions
+        return {"permissions": list_temp_permissions()}
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: temp permissions failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+
+
+@app.post("/api/safety/temp-permissions")
+async def safety_add_temp_permission(request: Request):
+    data = await request.json()
+    try:
+        from safety.safety_store import add_temp_permission
+        result = add_temp_permission(data or {})
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: add temp permission failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid temp permission"])))
+    return result
+
+
+@app.post("/api/safety/temp-permissions/revoke")
+async def safety_revoke_temp_permission(request: Request):
+    data = await request.json()
+    permission_id = str((data or {}).get("id", "")).strip()
+    if not permission_id:
+        raise HTTPException(status_code=400, detail="id is required")
+    try:
+        from safety.safety_store import revoke_temp_permission
+        return revoke_temp_permission(permission_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: revoke temp permission failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+
+
+@app.post("/api/safety/temp-permissions/extend")
+async def safety_extend_temp_permission(request: Request):
+    data = await request.json()
+    permission_id = str((data or {}).get("id", "")).strip()
+    seconds = int((data or {}).get("seconds", 3600) or 3600)
+    if not permission_id:
+        raise HTTPException(status_code=400, detail="id is required")
+    try:
+        from safety.safety_store import extend_temp_permission
+        result = extend_temp_permission(permission_id, seconds)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: extend temp permission failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid temp permission"])))
+    return result
+
+
+@app.post("/api/safety/temp-permissions/convert")
+async def safety_convert_temp_permission(request: Request):
+    data = await request.json()
+    permission_id = str((data or {}).get("id", "")).strip()
+    if not permission_id:
+        raise HTTPException(status_code=400, detail="id is required")
+    try:
+        from safety.safety_store import convert_temp_permission
+        result = convert_temp_permission(permission_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: convert temp permission failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid temp permission"])))
+    return result
+
+
+@app.get("/api/safety/approvals")
+async def safety_approvals():
+    try:
+        from safety.safety_store import list_approvals
+        return {"approvals": list_approvals()}
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: approvals failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+
+
+@app.post("/api/safety/approvals/revoke")
+async def safety_revoke_approval(request: Request):
+    data = await request.json()
+    approval_id = str((data or {}).get("id", "")).strip()
+    if not approval_id:
+        raise HTTPException(status_code=400, detail="id is required")
+    try:
+        from safety.safety_store import revoke_approval
+        result = revoke_approval(approval_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: revoke approval failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid approval"])))
+    return result
+
+
+@app.post("/api/safety/approvals/clear")
+async def safety_clear_approvals(request: Request):
+    data = await request.json()
+    confirm = bool((data or {}).get("confirm", False))
+    if not confirm:
+        raise HTTPException(status_code=400, detail="Clear requires confirm: true")
+    try:
+        from safety.safety_store import clear_expired_approvals
+        return clear_expired_approvals()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: clear approvals failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+
+
+@app.get("/api/safety/events")
+async def safety_events():
+    try:
+        from safety.safety_store import list_events
+        return {"events": list_events(limit=200)}
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: events failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+
+
+@app.get("/api/safety/diagnostics")
+async def safety_diagnostics():
+    try:
+        from safety.safety_store import run_diagnostics
+        return run_diagnostics()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: diagnostics failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+
+
+@app.get("/api/safety/presets")
+async def safety_presets():
+    try:
+        from safety.safety_store import list_presets
+        return {"presets": list_presets()}
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: presets failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+
+
+@app.post("/api/safety/presets/apply")
+async def safety_apply_preset(request: Request):
+    data = await request.json()
+    preset_id = str((data or {}).get("preset", "")).strip()
+    if not preset_id:
+        raise HTTPException(status_code=400, detail="preset is required")
+    try:
+        from safety.safety_store import apply_preset
+        result = apply_preset(preset_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("safety: apply preset failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid preset"])))
+    if preset_id != "custom" and result.get("changes"):
+        _safety_apply_runtime()
+    return result
 
 
 @app.post("/api/add-dir")
@@ -3132,6 +4034,27 @@ async def add_working_dir(request: Request):
         dirs.append(target)
     apply_runtime_to_all_loops()
     return {"status": "success", "path": target, "additional_dirs": dirs}
+
+
+@app.post("/api/open")
+async def open_path(request: Request):
+    """Open a file or folder in the OS file manager (best-effort, local only)."""
+    data = await request.json()
+    raw_path = str(data.get("path", "")).strip()
+    if not raw_path:
+        raise HTTPException(status_code=400, detail="path is required")
+    target = os.path.abspath(raw_path)
+    import subprocess
+    try:
+        if os.name == "nt":
+            os.startfile(target)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", target])
+        else:
+            subprocess.Popen(["xdg-open", target])
+        return {"status": "success", "path": target}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not open path: {exc}")
 
 
 @app.post("/api/run")
@@ -3199,6 +4122,1187 @@ def search_files(q: str = ""):
         logger.warning("server:1661 : suppressed error", exc_info=True)
         pass
     return {"files": files[:10]}
+
+
+# ── Workspace API ─────────────────────────────────────────────────────────────
+
+_WORKSPACE_ACTIVITY_LOCK = threading.RLock()
+_WORKSPACE_ACTIVITY: deque = deque(maxlen=200)
+_WORKSPACE_DIR_ACCESS: Dict[str, str] = {}
+_WORKSPACE_SCAN_LOCK = threading.RLock()
+_WORKSPACE_SCAN_STATE: Dict[str, Any] = {"status": "not_started", "started_at": 0.0, "finished_at": 0.0, "progress": 0.0, "current_file": "", "indexed": 0, "failed": 0, "skipped": 0, "message": ""}
+_WORKSPACE_SUMMARY_CACHE_LOCK = threading.RLock()
+_WORKSPACE_SUMMARY_CACHE: Dict[str, Any] = {"computed_at": 0.0, "root": None, "payload": None, "warming": False}
+_WORKSPACE_SUMMARY_TTL = 300.0
+
+
+def _invalidate_workspace_summary_cache() -> None:
+    with _WORKSPACE_SUMMARY_CACHE_LOCK:
+        _WORKSPACE_SUMMARY_CACHE["computed_at"] = 0.0
+        _WORKSPACE_SUMMARY_CACHE["payload"] = None
+
+
+def _workspace_summary_snapshot_path() -> str:
+    return os.path.join(_PROJECT_ROOT, ".cache", "workspace_summary.json")
+
+
+def _save_workspace_summary_snapshot(payload: Dict[str, Any], root: str) -> None:
+    """Persist the computed summary to disk so restarts never re-scan slowly."""
+    try:
+        path = _workspace_summary_snapshot_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"root": root, "saved_at": time.time(), "payload": payload}, f, ensure_ascii=False)
+    except OSError:
+        logger.warning("Could not persist workspace summary snapshot", exc_info=True)
+
+
+def _load_workspace_summary_snapshot(root: str) -> Optional[Dict[str, Any]]:
+    """Load a previously persisted summary for this root, or None."""
+    try:
+        path = _workspace_summary_snapshot_path()
+        if not os.path.isfile(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("root") != root or not isinstance(data.get("payload"), dict):
+            return None
+        return data["payload"]
+    except (OSError, ValueError):
+        return None
+
+
+def _refresh_workspace_summary(root: str) -> Dict[str, Any]:
+    """Compute the full summary, keep it in memory, and persist it to disk."""
+    payload = _compute_workspace_summary(root)
+    with _WORKSPACE_SUMMARY_CACHE_LOCK:
+        _WORKSPACE_SUMMARY_CACHE.update({"computed_at": time.time(), "root": root, "payload": payload, "warming": False})
+    _save_workspace_summary_snapshot(payload, root)
+    return payload
+
+
+def _warm_workspace_summary() -> None:
+    """Compute the summary in the background at server startup so first loads are instant."""
+    def worker() -> None:
+        try:
+            _refresh_workspace_summary(_workspace_root())
+        except Exception:
+            logger.warning("Workspace summary warm-up failed", exc_info=True)
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _ensure_workspace_summary_refresh(root: str) -> None:
+    """Kick a background refresh unless one is already running (no duplicate threads)."""
+    with _WORKSPACE_SUMMARY_CACHE_LOCK:
+        if _WORKSPACE_SUMMARY_CACHE.get("warming"):
+            return
+        _WORKSPACE_SUMMARY_CACHE["warming"] = True
+
+    def worker() -> None:
+        try:
+            _refresh_workspace_summary(root)
+        except Exception:
+            logger.warning("Workspace summary background refresh failed", exc_info=True)
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _workspace_root() -> str:
+    configured = str(_RUNTIME_SETTINGS.get("workspace_root") or "").strip()
+    return configured or _PROJECT_ROOT
+
+
+def _canonical_workspace_path(raw: str) -> str:
+    raw = str(raw or "").strip().strip('"').strip("'")
+    if not raw:
+        raise HTTPException(status_code=400, detail="Path is required")
+    if not os.path.isabs(raw):
+        raw = os.path.join(_workspace_root(), raw)
+    raw = os.path.abspath(os.path.normpath(raw))
+    if os.name == "nt":
+        is_drive = len(raw) >= 2 and raw[0].isalpha() and raw[1] == ":"
+        is_unc = raw.startswith("\\\\")
+        if not is_drive and not is_unc:
+            raise HTTPException(status_code=400, detail="Unsupported path (network or device paths are not accepted)")
+    return raw
+
+
+def _is_within(parent: str, child: str) -> bool:
+    try:
+        parent_norm = os.path.normcase(os.path.abspath(parent))
+        child_norm = os.path.normcase(os.path.abspath(child))
+        return os.path.commonpath([parent_norm, child_norm]) == parent_norm
+    except Exception:
+        return False
+
+
+def _validate_workspace_path(raw: str) -> Dict[str, Any]:
+    """Validate a candidate workspace root or additional directory.
+
+    Returns a dict with validity, reason, canonical path, and permission flags.
+    Never trusts client-reported permissions — these are checked on disk.
+    """
+    try:
+        target = _canonical_workspace_path(raw)
+    except HTTPException as exc:
+        return {"valid": False, "reason": exc.detail, "path": str(raw or "").strip()}
+    if not os.path.exists(target):
+        return {"valid": False, "reason": "Path does not exist on disk", "path": target, "exists": False}
+    if not os.path.isdir(target):
+        return {"valid": False, "reason": "Path is a file — a directory is required", "path": target, "exists": True, "is_dir": False}
+    readable = os.access(target, os.R_OK)
+    writable = os.access(target, os.W_OK)
+    if not readable and not writable:
+        return {"valid": False, "reason": "Permission denied: no read or write access", "path": target, "exists": True, "is_dir": True, "readable": False, "writable": False}
+    return {
+        "valid": True,
+        "path": target,
+        "exists": True,
+        "is_dir": True,
+        "readable": readable,
+        "writable": writable,
+        "reason": "ok",
+    }
+
+
+def _record_workspace_activity(event_type: str, description: str, status: str = "ok", details: Any = None) -> None:
+    with _WORKSPACE_ACTIVITY_LOCK:
+        _WORKSPACE_ACTIVITY.appendleft({
+            "timestamp": time.time(),
+            "event_type": event_type,
+            "description": description,
+            "status": status,
+            "details": details,
+        })
+
+
+def _git_summary(root: str) -> Dict[str, Any]:
+    import subprocess
+    def run(args: List[str], timeout: int = 3) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(args, cwd=root, capture_output=True, text=True, timeout=timeout, errors="replace")
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return subprocess.CompletedProcess(args, 1, "", str(exc))
+
+    top = run(["git", "rev-parse", "--show-toplevel"])
+    if top.returncode != 0 or not top.stdout.strip():
+        return {"available": bool(shutil.which("git")), "is_repo": False}
+    repo_root = top.stdout.strip()
+    branch = run(["git", "branch", "--show-current"]).stdout.strip()
+    upstream = ""
+    upstream_raw = run(["git", "rev-parse", "--abbrev-ref", "@{upstream}"]).stdout.strip()
+    if upstream_raw and upstream_raw != "@{upstream}":
+        upstream = upstream_raw
+    changed = staged = untracked = 0
+    porcelain = run(["git", "status", "--porcelain=v1"])
+    for line in porcelain.stdout.splitlines():
+        if line.startswith("??"):
+            untracked += 1
+            continue
+        if len(line) > 1 and line[0] != " ":
+            staged += 1
+        if len(line) > 1 and line[1] != " ":
+            changed += 1
+    last_commit = ""
+    log = run(["git", "log", "-1", "--format=%h %s"])
+    if log.returncode == 0 and log.stdout.strip():
+        last_commit = log.stdout.strip()
+    return {
+        "available": bool(shutil.which("git")),
+        "is_repo": True,
+        "root": repo_root,
+        "branch": branch or "unknown",
+        "upstream": upstream,
+        "changed_files": changed,
+        "staged_files": staged,
+        "untracked_files": untracked,
+        "last_commit": last_commit,
+    }
+
+
+_DEFAULT_IGNORE_DIRS = {".git", "node_modules", "__pycache__", "venv", ".venv", "dist", "build", "coverage", ".next", ".cache", ".pytest_cache", ".mypy_cache"}
+_DEFAULT_IGNORE_FILES = {"*.pyc", "*.pyo", ".DS_Store", "*.log"}
+_BINARY_EXTENSIONS = {
+    "images": {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".svg", ".tiff", ".avif", ".heic"},
+    "audio": {".mp3", ".wav", ".flac", ".ogg", ".aac", ".m4a", ".wma"},
+    "video": {".mp4", ".mkv", ".webm", ".avi", ".mov", ".wmv"},
+    "archives": {".zip", ".tar", ".gz", ".bz2", ".7z", ".rar", ".xz"},
+    "executables": {".exe", ".dll", ".so", ".dylib", ".bin", ".msi", ".apk", ".app", ".class", ".o", ".obj", ".jar", ".pyc"},
+    "office": {".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".pdf"},
+}
+_SOURCE_EXTENSIONS = {
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".c", ".h", ".cpp", ".hpp", ".cs", ".java", ".rs", ".go", ".rb", ".php",
+    ".swift", ".kt", ".kts", ".scala", ".sh", ".ps1", ".bat", ".cmd", ".sql", ".html", ".css", ".scss", ".less",
+    ".json", ".yaml", ".yml", ".toml", ".xml", ".ini", ".cfg", ".conf", ".vue", ".svelte", ".lua", ".pl", ".r",
+    ".m", ".ipynb", ".dart", ".ex", ".exs", ".clj", ".ml", ".fs", ".hs", ".zig",
+}
+_DOC_EXTENSIONS = {".md", ".markdown", ".txt", ".rst", ".adoc", ".tex", ".pdf"}
+
+
+def _gitignore_rules(root: str) -> List[Dict[str, Any]]:
+    rules: List[Dict[str, Any]] = []
+    for source in (".gitignore", ".nexusignore"):
+        path = os.path.join(root, source)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f.read().splitlines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    rules.append({"pattern": stripped, "source": source, "kind": "ignore", "negated": stripped.startswith("!")})
+        except OSError:
+            continue
+    for name in sorted(_DEFAULT_IGNORE_DIRS):
+        rules.append({"pattern": name, "source": "built-in", "kind": "ignore", "negated": False})
+    for pat in sorted(_DEFAULT_IGNORE_FILES):
+        rules.append({"pattern": pat, "source": "built-in", "kind": "ignore", "negated": False})
+    return rules
+
+
+def _path_is_ignored(rel_path: str, rules: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Test a relative path against rules in order (last matching rule wins, like git)."""
+    rel = rel_path.replace("\\", "/")
+    result: Dict[str, Any] = {"ignored": False, "matched": None, "source": None}
+    for rule in rules:
+        pattern = rule["pattern"]
+        matched = False
+        try:
+            if not rule.get("negated"):
+                import fnmatch
+                if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(os.path.basename(rel), pattern):
+                    matched = True
+                elif "/" in pattern:
+                    matched = fnmatch.fnmatch(rel, pattern.rstrip("/") + "/*") or rel.startswith(pattern.rstrip("/") + "/")
+                else:
+                    matched = rel == pattern or rel.startswith(pattern + "/")
+        except Exception:
+            continue
+        if matched:
+            result["ignored"] = not rule.get("negated")
+            result["matched"] = rule["pattern"]
+            result["source"] = rule["source"]
+    return result
+
+
+def _scan_workspace_stats(root: str) -> Dict[str, Any]:
+    rules = _gitignore_rules(root)
+    stats = {
+        "files": 0, "folders": 0, "indexed_files": 0, "ignored_files": 0, "failed_files": 0,
+        "source_files": 0, "documentation_files": 0, "binary_files": 0, "total_size": 0,
+        "indexed_text_size": 0, "languages": {}, "calculated_at": time.time(),
+    }
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+        pruned = []
+        for d in dirnames:
+            if d in _DEFAULT_IGNORE_DIRS or d.startswith("."):
+                pruned.append(d)
+            else:
+                rel_dir = os.path.relpath(os.path.join(dirpath, d), root).replace("\\", "/")
+                if _path_is_ignored(rel_dir, rules).get("ignored"):
+                    pruned.append(d)
+        dirnames[:] = [d for d in dirnames if d not in pruned]
+        stats["folders"] += 1
+        for fname in filenames:
+            full = os.path.join(dirpath, fname)
+            try:
+                rel = os.path.relpath(full, root).replace("\\", "/")
+            except (ValueError, OSError):
+                stats["failed_files"] += 1
+                continue
+            if _path_is_ignored(rel, rules).get("ignored"):
+                stats["ignored_files"] += 1
+                continue
+            try:
+                size = os.path.getsize(full)
+                stats["total_size"] += size
+            except OSError:
+                stats["failed_files"] += 1
+                continue
+            ext = os.path.splitext(fname)[1].lower()
+            stats["files"] += 1
+            if ext in _SOURCE_EXTENSIONS:
+                stats["source_files"] += 1
+                stats["indexed_files"] += 1
+                stats["indexed_text_size"] += size
+                lang = ext.lstrip(".") or "text"
+                stats["languages"][lang] = stats["languages"].get(lang, 0) + 1
+            elif ext in _DOC_EXTENSIONS:
+                stats["documentation_files"] += 1
+                stats["indexed_files"] += 1
+                stats["indexed_text_size"] += size
+            elif any(ext in group for group in _BINARY_EXTENSIONS.values()):
+                stats["binary_files"] += 1
+            else:
+                stats["indexed_files"] += 1
+                stats["indexed_text_size"] += size
+    return stats
+
+
+def _detect_project(root: str) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "name": os.path.basename(root),
+        "type": "unknown",
+        "languages": [],
+        "frameworks": [],
+        "package_manager": None,
+        "build_command": None,
+        "dev_command": None,
+        "test_command": None,
+        "lint_command": None,
+        "format_command": None,
+        "entry_points": [],
+        "manifests": [],
+        "lock_files": [],
+        "config_files": [],
+        "detected_at": time.time(),
+    }
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return result
+    for name in entries:
+        full = os.path.join(root, name)
+        if os.path.isfile(full):
+            result["manifests"].append(name)
+            result["config_files"].append(name)
+    if "package.json" in result["manifests"]:
+        result["type"] = "node"
+        result["package_manager"] = "npm"
+        result["languages"].extend(["JavaScript", "TypeScript"])
+        try:
+            with open(os.path.join(root, "package.json"), "r", encoding="utf-8") as f:
+                pkg = json.load(f)
+            result["name"] = pkg.get("name", result["name"])
+            scripts = pkg.get("scripts") or {}
+            result["build_command"] = scripts.get("build") or scripts.get("compile")
+            result["dev_command"] = scripts.get("dev") or scripts.get("start")
+            result["test_command"] = scripts.get("test")
+            result["lint_command"] = scripts.get("lint")
+            result["format_command"] = scripts.get("format")
+        except (OSError, ValueError):
+            pass
+    if "pyproject.toml" in result["manifests"]:
+        result["type"] = "python"
+        result["package_manager"] = "pdm" if os.path.isfile(os.path.join(root, "pdm.lock")) else ("poetry" if os.path.isfile(os.path.join(root, "poetry.lock")) else "pip")
+        result["languages"].append("Python")
+        result["test_command"] = "python -m pytest"
+        result["build_command"] = None
+    elif "requirements.txt" in result["manifests"]:
+        result["type"] = "python"
+        result["package_manager"] = "pip"
+        result["languages"].append("Python")
+    if "Cargo.toml" in result["manifests"]:
+        result["type"] = "rust"
+        result["package_manager"] = "cargo"
+        result["languages"].append("Rust")
+        result["build_command"] = "cargo build"
+        result["test_command"] = "cargo test"
+    if "go.mod" in result["manifests"]:
+        result["type"] = "go"
+        result["package_manager"] = "go modules"
+        result["languages"].append("Go")
+        result["test_command"] = "go test ./..."
+    if any(lock in result["manifests"] for lock in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml")):
+        if "package-lock.json" in result["manifests"]:
+            result["package_manager"] = "npm"
+        elif "yarn.lock" in result["manifests"]:
+            result["package_manager"] = "yarn"
+        else:
+            result["package_manager"] = "pnpm"
+    if "README.md" in result["manifests"]:
+        result["documentation"] = ["README.md"]
+    if not result["languages"]:
+        result["languages"] = ["unknown"]
+    result["languages"] = sorted(set(result["languages"]))
+    return result
+
+
+_DEFAULT_PROTECTED_PATTERNS = [
+    {"pattern": ".git/**", "reason": "Git internals", "policy": "deny", "scope": "global", "mandatory": True},
+    {"pattern": ".env", "reason": "Environment secrets", "policy": "warn", "scope": "global", "mandatory": True},
+    {"pattern": ".env.*", "reason": "Environment secrets", "policy": "warn", "scope": "global", "mandatory": True},
+    {"pattern": "**/*.pem", "reason": "Private keys", "policy": "warn", "scope": "global", "mandatory": True},
+    {"pattern": "**/*.key", "reason": "Private keys", "policy": "warn", "scope": "global", "mandatory": True},
+    {"pattern": "**/.ssh/**", "reason": "SSH credentials", "policy": "deny", "scope": "global", "mandatory": True},
+    {"pattern": "**/*credential*", "reason": "Credentials", "policy": "warn", "scope": "global", "mandatory": True},
+    {"pattern": "**/*secret*", "reason": "Secrets", "policy": "warn", "scope": "global", "mandatory": True},
+]
+
+
+def _protected_paths() -> List[Dict[str, Any]]:
+    paths = [dict(entry) for entry in _DEFAULT_PROTECTED_PATTERNS]
+    try:
+        config = _load_nexus_config()
+        workspace_cfg = config.get("workspace") if isinstance(config.get("workspace"), dict) else {}
+        user = workspace_cfg.get("protected_paths") or []
+        if isinstance(user, list):
+            for entry in user:
+                if isinstance(entry, dict):
+                    paths.append({**entry, "scope": "workspace", "mandatory": False})
+                else:
+                    paths.append({"pattern": str(entry), "reason": "User configured", "policy": "warn", "scope": "workspace", "mandatory": False})
+    except Exception:
+        pass
+    return paths
+
+
+def _index_status() -> Dict[str, Any]:
+    status: Dict[str, Any] = {
+        "status": "not_started",
+        "indexed_files": 0,
+        "total_chunks": 0,
+        "index_storage_size": 0,
+        "last_full_scan": None,
+        "last_incremental_scan": None,
+        "current_file": "",
+        "recent_errors": [],
+    }
+    try:
+        rag_index = os.path.join(_PROJECT_ROOT, "knowledge", "_rag_index.json")
+        if os.path.isfile(rag_index):
+            try:
+                with open(rag_index, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                docs = data if isinstance(data, list) else (data.get("documents") if isinstance(data, dict) else None)
+                if isinstance(docs, list):
+                    status["indexed_files"] = len(docs)
+                    status["total_chunks"] = sum(len(d.get("chunks") or []) if isinstance(d, dict) else 0 for d in docs)
+                status["index_storage_size"] = os.path.getsize(rag_index)
+                status["last_full_scan"] = data.get("updated_at") if isinstance(data, dict) else None
+            except (OSError, ValueError):
+                pass
+            status["status"] = "ready"
+    except Exception:
+        pass
+    scan = dict(_WORKSPACE_SCAN_STATE)
+    if scan.get("status") in {"scanning", "parsing"}:
+        status["status"] = scan["status"]
+        status["current_file"] = scan.get("current_file") or ""
+    if _WORKSPACE_SCAN_STATE.get("finished_at"):
+        status["last_full_scan"] = status.get("last_full_scan") or _WORKSPACE_SCAN_STATE["finished_at"]
+    return status
+
+
+def _storage_stats() -> Dict[str, Any]:
+    def dir_size(path: str) -> int:
+        total = 0
+        try:
+            for dirpath, dirnames, filenames in os.walk(path):
+                for fname in filenames:
+                    try:
+                        total += os.path.getsize(os.path.join(dirpath, fname))
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+        return total
+
+    sessions = os.path.join(_PROJECT_ROOT, "logs", "sessions")
+    work_events = os.path.join(_PROJECT_ROOT, "workspace", "work_events")
+    knowledge = os.path.join(_PROJECT_ROOT, "knowledge")
+    cache = os.path.join(_PROJECT_ROOT, ".cache")
+    return {
+        "session_count": len(_LOOPS),
+        "session_storage_size": dir_size(sessions),
+        "cache_size": dir_size(cache),
+        "index_size": dir_size(knowledge),
+        "temp_size": dir_size(os.path.join(_PROJECT_ROOT, "tmp")),
+        "work_event_count": _WORK_EVENT_MAX_RECORDS,
+    }
+
+
+def _workspace_health(root: str, git: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    checks: List[Dict[str, Any]] = []
+    def add(name: str, status: str, detail: str) -> None:
+        checks.append({"name": name, "status": status, "detail": detail})
+
+    exists = os.path.isdir(root)
+    add("Root exists", "healthy" if exists else "failed", "Directory is present on disk" if exists else "Directory is missing")
+    readable = exists and os.access(root, os.R_OK)
+    add("Root readable", "healthy" if readable else "failed", "Read access verified" if readable else "No read permission")
+    writable = exists and os.access(root, os.W_OK)
+    add("Root writable", "healthy" if writable else "warning", "Write access verified" if writable else "No write permission (read-only workspace)")
+
+    rules = _gitignore_rules(root)
+    import fnmatch
+    long_paths = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in _DEFAULT_IGNORE_DIRS and not d.startswith(".")]
+            for fname in filenames:
+                full = os.path.join(dirpath, fname)
+                if len(full) > 250:
+                    long_paths += 1
+                if long_paths > 5:
+                    break
+            if long_paths > 5:
+                break
+    except OSError:
+        pass
+    add("Windows path-length risk", "warning" if long_paths else "healthy", f"{long_paths} path(s) exceed 250 characters" if long_paths else "No long paths detected")
+
+    try:
+        usage = shutil.disk_usage(root)
+        free_gb = usage.free / (1024 ** 3)
+        add("Disk space", "warning" if free_gb < 1 else "healthy", f"{free_gb:.1f} GB free")
+    except OSError:
+        add("Disk space", "not_checked", "Could not query disk usage")
+
+    git = git if git is not None else _git_summary(root)
+    add("Git availability", "healthy" if git.get("is_repo") else "not_checked" if git.get("available") else "unsupported", "Repository detected" if git.get("is_repo") else "Git installed" if git.get("available") else "Git not installed or not on PATH")
+
+    try:
+        import fnmatch
+        env_files = 0
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in _DEFAULT_IGNORE_DIRS and not d.startswith(".")]
+            for fname in filenames:
+                if fname.startswith(".env") or fname.endswith(".pem") or fname.endswith(".key"):
+                    env_files += 1
+        add("Sensitive-file presence", "warning" if env_files else "healthy", f"{env_files} sensitive file(s) found" if env_files else "No sensitive files detected")
+    except OSError:
+        add("Sensitive-file presence", "not_checked", "Could not scan")
+
+    index = _index_status()
+    add("Index health", "healthy" if index.get("status") in {"ready", "not_started"} else "warning", f"Index status: {index.get('status')}")
+    add("Backend connection", "healthy", "Connected to Nexus server")
+    return checks
+
+
+def _workspace_instructions() -> Dict[str, Any]:
+    try:
+        config = _load_nexus_config()
+        ws = config.get("workspace") if isinstance(config.get("workspace"), dict) else {}
+        instructions = ws.get("instructions") or ""
+        return {
+            "instructions": str(instructions),
+            "active": bool(instructions),
+            "updated_at": ws.get("instructions_updated_at"),
+        }
+    except Exception:
+        return {"instructions": "", "active": False, "updated_at": None}
+
+
+def _workspace_memory_meta() -> Dict[str, Any]:
+    try:
+        from memory import MemoryManager
+        mem = MemoryManager()
+        entries = getattr(mem, "store", None)
+        count = len(entries) if isinstance(entries, (list, dict)) else 0
+        size = 0
+        store_path = getattr(mem, "store_path", None) or getattr(mem, "memory_path", None)
+        if store_path and os.path.isfile(str(store_path)):
+            size = os.path.getsize(str(store_path))
+        return {"enabled": True, "entry_count": count, "storage_size": size, "last_update": getattr(mem, "last_update", None), "last_retrieval": getattr(mem, "last_retrieval", None), "scope": "workspace"}
+    except Exception:
+        return {"enabled": False, "entry_count": 0, "storage_size": 0, "last_update": None, "last_retrieval": None, "scope": "workspace", "unavailable_reason": "Memory manager is not available in this runtime"}
+
+
+def _workspace_export() -> Dict[str, Any]:
+    try:
+        config = _load_nexus_config()
+        workspace_cfg = config.get("workspace") if isinstance(config.get("workspace"), dict) else {}
+    except Exception:
+        workspace_cfg = {}
+    root = _workspace_root()
+    git = _git_summary(root)
+    return {
+        "format": "nexus-workspace-config",
+        "version": 1,
+        "exported_at": time.time(),
+        "workspace": {
+            "root": _RUNTIME_SETTINGS.get("workspace_root") or "",
+            "additional_dirs": _RUNTIME_SETTINGS.get("additional_dirs") or [],
+            "directory_access": _WORKSPACE_DIR_ACCESS,
+            "instructions": workspace_cfg.get("instructions") or "",
+            "protected_paths": [p for p in workspace_cfg.get("protected_paths") or [] if isinstance(p, dict)] if isinstance(workspace_cfg.get("protected_paths"), list) else [],
+            "ignore_rules": workspace_cfg.get("ignore_rules") or [],
+            "memory": workspace_cfg.get("memory") or {},
+        },
+        "git": {"is_repo": git.get("is_repo", False), "branch": git.get("branch"), "root": git.get("root")} if git.get("is_repo") else None,
+    }
+
+
+def _workspace_dirs_detail() -> List[Dict[str, Any]]:
+    root = _workspace_root()
+    result = []
+    for path in _RUNTIME_SETTINGS.get("additional_dirs") or []:
+        exists = os.path.isdir(path)
+        entry: Dict[str, Any] = {
+            "path": path,
+            "name": os.path.basename(path.rstrip("\\/")) or path,
+            "available": exists,
+            "readable": exists and os.access(path, os.R_OK),
+            "writable": exists and os.access(path, os.W_OK),
+            "access_mode": _WORKSPACE_DIR_ACCESS.get(path, "read_write"),
+            "index_status": "not_indexed",
+            "file_count": 0,
+            "last_scanned": None,
+        }
+        if exists:
+            try:
+                entry["file_count"] = sum(len(files) for _, _, files in os.walk(path))
+            except OSError:
+                pass
+            entry["index_status"] = "ready"
+        result.append(entry)
+    return result
+
+
+def _compute_workspace_summary(root: str) -> Dict[str, Any]:
+    """Build the full workspace summary. Expensive (~7-10s) — call in background only."""
+    exists = os.path.isdir(root)
+    state = "connected" if exists else "missing"
+    if not _RUNTIME_SETTINGS.get("workspace_root"):
+        state = "connected" if os.path.isdir(_PROJECT_ROOT) else "not_configured"
+    git = _git_summary(root)
+    stats = _scan_workspace_stats(root) if exists else None
+    project = _detect_project(root) if exists else None
+    dirs = _workspace_dirs_detail()
+    return {
+        "status": "success",
+        "root": root,
+        "workspace_name": os.path.basename(root.rstrip("\\/")) or root,
+        "state": state,
+        "exists": exists,
+        "readable": exists and os.access(root, os.R_OK),
+        "writable": exists and os.access(root, os.W_OK),
+        "root_protection": True,
+        "read_permission": "read" if exists and os.access(root, os.R_OK) else "denied",
+        "write_permission": "write" if exists and os.access(root, os.W_OK) else "read_only",
+        "configured_root": _RUNTIME_SETTINGS.get("workspace_root") or "",
+        "is_repo": git.get("is_repo", False),
+        "git_branch": git.get("branch"),
+        "last_scanned": stats.get("calculated_at") if stats else None,
+        "file_count": stats.get("files", 0) if stats else 0,
+        "folder_count": stats.get("folders", 0) if stats else 0,
+        "indexed_file_count": stats.get("indexed_files", 0) if stats else 0,
+        "indexed_text_size": stats.get("indexed_text_size", 0) if stats else 0,
+        "additional_directory_count": len(dirs),
+        "languages": (project or {}).get("languages") or (sorted((stats or {}).get("languages", {}).keys()) if stats else []),
+        "project_type": (project or {}).get("type", "unknown"),
+        "project_name": (project or {}).get("name") or os.path.basename(root.rstrip("\\/")) or root,
+        "additional_dirs": dirs,
+        "session_count": len(_LOOPS),
+        "index": _index_status(),
+        "health": _workspace_health(root, git),
+    }
+
+
+@app.get("/api/workspace")
+def workspace_summary():
+    """Full workspace summary for the Settings → Workspace page. Instant: served from
+    memory cache or the persisted disk snapshot; never blocks on a full re-scan."""
+    root = _workspace_root()
+    with _WORKSPACE_SUMMARY_CACHE_LOCK:
+        cached = _WORKSPACE_SUMMARY_CACHE
+        if (
+            cached.get("payload") is not None
+            and cached.get("root") == root
+            and time.time() - cached.get("computed_at", 0.0) < _WORKSPACE_SUMMARY_TTL
+        ):
+            return cached["payload"]
+    snapshot = _load_workspace_summary_snapshot(root)
+    if snapshot is not None:
+        _ensure_workspace_summary_refresh(root)
+        return snapshot
+    # True cold start (no snapshot yet). Kick a background compute if one is not
+    # already running, then wait for it so we never duplicate the full scan.
+    _ensure_workspace_summary_refresh(root)
+    deadline = time.time() + 60.0
+    while time.time() < deadline:
+        with _WORKSPACE_SUMMARY_CACHE_LOCK:
+            cached = _WORKSPACE_SUMMARY_CACHE
+            if cached.get("payload") is not None and cached.get("root") == root:
+                return cached["payload"]
+            if not cached.get("warming"):
+                break
+        time.sleep(0.25)
+    return _refresh_workspace_summary(root)
+
+
+@app.get("/api/workspace/git")
+def workspace_git():
+    return {"status": "success", **(_git_summary(_workspace_root()))}
+
+
+@app.get("/api/workspace/stats")
+def workspace_stats():
+    return {"status": "success", "stats": _scan_workspace_stats(_workspace_root())}
+
+
+@app.get("/api/workspace/project")
+def workspace_project():
+    return {"status": "success", "project": _detect_project(_workspace_root())}
+
+
+@app.get("/api/workspace/index")
+def workspace_index_status():
+    return {"status": "success", **_index_status()}
+
+
+@app.post("/api/workspace/index/rebuild")
+def workspace_index_rebuild():
+    if _WORKSPACE_SCAN_STATE.get("status") == "scanning":
+        raise HTTPException(status_code=409, detail="An indexing job is already running")
+    _WORKSPACE_SCAN_STATE.update({"status": "scanning", "started_at": time.time(), "progress": 0.0, "current_file": "", "indexed": 0, "skipped": 0, "failed": 0, "message": ""})
+    _invalidate_workspace_summary_cache()
+    root = _workspace_root()
+
+    def _run():
+        try:
+            from rag.engine import NexusAtlasRAG
+            rag = NexusAtlasRAG()
+            counts = {"files": 0, "failed": 0}
+            try:
+                for dirpath, dirnames, filenames in os.walk(root):
+                    dirnames[:] = [d for d in dirnames if d in _DEFAULT_IGNORE_DIRS or d.startswith(".")] and [] or [d for d in dirnames if d not in _DEFAULT_IGNORE_DIRS and not d.startswith(".")]
+                    for fname in filenames:
+                        if os.path.splitext(fname)[1].lower() not in _SOURCE_EXTENSIONS | _DOC_EXTENSIONS:
+                            _WORKSPACE_SCAN_STATE["skipped"] = _WORKSPACE_SCAN_STATE.get("skipped", 0) + 1
+                            continue
+                        full = os.path.join(dirpath, fname)
+                        _WORKSPACE_SCAN_STATE["current_file"] = full
+                        try:
+                            with open(full, "r", encoding="utf-8", errors="replace") as f:
+                                content = f.read()
+                            rag.store_document(os.path.relpath(full, root), content, os.path.getmtime(full))
+                            counts["files"] += 1
+                            _WORKSPACE_SCAN_STATE["indexed"] = counts["files"]
+                        except (OSError, UnicodeDecodeError):
+                            counts["failed"] += 1
+                            _WORKSPACE_SCAN_STATE["failed"] = counts["failed"]
+                    _WORKSPACE_SCAN_STATE["progress"] = min(1.0, (counts["files"] + 1) / max(1, counts["files"] + counts["failed"] + 1))
+            except Exception as exc:
+                _WORKSPACE_SCAN_STATE["message"] = str(exc)
+        except Exception as exc:
+            _WORKSPACE_SCAN_STATE["message"] = str(exc)
+        _WORKSPACE_SCAN_STATE["finished_at"] = time.time()
+        _WORKSPACE_SCAN_STATE["status"] = "ready"
+        _WORKSPACE_SCAN_STATE["current_file"] = ""
+        _record_workspace_activity("index_rebuilt", f"Index rebuilt ({_WORKSPACE_SCAN_STATE.get('indexed', 0)} files)", status="ok")
+
+    threading.Thread(target=_run, daemon=True).start()
+    _record_workspace_activity("index_rebuilt", "Index rebuild started", status="ok")
+    return {"status": "success", "message": "Index rebuild started"}
+
+
+@app.post("/api/workspace/index/clear")
+def workspace_index_clear():
+    try:
+        rag_index = os.path.join(_PROJECT_ROOT, "knowledge", "_rag_index.json")
+        if os.path.isfile(rag_index):
+            os.remove(rag_index)
+        _invalidate_workspace_summary_cache()
+        _record_workspace_activity("index_cleared", "Index cleared", status="ok")
+        return {"status": "success", "message": "Index cleared"}
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not clear index: {exc}")
+
+
+@app.get("/api/workspace/ignore")
+def workspace_ignore_rules():
+    return {"status": "success", "rules": _gitignore_rules(_workspace_root())}
+
+
+@app.post("/api/workspace/ignore/test")
+async def workspace_ignore_test(request: Request):
+    data = await request.json()
+    rel = str(data.get("path", "")).strip()
+    if not rel:
+        raise HTTPException(status_code=400, detail="path is required")
+    _invalidate_workspace_summary_cache()
+    root = _workspace_root()
+    rules = _gitignore_rules(root)
+    abs_path = os.path.abspath(os.path.join(root, rel)) if not os.path.isabs(rel) else os.path.abspath(rel)
+    if not _is_within(root, abs_path):
+        raise HTTPException(status_code=400, detail="Path is outside the workspace root")
+    rel_norm = os.path.relpath(abs_path, root).replace("\\", "/")
+    status = _path_is_ignored(rel_norm, rules)
+    if not os.path.exists(abs_path):
+        status["existence"] = "missing"
+    elif os.path.isdir(abs_path):
+        status["existence"] = "directory"
+    else:
+        status["existence"] = "file"
+    status["path"] = rel_norm
+    return {"status": "success", "result": status}
+
+
+@app.get("/api/workspace/protected")
+def workspace_protected():
+    root = _workspace_root()
+    entries = []
+    for entry in _protected_paths():
+        pattern = entry.get("pattern") or ""
+        cleaned = pattern.replace("**/", "").replace("/*", "")
+        candidate = os.path.join(root, cleaned) if not os.path.isabs(cleaned) else cleaned
+        entries.append({**entry, "exists": os.path.exists(candidate)})
+    return {"status": "success", "paths": entries}
+
+
+@app.post("/api/workspace/protected")
+async def workspace_protected_add(request: Request):
+    data = await request.json()
+    pattern = str(data.get("pattern", "")).strip()
+    reason = str(data.get("reason", "")).strip() or "User configured"
+    policy = str(data.get("policy", "warn")).strip()
+    if not pattern:
+        raise HTTPException(status_code=400, detail="pattern is required")
+    if policy not in {"deny", "warn", "allow"}:
+        raise HTTPException(status_code=400, detail="policy must be deny, warn, or allow")
+    config = _load_nexus_config()
+    ws = config.setdefault("workspace", {})
+    if not isinstance(ws, dict):
+        ws = {}
+        config["workspace"] = ws
+    paths = ws.setdefault("protected_paths", [])
+    if not isinstance(paths, list):
+        paths = []
+        ws["protected_paths"] = paths
+    for entry in paths:
+        if isinstance(entry, dict) and entry.get("pattern") == pattern:
+            raise HTTPException(status_code=409, detail="That protected path already exists")
+    paths.append({"pattern": pattern, "reason": reason, "policy": policy})
+    _save_nexus_config(config)
+    _invalidate_workspace_summary_cache()
+    _record_workspace_activity("protected_added", f"Protected path added: {pattern}", status="ok")
+    return {"status": "success"}
+
+
+@app.delete("/api/workspace/protected")
+async def workspace_protected_remove(request: Request):
+    pattern = str(request.query_params.get("pattern", "")).strip()
+    if not pattern:
+        raise HTTPException(status_code=400, detail="pattern is required")
+    config = _load_nexus_config()
+    ws = config.setdefault("workspace", {})
+    paths = ws.get("protected_paths") if isinstance(ws, dict) else None
+    if not isinstance(paths, list):
+        return {"status": "success", "removed": False}
+    remaining = [p for p in paths if not (isinstance(p, dict) and p.get("pattern") == pattern)]
+    if len(remaining) == len(paths):
+        return {"status": "success", "removed": False}
+    ws["protected_paths"] = remaining
+    _save_nexus_config(config)
+    _invalidate_workspace_summary_cache()
+    _record_workspace_activity("protected_removed", f"Protected path removed: {pattern}", status="ok")
+    return {"status": "success", "removed": True}
+
+
+@app.get("/api/workspace/storage")
+def workspace_storage():
+    return {"status": "success", **_storage_stats()}
+
+
+@app.post("/api/workspace/storage/clear")
+async def workspace_storage_clear(request: Request):
+    data = await request.json() if await _body_json(request) else {}
+    target = str(data.get("target", "temp")).strip()
+    root = _PROJECT_ROOT
+    _invalidate_workspace_summary_cache()
+    removable = {
+        "temp": os.path.join(root, "tmp"),
+        "cache": os.path.join(root, ".cache"),
+    }
+    if target == "sessions":
+        sessions_dir = os.path.join(root, "logs", "sessions")
+        count = 0
+        if os.path.isdir(sessions_dir):
+            for name in os.listdir(sessions_dir):
+                full = os.path.join(sessions_dir, name)
+                try:
+                    if os.path.isfile(full) and name != "session_index.json":
+                        os.remove(full)
+                        count += 1
+                except OSError:
+                    continue
+        _record_workspace_activity("cache_cleared", f"Cleared {count} inactive session file(s)", status="ok")
+        return {"status": "success", "removed": count, "note": "Project source files were not touched."}
+    if target == "index":
+        try:
+            rag_index = os.path.join(root, "knowledge", "_rag_index.json")
+            removed = 0
+            if os.path.isfile(rag_index):
+                os.remove(rag_index)
+                removed += 1
+            _record_workspace_activity("index_cleared", "Index cleared", status="ok")
+            return {"status": "success", "removed": removed, "note": "Project source files were not touched."}
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not clear index: {exc}")
+    path = removable.get(target)
+    if not path:
+        raise HTTPException(status_code=400, detail="target must be temp, cache, sessions, or index")
+    count = 0
+    if os.path.isdir(path):
+        for name in os.listdir(path):
+            full = os.path.join(path, name)
+            try:
+                if os.path.isfile(full):
+                    os.remove(full)
+                    count += 1
+            except OSError:
+                continue
+    _record_workspace_activity("cache_cleared", f"Cleared {count} file(s) from {target}", status="ok")
+    return {"status": "success", "removed": count, "note": "Project source files were not touched."}
+
+
+@app.get("/api/workspace/health")
+def workspace_health():
+    return {"status": "success", "checks": _workspace_health(_workspace_root())}
+
+
+@app.get("/api/workspace/activity")
+def workspace_activity():
+    with _WORKSPACE_ACTIVITY_LOCK:
+        return {"status": "success", "events": list(_WORKSPACE_ACTIVITY)}
+
+
+@app.get("/api/workspace/instructions")
+def workspace_instructions_get():
+    return {"status": "success", **_workspace_instructions()}
+
+
+@app.post("/api/workspace/instructions")
+async def workspace_instructions_save(request: Request):
+    data = await request.json()
+    instructions = str(data.get("instructions", "")).strip()
+    config = _load_nexus_config()
+    ws = config.setdefault("workspace", {})
+    if not isinstance(ws, dict):
+        ws = {}
+        config["workspace"] = ws
+    ws["instructions"] = instructions
+    ws["instructions_updated_at"] = time.time()
+    _save_nexus_config(config)
+    _invalidate_workspace_summary_cache()
+    _record_workspace_activity("settings_changed", "Workspace instructions updated", status="ok")
+    return {"status": "success"}
+
+
+@app.get("/api/workspace/memory")
+def workspace_memory_get():
+    return {"status": "success", **_workspace_memory_meta()}
+
+
+@app.post("/api/workspace/memory/clear")
+def workspace_memory_clear():
+    _invalidate_workspace_summary_cache()
+    cleared = False
+    try:
+        from memory import MemoryManager
+        mem = MemoryManager()
+        if hasattr(mem, "clear"):
+            mem.clear()
+            cleared = True
+    except Exception:
+        pass
+    _record_workspace_activity("settings_changed", "Workspace memory cleared" if cleared else "Workspace memory clear unavailable", status="ok" if cleared else "error")
+    return {"status": "success" if cleared else "unsupported", "cleared": cleared, "note": "Project files were not touched."}
+
+
+@app.get("/api/workspace/export")
+def workspace_export():
+    return {"status": "success", **_workspace_export()}
+
+
+@app.post("/api/workspace/import")
+async def workspace_import(request: Request):
+    data = await request.json()
+    payload = data.get("config") if isinstance(data, dict) else None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="config object is required")
+    if payload.get("format") != "nexus-workspace-config":
+        raise HTTPException(status_code=400, detail="Unsupported or malformed configuration format")
+    version = payload.get("version")
+    if not isinstance(version, int) or version > 1:
+        raise HTTPException(status_code=400, detail="Unsupported configuration version")
+    ws = payload.get("workspace") if isinstance(payload.get("workspace"), dict) else {}
+    config = _load_nexus_config()
+    existing = config.setdefault("workspace", {})
+    if not isinstance(existing, dict):
+        existing = {}
+        config["workspace"] = existing
+    preview = {
+        "instructions": bool(ws.get("instructions")),
+        "protected_paths": len(ws.get("protected_paths") or []) if isinstance(ws.get("protected_paths"), list) else 0,
+        "ignore_rules": len(ws.get("ignore_rules") or []) if isinstance(ws.get("ignore_rules"), list) else 0,
+        "memory": len(ws.get("memory") or {}) if isinstance(ws.get("memory"), dict) else 0,
+    }
+    if data.get("apply"):
+        for key in ("instructions", "protected_paths", "ignore_rules", "memory"):
+            if key in ws:
+                existing[key] = ws[key]
+        _save_nexus_config(config)
+        _invalidate_workspace_summary_cache()
+        _record_workspace_activity("settings_changed", "Workspace configuration imported", status="ok")
+        return {"status": "success", "applied": True, "preview": preview}
+    return {"status": "success", "applied": False, "preview": preview}
+
+
+@app.post("/api/workspace/reset")
+def workspace_reset():
+    """Reset workspace settings (access, instructions, protected paths, dirs). Does not delete files."""
+    try:
+        config = _load_nexus_config()
+        config.pop("workspace", None)
+        _save_nexus_config(config)
+    except Exception:
+        pass
+    _RUNTIME_SETTINGS["additional_dirs"] = []
+    _WORKSPACE_DIR_ACCESS.clear()
+    _save_runtime_preferences()
+    _invalidate_workspace_summary_cache()
+    apply_runtime_to_all_loops()
+    _record_workspace_activity("settings_changed", "Workspace settings reset to defaults", status="ok")
+    return {"status": "success", "message": "Workspace settings reset. Project files were not touched."}
+
+
+async def _body_json(request: Request) -> bool:
+    try:
+        await request.json()
+        return True
+    except Exception:
+        return False
+
+
+@app.get("/api/workspace/validate")
+def workspace_validate(path: str = ""):
+    """Validate a candidate workspace root or additional-directory path."""
+    if not path:
+        raise HTTPException(status_code=400, detail="path query parameter is required")
+    return {"status": "success", "validation": _validate_workspace_path(path)}
+
+
+@app.post("/api/workspace/root")
+async def workspace_set_root(request: Request):
+    """Switch the workspace root. Validates on disk before applying and keeps the old root on failure."""
+    data = await request.json()
+    raw_path = str(data.get("path", "")).strip()
+    if not raw_path:
+        raise HTTPException(status_code=400, detail="path is required")
+    old_root = _workspace_root()
+    validation = _validate_workspace_path(raw_path)
+    if not validation.get("valid"):
+        raise HTTPException(status_code=400, detail=validation.get("reason", "Invalid workspace path"))
+    _RUNTIME_SETTINGS["workspace_root"] = validation["path"]
+    _save_runtime_preferences()
+    _invalidate_workspace_summary_cache()
+    apply_runtime_to_all_loops()
+    _record_workspace_activity("root_changed", f"Workspace root changed to {validation['path']}", status="ok")
+    return {"status": "success", "path": validation["path"], "previous": old_root, "validation": validation}
+
+
+@app.get("/api/workspace/dirs")
+def workspace_dirs_list():
+    return {"status": "success", "dirs": _workspace_dirs_detail()}
+
+
+@app.post("/api/workspace/dirs")
+async def workspace_dirs_add(request: Request):
+    """Add an additional directory with on-disk validation and access-mode selection."""
+    data = await request.json()
+    raw_path = str(data.get("path", "")).strip()
+    access_mode = str(data.get("access_mode", "read_write")).strip()
+    if not raw_path:
+        raise HTTPException(status_code=400, detail="path is required")
+    validation = _validate_workspace_path(raw_path)
+    if not validation.get("valid"):
+        raise HTTPException(status_code=400, detail=validation.get("reason", "Invalid directory"))
+    target = validation["path"]
+    root = _workspace_root()
+    if _is_within(root, target):
+        raise HTTPException(status_code=400, detail="Path is inside the workspace root and does not need to be added")
+    if target == root:
+        raise HTTPException(status_code=400, detail="Path is the workspace root itself")
+    dirs = _RUNTIME_SETTINGS.setdefault("additional_dirs", [])
+    if target in dirs:
+        raise HTTPException(status_code=409, detail="Directory is already added")
+    for existing in dirs:
+        if _is_within(existing, target) or _is_within(target, existing):
+            raise HTTPException(status_code=409, detail=f"Directory overlaps an existing additional directory: {existing}")
+    if access_mode not in {"read_only", "read_write", "index_only", "disabled"}:
+        access_mode = "read_write"
+    dirs.append(target)
+    _WORKSPACE_DIR_ACCESS[target] = access_mode
+    _save_runtime_preferences()
+    _invalidate_workspace_summary_cache()
+    apply_runtime_to_all_loops()
+    _record_workspace_activity("directory_added", f"Additional directory added: {target}", status="ok")
+    return {"status": "success", "path": target, "access_mode": access_mode, "additional_dirs": dirs}
+
+
+@app.patch("/api/workspace/dirs")
+async def workspace_dirs_update(request: Request):
+    """Change the access mode of an additional directory."""
+    data = await request.json()
+    path = str(data.get("path", "")).strip()
+    access_mode = str(data.get("access_mode", "")).strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    if access_mode not in {"read_only", "read_write", "index_only", "disabled"}:
+        raise HTTPException(status_code=400, detail="Invalid access mode")
+    dirs = _RUNTIME_SETTINGS.setdefault("additional_dirs", [])
+    if path not in dirs:
+        raise HTTPException(status_code=404, detail="Directory is not in the additional-directories list")
+    _WORKSPACE_DIR_ACCESS[path] = access_mode
+    _invalidate_workspace_summary_cache()
+    _record_workspace_activity("directory_updated", f"Access mode for {path} set to {access_mode}", status="ok")
+    return {"status": "success", "path": path, "access_mode": access_mode}
+
+
+@app.delete("/api/workspace/dirs")
+async def workspace_dirs_remove(request: Request):
+    """Remove an additional directory from Nexus access. Does not delete files from disk."""
+    path = str(request.query_params.get("path", "")).strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    dirs = _RUNTIME_SETTINGS.setdefault("additional_dirs", [])
+    if path not in dirs:
+        raise HTTPException(status_code=404, detail="Directory is not in the additional-directories list")
+    dirs = [d for d in dirs if d != path]
+    _RUNTIME_SETTINGS["additional_dirs"] = dirs
+    _WORKSPACE_DIR_ACCESS.pop(path, None)
+    _save_runtime_preferences()
+    _invalidate_workspace_summary_cache()
+    apply_runtime_to_all_loops()
+    _record_workspace_activity("directory_removed", f"Additional directory removed: {path}", status="ok")
+    return {"status": "success", "removed": True, "note": "Files were not deleted from disk."}
+
+
+@app.get("/api/files/tree")
+def files_tree(path: str = ""):
+    """Lazy single-level file tree for the workspace. Only the requested directory is listed."""
+    root = _workspace_root()
+    raw = path.strip().strip('"').strip("'")
+    target = _canonical_workspace_path(raw) if raw else root
+    if not os.path.exists(target):
+        raise HTTPException(status_code=404, detail="Path does not exist")
+    if not os.path.isdir(target):
+        return {"status": "success", "path": os.path.relpath(target, root), "items": [{"name": os.path.basename(target), "type": "file", "path": os.path.relpath(target, root), "size": os.path.getsize(target)}]}
+    if not _is_within(root, target):
+        raise HTTPException(status_code=403, detail="Path is outside the workspace root")
+    items = []
+    try:
+        entries = sorted(os.listdir(target), key=lambda e: (not os.path.isdir(os.path.join(target, e)), e.lower()))
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not list directory: {exc}")
+    for entry in entries:
+        full = os.path.join(target, entry)
+        try:
+            rel = os.path.relpath(full, root).replace("\\", "/")
+        except (ValueError, OSError):
+            continue
+        if os.path.isdir(full):
+            items.append({"name": entry, "type": "directory", "path": rel})
+        else:
+            try:
+                size = os.path.getsize(full)
+            except OSError:
+                size = 0
+            items.append({"name": entry, "type": "file", "path": rel, "size": size})
+    return {"status": "success", "path": os.path.relpath(target, root), "items": items}
 
 
 # ── Voice API ─────────────────────────────────────────────────────────────────

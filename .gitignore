@@ -52,3 +52,15 @@ graphify-out/cache/     # optional: commit for speed
 *.onnx
 *.gguf
 *.bin
+# Playwright/MCP browser artifacts
+.playwright-mcp/
+.nexus_queue.db
+HERMES.md
+MULTI_AGENT_TASKS.md
+.tmp/research-gemini
+gui/src/*.patch_ui.py
+gui/src/App.tsx.found_*.txt
+gui/src/App.tsx.original_log_*.txt
+gui/vite_dev.log
+gui/workspace/
+.nexus/

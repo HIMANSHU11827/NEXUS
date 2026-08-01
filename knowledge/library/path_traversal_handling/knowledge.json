@@ -1,0 +1,9 @@
+{
+  "title": "path_traversal_handling",
+  "content": "The error indicates a path traversal block, but NEXUS lacks a clear strategy for redirecting users to permitted file operations or providing safe alternatives when a path is blocked.",
+  "key_concepts": [],
+  "tags": [],
+  "version": "1.0.0",
+  "created_at": 1785511947.6800926,
+  "updated_at": 1785511947.680094
+}

@@ -1024,3 +1024,116 @@ class TestAgentExecutionContract:
         assert len(calls) == 1
         assert calls[0].name == "creating"
         assert calls[0].params["content"] == "function x() { return {ok: true}; }"
+
+
+class TestFailedRunNeverClaimsVerifiedWork:
+    def test_failing_command_never_produces_work_completed_and_verified(self, tmp_path, monkeypatch):
+        loop = NexusLoop(root_dir=str(tmp_path))
+        captured = []
+        loop.work_event_sink = captured.append
+        monkeypatch.setattr(loop, "_requires_real_tooling", lambda _task: True)
+
+        async def ground(task):
+            return [{"role": "user", "content": task}]
+
+        model_calls = 0
+        async def model(_messages, **_kwargs):
+            nonlocal model_calls
+            model_calls += 1
+            if model_calls <= 3:
+                yield "tool-call"
+                return
+            yield "The command failed with exit code 1"
+
+        async def execute(_calls):
+            loop._last_run_failed = True
+            loop._last_run_had_tool_execution = True
+            return ["[bash]: Error \u2014 Error: command exited with code 1."]
+
+        async def verify(*_args):
+            return {"success": True, "vaccine": ""}
+
+        monkeypatch.setattr(loop, "_ground_context", ground)
+        monkeypatch.setattr(loop, "_stream_model", model)
+        monkeypatch.setattr(loop, "_extract_tool_calls", lambda response: [ToolCall("bash", {"command": "exit 1"}, "call-one")] if response == "tool-call" else [])
+        monkeypatch.setattr(loop, "_audit_and_approve", lambda _calls: asyncio.sleep(0, result=True))
+        monkeypatch.setattr(loop, "_execute_tools", execute)
+        monkeypatch.setattr(loop, "_verify_all_parallel", verify)
+        monkeypatch.setattr(loop, "_is_trivial_task", lambda _task: False)
+        monkeypatch.setattr(loop, "_create_plan_via_tool", lambda _task: asyncio.sleep(0, result=None))
+        monkeypatch.setattr(loop, "_apply_slash_command", lambda _messages, _task: _task)
+        monkeypatch.setattr(loop, "_save_checkpoint", lambda *_args: None)
+        monkeypatch.setattr(loop, "_log_mission_replay", lambda *_args: None)
+        monkeypatch.setattr(loop, "_write_session_bus", lambda *_args: None)
+        monkeypatch.setattr(loop, "_start_background_finalization", lambda *_args: None)
+
+        result = asyncio.run(loop.run("run the failing command"))
+
+        assert "Work completed and verified" not in result
+        assert "Work failed" in result
+        assert loop._last_run_failed is True
+        assert any(event.get("event_type") == "run.failed" for event in captured)
+
+    def test_successful_command_still_says_work_completed_and_verified(self, tmp_path, monkeypatch):
+        loop = NexusLoop(root_dir=str(tmp_path))
+        captured = []
+        loop.work_event_sink = captured.append
+        monkeypatch.setattr(loop, "_requires_real_tooling", lambda _task: True)
+
+        async def ground(task):
+            return [{"role": "user", "content": task}]
+
+        model_calls = 0
+        async def model(_messages, **_kwargs):
+            nonlocal model_calls
+            model_calls += 1
+            if model_calls <= 3:
+                yield "tool-call"
+                return
+            yield "The command succeeded"
+
+        async def execute(_calls):
+            loop._last_run_failed = False
+            loop._last_run_had_tool_execution = True
+            return ["[bash]: REAL_OK"]
+
+        async def verify(*_args):
+            return {"success": True, "vaccine": ""}
+
+        monkeypatch.setattr(loop, "_ground_context", ground)
+        monkeypatch.setattr(loop, "_stream_model", model)
+        monkeypatch.setattr(loop, "_extract_tool_calls", lambda response: [ToolCall("bash", {"command": "echo ok"}, "ok-call")] if response == "tool-call" else [])
+        monkeypatch.setattr(loop, "_audit_and_approve", lambda _calls: asyncio.sleep(0, result=True))
+        monkeypatch.setattr(loop, "_execute_tools", execute)
+        monkeypatch.setattr(loop, "_verify_all_parallel", verify)
+        monkeypatch.setattr(loop, "_is_trivial_task", lambda _task: False)
+        monkeypatch.setattr(loop, "_create_plan_via_tool", lambda _task: asyncio.sleep(0, result=None))
+        monkeypatch.setattr(loop, "_apply_slash_command", lambda _messages, _task: _task)
+        monkeypatch.setattr(loop, "_save_checkpoint", lambda *_args: None)
+        monkeypatch.setattr(loop, "_log_mission_replay", lambda *_args: None)
+        monkeypatch.setattr(loop, "_write_session_bus", lambda *_args: None)
+        monkeypatch.setattr(loop, "_start_background_finalization", lambda *_args: None)
+
+        result = asyncio.run(loop.run("run the successful command"))
+
+        assert "Work completed and verified." in result
+        assert loop._last_run_failed is False
+
+    def test_evidence_summary_refuses_verified_on_failure_evidence(self):
+        failed = NexusLoop._deterministic_evidence_summary(["[bash]: Error \u2014 Error: command exited with code 1."])
+        assert "Work failed" in failed
+        assert "Work completed and verified" not in failed
+
+        exit_code = NexusLoop._deterministic_evidence_summary(["[EXIT_CODE]: 1"])
+        assert "Work failed" in exit_code
+        assert "Work completed and verified" not in exit_code
+
+        ok = NexusLoop._deterministic_evidence_summary(["[bash]: REAL_OK"])
+        assert "Work completed and verified." in ok
+        assert "Work failed" not in ok
+
+    def test_observations_contain_failure_unit_checks(self):
+        assert NexusLoop._observations_contain_failure(["[bash]: Error \u2014 boom"]) is True
+        assert NexusLoop._observations_contain_failure(["out\n[EXIT_CODE]: 1\nmore"]) is True
+        assert NexusLoop._observations_contain_failure(["[bash]: REAL_OK"]) is False
+        assert NexusLoop._observations_contain_failure(["0 errors found"]) is False

@@ -1,0 +1,9 @@
+{
+  "title": "Windows_fatal_exception_codes",
+  "content": "Exit code 3221225794 (0xC0000409) indicates STATUS_STACK_BUFFER_OVERRUN; NEXUS lacks crash-diagnosis knowledge for Windows fatal exceptions.",
+  "key_concepts": [],
+  "tags": [],
+  "version": "1.0.0",
+  "created_at": 1785514111.5798597,
+  "updated_at": 1785514111.5798602
+}

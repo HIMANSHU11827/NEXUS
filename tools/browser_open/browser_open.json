@@ -1,0 +1,10 @@
+{
+  "name": "browser_open",
+  "version": "1.0.0",
+  "description": "The user is likely trying to open/run the dino_game.html file in a browser for testing, but no browser launch capability is present.",
+  "defaults": {},
+  "permissions": {
+    "auto_approve": false
+  },
+  "created_at": 1785512004.947182
+}

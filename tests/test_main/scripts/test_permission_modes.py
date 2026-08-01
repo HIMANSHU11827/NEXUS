@@ -20,7 +20,9 @@ def test_auto_permission_blocks_risky_terminal_command():
         result = permissions.check("terminal", "rm -rf important")
 
         assert result.granted is False
-        assert "Auto-Pilot blocked" in result.reason
+        # Blocked either by the Safety command policy (destructive_commands) or
+        # the legacy Auto-Pilot risk scorer.
+        assert ("Auto-Pilot blocked" in result.reason) or ("blocked by policy" in result.reason.lower())
     finally:
         permissions.set_mode(old_mode)
         permissions._rules = old_rules

@@ -18,7 +18,8 @@ file.read file.created file.edited file.diff search.started search.result search
 web.started web.result web.completed web.failed test.started test.output test.completed test.failed
 subagent.started subagent.status subagent.result subagent.failed subagent.completed handoff.started handoff.completed
 approval.requested guardrail.blocked agent.thinking agent.completed
-memory.updated skill.used skill.created skill.updated error retry status.changed""".split()
+memory.updated skill.used skill.created skill.updated error retry status.changed
+checkpoint.created checkpoint.started checkpoint.completed checkpoint.failed checkpoint.restored checkpoint.deleted""".split()
 )
 EVENT_STATUSES = frozenset({"pending", "running", "success", "failed", "blocked", "skipped", "cancelled"})
 

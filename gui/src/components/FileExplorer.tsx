@@ -91,6 +91,14 @@ export default function FileExplorer({ onFileOpen }: FileExplorerProps) {
   useEffect(() => { if (creating) createRef.current?.focus() }, [creating])
   useEffect(() => { if (renaming) renameRef.current?.focus() }, [renaming])
   useEffect(() => { if (editingFile) editorRef.current?.focus() }, [editingFile])
+  useEffect(() => {
+    const refreshTree = () => {
+      fetchChildren(ROOT_KEY)
+      setChildrenMap(p => { const next = { ...p }; delete next[ROOT_KEY]; return next })
+    }
+    window.addEventListener('nexus-sandbox-folder', refreshTree)
+    return () => window.removeEventListener('nexus-sandbox-folder', refreshTree)
+  }, [fetchChildren])
 
   const refresh = (path: string) => {
     const parent = path === ROOT_KEY || !path.includes('/') ? ROOT_KEY : path.slice(0, path.lastIndexOf('/'))

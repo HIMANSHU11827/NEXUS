@@ -1,0 +1,9 @@
+{
+  "title": "web_search_error_handling",
+  "content": "The web search returned an error for a future date query (Aug 1 2026). NEXUS should be able to handle out-of-range or invalid date queries gracefully, informing the user about the limitation instead of failing.",
+  "key_concepts": [],
+  "tags": [],
+  "version": "1.0.0",
+  "created_at": 1785527260.9032195,
+  "updated_at": 1785527260.90322
+}

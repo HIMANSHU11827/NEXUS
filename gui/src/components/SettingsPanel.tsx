@@ -1,17 +1,18 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import {
   X, Palette, Cpu, Brain, Sparkles, SlidersHorizontal, Info,
-  Wrench, Puzzle, Network, UsersRound, ReceiptText, Settings2, CheckCircle2, CircleAlert, Radio, Clock3, MessageCircle, Monitor, ShieldCheck, Bell, Keyboard, Mic,
+  Wrench, Puzzle, Network, UsersRound, ReceiptText, Settings2, CheckCircle2, CircleAlert, Radio, Clock3, Monitor, ShieldCheck, Bell, Keyboard, Mic,
 } from 'lucide-react'
 import { api, type HiveItem, type InventoryItem, type OAuthLoginRun } from '../lib/api'
 import { useStore } from '../lib/store'
+import WorkspaceSettingsPanel from './WorkspaceSettings'
+import SafetySettings from './SafetySettings'
 
-type Section = 'appearance' | 'chat' | 'workspace' | 'safety' | 'notifications' | 'shortcuts' | 'voice' | 'providers' | 'memory' | 'evolution' | 'config' | 'skills' | 'tools' | 'plugins' | 'mcp' | 'hive' | 'gateway' | 'cron' | 'billing' | 'about'
+type Section = 'appearance' | 'workspace' | 'safety' | 'notifications' | 'shortcuts' | 'voice' | 'providers' | 'memory' | 'evolution' | 'config' | 'skills' | 'tools' | 'plugins' | 'mcp' | 'hive' | 'gateway' | 'cron' | 'billing' | 'about'
 type Loaded = Record<string, unknown>
 
 const sections: Array<{ id: Section; label: string; icon: typeof Palette }> = [
   { id: 'appearance', label: 'Theme & appearance', icon: Palette },
-  { id: 'chat', label: 'Chat', icon: MessageCircle },
   { id: 'workspace', label: 'Workspace', icon: Monitor },
   { id: 'safety', label: 'Safety', icon: ShieldCheck },
   { id: 'memory', label: 'Memory & context', icon: Brain },
@@ -287,6 +288,17 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState('')
   const [theme, setTheme] = useState(() => localStorage.getItem('nexus-theme') || 'light')
   const [pendingToggle, setPendingToggle] = useState('')
+  const safetyDirtyRef = useRef(false)
+
+  const navigateTo = (next: Section) => {
+    if (active === 'safety' && next !== 'safety' && safetyDirtyRef.current && !window.confirm('You have unsaved Safety changes. Discard them and leave the Safety page?')) return
+    setActive(next)
+  }
+
+  const closeSettings = () => {
+    if (active === 'safety' && safetyDirtyRef.current && !window.confirm('You have unsaved Safety changes. Discard them and close Settings?')) return
+    onClose()
+  }
 
   useEffect(() => {
     const saved = localStorage.getItem('nexus-theme') || 'light'
@@ -299,8 +311,8 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
     const loaders: Partial<Record<Section, () => Promise<unknown>>> = {
       providers: api.providers, skills: api.skills, tools: api.tools, plugins: api.plugins,
       mcp: api.mcp, hive: api.hives, gateway: api.gateways, cron: api.cronJobs,
-      evolution: api.evolution, config: api.state, memory: api.state, chat: api.state, workspace: api.state,
-      safety: api.state, notifications: api.state, voice: api.voiceStatus, billing: api.billing, about: api.version,
+      evolution: api.evolution, config: api.state, memory: api.state,
+      notifications: api.state, voice: api.voiceStatus, billing: api.billing, about: api.version,
     }
     const load = loaders[active]
     if (!load || data[active]) return
@@ -321,6 +333,7 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   }
 
   const content = useMemo(() => {
+    if (active === 'workspace') return <WorkspaceSettingsPanel state={(data.workspace as Record<string, unknown> | undefined) || {}} onSaved={() => setData(current => { const next = { ...current }; delete next.workspace; return next })} />
     if (active === 'appearance') return <Appearance theme={theme} onTheme={value => {
       setTheme(value); localStorage.setItem('nexus-theme', value);
       document.documentElement.classList.remove('dark', 'theme-grey', 'theme-glass', 'theme-green', 'theme-blue', 'theme-purple', 'theme-pink', 'theme-red', 'theme-orange')
@@ -334,9 +347,7 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
       const response = data.providers as { providers?: InventoryItem[] } | undefined
       return response?.providers?.length ? <ProviderList providers={response.providers} pending={pendingToggle.replace('provider:', '')} onToggle={(name, enabled) => toggle('provider', name, enabled)} onChanged={() => setData(current => { const next = { ...current }; delete next.providers; return next })} /> : <p className="py-8 text-sm text-muted-foreground">No provider implementations were reported.</p>
     }
-    if (active === 'chat') return <ChatSettings state={(data.chat as Record<string, unknown> | undefined) || {}} sessions={sessions.length} />
-    if (active === 'workspace') return <WorkspaceSettings state={(data.workspace as Record<string, unknown> | undefined) || {}} />
-    if (active === 'safety') return <SafetySettings state={(data.safety as Record<string, unknown> | undefined) || {}} onSaved={() => setData(current => { const next = { ...current }; delete next.safety; delete next.config; return next })} />
+    if (active === 'safety') return <SafetySettings onOpenWorkspace={() => navigateTo('workspace')} onDirtyChange={dirty => { safetyDirtyRef.current = dirty }} />
     if (active === 'memory') return <MemorySettings state={(data.memory as Record<string, unknown> | undefined) || {}} />
     if (active === 'voice') return <VoiceSettings status={(data.voice as { running?: boolean; mode?: string; phase?: string; transcript_preview?: string; reply_preview?: string } | undefined)} onChanged={() => setData(current => { const next = { ...current }; delete next.voice; return next })} />
     if (active === 'notifications') return <NotificationSettings />
@@ -371,18 +382,20 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
       <div
         className="flex overflow-hidden rounded-xl border border-border bg-background shadow-2xl"
         style={{
-          width: "min(1240px, calc(100vw - 32px))",
-          height: "min(760px, calc(100vh - 32px))",
+          width: "min(1320px, calc(100vw - 48px))",
+          maxWidth: "1320px",
+          height: "min(760px, 88vh)",
+          maxHeight: "88vh",
         }}
       >
       <aside className="flex w-60 shrink-0 flex-col border-r border-border bg-secondary/35 p-3">
         <div className="mb-4 px-2 pt-1"><p className="text-sm font-semibold">Nexus settings</p><p className="mt-0.5 text-xs text-muted-foreground">Workspace configuration</p></div>
         <nav className="flex-1 space-y-0.5 overflow-y-auto" aria-label="Settings sections">
-          {sections.map(section => { const Icon = section.icon; return <button key={section.id} onClick={() => setActive(section.id)} className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition ${active === section.id ? 'bg-background font-medium text-foreground shadow-sm ring-1 ring-border' : 'text-muted-foreground hover:bg-background/70 hover:text-foreground'}`}><Icon size={16} />{section.label}</button> })}
+          {sections.map(section => { const Icon = section.icon; return <button key={section.id} onClick={() => navigateTo(section.id)} className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition ${active === section.id ? 'bg-background font-medium text-foreground shadow-sm ring-1 ring-border' : 'text-muted-foreground hover:bg-background/70 hover:text-foreground'}`}><Icon size={16} />{section.label}</button> })}
         </nav>
       </aside>
       <section className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center justify-between border-b border-border px-7 py-4"><div><h2 className="text-base font-semibold">{activeLabel}</h2><p className="mt-0.5 text-xs text-muted-foreground">{active === 'appearance' ? 'Preferences saved on this device.' : 'Data reported by your running Nexus server.'}</p></div><button onClick={onClose} className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground" aria-label="Close settings"><X size={17} /></button></header>
+        <header className="flex items-center justify-between border-b border-border px-7 py-4"><div><h2 className="text-base font-semibold">{activeLabel}</h2><p className="mt-0.5 text-xs text-muted-foreground">{active === 'appearance' ? 'Preferences saved on this device.' : 'Data reported by your running Nexus server.'}</p></div><button onClick={closeSettings} className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground" aria-label="Close settings"><X size={17} /></button></header>
         <div className="flex-1 overflow-y-auto px-7 py-6"><div className="mx-auto max-w-4xl">{content}</div></div>
       </section>
     </div>
@@ -403,67 +416,6 @@ function Appearance({ theme, onTheme }: { theme: string; onTheme: (theme: string
     { value: 'orange', label: 'Orange', detail: 'Warm orange tones', bg: 'bg-orange-900', dotDark: 'bg-orange-100', dotMid: 'bg-orange-400', dotLight: 'bg-orange-700' },
   ] as const
   return <div className="space-y-6"><div><h3 className="text-sm font-semibold">Color theme</h3><p className="mt-1 text-sm text-muted-foreground">Choose how Nexus looks in this browser. Themes apply instantly and are saved to this device.</p></div><div className="grid max-w-3xl grid-cols-2 gap-3 sm:grid-cols-3">{options.map(choice => <button key={choice.value} onClick={() => onTheme(choice.value)} className={`rounded-xl border p-4 text-left transition hover:border-foreground/60 ${theme === choice.value ? 'border-foreground bg-secondary ring-1 ring-foreground/25' : 'border-border'}`}><div className={`mb-3 flex items-center gap-1.5 rounded-lg border border-border/70 px-2 py-1.5 ${choice.bg}`}><span className={`h-3 w-3 rounded-full ${choice.dotDark}`} /><span className={`h-3 w-3 rounded-full ${choice.dotMid}`} /><span className={`h-3 w-3 rounded-full ${choice.dotLight}`} /></div><p className="font-medium capitalize">{choice.label}</p><p className="mt-1 text-xs text-muted-foreground">{choice.detail}</p>{theme === choice.value && <span className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-current" />Active</span>}</button>)}</div></div>
-}
-
-function ChatSettings({ state, sessions }: { state: Record<string, unknown>; sessions: number }) {
-  const running = Number(state.task_count || 0)
-  const savedModel = typeof state.selected_model === 'string' ? state.selected_model : undefined
-  const permissionMode = typeof state.permission_mode === 'string' ? state.permission_mode : undefined
-  const sandboxTier = typeof state.sandbox_tier === 'string' ? state.sandbox_tier : undefined
-  return (
-    <div className="space-y-6">
-      <div>
-        <h3 className="text-sm font-semibold">Chat</h3>
-        <p className="mt-1 text-sm text-muted-foreground">Manage local chat storage, input behavior, and runtime defaults reported by your Nexus server.</p>
-      </div>
-      <div className="grid gap-3 sm:grid-cols-3">
-        <InfoBlock title="Saved sessions" value={String(sessions)} detail="Local chat sessions currently loaded in the GUI." />
-        <InfoBlock title="Recorded tasks" value={String(running)} detail="Tasks reported by the running Nexus server." />
-        <InfoBlock title="Default model" value={savedModel || 'Not set'} detail="Model used for new chat sessions." />
-      </div>
-      <div className="grid gap-4 md:grid-cols-2">
-        <div className="rounded-xl border border-border bg-card p-4">
-          <p className="text-sm font-medium">Input behavior</p>
-          <p className="mt-1 text-sm text-muted-foreground">Enter sends a message. Shift + Enter adds a new line. Use Stop while a response is actively running.</p>
-          <div className="mt-3 flex items-center justify-between gap-3">
-            <span className="text-xs text-muted-foreground">Permission mode</span>
-            <span className="text-xs font-medium text-foreground">{permissionMode || 'Unknown'}</span>
-          </div>
-          <div className="mt-2 flex items-center justify-between gap-3">
-            <span className="text-xs text-muted-foreground">Sandbox tier</span>
-            <span className="text-xs font-medium text-foreground">{sandboxTier || 'Unknown'}</span>
-          </div>
-        </div>
-        <div className="rounded-xl border border-border bg-card p-4">
-          <p className="text-sm font-medium">History</p>
-          <p className="mt-1 text-sm text-muted-foreground">Conversation history is stored locally by the Nexus server and restored when you reopen a session.</p>
-          <div className="mt-3 flex items-center justify-between gap-3">
-            <span className="text-xs text-muted-foreground">Current session</span>
-            <span className="text-xs font-medium text-foreground">Active</span>
-          </div>
-          <div className="mt-2 flex items-center justify-between gap-3">
-            <span className="text-xs text-muted-foreground">Local backup</span>
-            <span className="text-xs font-medium text-foreground">Enabled</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function WorkspaceSettings({ state }: { state: Record<string, unknown> }) {
-  const dirs = Array.isArray(state.additional_dirs) ? state.additional_dirs as string[] : []
-  return <div className="space-y-4"><div><h3 className="text-sm font-semibold">Workspace access</h3><p className="mt-1 text-sm text-muted-foreground">Nexus tools operate in the current project workspace. Additional directories are controlled by the runtime configuration.</p></div><InfoBlock title="Additional directories" value={String(dirs.length)} detail={dirs.length ? dirs.join(', ') : 'No additional directories are configured.'} /><div className="rounded-lg border border-border bg-card p-4"><p className="text-sm font-medium">File activity</p><p className="mt-1 text-sm text-muted-foreground">Real file reads, creates, edits, and deletes appear in the chat activity cards. Open Configuration to change allowed directories.</p></div></div>
-}
-
-function SafetySettings({ state, onSaved }: { state: Record<string, unknown>; onSaved: () => void }) {
-  const [permission, setPermission] = useState(String(state.mode || 'auto'))
-  const [sandbox, setSandbox] = useState(String(state.sandbox_tier || 'normal'))
-  const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState('')
-  useEffect(() => { setPermission(String(state.mode || 'auto')); setSandbox(String(state.sandbox_tier || 'normal')) }, [state])
-  const save = async () => { setSaving(true); setMessage(''); try { await Promise.all([api.setPermissions(permission), api.setSandbox(sandbox)]); setMessage('Safety settings saved.'); onSaved() } catch (error) { setMessage(error instanceof Error ? error.message : 'Could not save safety settings.') } finally { setSaving(false) } }
-  return <div className="space-y-5"><div><h3 className="text-sm font-semibold">Command safeguards</h3><p className="mt-1 text-sm text-muted-foreground">These are real runtime controls used before Nexus runs tools and commands.</p></div><div className="grid gap-4 rounded-lg border border-border bg-card p-4 md:grid-cols-2"><label className="grid gap-1.5 text-sm font-medium">Permission mode<select value={permission} onChange={event => setPermission(event.target.value)} className="h-10 rounded-md border border-border bg-background px-3 text-sm font-normal"><option value="auto">Automatic</option><option value="ask">Ask every time</option><option value="allowlist">Allowlist only</option><option value="all">Allow all</option></select></label><label className="grid gap-1.5 text-sm font-medium">Sandbox tier<select value={sandbox} onChange={event => setSandbox(event.target.value)} className="h-10 rounded-md border border-border bg-background px-3 text-sm font-normal"><option value="no_sandbox">No Sandbox</option><option value="normal">Sandbox</option><option value="docker">Advanced Sandbox</option></select></label></div><div className="flex items-center justify-between gap-4"><p className={`text-sm ${message === 'Safety settings saved.' ? 'text-emerald-700' : 'text-destructive'}`} role="status">{message}</p><button type="button" disabled={saving} onClick={save} className="rounded-md bg-foreground px-3 py-2 text-sm font-medium text-background disabled:opacity-50">{saving ? 'Saving…' : 'Save safety settings'}</button></div></div>
 }
 
 function MemorySettings({ state }: { state: Record<string, unknown> }) {

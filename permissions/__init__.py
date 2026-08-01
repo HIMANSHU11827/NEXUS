@@ -163,10 +163,139 @@ class PermissionSystem(ThreadSafeSingleton):
         safe_limit = max(1, min(int(limit or 50), self._decision_log_limit))
         return [dict(item) for item in self._decision_log[-safe_limit:]]
 
+    @staticmethod
+    def _safety_overlay(tool_name: str, action: str, mode=None) -> Optional[Dict[str, str]]:
+        """Consult the persistent Safety settings before legacy mode rules.
+
+        The Safety page owns Permission Mode and Sandbox Mode as first-class,
+        workspace-independent settings. This overlay enforces them at the single
+        chokepoint used by the agent loop, keeping the three systems separate:
+        workspace selection, permission mode, and sandbox mode.
+
+        Returns ``None`` when the overlay has nothing to add (normal rules apply),
+        or ``{"decision": ..., "reason": ..., "source": ...}``.
+        """
+        try:
+            from safety.safety_store import get_state, enforce_command
+        except Exception:
+            return None
+        try:
+            state = get_state()
+            permission = str(state.get("permission_mode") or "automatic")
+            sandbox = str(state.get("sandbox_mode") or "workspace")
+        except Exception:
+            return None
+
+        # 0. Sandbox "no tools" always disables tool execution — a first-class
+        # safety gate independent of the permission mode.
+        if sandbox == "no_tools":
+            return {
+                "decision": "deny",
+                "reason": "No-tools sandbox mode is active. Tool execution is disabled; Nexus responds with text only.",
+                "source": "safety:no_tools",
+            }
+
+        if permission == "deny_all":
+            return {
+                "decision": "deny",
+                "reason": "Deny all tools mode is active. Nexus may respond with text only.",
+                "source": "safety:deny_all",
+            }
+
+        tool = str(tool_name or "").lower()
+        is_read = bool(re.match(
+            r"^(glob|grep|rg|search|read|view|read_file|get_file|list|ls|tree|todo|rag|lsp|web_search|web_fetch|fetch|describe|status|health|inspect|peek|head|tail)$",
+            tool,
+        ) or tool.startswith("read_") or tool.endswith("_read"))
+        is_shell = tool in {"bash", "shell", "terminal", "exec", "run", "run_command", "command", "powershell", "cmd", "pwsh"}
+
+        def _command_assessment():
+            try:
+                return enforce_command(str(action or ""), tool=tool)
+            except Exception:
+                return None
+
+        if permission == "read_only":
+            # Safe reads and read-only commands run; everything else is denied.
+            if is_read:
+                return {
+                    "decision": "allow",
+                    "reason": "Read-only mode allows safe reads.",
+                    "source": "safety:read_only",
+                }
+            if is_shell:
+                assessment = _command_assessment()
+                if assessment is not None:
+                    if assessment.decision in ("deny", "block"):
+                        return {"decision": "deny", "reason": assessment.reason, "source": "safety:read_only"}
+                    if assessment.decision == "ask":
+                        return {"decision": "ask", "reason": assessment.reason, "source": "mode:manual_approval"}
+                    if assessment.decision == "allow":
+                        return {"decision": "allow", "reason": "Read-only mode allows this safe command.", "source": "safety:read_only"}
+            return {
+                "decision": "deny",
+                "reason": "Read-only mode denies this action.",
+                "source": "safety:read_only",
+            }
+
+        if permission == "restricted":
+            # Safe reads are permitted; other actions require approval.
+            if is_read:
+                return {"decision": "allow", "reason": "Restricted mode allows safe reads.", "source": "safety:restricted"}
+            return {
+                "decision": "ask",
+                "reason": "Restricted mode requires approval for this action.",
+                "source": "mode:manual_approval",
+            }
+
+        # Automatic / ask / trusted / custom modes: blocked command policies are
+        # never run. Deny-policy categories are enforced at the chokepoint; ask
+        # and allow decisions fall through to the legacy mode handling so the
+        # permission mode still controls prompting.
+        # Legacy BYPASS ("Total Sovereignty") is the explicit override for the
+        # default posture: a user who chose it trusts everything, so policy
+        # denials yield back to the legacy mode. Explicit Safety modes above
+        # (no_tools / deny_all / read_only / restricted) still win over BYPASS.
+        if mode == PermissionMode.BYPASS:
+            return None
+        if is_shell:
+            assessment = _command_assessment()
+            if assessment is not None and assessment.decision in ("deny", "block"):
+                return {
+                    "decision": "deny",
+                    "reason": assessment.reason,
+                    "source": "safety:command_policy",
+                }
+
+        return None
+
     def check(
         self, tool_name: str, action: str = "", context: Dict[str, Any] = None
     ) -> PermissionResult:
         """Check if an operation is permitted under the current mode."""
+
+        # 0. Persistent Safety overlay (independent of the legacy mode enum).
+        overlay = self._safety_overlay(tool_name, action, mode=self.mode)
+        if overlay is not None:
+            decision = overlay.get("decision")
+            if decision == "ask":
+                return self._result(
+                    False,
+                    overlay.get("reason", "Manual approval required."),
+                    prompt=f"Execute {tool_name}({action})? [y/N]",
+                    tool_name=tool_name,
+                    action=action,
+                    source="mode:manual_approval",
+                    context=context,
+                )
+            return self._result(
+                False,
+                overlay.get("reason", "Blocked by safety policy."),
+                tool_name=tool_name,
+                action=action,
+                source=overlay.get("source", "safety"),
+                context=context,
+            )
 
         # 1. BYPASS: Total Sovereignty
         if self.mode == PermissionMode.BYPASS:
@@ -268,7 +397,7 @@ class PermissionSystem(ThreadSafeSingleton):
             return self._result(
                 False,
                 f"Manual approval required for {tool_name}.",
-                f"Execute {tool_name}({action})? [y/N]",
+                prompt=f"Execute {tool_name}({action})? [y/N]",
                 tool_name=tool_name,
                 action=action,
                 source="mode:manual_approval",

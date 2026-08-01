@@ -6,8 +6,11 @@ export interface TimelineEvent {
   type: string
   section: SectionKey
   title: string
-  status: 'pending' | 'running' | 'success' | 'failed' | 'cancelled'
+  status: 'pending' | 'running' | 'success' | 'failed' | 'cancelled' | 'blocked' | 'skipped'
   timestamp: number
+  runId?: string
+  parentId?: string
+  attempt?: number
   tool?: string
   command?: string
   path?: string
@@ -36,6 +39,11 @@ export interface TimelineEvent {
   planType?: 'simple' | 'advanced'
   phases?: Array<{ title: string; subgoals: string[] }>
   sequence?: number
+  checkpointId?: string
+  startedAt?: number
+  finishedAt?: number
+  updatedAt?: number
+  attemptStartedAt?: number
 }
 
 export type SectionKey =
@@ -241,9 +249,12 @@ export function useStreamChat() {
               const sourceType = canonicalType.startsWith('plan.step.') && toolKind
                 ? `${toolKind}.${canonicalType.endsWith('.completed') ? 'completed' : canonicalType.endsWith('.failed') ? 'failed' : 'started'}`
                 : canonicalType
-              const status = raw.status === 'success' || raw.status === 'done' || raw.status === 'completed' ? 'success'
+              const status: TimelineEvent['status'] = raw.status === 'success' || raw.status === 'done' || raw.status === 'completed' ? 'success'
                 : raw.status === 'failed' ? 'failed'
                 : raw.status === 'cancelled' ? 'cancelled'
+                : raw.status === 'blocked' ? 'blocked'
+                : raw.status === 'skipped' ? 'skipped'
+                : raw.status === 'pending' ? 'pending'
                 : 'running'
               const type = completedTypeForStatus(sourceType, status)
               const sourcePayload = Array.isArray(raw.sources) ? raw.sources : details.sources
@@ -287,7 +298,21 @@ export function useStreamChat() {
                   .map((phase: { title?: unknown; subgoals?: unknown }) => ({ title: typeof phase.title === 'string' ? phase.title : 'Phase', subgoals: Array.isArray(phase.subgoals) ? phase.subgoals.filter((goal: unknown): goal is string => typeof goal === 'string') : [] }))
                   : undefined,
                 startTime: raw.start_time ? raw.start_time * 1000 : undefined,
+                startedAt: raw.start_time ? raw.start_time * 1000 : undefined,
+                finishedAt: raw.end_time ? raw.end_time * 1000
+                  : (status === 'success' || status === 'failed' || status === 'cancelled' || status === 'skipped')
+                    ? (raw.timestamp ? raw.timestamp * 1000 : Date.now())
+                    : undefined,
+                updatedAt: raw.timestamp ? raw.timestamp * 1000 : Date.now(),
+                attemptStartedAt: raw.attempt_started_at ? raw.attempt_started_at * 1000 : undefined,
+                runId: raw.run_id || raw.turn_id || undefined,
+                parentId: raw.parent_id || raw.parent_run_id || undefined,
+                attempt: typeof raw.attempt === 'number' ? raw.attempt : typeof details.attempt === 'number' ? details.attempt : undefined,
                 sequence: typeof raw.sequence === 'number' ? raw.sequence : undefined,
+                checkpointId: typeof raw.checkpoint_id === 'string' ? raw.checkpoint_id
+                  : typeof raw.checkpointId === 'string' ? raw.checkpointId
+                    : typeof details.checkpoint_id === 'string' ? details.checkpoint_id
+                      : typeof details.checkpointId === 'string' ? details.checkpointId : undefined,
               }
 
               const isAppend = Boolean(raw.append || payload.append)
@@ -337,6 +362,10 @@ export function useStreamChat() {
                           ...event,
                           status: 'running',
                           startTime: e.startTime || event.startTime || e.timestamp,
+                          startedAt: e.startedAt || event.startedAt || e.startTime || e.timestamp,
+                          finishedAt: e.finishedAt,
+                          updatedAt: event.updatedAt || e.updatedAt || event.timestamp || e.timestamp,
+                          attemptStartedAt: e.attemptStartedAt || event.attemptStartedAt,
                           output,
                           lines: boundedLiveLines(chunk ? [...(e.lines || []), chunk] : e.lines),
                         }
@@ -358,8 +387,9 @@ export function useStreamChat() {
                   if (matched) {
                     // Stale replay frames never clobber newer live state.
                     if (!acceptsSequencedUpdate(matched, event)) return s
-                    const startedAt = matched.startTime || matched.timestamp
-                    const durationMs = event.durationMs ?? matched.durationMs ?? Math.max(0, event.timestamp - startedAt)
+                    const startedAt = matched.startedAt || matched.startTime || matched.timestamp
+                    const finishedAt = event.finishedAt || event.timestamp
+                    const durationMs = event.durationMs ?? matched.durationMs ?? Math.max(0, finishedAt - startedAt)
                     return {
                       ...s,
                       events: s.events.map(e =>
@@ -382,6 +412,10 @@ export function useStreamChat() {
                               lineEnd: event.lineEnd ?? e.lineEnd,
                               durationMs,
                               startTime: startedAt,
+                              startedAt,
+                              finishedAt: e.finishedAt || finishedAt,
+                              updatedAt: event.updatedAt || event.timestamp,
+                              attemptStartedAt: e.attemptStartedAt || event.attemptStartedAt,
                               sequence: event.sequence ?? e.sequence,
                             }
                           : e
@@ -399,7 +433,17 @@ export function useStreamChat() {
                 const existing = s.events.find(e => e.id === event.id)
                 if (existing) {
                   if (!acceptsSequencedUpdate(existing, event)) return s
-                  return { ...s, events: s.events.map(e => e.id === event.id ? { ...e, ...event } : e) }
+                  return {
+                    ...s,
+                    events: s.events.map(e => e.id === event.id ? {
+                      ...e,
+                      ...event,
+                      startedAt: e.startedAt || event.startedAt || e.startTime || e.timestamp,
+                      finishedAt: e.finishedAt || event.finishedAt,
+                      updatedAt: event.updatedAt || event.timestamp,
+                      attemptStartedAt: e.attemptStartedAt || event.attemptStartedAt,
+                    } : e),
+                  }
                 }
                 return { ...s, events: boundLiveEvents([...s.events, event]) }
               })

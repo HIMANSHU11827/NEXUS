@@ -676,7 +676,10 @@ def boot():
         )
         asyncio.run(_wait_for_health("http://127.0.0.1:8000/api/health", label="API server"))
         try:
-            subprocess.run(["npm", "run", "dev"], cwd=os.path.join(project_root, "gui"))
+            if os.name == "nt":
+                subprocess.run(["npm.cmd", "run", "dev"], cwd=os.path.join(project_root, "gui"))
+            else:
+                subprocess.run(["npm", "run", "dev"], cwd=os.path.join(project_root, "gui"))
         finally:
             proc.terminate()
         return

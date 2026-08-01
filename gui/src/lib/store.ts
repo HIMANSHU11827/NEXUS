@@ -8,6 +8,8 @@ export interface Message {
   content: string
   timestamp: number
   activity?: TimelineEvent[]
+  checkpointId?: string
+  checkpointRestored?: boolean
 }
 
 export interface Session {
@@ -73,6 +75,10 @@ function restoreActivity(events: Record<string, unknown>[] | undefined): Timelin
       title: String(raw.title || raw.related_tool || raw.action || 'Work event'),
       status,
       timestamp: typeof raw.timestamp === 'number' ? raw.timestamp * 1000 : Date.now(),
+      startedAt: typeof raw.start_time === 'number' ? raw.start_time * 1000 : typeof details.start_time === 'number' ? details.start_time * 1000 : undefined,
+      finishedAt: typeof raw.end_time === 'number' ? raw.end_time * 1000 : typeof details.end_time === 'number' ? details.end_time * 1000 : undefined,
+      updatedAt: typeof raw.timestamp === 'number' ? raw.timestamp * 1000 : Date.now(),
+      attemptStartedAt: typeof raw.attempt_started_at === 'number' ? raw.attempt_started_at * 1000 : typeof details.attempt_started_at === 'number' ? details.attempt_started_at * 1000 : undefined,
       tool: typeof toolName === 'string' ? toolName : undefined,
       command: typeof raw.related_command === 'string' ? raw.related_command : typeof details.command === 'string' ? details.command : undefined,
       path: typeof files[0] === 'string' ? files[0] : typeof raw.path === 'string' ? raw.path : undefined,
@@ -110,6 +116,10 @@ function restoreActivity(events: Record<string, unknown>[] | undefined): Timelin
       ...existing,
       ...event,
       timestamp: event.timestamp || existing.timestamp,
+      startedAt: existing.startedAt || event.startedAt || existing.startTime || existing.timestamp,
+      finishedAt: event.finishedAt || existing.finishedAt,
+      updatedAt: event.updatedAt || existing.updatedAt || event.timestamp || existing.timestamp,
+      attemptStartedAt: existing.attemptStartedAt || event.attemptStartedAt,
       status: isAppend ? (existing.status === 'pending' ? 'running' : existing.status) : event.status,
       output: isAppend
         ? appendOutput(existingOutput, chunk)
@@ -122,6 +132,31 @@ function restoreActivity(events: Record<string, unknown>[] | undefined): Timelin
     }
   }
   return restored
+}
+
+// Persisted work events are raw backend records. A `checkpoint.created` event
+// is matched to its message by the turn id the backend stamps on both.
+function checkpointIdFromRawEvents(events: Record<string, unknown>[] | undefined, turnId?: string): string | undefined {
+  if (!Array.isArray(events)) return undefined
+  for (const raw of events) {
+    if (String(raw.event_type || raw.type || '') !== 'checkpoint.created') continue
+    const checkpointId = String(raw.checkpoint_id || raw.checkpointId || '')
+    if (!checkpointId) continue
+    const eventTurnId = String(raw.turn_id || raw.turnId || '')
+    if (turnId && eventTurnId && eventTurnId !== turnId) continue
+    return checkpointId
+  }
+  return undefined
+}
+
+// Live stream events are normalized TimelineEvents carrying the checkpoint id
+// the SSE record preserved.
+function checkpointIdFromActivity(activity: TimelineEvent[] | undefined): string | undefined {
+  if (!activity) return undefined
+  for (const event of activity) {
+    if (event.type === 'checkpoint.created' && event.checkpointId) return event.checkpointId
+  }
+  return undefined
 }
 
 interface AppState {
@@ -137,6 +172,7 @@ interface AppState {
   setActiveSession: (id: string) => void
   addMessage: (sessionId: string, role: 'user' | 'assistant', content: string, activity?: TimelineEvent[]) => void
   setProcessing: (v: boolean) => void
+  setMessageCheckpointRestored: (sessionId: string, messageId: string) => void
   getActiveSession: () => Session | undefined
   loadSessionsFromServer: () => Promise<void>
   loadSessionMessages: (id: string) => Promise<void>
@@ -221,13 +257,13 @@ export const useStore = create<AppState>((set, get) => ({
                 return {
                   ...sess,
                   messages: sess.messages.map((message, index) => index === sess.messages.length - 1
-                    ? { ...message, activity }
+                    ? { ...message, activity, checkpointId: checkpointIdFromActivity(activity) || message.checkpointId }
                     : message),
                 }
               }
               return {
                 ...sess,
-                messages: [...sess.messages, { id: crypto.randomUUID(), role, content, timestamp: Date.now(), activity }],
+                messages: [...sess.messages, { id: crypto.randomUUID(), role, content, timestamp: Date.now(), activity, checkpointId: checkpointIdFromActivity(activity) }],
                 updatedAt: Date.now(),
                 title: sess.messages.length === 0 && role === 'user'
                   ? content.slice(0, 50)
@@ -240,6 +276,21 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   setProcessing: (v) => set({ isProcessing: v }),
+
+  setMessageCheckpointRestored: (sessionId, messageId) => {
+    set(s => ({
+      sessions: s.sessions.map(sess =>
+        sess.id === sessionId
+          ? {
+              ...sess,
+              messages: sess.messages.map(message =>
+                message.id === messageId ? { ...message, checkpointRestored: true } : message
+              ),
+            }
+          : sess
+      ),
+    }))
+  },
 
   getActiveSession: () => {
     const { sessions, activeSessionId } = get()
@@ -285,6 +336,7 @@ export const useStore = create<AppState>((set, get) => ({
                   content: msg.role === 'assistant' ? stripLeakedToolProtocol(msg.content) : msg.content,
                   timestamp: Date.now(),
                   activity: msg.role === 'assistant' ? restoreActivity(msg.work_events) : undefined,
+                  checkpointId: msg.role === 'assistant' ? checkpointIdFromRawEvents(msg.work_events, msg.turn_id) : undefined,
                 })),
               }
             : sess

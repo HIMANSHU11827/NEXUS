@@ -1,9 +1,11 @@
-import { Send, Copy, Check, CheckCircle2, StopCircle, Loader2, Globe, Terminal, FileEdit, Search, Code, XCircle, ChevronDown, ChevronRight, ExternalLink, Mic, MicOff, Volume2, VolumeX, Cpu, ShieldCheck, MonitorUp, MonitorOff, Headphones, FolderOpen, Plus, GitBranch } from 'lucide-react'
+import { Send, Copy, Check, CheckCircle, CheckCircle2, StopCircle, Loader2, Globe, Terminal, FileEdit, Search, Code, XCircle, ChevronDown, ChevronRight, ExternalLink, Mic, MicOff, Volume2, VolumeX, Cpu, ShieldCheck, MonitorUp, MonitorOff, Headphones, FolderOpen, Plus, GitBranch } from 'lucide-react'
 import { createElement, useState, useRef, useEffect, useCallback, type ReactNode } from 'react'
 import { useStore, type Message } from '../lib/store'
 import { api } from '../lib/api'
 import ApprovalPanel from './ApprovalPanel'
+import BackgroundTasksPanel from './BackgroundTasksPanel'
 import { useStreamChat, type TimelineEvent } from '../hooks/useStreamChat'
+import { formatTaskDuration, taskDurationMs, type TaskTiming } from '../lib/taskDuration'
 import mascot from '../assets/nexus-mascot-brand.png'
 
 type BrowserSpeechRecognition = {
@@ -266,6 +268,36 @@ function MessageEntry({ msg }: { msg: Message }) {
   const hasActivity = !isUser && Boolean(msg.activity?.length)
   const [activityExpanded, setActivityExpanded] = useState(false)
   const totalWorkDuration = hasActivity ? runDuration(msg.activity!) : undefined
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [restoring, setRestoring] = useState(false)
+  const [restoreError, setRestoreError] = useState('')
+  const [restoreBlocked, setRestoreBlocked] = useState(false)
+  const [restoreSuccess, setRestoreSuccess] = useState('')
+  const sessionId = useStore(state => state.activeSessionId)
+  const setMessageCheckpointRestored = useStore(state => state.setMessageCheckpointRestored)
+
+  const confirmRestore = async () => {
+    if (!msg.checkpointId || restoring) return
+    if (!sessionId) {
+      setRestoreError('No active session.')
+      return
+    }
+    setConfirmOpen(false)
+    setRestoring(true)
+    setRestoreError('')
+    try {
+      const result = await api.restoreCheckpoint(msg.checkpointId, sessionId)
+      setMessageCheckpointRestored(sessionId, msg.id)
+      setRestoreSuccess(`Checkpoint restored. ${result.restored} file${result.restored === 1 ? '' : 's'} restored${result.removed > 0 ? ` and ${result.removed} removed` : ''}.`)
+      window.dispatchEvent(new CustomEvent('nexus-sandbox-folder', { detail: { path: result.workspace_root || '' } }))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not restore the checkpoint.'
+      setRestoreError(message)
+      if (/not found|corrupt/i.test(message)) setRestoreBlocked(true)
+    } finally {
+      setRestoring(false)
+    }
+  }
 
   return (
     <div className={`mb-5 flex group ${isUser ? 'justify-end' : 'justify-start'}`} data-testid="message-bubble">
@@ -317,16 +349,58 @@ function MessageEntry({ msg }: { msg: Message }) {
           </div>
         </div>
         {!isUser && hasActivity && (
-          <div className="mt-2 flex w-full justify-end border-t border-border/60 pt-2">
-            <button
-              type="button"
-              disabled
-              title="A restorable file checkpoint is not available for this run."
-              className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground/60"
-            >
-              <span>Restore Checkpoint</span>
-              <GitBranch size={14} />
-            </button>
+          <div className="mt-2 flex w-full flex-col items-end border-t border-border/60 pt-2">
+            {(restoreSuccess || restoreError) && (
+              <p role={restoreError ? 'alert' : 'status'} className={`mb-1 text-[10px] ${restoreError ? 'text-destructive/75' : 'text-emerald-600/80'}`}>
+                {restoreError || restoreSuccess}
+              </p>
+            )}
+            <div className="flex items-center gap-2">
+              {msg.checkpointRestored ? (
+                <button
+                  type="button"
+                  disabled
+                  title="Files from this run were restored."
+                  className="flex items-center gap-2 px-2 py-1 text-xs text-emerald-600/80"
+                >
+                  <span>Checkpoint Restored</span>
+                  <CheckCircle size={14} />
+                </button>
+              ) : msg.checkpointId ? (
+                <button
+                  type="button"
+                  onClick={() => { setRestoreError(''); setConfirmOpen(true) }}
+                  disabled={restoring || restoreBlocked}
+                  title={restoreBlocked ? 'This checkpoint is no longer available.' : 'Restore the files changed by this run.'}
+                  className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground transition hover:text-foreground disabled:opacity-50"
+                >
+                  {restoring ? <Loader2 size={14} className="animate-spin" /> : <GitBranch size={14} />}
+                  <span>{restoring ? 'Restoring…' : 'Restore Checkpoint'}</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled
+                  title="A restorable file checkpoint is not available for this run."
+                  className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground/60"
+                >
+                  <span>Restore Checkpoint</span>
+                  <GitBranch size={14} />
+                </button>
+              )}
+            </div>
+            {confirmOpen && (
+              <div className="mt-2 w-full rounded-md border border-border bg-card/70 p-3">
+                <p className="text-xs leading-relaxed text-foreground/85">Restore the files changed by this run? This reverts modified files, restores deleted files, and removes files created by this run. You cannot undo this.</p>
+                <div className="mt-2 flex justify-end gap-2">
+                  <button type="button" onClick={() => setConfirmOpen(false)} disabled={restoring} className="rounded px-3 py-1 text-xs text-muted-foreground transition hover:bg-secondary disabled:opacity-50">Cancel</button>
+                  <button type="button" onClick={confirmRestore} disabled={restoring} className="flex items-center gap-1.5 rounded bg-foreground px-3 py-1 text-xs font-medium text-background transition hover:opacity-80 disabled:opacity-50">
+                    {restoring && <Loader2 size={12} className="animate-spin" />}
+                    <span>{restoring ? 'Restoring…' : 'Confirm Restore'}</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -345,12 +419,7 @@ function eventIcon(type: string) {
 }
 
 function formatDuration(ms?: number): string {
-  if (ms === undefined || ms === null) return ''
-  if (ms < 1000) return `${Math.round(ms)}ms`
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
-  const m = Math.floor(ms / 60000)
-  const s = Math.round((ms % 60000) / 1000)
-  return `${m}m ${s}s`
+  return formatTaskDuration(ms)
 }
 
 function toolLabel(event: TimelineEvent): string {
@@ -600,20 +669,6 @@ function EventDetails({ event }: { event: TimelineEvent }) {
   )
 }
 
-function RunningTimer({ startTime }: { startTime?: number }) {
-  const [elapsed, setElapsed] = useState(0)
-  useEffect(() => {
-    const ms = startTime ? Date.now() - startTime : 0
-    setElapsed(Math.max(0, ms))
-    const id = setInterval(() => {
-      const ms2 = startTime ? Date.now() - startTime : 0
-      setElapsed(Math.max(0, ms2))
-    }, 200)
-    return () => clearInterval(id)
-  }, [startTime])
-  return <span className="animate-pulse">{formatDuration(elapsed)}</span>
-}
-
 function LiveRunStatus({ events, onStop }: { events: TimelineEvent[]; onStop: () => void }) {
   const startedAt = useRef(Date.now())
   const [elapsed, setElapsed] = useState(0)
@@ -650,16 +705,65 @@ function LiveRunStatus({ events, onStop }: { events: TimelineEvent[]; onStop: ()
   )
 }
 
-function ToolEventItem({ event }: { event: TimelineEvent }) {
+function isTaskActive(event: TimelineEvent): boolean {
+  return event.status === 'running' || event.status === 'pending' || event.status === 'blocked' || event.type.startsWith('retry')
+}
+
+// Tasks still moving (running, retrying) pulse; waiting/paused hold still.
+function taskStatusLabel(event: TimelineEvent): { label: string; active: boolean } {
+  if (event.type.startsWith('retry')) return { label: 'Retrying', active: true }
+  switch (event.status) {
+    case 'running':
+      return { label: 'Running', active: true }
+    case 'pending':
+      return { label: 'Waiting', active: false }
+    case 'blocked':
+      return { label: 'Paused', active: false }
+    case 'success':
+      return { label: 'Done', active: false }
+    case 'failed':
+      return { label: isTimeoutEvent(event) ? 'Timed out' : 'Failed', active: false }
+    case 'cancelled':
+      return { label: 'Cancelled', active: false }
+    default:
+      return { label: 'Stopped', active: false }
+  }
+}
+
+function isTimeoutEvent(event: TimelineEvent): boolean {
+  const haystack = `${event.error || ''} ${event.summary || ''} ${event.title || ''}`.toLowerCase()
+  return /timeout|timed out|exceeded/.test(haystack)
+}
+
+// Real duration for the row. Finished tasks freeze at finishedAt - startedAt;
+// active tasks tick with the shared `now`. Falls back to the backend's own
+// durationMs, and only reports '—' when the task truly has no timing data.
+const TERMINAL_TASK_STATUSES = new Set(['success', 'failed', 'cancelled', 'skipped'])
+
+function taskDurationFor(event: TimelineEvent, now: number): number | undefined {
+  const finished = TERMINAL_TASK_STATUSES.has(event.status)
+  const timing: TaskTiming = {
+    // Finished rows never invent a start from their own (terminal) timestamp;
+    // active rows may, since their event timestamp is the start of the attempt.
+    startedAt: finished
+      ? event.startedAt ?? event.startTime
+      : event.startedAt ?? event.startTime ?? event.timestamp,
+    finishedAt: finished ? event.finishedAt : undefined,
+  }
+  const fromTimestamps = taskDurationMs(timing, now)
+  if (fromTimestamps !== undefined) return fromTimestamps
+  return event.durationMs
+}
+
+function ToolEventItem({ event, now }: { event: TimelineEvent; now: number }) {
   const [expanded, setExpanded] = useState(false)
   const Icon = eventIcon(event.type)
-  const isRunning = event.status === 'running' || event.status === 'pending'
+  const { label: statusLabel, active } = taskStatusLabel(event)
   const isFailed = event.status === 'failed'
   const isDone = event.status === 'success'
   const label = toolLabel(event)
   const target = toolTarget(event)
-  const duration = formatDuration(event.durationMs)
-  const statusLabel = isRunning ? 'Running' : isDone ? 'Done' : isFailed ? 'Failed' : 'Stopped'
+  const duration = formatTaskDuration(taskDurationFor(event, now))
   // File errors can contain an absolute path from the backend. File activity
   // intentionally shows filenames only, so keep that transport detail out of
   // the visible row as well.
@@ -688,7 +792,7 @@ function ToolEventItem({ event }: { event: TimelineEvent }) {
       >
         <span className="shrink-0 text-muted-foreground/50">{hasDetails ? (expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />) : <span className="block size-3" />}</span>
         <span className="shrink-0" aria-label={statusLabel}>
-          {isRunning ? <Loader2 size={12} className="animate-spin text-muted-foreground/60" />
+          {active ? <Loader2 size={12} className="animate-spin text-muted-foreground/60" />
             : isFailed ? <XCircle size={12} className="text-destructive/70" />
             : isDone ? <CheckCircle2 size={12} className="text-emerald-600/70" />
             : <Icon size={12} className="text-muted-foreground/55" />}
@@ -696,7 +800,7 @@ function ToolEventItem({ event }: { event: TimelineEvent }) {
         <span className="shrink-0 font-semibold text-foreground/85">{label}</span>
         {detail && <span className="truncate font-mono text-muted-foreground/60" title={detail}>· {detail}</span>}
         <span className={`ml-auto shrink-0 text-[10px] ${isFailed ? 'text-destructive/70' : 'text-muted-foreground/50'}`}>
-          {statusLabel}{' · '}{isRunning ? <RunningTimer startTime={event.startTime || event.timestamp} /> : duration || '—'}
+          {statusLabel}{' · '}{duration || '—'}
         </span>
       </button>
       {expanded && hasDetails && <EventDetails event={event} />}
@@ -754,14 +858,6 @@ function isExternalEvent(event: TimelineEvent): boolean {
   if (event.kind && PUBLIC_ACTIVITY_KINDS.includes(String(event.kind).toLowerCase())) return true
   if (event.type.endsWith('.stdout') || event.type.endsWith('.stderr') || event.type.endsWith('.output') || event.type.endsWith('.result')) return false
   return EXTERNAL_PREFIXES.some(p => event.type.startsWith(p))
-}
-
-// A chat reply or a plan is not background work. This list is deliberately
-// limited to real execution that the user can inspect after it completes.
-function isBackgroundExecutionEvent(event: TimelineEvent): boolean {
-  if (event.visibility === 'internal') return false
-  return ['command.', 'terminal.', 'test.', 'git.', 'hive.', 'subagent.'].some(prefix => event.type.startsWith(prefix))
-    || (event.type.startsWith('tool.') && Boolean(event.command || event.subagent))
 }
 
 /**
@@ -831,12 +927,22 @@ function PublicProgress({ event }: { event: TimelineEvent }) {
 
 function EventActivity({ events }: { events: TimelineEvent[] }) {
   const visible = deduplicateEvents(events.filter(isExternalEvent))
+  const hasActiveTask = visible.some(isTaskActive)
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    if (!hasActiveTask) return
+    setNow(Date.now())
+    const id = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [hasActiveTask])
+
   if (visible.length === 0) return null
   return (
     <div className="mb-3 space-y-2 nexus-event-line" style={{ animation: 'nexus-fade-in 0.25s ease-out' }}>
       {visible.map(ev => (
         <div key={ev.id} className="space-y-1">
-          {ev.type === 'assistant.progress' ? <PublicProgress event={ev} /> : <ToolEventItem event={ev} />}
+          {ev.type === 'assistant.progress' ? <PublicProgress event={ev} /> : <ToolEventItem event={ev} now={now} />}
         </div>
       ))}
     </div>
@@ -864,10 +970,6 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
   const [attachmentError, setAttachmentError] = useState('')
   const [queuedTasks, setQueuedTasks] = useState<QueuedTask[]>([])
   const [queueExpanded, setQueueExpanded] = useState(false)
-  const [backgroundExpanded, setBackgroundExpanded] = useState(false)
-  const [backgroundRuns, setBackgroundRuns] = useState<TimelineEvent[]>([])
-  const [backgroundSteerOpen, setBackgroundSteerOpen] = useState(false)
-  const [backgroundSteerText, setBackgroundSteerText] = useState('')
   const [editingQueuedId, setEditingQueuedId] = useState<string | null>(null)
   const [editingQueuedPrompt, setEditingQueuedPrompt] = useState('')
   const [showModelPicker, setShowModelPicker] = useState(false)
@@ -889,7 +991,6 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
   const slashQuery = input.trimStart().startsWith('/') ? input.trimStart().slice(1).split(/\s/, 1)[0].toLowerCase() : ''
   const showSlashMenu = input.trimStart().startsWith('/') && !input.trimStart().slice(1).includes(' ')
   const matchingCommands = nexusCommands.filter(command => command.name.includes(slashQuery) || command.description.toLowerCase().includes(slashQuery)).slice(0, 8)
-  const activeBackgroundRuns = backgroundRuns.filter(run => run.status === 'running' || run.status === 'pending')
 
   const settingsForModel = (model: string): ModelPreferences => modelPreferences[model] || defaultModelPreferences
   const updateModelPreferences = (model: string, next: Partial<ModelPreferences>) => {
@@ -936,21 +1037,6 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
     window.addEventListener('nexus-sandbox-folder', syncExplorerFolder)
     return () => window.removeEventListener('nexus-sandbox-folder', syncExplorerFolder)
   }, [sandboxTier])
-
-  useEffect(() => {
-    const executionEvents = events.filter(isBackgroundExecutionEvent)
-    if (executionEvents.length === 0) return
-    setBackgroundRuns(current => {
-      const byId = new Map(current.map(run => [run.id, run]))
-      for (const event of executionEvents) byId.set(event.id, { ...byId.get(event.id), ...event })
-      return Array.from(byId.values()).sort((a, b) => a.timestamp - b.timestamp).slice(-20)
-    })
-  }, [events])
-
-  useEffect(() => {
-    setBackgroundRuns([])
-    setBackgroundExpanded(false)
-  }, [activeSessionId])
 
   const speakResponse = useCallback((value: string) => {
     if (!speechEnabled || !('speechSynthesis' in window) || !value.trim()) return
@@ -1180,14 +1266,10 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
     setEditingQueuedId(null)
   }
 
-  const addBackgroundSteer = () => {
-    const prompt = backgroundSteerText.trim()
-    if (!prompt) return
-    const task = { id: crypto.randomUUID(), prompt, attachments: [] as Attachment[] }
+  const enqueueSteer = (text: string) => {
+    const task = { id: crypto.randomUUID(), prompt: text, attachments: [] as Attachment[] }
     taskQueueRef.current = [task, ...taskQueueRef.current]
     setQueuedTasks(taskQueueRef.current)
-    setBackgroundSteerText('')
-    setBackgroundSteerOpen(false)
     setQueueExpanded(true)
   }
 
@@ -1293,7 +1375,7 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
             onRespond={respondApproval}
           />
         ) : null}
-        {backgroundRuns.length > 0 && <div className="mb-1 border border-border bg-secondary/25 text-[11px] text-muted-foreground"><button type="button" onClick={() => setBackgroundExpanded(value => !value)} aria-expanded={backgroundExpanded} className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-secondary/45">{backgroundExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}{activeBackgroundRuns.length > 0 ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}<span>{activeBackgroundRuns.length > 0 ? `${activeBackgroundRuns.length} Background running` : `${backgroundRuns.length} Background history`}</span></button>{backgroundExpanded && <div className="border-t border-border px-3 py-2">{activeBackgroundRuns.length > 0 && <div className="mb-2 flex items-center justify-between gap-2"><span>Real command or agent work is running in the background.</span><div className="flex shrink-0 items-center gap-1"><button type="button" onClick={() => setBackgroundSteerOpen(value => !value)} className="border border-border bg-background px-2 py-1 font-medium text-foreground hover:bg-secondary">Steer</button><button type="button" onClick={cancel} className="border border-destructive/40 bg-destructive/5 px-2 py-1 font-medium text-destructive hover:bg-destructive/10">Stop</button></div></div>}{backgroundRuns.map(run => <div key={run.id} className="border-t border-border/60 py-1.5 first:border-t-0 first:pt-0"><div className="flex items-center gap-2"><span className="shrink-0">{run.status === 'running' || run.status === 'pending' ? <Loader2 size={12} className="animate-spin" /> : run.status === 'failed' ? <XCircle size={12} className="text-destructive" /> : <CheckCircle2 size={12} className="text-emerald-600" />}</span><span className="min-w-0 flex-1 truncate font-medium text-foreground" title={run.command || run.title}>{run.command || run.title || run.tool || 'Nexus background task'}</span><span className="shrink-0 text-[10px] capitalize">{run.status === 'success' ? 'Completed' : run.status}</span></div>{(run.summary || run.output || run.error) && <p className="ml-5 mt-1 whitespace-pre-wrap break-words text-[10px] text-muted-foreground">{(run.error || run.summary || run.output || '').slice(0, 320)}</p>}</div>)}{backgroundSteerOpen && <div className="mt-2 flex gap-1.5"><input autoFocus value={backgroundSteerText} onChange={event => setBackgroundSteerText(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') addBackgroundSteer(); if (event.key === 'Escape') setBackgroundSteerOpen(false) }} placeholder="Add a priority instruction…" className="min-w-0 flex-1 border border-border bg-background px-2 py-1.5 text-[11px] text-foreground outline-none focus:border-ring" aria-label="Steer background task" /><button type="button" onClick={addBackgroundSteer} disabled={!backgroundSteerText.trim()} className="border border-border bg-background px-2 py-1 font-medium text-foreground hover:bg-secondary disabled:opacity-40">Add</button><button type="button" onClick={() => { setBackgroundSteerOpen(false); setBackgroundSteerText('') }} className="border border-border bg-background px-2 py-1 hover:bg-secondary">Cancel</button></div>}{activeBackgroundRuns.length > 0 && <p className="mt-1.5 text-[10px] text-muted-foreground">The instruction is placed first in the queue and runs when current work finishes.</p>}</div>}</div>}
+        <BackgroundTasksPanel events={events} onCancel={cancel} onSteerAdd={enqueueSteer} />
         {queuedTasks.length > 0 && <div className="mb-1 border border-border bg-secondary/25 text-[11px] text-muted-foreground"><button type="button" onClick={() => setQueueExpanded(value => !value)} aria-expanded={queueExpanded} className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-secondary/45">{queueExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}<Code size={12} /><span>{queuedTasks.length} Queued</span></button>{queueExpanded && <div className="border-t border-border px-3 py-1.5">{queuedTasks.map((task, index) => { const editing = editingQueuedId === task.id; return <div key={task.id} className="flex items-center gap-2 py-1.5"><span className="text-muted-foreground">{index + 1}.</span>{editing ? <input autoFocus value={editingQueuedPrompt} onChange={event => setEditingQueuedPrompt(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') saveQueuedTask(task.id); if (event.key === 'Escape') setEditingQueuedId(null) }} className="min-w-0 flex-1 border border-border bg-background px-1.5 py-1 text-[11px] text-foreground outline-none" aria-label="Edit queued request" /> : <span className="min-w-0 flex-1 truncate">{task.prompt}</span>}<div className="flex shrink-0 items-center gap-1">{editing ? <><button type="button" onClick={() => saveQueuedTask(task.id)} className="px-1.5 py-1 hover:bg-secondary">Save</button><button type="button" onClick={() => setEditingQueuedId(null)} className="px-1.5 py-1 hover:bg-secondary">Cancel</button></> : <><button type="button" onClick={() => steerQueuedTask(task)} className="px-1.5 py-1 hover:bg-secondary">Steer</button><button type="button" onClick={() => { setEditingQueuedId(task.id); setEditingQueuedPrompt(task.prompt) }} className="flex size-6 items-center justify-center hover:bg-secondary" aria-label={`Edit queued request: ${task.prompt}`}><FileEdit size={13} /></button><button type="button" onClick={() => removeQueuedTask(task.id)} className="flex size-6 items-center justify-center hover:bg-secondary" aria-label={`Delete queued request: ${task.prompt}`}><XCircle size={13} /></button></>}</div></div>})}</div>}</div>}
         {screenStream && <div className="mb-2 flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/5 px-2 py-1.5"><video ref={screenPreviewRef} autoPlay muted playsInline className="h-10 w-16 rounded object-cover" /><span className="min-w-0 flex-1 truncate text-[11px] font-medium text-blue-700 dark:text-blue-300">Screen sharing is active</span><button type="button" onClick={stopScreenShare} className="rounded px-2 py-1 text-[10px] font-medium text-blue-700 hover:bg-blue-500/10 dark:text-blue-300">Stop</button></div>}
         <div className="relative rounded-md border border-border bg-secondary/90 p-1 shadow-[0_8px_28px_rgba(15,23,42,0.06)] transition focus-within:border-ring/50 focus-within:ring-2 focus-within:ring-ring/10">

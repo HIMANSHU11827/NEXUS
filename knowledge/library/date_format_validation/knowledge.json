@@ -1,0 +1,9 @@
+{
+  "title": "date_format_validation",
+  "content": "System expects dd-mm-yy date format but command input failed validation, indicating lack of date parsing/validation logic",
+  "key_concepts": [],
+  "tags": [],
+  "version": "1.0.0",
+  "created_at": 1785511833.5430672,
+  "updated_at": 1785511833.543068
+}
