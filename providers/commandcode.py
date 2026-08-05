@@ -50,6 +50,34 @@ class CommandCodeProvider(NexusBaseProvider):
     def _use_http_api(self) -> bool:
         return self.validate_api_key() and bool(self.endpoint)
 
+    @staticmethod
+    def _tool_envelope(tool_calls) -> str:
+        """Convert OpenAI-compatible native calls to the V5 parser format."""
+        envelopes = []
+        for call in tool_calls or []:
+            function = call.get("function", {}) if isinstance(call, dict) else {}
+            name = str(function.get("name") or "").strip()
+            if not name:
+                continue
+            arguments = function.get("arguments", {})
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments) if arguments.strip() else {}
+                except json.JSONDecodeError:
+                    arguments = {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            envelopes.append(f"<function={name}>{json.dumps(arguments, ensure_ascii=False)}")
+        return "\n".join(envelopes)
+
+    @staticmethod
+    def _add_tool_payload(payload: dict, kwargs: dict) -> None:
+        """Preserve model-selected native tool calling when requested."""
+        if kwargs.get("tools"):
+            payload["tools"] = kwargs["tools"]
+        if kwargs.get("tool_choice"):
+            payload["tool_choice"] = kwargs["tool_choice"]
+
     def _build_prompt(self, prompt: str, system_prompt: str,
                       messages: Optional[List[Dict[str, str]]] = None) -> str:
         parts: List[str] = []
@@ -106,6 +134,7 @@ class CommandCodeProvider(NexusBaseProvider):
             timeout = int(kwargs.get("timeout") or os.getenv("NEXUS_PROVIDER_TIMEOUT", "120"))
             payload = {"model": model_name, "messages": msgs}
             self.headers["Authorization"] = f"Bearer {self.api_key}"
+            self._add_tool_payload(payload, kwargs)
             try:
                 response = self.session.post(
                     self.endpoint, json=payload, headers=self.headers, timeout=timeout
@@ -113,7 +142,11 @@ class CommandCodeProvider(NexusBaseProvider):
                 if response.status_code == 200:
                     data = response.json()
                     if data.get("choices"):
-                        return data["choices"][0]["message"]["content"]
+                        message = data["choices"][0].get("message", {})
+                        native_tools = message.get("tool_calls") or []
+                        if native_tools:
+                            return self._tool_envelope(native_tools)
+                        return message.get("content") or ""
                     return f"Error: Command Code API returned unexpected payload: {data}"
                 return (
                     f"Error: Command Code API returned {response.status_code}. "
@@ -134,6 +167,7 @@ class CommandCodeProvider(NexusBaseProvider):
             deadline = time.time() + int(os.getenv("NEXUS_STREAM_DEADLINE", "120"))
             payload = {"model": model_name, "messages": msgs, "stream": True}
             self.headers["Authorization"] = f"Bearer {self.api_key}"
+            self._add_tool_payload(payload, kwargs)
             try:
                 response = self.session.post(
                     self.endpoint,
@@ -148,6 +182,7 @@ class CommandCodeProvider(NexusBaseProvider):
                         f"{response.text[:500]}"
                     )
                     return
+                streamed_tool_calls = {}
                 for line in response.iter_lines():
                     if time.time() >= deadline:
                         yield "\nError in stream: Command Code stream deadline exceeded"
@@ -159,16 +194,27 @@ class CommandCodeProvider(NexusBaseProvider):
                         continue
                     data_str = decoded[6:].strip()
                     if data_str == "[DONE]":
-                        return
+                        break
                     try:
                         chunk = json.loads(data_str)
                         choices = chunk.get("choices", [])
                         if choices:
-                            content = choices[0].get("delta", {}).get("content", "")
+                            delta = choices[0].get("delta", {})
+                            for tool_call in delta.get("tool_calls", []) or []:
+                                index = tool_call.get("index", 0)
+                                current = streamed_tool_calls.setdefault(index, {
+                                    "function": {"name": "", "arguments": ""}
+                                })
+                                function = tool_call.get("function", {}) or {}
+                                current["function"]["name"] += str(function.get("name") or "")
+                                current["function"]["arguments"] += str(function.get("arguments") or "")
+                            content = delta.get("content", "")
                             if content:
                                 yield content
                     except (json.JSONDecodeError, KeyError, IndexError):
                         continue
+                if streamed_tool_calls:
+                    yield self._tool_envelope(list(streamed_tool_calls.values()))
                 return
             except Exception as e:
                 yield f"\nError in Command Code stream: {str(e)}"

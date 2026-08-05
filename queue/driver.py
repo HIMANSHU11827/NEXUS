@@ -1,7 +1,7 @@
 """Always-on 24/7 task driver for NEXUS.
 
 Leases tasks from the durable SQLite queue (``queue.store.TaskQueue``) and runs
-each one through ``orchestrators.loop.NexusLoop._full_loop``, draining every
+each one through ``orchestrators.NexusLoop``, draining every
 event the loop emits.
 
 Standalone usage
@@ -62,6 +62,7 @@ class QueueDriver:
         lease_timeout: int = DEFAULT_LEASE_TIMEOUT,
         requeue_after: float = DEFAULT_REQUEUE_AFTER,
         db_path: Optional[str] = None,
+        mission_runner: Any = None,
     ) -> None:
         self.kernel = kernel
         self.root = _resolve_root(kernel)
@@ -71,22 +72,29 @@ class QueueDriver:
         self.lease_timeout = int(lease_timeout)
         self.requeue_after = float(requeue_after)
 
+        # Long-horizon mission runner (queue/mission.py). When present, the
+        # driver reconciles each task outcome back into its mission ledger and
+        # advances active missions (enqueues the next milestone) whenever the
+        # queue goes idle — so an epic goal keeps producing work 24/7 by itself.
+        self.mission_runner = mission_runner
+
         self._stopping = False
         self._tasks: List[asyncio.Task] = []
         self._active = 0                 # tasks currently mid-execution
         self._last_reap = 0.0
+        self._startup_reap_done = False  # crash-recovery sweep runs once at boot
         self.stats = {"completed": 0, "failed": 0, "leased": 0}
 
     # ------------------------------------------------------------------ #
     # loop construction
     # ------------------------------------------------------------------ #
-    def _build_loop(self):
+    def _build_loop(self, session_id: str = "default"):
         """Return a NexusLoop instance, preferring the kernel's own."""
         loop_obj = getattr(self.kernel, "loop", None)
-        if loop_obj is not None and hasattr(loop_obj, "_full_loop"):
+        if loop_obj is not None and hasattr(loop_obj, "stream_run"):
             return loop_obj
-        from orchestrators.loop import NexusLoop  # local import: heavy module
-        return NexusLoop(root_dir=self.root)
+        from orchestrators import NexusLoop  # V5 loop
+        return NexusLoop(root_dir=self.root, session_id=session_id or "default")
 
     # ------------------------------------------------------------------ #
     # single task execution
@@ -107,27 +115,122 @@ class QueueDriver:
         if payload.get("max_tokens"):
             kwargs["max_tokens"] = payload["max_tokens"]
 
-        loop_obj = self._build_loop()
+        meta = payload.get("meta") or {}
+        session_id = str(meta.get("session_id") or task.get("session_id") or "default")
+        loop_obj = self._build_loop(session_id=session_id)
 
         events = 0
         last_text = ""
-        async for event in loop_obj._full_loop(task_desc, **kwargs):
+        done_data: Dict[str, Any] = {}
+        # NexusLoopV5 exposes one canonical streaming entrypoint.  Keep the
+        # queue driver on that path so queued work has the same tool registry,
+        # memory, events, and truthful success contract as GUI chat.
+        async for event in loop_obj.stream_run(task_desc, **kwargs):
             events += 1
             if isinstance(event, dict):
-                for key in ("summary", "content", "text", "message", "title"):
-                    val = event.get(key)
+                candidates = [event]
+                if isinstance(event.get("data"), dict):
+                    candidates.append(event["data"])
+                for key in ("summary", "content", "text", "message", "title", "response"):
+                    val = next(
+                        (candidate.get(key) for candidate in candidates
+                         if isinstance(candidate.get(key), str) and candidate.get(key).strip()),
+                        None,
+                    )
                     if isinstance(val, str) and val.strip():
                         last_text = val
                         break
+                if event.get("type") == "done" and isinstance(event.get("data"), dict):
+                    done_data = event["data"]
+        if done_data and not bool(done_data.get("success")):
+            detail = str(done_data.get("error") or done_data.get("response") or "task did not complete successfully")
+            raise RuntimeError(detail)
         summary = last_text or f"completed with {events} events"
         return summary[:MAX_SUMMARY_CHARS]
 
     # ------------------------------------------------------------------ #
+    # lease renewal heartbeat
+    # ------------------------------------------------------------------ #
+    async def _run_with_heartbeat(
+        self,
+        task: Dict[str, Any],
+        task_id: int,
+        lease_token: Optional[str],
+        leased_at: float,
+    ) -> str:
+        """Run ``run_task`` while heart-beating its lease.
+
+        Once ``lease_timeout / 2`` has elapsed the worker renews the lease via
+        ``queue.ack_lease(task_id, lease_token, timeout_sec=lease_timeout)`` on
+        a small interval, pushing ``leased_until`` forward so a long-running
+        task is never reaped by the expired-lease sweep mid-execution. If the
+        token ever stops matching (lease lost to a reaper or another worker)
+        we log and let the token-checked ``complete``/``fail`` guards discard
+        the result. ``run_task`` always runs to completion — the heartbeat
+        never cancels the orchestrator mid-stream.
+        """
+        # Never renew toward an immediate-death lease even if lease_timeout was
+        # truncated below 1s (int() of a sub-second value truncates to 0).
+        ttl = float(max(1, int(self.lease_timeout)))
+        check_every = max(0.25, min(ttl / 4.0, 60.0))
+        first_renew_at = leased_at + ttl / 2.0
+
+        async def _heed() -> None:
+            while True:
+                await asyncio.sleep(check_every)
+                if time.time() < first_renew_at:
+                    continue
+                try:
+                    if not self.queue.ack_lease(
+                        task_id, lease_token, timeout_sec=ttl
+                    ):
+                        log.warning(
+                            "lease for task %s no longer owned by this worker; "
+                            "stemmed result will be discarded",
+                            task_id,
+                        )
+                        return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # heartbeat is best-effort
+                    log.debug("lease renewal hiccup for task %s: %s", task_id, exc)
+
+        main = asyncio.ensure_future(self.run_task(task))
+        heed = asyncio.ensure_future(_heed())
+        try:
+            return await main
+        finally:
+            heed.cancel()
+            await asyncio.gather(heed, return_exceptions=True)
+            if not main.done():
+                main.cancel()
+                await asyncio.gather(main, return_exceptions=True)
+
+    # ------------------------------------------------------------------ #
     # worker
     # ------------------------------------------------------------------ #
+    async def _startup_reap(self) -> None:
+        """Requeue leases orphaned by a crash before the loop spins up.
+
+        Run once per driver (first worker to start wins). Tasks leased by a
+        process that died are re-enqueued immediately instead of waiting up to
+        REAP_INTERVAL (60s) for the periodic sweep, so 24/7 recovery is fast.
+        """
+        if self._startup_reap_done:
+            return
+        try:
+            n = self.queue.requeue_expired_leases()
+            self._startup_reap_done = True
+            self._last_reap = time.time()  # don't double-reap on the next tick
+            if n:
+                log.info("startup sweep requeued %s expired lease(s)", n)
+        except Exception as exc:
+            log.warning("startup lease sweep failed: %s", exc)
+
     async def _worker(self, worker_id: str) -> None:
         log.info("queue worker %s started", worker_id)
         try:
+            await self._startup_reap()
             while not self._stopping:
                 await self._maybe_reap()
 
@@ -140,22 +243,39 @@ class QueueDriver:
                     task = None
 
                 if not task:
+                    # Queue empty: give active long-horizon missions a chance to
+                    # enqueue their next milestone so the system keeps producing
+                    # work on its own rather than idling forever.
+                    try:
+                        if self.mission_runner is not None:
+                            self.mission_runner.advance()
+                    except Exception as exc:
+                        log.warning("mission advance failed: %s", exc)
                     await asyncio.sleep(self.idle_sleep)
                     continue
 
                 task_id = task.get("id")
+                lease_token = task.get("lease_token")
                 self.stats["leased"] += 1
                 self._active += 1
                 try:
-                    summary = await self.run_task(task)
-                    self.queue.complete(task_id, summary)
+                    leased_at = time.time()
+                    summary = await self._run_with_heartbeat(
+                        task, task_id=task_id, lease_token=lease_token,
+                        leased_at=leased_at,
+                    )
+                    completed = self.queue.complete(task_id, summary, lease_token=lease_token)
+                    if not completed:
+                        raise RuntimeError("queue lease lost before completion; result discarded")
                     self.stats["completed"] += 1
                     log.info("task %s completed by %s", task_id, worker_id)
+                    self._reconcile_mission(task, "success")
                 except asyncio.CancelledError:
                     # graceful shutdown mid-task: release the lease for retry
                     try:
                         self.queue.fail(
-                            task_id, "driver shutdown", requeue_after=0
+                            task_id, "driver shutdown", requeue_after=0,
+                            lease_token=lease_token,
                         )
                     except Exception:
                         pass
@@ -163,9 +283,11 @@ class QueueDriver:
                 except Exception as exc:
                     self.stats["failed"] += 1
                     log.exception("task %s failed: %s", task_id, exc)
+                    self._reconcile_mission(task, "failure", detail=str(exc))
                     try:
                         self.queue.fail(
-                            task_id, str(exc), requeue_after=self.requeue_after
+                            task_id, str(exc), requeue_after=self.requeue_after,
+                            lease_token=lease_token,
                         )
                     except Exception:
                         log.exception("could not record failure for %s", task_id)
@@ -209,6 +331,15 @@ class QueueDriver:
     # convenience alias
     async def start(self) -> None:
         await self.run()
+
+    def _reconcile_mission(self, task: Dict[str, Any], outcome: str, detail: str = "") -> None:
+        """Feed a task outcome back into its mission ledger (best-effort)."""
+        if self.mission_runner is None:
+            return
+        try:
+            self.mission_runner.reconcile(task, outcome, detail=detail)
+        except Exception as exc:
+            log.warning("mission reconcile failed: %s", exc)
 
     def stop(self) -> None:
         """Ask workers to finish the current task and exit."""
@@ -259,8 +390,30 @@ def start_queue_driver(kernel: Any = None, workers: int = 1, **kw) -> asyncio.Ta
 
 
 async def run_forever(kernel: Any = None, workers: int = 1, **kw) -> None:
-    """Blocking async entrypoint with SIGINT/SIGTERM graceful shutdown."""
-    driver = QueueDriver(kernel=kernel, workers=workers, **kw)
+    """Blocking async entrypoint with SIGINT/SIGTERM graceful shutdown.
+
+    When ``missions=True`` (or ``NEXUS_MISSIONS=1``), a long-horizon
+    ``MissionRunner`` is attached so the driver re-hydrates active missions on
+    startup, advances them whenever the queue idles, and reconciles each task
+    outcome back into the mission ledger — one epic goal keeps producing work
+    24/7, survives restarts, and never abandons its goal.
+    """
+    missions_enabled = bool(
+        kw.pop("missions", False) or os.environ.get("NEXUS_MISSIONS", "") not in ("", "0")
+    )
+    boot_root = kw.pop("root", None)  # QueueDriver resolves root itself
+    mission_runner = None
+    if missions_enabled:
+        try:
+            from .mission import MissionRunner
+            mission_runner = MissionRunner(root=boot_root)
+            requeued = mission_runner.hydrate_active()
+            if requeued:
+                log.info("mission recovery requeued %s pending milestone(s)", requeued)
+        except Exception as exc:
+            log.warning("mission runner unavailable (%s); driving queue only", exc)
+
+    driver = QueueDriver(kernel=kernel, workers=workers, mission_runner=mission_runner, **kw)
     loop = asyncio.get_event_loop()
     stop_evt = asyncio.Event()
 

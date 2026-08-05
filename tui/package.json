@@ -6,7 +6,7 @@
   "scripts": {
     "start": "npx tsx nexus-tui.tsx",
     "build": "tsc --noEmit",
-    "test": "tsx choice-question.test.ts && tsx terminal-markdown.test.ts && tsx startup-session.test.ts && tsx sse-parser.test.ts"
+    "test": "tsx modularization.test.ts && tsx choice-question.test.ts && tsx terminal-markdown.test.ts && tsx startup-session.test.ts && tsx sse-parser.test.ts && tsx live-agent-state.test.ts && tsx tool-call-state.test.ts && tsx v3-smoke.test.ts"
   },
   "dependencies": {
     "ink": "^7.0.1",

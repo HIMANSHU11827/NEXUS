@@ -102,3 +102,20 @@ def test_partial_stream_failure_does_not_mix_provider_answers():
     assert result[0] == "partial"
     assert result[1].startswith("[PROVIDER_ERROR]: connection lost")
     assert "hello" not in result
+
+
+def test_offline_local_failure_is_clear_and_does_not_claim_remote_fallback():
+    router = object.__new__(NexusMoERouter)
+    router.factory = _Factory()
+    router.factory.providers["lm_studio"] = _Provider(["Error: LM Studio not reachable"])
+    router.factory.offline_mode = lambda: True
+    router.factory.next_provider_fallback = lambda _provider: None
+    router.provider_override = "lm_studio"
+    router.profile_override = ""
+    router._load_task_routing = lambda: {}
+
+    result = list(router.stream_generate([{"role": "user", "content": "hello"}]))
+
+    assert result == [
+        "[PROVIDER_ERROR]: LM Studio is not reachable. Start the local server and load a model, then retry."
+    ]

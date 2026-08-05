@@ -41,6 +41,34 @@ class OpenRouterProvider(NexusBaseProvider):
     def configure_thinking(self, enabled: bool):
         self.thinking = enabled
 
+    @staticmethod
+    def _tool_envelope(tool_calls) -> str:
+        """Convert OpenAI-compatible native calls to NEXUS's parser format."""
+        envelopes = []
+        for call in tool_calls or []:
+            function = call.get("function", {}) if isinstance(call, dict) else {}
+            name = str(function.get("name") or "").strip()
+            if not name:
+                continue
+            arguments = function.get("arguments", {})
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments) if arguments.strip() else {}
+                except json.JSONDecodeError:
+                    arguments = {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            envelopes.append(f"<function={name}>{json.dumps(arguments, ensure_ascii=False)}")
+        return "\n".join(envelopes)
+
+    @staticmethod
+    def _add_tool_payload(payload: dict, kwargs: dict) -> None:
+        """Preserve native tool calling when the orchestrator supplies schemas."""
+        if kwargs.get("tools"):
+            payload["tools"] = kwargs["tools"]
+        if kwargs.get("tool_choice"):
+            payload["tool_choice"] = kwargs["tool_choice"]
+
     def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         if not self.validate_api_key():
             return "Error: OpenRouter API key is missing or invalid. Set OPENROUTER_API_KEY to use openrouter/free."
@@ -53,6 +81,7 @@ class OpenRouterProvider(NexusBaseProvider):
         
         for i, model_name in enumerate(models_to_try):
             payload = {"model": model_name, "messages": msgs}
+            self._add_tool_payload(payload, kwargs)
             if self.thinking:
                 payload["thinking"] = {}
             try:
@@ -60,7 +89,11 @@ class OpenRouterProvider(NexusBaseProvider):
                 if response.status_code == 200:
                     data = response.json()
                     if "choices" in data and len(data["choices"]) > 0:
-                        return data["choices"][0]["message"]["content"]
+                        message = data["choices"][0].get("message", {})
+                        native_tools = message.get("tool_calls") or []
+                        if native_tools:
+                            return self._tool_envelope(native_tools)
+                        return message.get("content") or ""
                     continue
                 
                 if response.status_code in (408, 429, 500, 502, 503, 504) and i < len(models_to_try) - 1:
@@ -93,6 +126,7 @@ class OpenRouterProvider(NexusBaseProvider):
                 yield "Error in stream: OpenRouter stream deadline exceeded"
                 return
             payload = {"model": model_name, "messages": msgs, "stream": True}
+            self._add_tool_payload(payload, kwargs)
             if self.thinking:
                 payload["thinking"] = {}
             try:
@@ -110,6 +144,7 @@ class OpenRouterProvider(NexusBaseProvider):
                         pass
                     first_token_deadline = time.time() + timeout
                     has_received_token = False
+                    streamed_tool_calls = {}
                     for line in response.iter_lines():
                         if time.time() >= deadline:
                             yield "Error in stream: OpenRouter stream deadline exceeded"
@@ -126,14 +161,31 @@ class OpenRouterProvider(NexusBaseProvider):
                                     choices = chunk.get("choices", [])
                                     if choices:
                                         has_received_token = True
-                                        content = choices[0].get("delta", {}).get("content", "")
+                                        delta = choices[0].get("delta", {})
+                                        for tool_call in delta.get("tool_calls", []) or []:
+                                            index = tool_call.get("index", 0)
+                                            current = streamed_tool_calls.setdefault(index, {
+                                                "function": {"name": "", "arguments": ""}
+                                            })
+                                            function = tool_call.get("function", {}) or {}
+                                            current["function"]["name"] += str(function.get("name") or "")
+                                            current["function"]["arguments"] += str(function.get("arguments") or "")
+                                        content = delta.get("content", "")
                                         if content: yield content
                                 except (json.JSONDecodeError, KeyError, IndexError):
                                     continue
+                    if streamed_tool_calls:
+                        yield self._tool_envelope(list(streamed_tool_calls.values()))
                     return # Success
                 
                 if i < len(models_to_try) - 1:
-                    yield f"\n[MESH_RIPPLE]: '{model_name}' returned status {response.status_code}. Switching to '{models_to_try[i+1]}'...\n"
+                    # Retry diagnostics belong in logs, never in the model
+                    # stream.  Streaming them makes the UI render internal
+                    # router chatter as if it were the assistant's answer.
+                    logger.warning(
+                        "[MESH_RIPPLE]: Model '%s' returned %s. Retrying '%s'.",
+                        model_name, response.status_code, models_to_try[i + 1],
+                    )
                     continue
                 
                 yield (
@@ -143,7 +195,10 @@ class OpenRouterProvider(NexusBaseProvider):
                 return
             except Exception as e:
                 if i < len(models_to_try) - 1:
-                    yield f"\n[MESH_RIPPLE]: '{model_name}' failed ({redact_secrets(e)[:200]}). Switching to '{models_to_try[i+1]}'...\n"
+                    logger.warning(
+                        "[MESH_RIPPLE]: Model '%s' failed (%s). Retrying '%s'.",
+                        model_name, redact_secrets(e)[:200], models_to_try[i + 1],
+                    )
                     continue
                 yield f"Error in stream: {redact_secrets(e)[:500]}"
                 return

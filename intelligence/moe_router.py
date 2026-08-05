@@ -72,6 +72,17 @@ class NexusMoERouter:
             if m.get("role") == "user":
                 text = (m.get("content") or "").lower()
                 break
+        # Keyword classifier first (no embeddings needed): score each routing
+        # key by keyword overlap on the prompt (providers/model_bench.py). The
+        # legacy substring scan below stays as the true fallback so unannotated
+        # routing tables keep their exact behavior.
+        try:
+            from providers import model_bench
+            keyword_task = model_bench.classify_task(text, candidates=list(task_cfg))
+            if keyword_task:
+                return dict(task_cfg.get(keyword_task, {}))
+        except Exception:
+            logger.debug("intelligence/moe_router.py: keyword classifier unavailable; using substring match", exc_info=True)
         # Pick the task whose key appears in the prompt (longest/most-specific match)
         matched = None
         for task, c in task_cfg.items():
@@ -81,31 +92,85 @@ class NexusMoERouter:
         chosen = matched or next(iter(task_cfg))
         return dict(task_cfg.get(chosen, {}))
 
+    @staticmethod
+    def _preference_tier(prefs: Optional[dict] = None) -> str:
+        """Map caller preference kwargs (preferred/latency_tier/cost_tier) to
+        a routing tier. Optional; defaults to the NEXUS_HEAVY_MODE/env policy."""
+        from providers import model_bench
+        return model_bench.resolve_tier(
+            preferred=(prefs or {}).get("preferred"),
+            latency_tier=(prefs or {}).get("latency_tier"),
+            cost_tier=(prefs or {}).get("cost_tier"),
+        )
+
+    def _ranked_primary(self, messages: List[Dict[str, str]], prefs: Optional[dict] = None) -> str:
+        """Task-aware primary provider pick among the configured fallback chain.
+
+        Ranks the chain by per-task benchmark score with latency/cost hard
+        filters (providers/model_bench.py). Returns "" when ranking is not
+        usable so callers keep their exact legacy default-provider behavior.
+        """
+        try:
+            from providers import model_bench
+            text = " ".join(
+                str(m.get("content", "")) for m in (messages or [])
+                if isinstance(m.get("content"), str)
+            )
+            task = model_bench.classify_task(text)
+            if not task:
+                return ""
+            loader = getattr(self.factory, "loader", None)
+            cfg = loader.get("provider", {}) if loader is not None else {}
+            if not isinstance(cfg, dict):
+                return ""
+            chain = cfg.get("fallback_chain") or []
+            if not chain:
+                return ""
+            ranked = model_bench.rank_models(
+                task,
+                [self._normalize_provider_id(c) for c in chain],
+                tier=self._preference_tier(prefs),
+            )
+            return self._normalize_provider_id(ranked[0]) if ranked else ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _normalize_provider_id(provider: Any) -> str:
+        """Canonicalize provider aliases at the routing boundary."""
+        value = str(provider or "").strip().lower().replace("-", "_").replace(" ", "_")
+        return {"lmstudio": "lm_studio", "lm__studio": "lm_studio"}.get(value, value)
+
     def set_override(self, provider: str, profile: Optional[str] = None):
-        self.provider_override = provider
-        os.environ["NEXUS_PROVIDER"] = provider
+        canonical = self._normalize_provider_id(provider)
+        self.provider_override = canonical
+        os.environ["NEXUS_PROVIDER"] = canonical
         if profile:
             self.profile_override = profile
 
-    def _get_provider_name(self) -> str:
+    def _get_provider_name(self, messages: Optional[List[Dict[str, str]]] = None, prefs: Optional[dict] = None) -> str:
         if self.provider_override:
-            return self.provider_override
-        task_cfg = self._load_task_routing()
-        for c in task_cfg.values():
-            if isinstance(c, dict) and c.get("provider"):
-                return c["provider"]
+            return self._normalize_provider_id(self.provider_override)
+        matched = self._get_task_config(messages or []) if messages else {}
+        if matched.get("provider"):
+            return self._normalize_provider_id(matched["provider"])
+        # Task-aware selection before the configured default: rank the fallback
+        # chain by benchmark quality + latency/cost hard limits. On any failure
+        # this returns "" and we keep the legacy default-provider behavior.
+        ranked = self._ranked_primary(messages or [], prefs)
+        if ranked:
+            return self._normalize_provider_id(ranked)
         provider_cfg = self.factory.loader.get("provider", {})
         if isinstance(provider_cfg, dict):
-            return provider_cfg.get("default_provider", "openai")
+            return self._normalize_provider_id(provider_cfg.get("default_provider", "openai"))
         return "openai"
 
-    def _get_profile_name(self) -> Optional[str]:
+    def _get_profile_name(self, messages: Optional[List[Dict[str, str]]] = None) -> Optional[str]:
         if self.profile_override:
             return self.profile_override
-        task_cfg = self._load_task_routing()
-        for c in task_cfg.values():
-            if isinstance(c, dict) and c.get("profile"):
-                return c["profile"]
+        matched = self._get_task_config(messages or []) if messages else {}
+        if matched.get("profile"):
+            return str(matched["profile"])
         return None
 
     def _is_quota_error(self, error: str) -> bool:
@@ -126,6 +191,14 @@ class NexusMoERouter:
 
     def _resolve_with_auto_fallback(self, provider_name: str, profile_name: Optional[str] = None, attempt: int = 0) -> Any:
         if attempt > 3:
+            return None
+        provider_name = self._normalize_provider_id(provider_name)
+        offline = bool(getattr(self.factory, "offline_mode", lambda: False)())
+        local_name = getattr(self.factory, "_is_local_provider_name", None)
+        is_local = bool(local_name(provider_name)) if callable(local_name) else str(provider_name).lower() in {
+            "lm_studio", "lm-studio", "ollama", "local"
+        }
+        if offline and not is_local:
             return None
         provider = self.factory.get_provider_by_name("cloud", provider_name, profile=profile_name)
         if hasattr(provider, "_fallback_attempt"):
@@ -169,8 +242,17 @@ class NexusMoERouter:
             return None, str(e)
 
     def stream_generate(self, messages: List[Dict[str, str]], **kwargs):
-        provider_name = str(kwargs.pop("provider", "") or self._get_provider_name())
-        profile_name = kwargs.pop("profile", None) or self._get_profile_name()
+        # Optional routing-preference hints (preferred/latency_tier/cost_tier)
+        # tune the task-aware ranking tiers; they never reach the provider.
+        routing_prefs = {}
+        for _key in ("preferred", "latency_tier", "cost_tier"):
+            _value = kwargs.pop(_key, None)
+            if _value:
+                routing_prefs[_key] = _value
+        explicit_provider = str(kwargs.pop("provider", "") or "").strip()
+        explicit_profile = kwargs.pop("profile", None)
+        provider_name = self._normalize_provider_id(explicit_provider) if explicit_provider else self._get_provider_name(messages, routing_prefs)
+        profile_name = explicit_profile or self._get_profile_name(messages)
         model_override = str(kwargs.pop("model", "") or "")
         attempted_providers = set()
         attempted_profiles = set()
@@ -179,6 +261,12 @@ class NexusMoERouter:
         for attempt in range(8):
             provider = self._resolve_with_auto_fallback(provider_name, profile_name)
             if provider is None:
+                logger.error(
+                    "[PROVIDER_RESOLVE_FAILED] provider=%s profile=%s attempt=%s",
+                    provider_name,
+                    profile_name or "",
+                    attempt,
+                )
                 break
             self._apply_task_config(provider, messages)
             if model_override and hasattr(provider, "model"):
@@ -187,10 +275,14 @@ class NexusMoERouter:
             saw_chunk = False
             error_probe = ""
             try:
+                # Do not serialize unset optional fields (notably
+                # ``max_tokens=None``). Some local OpenAI-compatible servers
+                # reject or stall on explicit JSON nulls.
+                call_kwargs = {key: value for key, value in kwargs.items() if value is not None}
                 chunk_iter = (
-                    provider.stream_chat(messages, **kwargs)
+                    provider.stream_chat(messages, **call_kwargs)
                     if hasattr(provider, "stream_chat")
-                    else provider.stream_generate(messages=messages, **kwargs)
+                    else provider.stream_generate(messages=messages, **call_kwargs)
                 )
                 for chunk in chunk_iter:
                     text = str(chunk or "")
@@ -248,8 +340,24 @@ class NexusMoERouter:
 
             break
 
-        logger.error(f"[FALLBACK_EXHAUSTED] All providers/profiles failed for: {provider_name}")
-        yield f"[PROVIDER_ERROR]: All providers unavailable. Last error: {error}"
+        # Preserve the actual redacted provider failure for diagnosis. The UI
+        # should remain concise, but silently collapsing every failure into
+        # "provider unavailable" made valid credentials and HTTP errors
+        # indistinguishable.
+        from providers.reliability import redact_secrets
+        logger.error(
+            "[FALLBACK_EXHAUSTED] All providers/profiles failed for %s; last_error=%s",
+            provider_name,
+            redact_secrets(error or "no provider response"),
+        )
+        offline = bool(getattr(self.factory, "offline_mode", lambda: False)())
+        if offline and provider_name in {"lm_studio", "lm-studio", "ollama", "local"}:
+            detail = "LM Studio is not reachable. Start the local server and load a model, then retry."
+        elif offline:
+            detail = "Offline mode is enabled; remote providers are disabled."
+        else:
+            detail = f"All providers unavailable. Last error: {error}"
+        yield f"[PROVIDER_ERROR]: {detail}"
 
     def chat(self, messages: List[Dict[str, str]], **kwargs) -> str:
         parts = list(self.stream_generate(messages, **kwargs))

@@ -53,6 +53,8 @@ class SelfImprovementLifecycle(LifecycleManager):
         self._cycle_info: Dict[str, Dict[str, Any]] = {}
         self._versions: Dict[str, List[str]] = {}
         self._cycle_counter = 0
+        self._persist_key = "self_improvement"
+        self._restore_persisted()
 
     def _to_ls(self, state_str: str) -> LifecycleState:
         mapping = {
@@ -80,6 +82,7 @@ class SelfImprovementLifecycle(LifecycleManager):
         }
         self._versions[cycle_id] = [default_version()]
         self.register_entity(cycle_id, LifecycleState.CREATED)
+        self._persist()
         return cycle_id
 
     def improve_cycle(self, cycle_id: str, is_major: bool = False) -> str:
@@ -91,6 +94,7 @@ class SelfImprovementLifecycle(LifecycleManager):
         self._cycle_info[cycle_id]["version"] = new_ver
         self._versions.setdefault(cycle_id, []).append(new_ver)
         kind = "major" if is_major else "minor"
+        self._persist()
         return f"Cycle '{cycle_id}' {kind} improved: v{current} → v{new_ver}"
 
     def get_version(self, cycle_id: str) -> str:
@@ -104,6 +108,7 @@ class SelfImprovementLifecycle(LifecycleManager):
             return False
         self._cycle_states[cycle_id] = "analyzing"
         self._cycle_info[cycle_id]["stage"] = "analyzing"
+        self._persist()
         return True
 
     def learn(self, cycle_id: str) -> bool:
@@ -111,6 +116,7 @@ class SelfImprovementLifecycle(LifecycleManager):
             return False
         self._cycle_states[cycle_id] = "learning"
         self._cycle_info[cycle_id]["stage"] = "learning"
+        self._persist()
         return True
 
     def apply(self, cycle_id: str, changes: List[str]) -> bool:
@@ -119,6 +125,7 @@ class SelfImprovementLifecycle(LifecycleManager):
         self._cycle_states[cycle_id] = "applying"
         self._cycle_info[cycle_id]["stage"] = "applying"
         self._cycle_info[cycle_id]["changes"] = changes
+        self._persist()
         return True
 
     def evaluate(self, cycle_id: str, score: float) -> bool:
@@ -127,6 +134,7 @@ class SelfImprovementLifecycle(LifecycleManager):
         self._cycle_states[cycle_id] = "evaluating"
         self._cycle_info[cycle_id]["stage"] = "evaluating"
         self._cycle_info[cycle_id]["score"] = score
+        self._persist()
         return True
 
     def integrate(self, cycle_id: str) -> bool:
@@ -135,6 +143,7 @@ class SelfImprovementLifecycle(LifecycleManager):
         self._cycle_states[cycle_id] = "integrated"
         self._cycle_info[cycle_id]["stage"] = "integrated"
         self._cycle_info[cycle_id]["integrated"] = datetime.now().isoformat()
+        self._persist()
         return True
 
     def rollback(self, cycle_id: str) -> bool:
@@ -142,6 +151,7 @@ class SelfImprovementLifecycle(LifecycleManager):
             return False
         self._cycle_states[cycle_id] = "rolled_back"
         self._cycle_info[cycle_id]["stage"] = "rolled_back"
+        self._persist()
         return True
 
     def cancel(self, cycle_id: str) -> bool:
@@ -149,11 +159,13 @@ class SelfImprovementLifecycle(LifecycleManager):
             return False
         self._cycle_states[cycle_id] = "cancelled"
         self._cycle_info[cycle_id]["stage"] = "cancelled"
+        self._persist()
         return True
 
     def mark_error(self, cycle_id: str) -> bool:
         self._cycle_states[cycle_id] = "error"
         self._cycle_info[cycle_id]["stage"] = "error"
+        self._persist()
         return True
 
     def get_cycle_state(self, cycle_id: str) -> Optional[str]:
@@ -165,6 +177,22 @@ class SelfImprovementLifecycle(LifecycleManager):
     def get_active_cycles(self) -> List[str]:
         active_states = {"analyzing", "learning", "applying", "evaluating"}
         return [cid for cid, s in self._cycle_states.items() if s in active_states]
+
+    def _override_payload(self) -> Dict[str, Any]:
+        return {
+            "cycle_states": self._cycle_states,
+            "cycle_info": self._cycle_info,
+            "versions": self._versions,
+            "cycle_counter": self._cycle_counter,
+        }
+
+    def _apply_override_payload(self, payload: Dict[str, Any]) -> None:
+        self._cycle_states = payload.get("cycle_states", {}) or {}
+        self._cycle_info = payload.get("cycle_info", {}) or {}
+        self._versions = payload.get("versions", {}) or {}
+        counter = payload.get("cycle_counter")
+        if counter is not None:
+            self._cycle_counter = int(counter)
 
     def get_stats(self) -> Dict[str, Any]:
         states = {}

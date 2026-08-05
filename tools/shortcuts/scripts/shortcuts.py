@@ -20,10 +20,16 @@ class ShortcutsTool(BaseTool):
     async def execute(self, action: str = "list", path: str = "", pattern: str = "", **kwargs) -> ToolResult:
         try:
             action = (action or "list").strip().lower()
-            root = self.root_dir or os.getcwd()
-            target = os.path.join(root, path) if path and not os.path.isabs(path) else (path or root)
-            if not os.path.isabs(target) and not os.path.exists(target):
-                target = os.path.join(root, target)
+            root = os.path.abspath(self.root_dir or os.getcwd())
+            raw = os.path.join(root, path) if path and not os.path.isabs(path) else (path or root)
+            target = os.path.abspath(os.path.normpath(raw))
+            # Workspace containment: reject any target that escapes the root.
+            try:
+                outside = os.path.commonpath([root, target]) != root
+            except ValueError:
+                outside = True
+            if outside:
+                return ToolResult(success=False, error=f"Path traversal blocked: {path or '.'}")
 
             if action == "pwd":
                 return ToolResult(success=True, output=os.path.abspath(root))

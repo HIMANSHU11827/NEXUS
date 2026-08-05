@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 def _server_mocks():
     patches = [
         patch("dotenv.load_dotenv"),
-        patch("orchestrators.loop.NexusLoop"),
+        patch("orchestrators.NexusLoop"),
         patch("authentication.check_auth", return_value=MagicMock()),
         patch("authentication.is_public_path", return_value=True),
         patch("authentication.AuthUser"),
@@ -50,6 +50,76 @@ def test_server_chat_cancel_route_aborts_active_loop():
     assert payload["run_id"] == "turn-server-cancel"
     assert payload["event"]["type"] == "run.cancelled"
     _LOOPS.clear()
+
+
+def test_set_model_can_switch_to_an_enabled_named_profile(monkeypatch):
+    import server
+
+    class Profile:
+        model_id = "deepseek-v4-flash"
+        model = ""
+
+    class Store:
+        @staticmethod
+        def get_profile(provider, name):
+            return Profile() if (provider, name) == ("deepseek", "work") else None
+
+    monkeypatch.setattr("providers.profiles.load_profile_store", lambda: Store())
+    monkeypatch.setattr(server, "apply_runtime_to_all_loops", lambda: None)
+    server._RUNTIME_SETTINGS.update({"model": "", "provider": "", "profile": ""})
+
+    with TestClient(server.app) as client:
+        response = client.post("/api/model", json={"model": "Friendly work", "provider": "deepseek", "profile": "work"})
+
+    assert response.status_code == 200
+    assert response.json()["model"] == "deepseek-v4-flash"
+    assert response.json()["profile"] == "work"
+
+
+def test_set_model_rejects_an_unavailable_profile(monkeypatch):
+    import server
+
+    class Store:
+        @staticmethod
+        def get_profile(_provider, _name):
+            return None
+
+    monkeypatch.setattr("providers.profiles.load_profile_store", lambda: Store())
+    with TestClient(server.app) as client:
+        response = client.post("/api/model", json={"model": "Friendly", "provider": "deepseek", "profile": "disabled"})
+
+    assert response.status_code == 409
+    assert "unavailable or disabled" in response.json()["detail"]
+
+
+def test_saved_models_route_matches_gui_picker_contract(tmp_path, monkeypatch):
+    import server
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    provider_path = config_dir / "provider.yml"
+    provider_path.write_text(
+        "providers:\n  deepseek:\n    model: deepseek-chat\n  ollama:\n    model: llama3\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server, "_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(server.yaml, "safe_load", lambda _handle: {
+        "providers": {
+            "deepseek": {"model": "deepseek-chat"},
+            "ollama": {"model": "llama3"},
+        }
+    })
+
+    with TestClient(server.app) as client:
+        response = client.get("/models/saved")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "models": [
+            {"model": "deepseek-chat", "provider": "deepseek", "profile": "", "alias": "", "label": "deepseek: deepseek-chat"},
+            {"model": "llama3", "provider": "ollama", "profile": "", "alias": "", "label": "ollama: llama3"},
+        ]
+    }
 
 
 def test_server_chat_passes_turn_and_max_tokens_to_loop(monkeypatch):

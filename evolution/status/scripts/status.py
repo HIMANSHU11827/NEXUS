@@ -97,7 +97,7 @@ class EvolutionStatus:
         return {"count": len(items), "items": items}
 
     def _scan_memories(self) -> Dict:
-        memory_dir = os.path.join(self.root, "memory")
+        memory_dir = os.path.join(self.root, "data", "memory_forge")
         items = []
         if os.path.isdir(memory_dir):
             for entry in sorted(os.listdir(memory_dir)):

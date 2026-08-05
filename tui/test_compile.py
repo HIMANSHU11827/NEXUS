@@ -23,7 +23,7 @@ else:
 
 # Check python server/shell
 os.chdir("..")
-for f in ["server/__init__.py", "shell/__init__.py", "nexus/__init__.py"]:
+for f in ["server/__init__.py", "orchestrators/v5/runner.py", "nexus/__init__.py"]:
     print(f"Checking {f}...")
     result = subprocess.run([sys.executable, "-m", "py_compile", f], capture_output=True, text=True)
     if result.returncode == 0:

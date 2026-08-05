@@ -1,7 +1,7 @@
 """Runtime write-guard for NEXUS core source files.
 
 NEXUS must never rewrite its own runtime modules while running. A live process
-once corrupted ``orchestrators/loop.py`` at runtime (injected typo + duplicated
+once corrupted the retired loop at runtime (injected typo + duplicated
 lines). This module provides a cheap, monkey-patch-free guard that evolution /
 self-improvement call paths invoke before touching any file.
 
@@ -205,28 +205,28 @@ def protected_core_writes(context: str = "evolution"):
 
 
 def verify_core_integrity(root: str | None = None) -> bool:
-    """Startup check: orchestrators/loop.py parses and has no corruption marker."""
+    """Startup check: the canonical V5 core parses and is not corrupted."""
     import ast
 
     root = root or PROJECT_ROOT
-    loop_path = os.path.join(root, "orchestrators", "loop.py")
+    loop_path = os.path.join(root, "orchestrators", "v5", "core.py")
     if not os.path.isfile(loop_path):
-        logger.warning("[RUNTIME_GUARD] loop.py not found at %s", loop_path)
+        logger.warning("[RUNTIME_GUARD] V5 core not found at %s", loop_path)
         return False
     try:
         src = open(loop_path, "r", encoding="utf-8", errors="replace").read()
     except Exception as exc:
-        logger.error("[RUNTIME_GUARD] cannot read loop.py: %s", exc)
+        logger.error("[RUNTIME_GUARD] cannot read V5 core: %s", exc)
         return False
     if "getcworkspace" in src:
         logger.error(
-            "[RUNTIME_GUARD] CORRUPTION DETECTED in orchestrators/loop.py: "
+            "[RUNTIME_GUARD] CORRUPTION DETECTED in orchestrators/v5/core.py: "
             "'getcworkspace' marker present — core file was rewritten at runtime."
         )
         return False
     try:
         ast.parse(src)
     except SyntaxError as exc:
-        logger.error("[RUNTIME_GUARD] orchestrators/loop.py fails to parse: %s", exc)
+        logger.error("[RUNTIME_GUARD] orchestrators/v5/core.py fails to parse: %s", exc)
         return False
     return True

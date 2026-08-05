@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 def _server_mocks():
     patches = [
         patch("dotenv.load_dotenv"),
-        patch("orchestrators.loop.NexusLoop"),
+        patch("orchestrators.NexusLoop"),
         patch("authentication.check_auth", return_value=MagicMock()),
         patch("authentication.is_public_path", return_value=True),
         patch("authentication.AuthUser"),

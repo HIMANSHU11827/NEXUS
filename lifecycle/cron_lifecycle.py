@@ -50,6 +50,8 @@ class CronLifecycle(LifecycleManager):
         self._cron_info: Dict[str, Dict[str, Any]] = {}
         self._executions: Dict[str, List[Dict]] = {}
         self._versions: Dict[str, List[str]] = {}
+        self._persist_key = "cron"
+        self._restore_persisted()
 
     def _to_ls(self, state_str: str) -> LifecycleState:
         mapping = {
@@ -73,6 +75,7 @@ class CronLifecycle(LifecycleManager):
         self._versions[task_id] = [default_version()]
         self._executions[task_id] = []
         self.register_entity(task_id, LifecycleState.CREATED)
+        self._persist()
         return f"Cron task '{name}' v{default_version()} scheduled with '{cron_expr}'."
 
     def improve_task(self, task_id: str, is_major: bool = False) -> str:
@@ -84,6 +87,7 @@ class CronLifecycle(LifecycleManager):
         self._cron_info[task_id]["version"] = new_ver
         self._versions.setdefault(task_id, []).append(new_ver)
         kind = "major" if is_major else "minor"
+        self._persist()
         return f"Cron task '{self._cron_info[task_id]['name']}' {kind} improved: v{current} → v{new_ver}"
 
     def get_version(self, task_id: str) -> str:
@@ -99,6 +103,7 @@ class CronLifecycle(LifecycleManager):
         self._cron_info[task_id]["runs"] = self._cron_info[task_id].get("runs", 0) + 1
         self._cron_info[task_id]["last_run"] = datetime.now().isoformat()
         self._executions[task_id].append({"started": datetime.now().isoformat()})
+        self._persist()
         return True
 
     def complete_task(self, task_id: str) -> bool:
@@ -107,6 +112,7 @@ class CronLifecycle(LifecycleManager):
         self._cron_states[task_id] = "completed"
         if self._executions[task_id]:
             self._executions[task_id][-1]["completed"] = datetime.now().isoformat()
+        self._persist()
         return True
 
     def fail_task(self, task_id: str, error_msg: str = "") -> bool:
@@ -116,12 +122,14 @@ class CronLifecycle(LifecycleManager):
         if self._executions[task_id]:
             self._executions[task_id][-1]["failed"] = datetime.now().isoformat()
             self._executions[task_id][-1]["error"] = error_msg
+        self._persist()
         return True
 
     def cancel_task(self, task_id: str) -> bool:
         if self._cron_states.get(task_id) not in ("scheduled", "running", "failed"):
             return False
         self._cron_states[task_id] = "cancelled"
+        self._persist()
         return True
 
     def reschedule_task(self, task_id: str, new_expr: str) -> bool:
@@ -129,16 +137,19 @@ class CronLifecycle(LifecycleManager):
             return False
         self._cron_states[task_id] = "rescheduled"
         self._cron_info[task_id]["cron_expr"] = new_expr
+        self._persist()
         return True
 
     def mark_error(self, task_id: str) -> bool:
         self._cron_states[task_id] = "error"
+        self._persist()
         return True
 
     def archive(self, task_id: str) -> bool:
         if self._cron_states.get(task_id) not in ("completed", "failed"):
             return False
         self._cron_states[task_id] = "archived"
+        self._persist()
         return True
 
     def get_task_state(self, task_id: str) -> Optional[str]:
@@ -149,6 +160,20 @@ class CronLifecycle(LifecycleManager):
 
     def get_scheduled_tasks(self) -> List[str]:
         return [tid for tid, s in self._cron_states.items() if s in ("scheduled", "rescheduled")]
+
+    def _override_payload(self) -> Dict[str, Any]:
+        return {
+            "cron_states": self._cron_states,
+            "cron_info": self._cron_info,
+            "executions": self._executions,
+            "versions": self._versions,
+        }
+
+    def _apply_override_payload(self, payload: Dict[str, Any]) -> None:
+        self._cron_states = payload.get("cron_states", {}) or {}
+        self._cron_info = payload.get("cron_info", {}) or {}
+        self._executions = payload.get("executions", {}) or {}
+        self._versions = payload.get("versions", {}) or {}
 
     def get_stats(self) -> Dict[str, Any]:
         states = {}

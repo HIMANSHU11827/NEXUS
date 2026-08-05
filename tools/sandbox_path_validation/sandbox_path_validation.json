@@ -1,0 +1,10 @@
+{
+  "name": "sandbox_path_validation",
+  "version": "1.0.0",
+  "description": "NEXUS lacks a tool to validate/expand workspace-only sandbox paths, allowing external paths like C:\\Users\\himan\\Desktop\\NEXUS to be rejected without an actionable fallback.",
+  "defaults": {},
+  "permissions": {
+    "auto_approve": false
+  },
+  "created_at": 1785654622.420644
+}

@@ -33,6 +33,18 @@ class VoiceSettings:
     keep_models_loaded: bool = True
     assistant_timeout_seconds: float = 45.0
     require_wake_word: bool = False
+    # STT/VAD controls
+    stt_timeout_seconds: float = 30.0
+    vad_enabled: bool = True
+    # New enhanced settings
+    noise_suppression: bool = True
+    echo_cancellation: bool = False
+    gain_boost: float = 1.0
+    voice_activity_sensitivity: float = 0.5
+    auto_gain_control: bool = True
+    transcription_history_limit: int = 100
+    voice_profile: str = "default"
+    advanced_mode: bool = False
 
     @classmethod
     def from_config(cls, config: Any = None) -> "VoiceSettings":

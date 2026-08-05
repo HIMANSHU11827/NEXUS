@@ -4,12 +4,29 @@ With backwards compatibility for default, plan, bypass, and auto modes.
 """
 
 import fnmatch
+import json
+import os
 import re
 import time
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from utils.singleton import ThreadSafeSingleton
+
+# JSONL ledger under the user's NEXUS home: one line per decision, so the
+# in-memory ring (capped at 200) can be re-hydrated on the next process start
+# and the API decision endpoint sees prior sessions too.  The path is a module
+# constant so tests can redirect it; every write/read degrades to in-memory-only
+# on IO failure.
+_DECISION_LOG_DIR = os.path.join(os.path.expanduser("~"), ".nexus", "permissions")
+DECISIONS_LOG_FILE = os.path.join(_DECISION_LOG_DIR, "decisions.jsonl")
+
+# Per-agent allow/deny rules live in the NEXUS config dir.  Absent file == empty
+# rules; a malformed file degrades to empty rules, never an exception.
+_NEXUS_CONFIG_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config"
+)
+DEFAULT_AGENT_RULES_FILE = os.path.join(_NEXUS_CONFIG_DIR, "permission_agents.yml")
 
 
 class PermissionMode(Enum):
@@ -72,7 +89,13 @@ class PermissionSystem(ThreadSafeSingleton):
         self._pre_authorized_list: List[str] = [] # Whitelist for 'PRE_AUTHORIZED' mode
         self._decision_log: List[Dict[str, Any]] = []
         self._decision_log_limit = 200
+        # Per-agent allow/deny rules, keyed by agent_id. Loaded once from
+        # config/permission_agents.yml (empty when absent). Only consulted when
+        # check() is called with an explicit agent_id.
+        self.agent_rules: Dict[str, Dict[str, Any]] = {}
         self._setup_defaults()
+        self.agent_rules = self._load_agent_rules()
+        self._load_decision_history()
 
     def _setup_defaults(self):
         """Default safe permissions."""
@@ -84,6 +107,167 @@ class PermissionSystem(ThreadSafeSingleton):
         self._rules.append(PermissionRule("todo", "*", True))
         self._rules.append(PermissionRule("rag", "*", True))
         self._rules.append(PermissionRule("lsp", "*", True))
+        # Skill permissions - all skill operations allowed by default
+        self._rules.append(PermissionRule("skill_view", "*", True))
+        self._rules.append(PermissionRule("skills_list", "*", True))
+        self._rules.append(PermissionRule("skill_manage", "view", True))
+        self._rules.append(PermissionRule("skill_manage", "list", True))
+        self._rules.append(PermissionRule("skill_manage", "read", True))
+        self._rules.append(PermissionRule("skill_execute", "*", True))
+        # Skill mutations require explicit approval in restrictive modes
+        self._rules.append(PermissionRule("skill_manage", "write_file", True))
+        self._rules.append(PermissionRule("skill_manage", "delete", True))
+        self._rules.append(PermissionRule("skill_manage", "create", True))
+
+    # ── JSONL decision ledger ──────────────────────────────────────────────
+    def _load_decision_history(self) -> None:
+        """Rehydrate the in-memory ring from the JSONL ledger, best-effort.
+
+        Prior-session decisions are loaded first so they trail at the front of
+        the ring and new decisions are appended after them. Any IO or parse
+        failure degrades to an empty log (in-memory-only), never an exception.
+        """
+        try:
+            path = DECISIONS_LOG_FILE
+            if not os.path.isfile(path):
+                return
+            loaded: List[Dict[str, Any]] = []
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(entry, dict):
+                        loaded.append(entry)
+            if loaded:
+                self._decision_log = loaded
+                if len(self._decision_log) > self._decision_log_limit:
+                    del self._decision_log[
+                        : len(self._decision_log) - self._decision_log_limit
+                    ]
+        except Exception:
+            self._decision_log = []
+
+    def _persist_decision(self, decision: Dict[str, Any]) -> None:
+        """Append one decision to the JSONL ledger; never raises on IO errors.
+
+        A concurrent append failure or an unwritable home must not break the
+        permission decision itself, so the ledger degrades to in-memory-only.
+        """
+        try:
+            path = DECISIONS_LOG_FILE
+            directory = os.path.dirname(path)
+            if directory and not os.path.isdir(directory):
+                os.makedirs(directory, exist_ok=True)
+            line = json.dumps(decision, ensure_ascii=False, default=str)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except Exception:
+            pass
+
+    # ── Per-agent rule overlay ─────────────────────────────────────────────
+    def _default_agent_rules_path(self) -> str:
+        return DEFAULT_AGENT_RULES_FILE
+
+    def _load_agent_rules(self) -> Dict[str, Dict[str, Any]]:
+        """Load per-agent allow/deny rules from config/permission_agents.yml.
+
+        Expected shape (``agents`` key is optional):
+          agents:
+            name:
+              deny: ["bash", "deleting"]
+              allow: ["reading", "grep"]
+        Any missing or malformed file yields empty rules; never raises.
+        """
+        rules: Dict[str, Dict[str, Any]] = {}
+        try:
+            from yaml import safe_load
+        except Exception:
+            return rules
+        try:
+            path = self._default_agent_rules_path()
+            if not path or not os.path.isfile(path):
+                return rules
+            with open(path, "r", encoding="utf-8") as fh:
+                data = safe_load(fh) or {}
+            agents = data.get("agents", data) if isinstance(data, dict) else {}
+            for agent_id, spec in (agents or {}).items():
+                if isinstance(spec, dict):
+                    rules[str(agent_id)] = spec
+        except Exception:
+            rules = {}
+        return rules
+
+    def reload_agent_rules(self) -> None:
+        """Re-read config/permission_agents.yml into ``agent_rules``."""
+        try:
+            self.agent_rules = self._load_agent_rules()
+        except Exception:
+            self.agent_rules = {}
+
+    def get_agent_rules(self) -> Dict[str, Dict[str, Any]]:
+        return dict(self.agent_rules or {})
+
+    @staticmethod
+    def _agent_entry_matches(entry: Any, tool_name: str, action: str) -> bool:
+        """Match one per-agent rule entry against a tool call.
+
+        Accepts a bare pattern string (``"bash"`` or ``"deny:rm *"``) or a
+        dict ``{"tool": ..., "action": ...}``. Patterns use glob wildcards and
+        are matched case-insensitively against the tool name.
+        """
+        try:
+            tool = str(tool_name or "").lower()
+            act = str(action or "")
+            if isinstance(entry, str):
+                text = str(entry).strip()
+                if not text:
+                    return False
+                # "tool:action" form lets one entry pin both dimensions.
+                if ":" in text and not text.startswith(("C:/", "C:\\", "/")):
+                    tool_part, _, action_part = text.partition(":")
+                    return (
+                        fnmatch.fnmatch(tool, tool_part.strip().lower())
+                        and fnmatch.fnmatch(act.lower(), action_part.strip().lower())
+                    )
+                if "*" in text:
+                    return fnmatch.fnmatch(tool, text.lower())
+                return tool == text.lower()
+            if isinstance(entry, dict):
+                tool_part = str(entry.get("tool") or "").strip()
+                action_part = str(entry.get("action") or "*").strip() or "*"
+                if not tool_part:
+                    return False
+                return fnmatch.fnmatch(tool, tool_part.lower()) and fnmatch.fnmatch(
+                    act.lower(), action_part.lower()
+                )
+        except Exception:
+            return False
+        return False
+
+    def _agent_deny_reason(self, agent_id: str, tool_name: str, action: str) -> Optional[str]:
+        """Return a per-agent deny reason, or None when the agent may proceed.
+
+        A matching ``deny`` entry wins over the global allow list — an agent
+        that is barred from a tool stays barred no matter what the system-wide
+        rules permit. ``allow`` entries are loaded and exposed via
+        ``get_agent_rules()`` for per-agent capability introspection, but never
+        auto-grant what a global rule or mode denies.
+        """
+        try:
+            spec = self.agent_rules.get(str(agent_id))
+            if not isinstance(spec, dict):
+                return None
+            for entry in spec.get("deny") or []:
+                if self._agent_entry_matches(entry, tool_name, action):
+                    return f"Agent rule denies {tool_name} for {agent_id}."
+        except Exception:
+            return None
+        return None
 
     def set_mode(self, mode: PermissionMode):
         self.mode = mode
@@ -149,12 +333,16 @@ class PermissionSystem(ThreadSafeSingleton):
                 "granted": rule.granted,
             }
         if context:
-            for key in ("run_id", "turn_id", "session_id", "surface"):
+            for key in ("run_id", "turn_id", "session_id", "surface", "agent_id"):
                 if key in context:
                     decision[key] = str(context[key])
         self._decision_log.append(decision)
         if len(self._decision_log) > self._decision_log_limit:
             del self._decision_log[: len(self._decision_log) - self._decision_log_limit]
+        # Mirror every decision to the JSONL ledger (timestamp, provider/surface
+        # via context, action preview, grant, matched rule). IO failures degrade
+        # silently to in-memory-only.
+        self._persist_decision(decision)
         return PermissionResult(granted, reason, prompt, decision)
 
     def get_decision_log(self, limit: int = 50) -> List[Dict[str, Any]]:
@@ -162,6 +350,33 @@ class PermissionSystem(ThreadSafeSingleton):
         self._ensure_decision_log()
         safe_limit = max(1, min(int(limit or 50), self._decision_log_limit))
         return [dict(item) for item in self._decision_log[-safe_limit:]]
+
+    def record_approval(
+        self,
+        tool_name: str,
+        action: str,
+        *,
+        granted: bool,
+        session_id: str = "",
+    ) -> None:
+        """Record a human approval/denial verdict in the decision ledger.
+
+        The broker path is intentionally outside ``check()`` (a human answer,
+        not a policy evaluation), so ask-mode verdicts are logged here to keep
+        the JSONL ledger a complete audit of "decision then outcome". Never
+        raises; a ledger failure degrades to in-memory-only.
+        """
+        try:
+            self._result(
+                bool(granted),
+                "Approved by human" if granted else "Denied by human",
+                tool_name=tool_name,
+                action=action,
+                source="mode:human_approval",
+                context={"session_id": str(session_id)} if session_id else None,
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _safety_overlay(tool_name: str, action: str, mode=None) -> Optional[Dict[str, str]]:
@@ -270,9 +485,36 @@ class PermissionSystem(ThreadSafeSingleton):
         return None
 
     def check(
-        self, tool_name: str, action: str = "", context: Dict[str, Any] = None
+        self,
+        tool_name: str,
+        action: str = "",
+        context: Dict[str, Any] = None,
+        agent_id: Optional[str] = None,
     ) -> PermissionResult:
-        """Check if an operation is permitted under the current mode."""
+        """Check if an operation is permitted under the current mode.
+
+        ``agent_id`` is optional per-agent scoping: when provided, a matching
+        per-agent ``deny`` entry (config/permission_agents.yml) denies the tool
+        regardless of the global rules below. Behavior is unchanged when
+        ``agent_id`` is None.
+        """
+
+        # 0a. Per-agent overlay: an explicit per-agent deny wins over every
+        # global allow and even the safety overlay, so an agent barred from a
+        # tool can never smuggle it through a shared allow-list rule.
+        if agent_id:
+            agent_reason = self._agent_deny_reason(agent_id, tool_name, action)
+            if agent_reason is not None:
+                agent_context = dict(context or {})
+                agent_context.setdefault("agent_id", str(agent_id))
+                return self._result(
+                    False,
+                    agent_reason,
+                    tool_name=tool_name,
+                    action=action,
+                    source="agent:deny",
+                    context=agent_context,
+                )
 
         # 0. Persistent Safety overlay (independent of the legacy mode enum).
         overlay = self._safety_overlay(tool_name, action, mode=self.mode)

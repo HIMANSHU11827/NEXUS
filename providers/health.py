@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
-from providers.reliability import classify_failure, redact_secrets
+from providers.reliability import (
+    BreakerState,
+    CircuitBreaker,
+    classify_failure,
+    redact_secrets,
+)
 
 # A provider marked unhealthy is excluded from the mesh only for this long;
 # without a decay window a single transient failure banned it permanently.
@@ -102,7 +108,7 @@ class ProviderCapabilityRegistry:
         "deepseek": ProviderCapability(text=True, streaming=True, tool_calling=True, max_context=128000),
         "perplexity": ProviderCapability(text=True, streaming=True, tool_calling=False, max_context=128000),
         "ollama": ProviderCapability(text=True, streaming=True, local=True, max_context=32000),
-        "lm_studio": ProviderCapability(text=True, streaming=True, local=True, max_context=32000),
+        "lm_studio": ProviderCapability(text=True, streaming=True, local=True, tool_calling=True, max_context=32000),
         "llama_cpp": ProviderCapability(text=True, streaming=True, local=True, max_context=32000),
         "vlm": ProviderCapability(text=True, streaming=False, vision=True, max_context=128000),
     }
@@ -139,3 +145,94 @@ class ProviderCapabilityRegistry:
         else:
             viable.sort(key=lambda c: (self.get(c).local, -self.get(c).max_context))
         return viable
+
+
+class ComponentBreakerRegistry:
+    """Per-component circuit breakers for non-provider work.
+
+    Keyed by component name (``tool`` / ``plugin`` / ``mcp`` / ``gateway``, or
+    any operator-chosen namespace). A component opens after
+    ``failure_threshold`` consecutive failures and re-enters service through a
+    half-open probe after ``cooldown`` seconds (default 30s). Purely
+    in-memory, stdlib-only, thread-safe. ``tools`` is preseeded (empty) so tool
+    layers can attach state without a first-touch creation race.
+    """
+
+    DEFAULT_FAILURE_THRESHOLD = 3
+    DEFAULT_COOLDOWN = 30.0
+
+    def __init__(
+        self,
+        failure_threshold: int = DEFAULT_FAILURE_THRESHOLD,
+        cooldown: float = DEFAULT_COOLDOWN,
+        half_open_max_calls: int = 1,
+        success_threshold: int = 1,
+    ) -> None:
+        self.failure_threshold = max(1, int(failure_threshold))
+        self.cooldown = float(cooldown)
+        self.half_open_max_calls = max(1, int(half_open_max_calls))
+        self.success_threshold = max(1, int(success_threshold))
+        self._breakers: Dict[str, CircuitBreaker] = {}
+        self._lock = threading.RLock()
+        self._preseed()
+
+    def _new_breaker(self, name: str) -> CircuitBreaker:
+        return CircuitBreaker(
+            provider_id=name,
+            failure_threshold=self.failure_threshold,
+            cooldown=self.cooldown,
+            half_open_max_calls=self.half_open_max_calls,
+            success_threshold=self.success_threshold,
+        )
+
+    def _preseed(self) -> None:
+        """Warm empty registry key(s) without ever tripping any breaker."""
+        for name in ("tools",):
+            if name not in self._breakers:
+                self._breakers[name] = self._new_breaker(name)
+
+    def get(self, component: str) -> CircuitBreaker:
+        """Fetch the breaker for a component, creating it when first seen."""
+        key = str(component or "unknown")
+        with self._lock:
+            breaker = self._breakers.get(key)
+            if breaker is None:
+                breaker = self._new_breaker(key)
+                self._breakers[key] = breaker
+            return breaker
+
+    def record_success(self, component: str) -> None:
+        """Mark one successful call for a component (closes a half-open probe)."""
+        self.get(component).record_success()
+
+    def record_failure(self, component: str) -> None:
+        """Mark one failed call; opens the component at the failure threshold."""
+        self.get(component).record_failure()
+
+    def is_open(self, component: str) -> bool:
+        """True when the component is open or half-open (i.e. throttled)."""
+        return self.get(component).state is not BreakerState.CLOSED
+
+    def allows(self, component: str) -> bool:
+        """True when the component may accept a call right now."""
+        return self.get(component).allows()
+
+    def reset(self, component: Optional[str] = None) -> None:
+        """Reset one breaker, or every breaker when ``component`` is None."""
+        if component is None:
+            with self._lock:
+                for breaker in self._breakers.values():
+                    breaker.reset()
+        else:
+            self.get(component).reset()
+
+    def snapshot(self, component: Optional[str] = None) -> Dict[str, Any]:
+        """State of one (or every) component breaker for diagnostics."""
+        if component is None:
+            with self._lock:
+                return {name: b.snapshot() for name, b in self._breakers.items()}
+        return self.get(component).snapshot()
+
+
+component_breakers = ComponentBreakerRegistry()
+

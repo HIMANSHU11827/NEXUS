@@ -3,6 +3,7 @@ from __future__ import annotations
 __version__ = "2.0.0"
 import os
 import platform
+import re
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -13,6 +14,18 @@ from tools.nexus_tools.base_tool import BaseTool, ToolResult
 class SystemTool(BaseTool):
     name = "system"
     description = "Monitor system resources, audit configuration, and run diagnostics"
+
+    #: Env var names that look like credentials. Their VALUES are redacted from
+    #: diagnostics so secrets never reach tool output, logs, or the model.
+    _SECRET_ENV_RE = re.compile(r"(?i)(api[_-]?key|secret|token|password|passwd|"
+                                r"credential|auth|signing|client[_-]?secret|"
+                                r"access[_-]?(key|token)|private[_-]?key|session[_-]?secret)")
+
+    @classmethod
+    def _redact_env(cls, key: str, value: str) -> str:
+        if cls._SECRET_ENV_RE.search(key):
+            return "**<redacted>**"
+        return value
 
     async def execute(self, action: str, target: Optional[str] = None, **kwargs) -> ToolResult:
         try:
@@ -26,7 +39,9 @@ class SystemTool(BaseTool):
                 return ToolResult(success=True, output="\n".join(info))
 
             elif action == "env":
-                return ToolResult(success=True, output="\n".join(f"{k}={v}" for k, v in sorted(os.environ.items())))
+                # Redact credential-like values so diagnostics never leak secrets.
+                lines = [f"{k}={SystemTool._redact_env(k, v)}" for k, v in sorted(os.environ.items())]
+                return ToolResult(success=True, output="\n".join(lines))
 
             elif action == "audit":
                 root = Path(self.root_dir or ".")

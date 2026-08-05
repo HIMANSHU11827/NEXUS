@@ -7,7 +7,8 @@
   "params": {
     "path": {"type": "string", "description": "File path to edit", "required": true},
     "old_string": {"type": "string", "description": "Text to replace", "required": true},
-    "new_string": {"type": "string", "description": "Replacement text", "required": true}
+    "new_string": {"type": "string", "description": "Replacement text", "required": true},
+    "replace_all": {"type": "boolean", "description": "Replace every occurrence of old_string instead of just the first", "default": false}
   },
   "category": "filesystem"
 }

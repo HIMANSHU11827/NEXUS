@@ -98,12 +98,27 @@ class ModelRouter:
         else:
             logger.info("🌐 [GLOBAL_STATUS]: High-fidelity cloud mesh active. No training required.")
 
-    def set_override(self, provider_id: str):
+    def set_override(self, provider_id: str, profile: Optional[str] = None):
         """Forces the router to use a specific provider."""
-        new_provider = self.factory.get_provider_by_id(provider_id)
+        new_provider = self.factory.get_provider_by_name(
+            "cloud", provider_id, profile=profile or None
+        )
         if new_provider:
             self.provider = new_provider
-            logger.info(f"🧠 [ROUTER_OVERRIDE]: Brain switched to {provider_id}")
+            logger.info("🧠 [ROUTER_OVERRIDE]: Brain switched to %s", provider_id)
+
+    def _request_provider(self, provider_id: Optional[str], profile: Optional[str] = None):
+        """Resolve a request-local provider without mutating shared router state."""
+        requested = str(provider_id or "").strip()
+        if not requested:
+            return self.provider
+        try:
+            return self.factory.get_provider_by_name(
+                "cloud", requested, profile=str(profile or "").strip() or None
+            ) or self.provider
+        except Exception:
+            logger.warning("Request provider resolution failed for %s", requested, exc_info=True)
+            return self.provider
 
     def _get_required_tier(self, messages: List[Dict[str, str]]) -> str:
         """Classifies the task into an intelligence tier (1M to 1T+)."""
@@ -155,6 +170,11 @@ class ModelRouter:
             if system_prompt: messages.append({"role": "system", "content": system_prompt})
             if prompt: messages.append({"role": "user", "content": prompt})
 
+        requested_provider = kwargs.pop("provider", None)
+        requested_profile = kwargs.pop("profile", None)
+        routing_prefs = self._pop_routing_prefs(kwargs)
+        request_provider = self._request_provider(requested_provider, requested_profile)
+
         # 🏎️ [HYBRID_MODE]: Use MOA for maximum reasoning
         if self.mode == "HYBRID":
             logger.info("⚡ [HYBRID]: Activating MOA Intelligence Mesh...")
@@ -180,13 +200,13 @@ class ModelRouter:
                 logger.warning(f"Local fail: {e}")
 
         # Cloud/local mesh with capability-aware fallback.
-        fallback_mesh = self._fallback_mesh(messages=messages)
+        fallback_mesh = self._fallback_mesh(messages=messages, active_provider=request_provider, prefs=routing_prefs)
 
-        if self.provider:
-            provider_id = self._provider_id(self.provider)
+        if request_provider:
+            provider_id = self._provider_id(request_provider)
             try:
                 self.total_cloud_calls += 1
-                return self._invoke(self.provider, provider_id, messages, **kwargs)
+                return self._invoke(request_provider, provider_id, messages, **kwargs)
             except Exception as e:
                 logger.warning(
                     "Primary brain (%s) failed: %s",
@@ -206,6 +226,27 @@ class ModelRouter:
             getattr(provider, "_provider_id", "")
             or getattr(provider, "provider_name", "")
             or type(provider).__name__
+        )
+
+    @staticmethod
+    def _pop_routing_prefs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract optional latency/cost preference kwargs for task-aware
+        routing. Cleanly removed so providers never receive routing hints."""
+        prefs: Dict[str, Any] = {}
+        for _key in ("preferred", "latency_tier", "cost_tier"):
+            value = kwargs.pop(_key, None)
+            if value:
+                prefs[_key] = value
+        return prefs
+
+    @staticmethod
+    def _preference_tier(prefs: Optional[Dict[str, Any]] = None) -> str:
+        """Map routing-preference kwargs (+ env policy) to a tier name."""
+        from providers import model_bench
+        return model_bench.resolve_tier(
+            preferred=(prefs or {}).get("preferred"),
+            latency_tier=(prefs or {}).get("latency_tier"),
+            cost_tier=(prefs or {}).get("cost_tier"),
         )
 
     def _apply_model_limits(self, provider: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -262,8 +303,14 @@ class ModelRouter:
         self.health.mark_success(provider_id, (time.time() - start) * 1000)
         return result
 
-    def _fallback_mesh(self, messages: Optional[List[Dict[str, str]]] = None, *, streaming: bool = False) -> List[str]:
-        """Return provider IDs ordered by capability and recent health."""
+    def _fallback_mesh(self, messages: Optional[List[Dict[str, str]]] = None, *, streaming: bool = False, active_provider: Any = None, prefs: Optional[Dict[str, Any]] = None) -> List[str]:
+        """Return provider IDs ordered by task quality, capability and health.
+
+        When the prompt classifies into a known task, the viable providers are
+        ranked by per-task benchmark score with latency/cost hard filters
+        (providers/model_bench.py). Any failure in that path keeps the legacy
+        capability + recent-health ordering exactly as before.
+        """
         try:
             cfg = self.kernel.config.get("task_routing_auto", {})
             candidates = list(cfg.keys()) if isinstance(cfg, dict) else []
@@ -271,19 +318,46 @@ class ModelRouter:
             candidates = []
         if not candidates:
             candidates = ["openrouter", "gemini", "groq", "openai", "ollama", "lm_studio"]
-        active = getattr(self.provider, "provider_name", "")
+        active = getattr(active_provider or self.provider, "provider_name", "")
         ordered = [c for c in candidates if c != active]
         text = "\n".join(m.get("content", "") for m in messages or [])
         needs_vision = any(k in text.lower() for k in ["image", "screenshot", "vision", "multimodal", "os_", "ui_automation", "browser", "desktop"])
         prefer_local = self.mode == "LOCAL"
-        selected = self.capabilities.choose(
-            ordered,
-            self.health,
-            streaming=streaming,
-            vision=needs_vision,
-            prefer_local=prefer_local,
-        )
-        mesh = selected or ordered
+
+        # Task-aware quality ordering with latency/cost hard filters; skipped in
+        # LOCAL mode where the local-first policy must win.
+        ranked: List[str] = []
+        try:
+            from providers import model_bench
+            task = model_bench.classify_task(text)
+            if task and not prefer_local:
+                viable = [
+                    c for c in ordered
+                    if self.capabilities.supports(c, streaming=streaming, vision=needs_vision)
+                    and not self.health.is_degraded(c)
+                ]
+                if viable:
+                    ranked = model_bench.rank_models(
+                        task,
+                        viable,
+                        caps=self.model_capabilities,
+                        health=self.health,
+                        tier=self._preference_tier(prefs),
+                    )
+        except Exception:
+            logger.debug("ROUTER: task-aware mesh ranking skipped; using legacy ordering", exc_info=True)
+
+        if ranked:
+            mesh = ranked
+        else:
+            selected = self.capabilities.choose(
+                ordered,
+                self.health,
+                streaming=streaming,
+                vision=needs_vision,
+                prefer_local=prefer_local,
+            )
+            mesh = selected or ordered
         # Never dispatch to a provider whose breaker is open.
         allowed = [c for c in mesh if self.breakers.allows(c)]
         return allowed or [c for c in ordered if self.breakers.allows(c)]
@@ -334,6 +408,11 @@ class ModelRouter:
             if system_prompt: messages.append({"role": "system", "content": system_prompt})
             if prompt: messages.append({"role": "user", "content": prompt})
 
+        requested_provider = kwargs.pop("provider", None)
+        requested_profile = kwargs.pop("profile", None)
+        routing_prefs = self._pop_routing_prefs(kwargs)
+        request_provider = self._request_provider(requested_provider, requested_profile)
+
         if self.mode == "HYBRID":
             # MOA doesn't support streaming well in current impl, fallback to cloud for stream
             use_heavy = True
@@ -345,25 +424,25 @@ class ModelRouter:
             yield from self.kernel.local_brain.stream_generate(messages=messages)
             return
 
-        if self.provider:
+        if request_provider:
             self.total_cloud_calls += 1
             emitted_any = False
-            primary_id = self._provider_id(self.provider)
+            primary_id = self._provider_id(request_provider)
             breaker = self.breakers.get(primary_id)
             try:
                 start = time.time()
                 breaker.before_call()
-                if hasattr(self.provider, "validate_api_key") and not self.provider.validate_api_key():
+                if hasattr(request_provider, "validate_api_key") and not request_provider.validate_api_key():
                     raise RuntimeError("provider rejected credentials: missing or invalid api key")
-                stream_kwargs = self._apply_model_limits(self.provider, kwargs)
-                if hasattr(self.provider, "stream_generate"):
-                    for chunk in self.provider.stream_generate(messages=messages, **stream_kwargs):
+                stream_kwargs = self._apply_model_limits(request_provider, kwargs)
+                if hasattr(request_provider, "stream_generate"):
+                    for chunk in request_provider.stream_generate(messages=messages, **stream_kwargs):
                         if self._looks_like_provider_error(chunk):
                             raise RuntimeError(str(chunk))
                         emitted_any = True
                         yield chunk
                 else:
-                    result = self.provider.generate(messages=messages, **stream_kwargs)
+                    result = request_provider.generate(messages=messages, **stream_kwargs)
                     if self._looks_like_provider_error(result):
                         raise RuntimeError(str(result))
                     emitted_any = True
@@ -385,7 +464,7 @@ class ModelRouter:
                 if emitted_any:
                     yield f"[PROVIDER_ERROR]: {last_error}"
                     return
-                for fallback_id in self._fallback_mesh(messages=messages, streaming=True):
+                for fallback_id in self._fallback_mesh(messages=messages, streaming=True, active_provider=request_provider, prefs=routing_prefs):
                     fallback_emitted = False
                     fb_breaker = self.breakers.get(fallback_id)
                     if not fb_breaker.allows():

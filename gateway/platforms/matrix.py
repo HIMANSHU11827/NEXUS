@@ -80,20 +80,24 @@ class MatrixAdapter(BasePlatformAdapter):
             self._client = None
 
     async def _sync_loop(self):
-        """Continuously sync with Matrix homeserver."""
-        while True:
-            try:
-                resp = await self._client.sync(timeout=30000)
-                for room_id in resp.rooms.join:
-                    room = resp.rooms.join[room_id]
-                    for event in room.timeline.events:
-                        if isinstance(event, RoomMessageText):
-                            await self._on_room_message(room_id, event)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.debug(f"Matrix sync error: {e}")
-            await asyncio.sleep(1)
+        """Continuously sync with Matrix homeserver.
+
+        Wrapped in the shared :meth:`BasePlatformAdapter._guard_poll` reconnect
+        helper so a transient sync failure (network blip, homeserver hiccup)
+        re-arms with exponential backoff instead of killling the platform. While
+        failing repeatedly the adapter reports ``health=unavailable``; graceful
+        shutdown cancels the loop cleanly.
+        """
+        await self._guard_poll(self._sync_once, backoff_base=1.0, backoff_cap=30.0)
+
+    async def _sync_once(self):
+        """A single Matrix sync round-trip and event dispatch. Raises on error."""
+        resp = await self._client.sync(timeout=30000)
+        for room_id in resp.rooms.join:
+            room = resp.rooms.join[room_id]
+            for event in room.timeline.events:
+                if isinstance(event, RoomMessageText):
+                    await self._on_room_message(room_id, event)
 
     async def _on_room_message(self, room_id: str, event: RoomMessageText):
         if not self._on_message:

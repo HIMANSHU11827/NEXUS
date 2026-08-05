@@ -3,9 +3,21 @@ import logging
 import os
 from typing import Optional
 
-from gateway.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+from gateway.base import (
+    BasePlatformAdapter,
+    HEALTH_HEALTHY,
+    HEALTH_UNAVAILABLE,
+    MessageEvent,
+    MessageType,
+    SendResult,
+)
+from providers.reliability import bounded_tool_retry
 
 logger = logging.getLogger(__name__)
+
+# Polling re-arm backoff: 1s, 2s, 4s, ... capped at 60s between reconnects.
+POLL_BACKOFF_BASE = 1.0
+POLL_BACKOFF_CAP = 60.0
 
 # Optional dependency: the adapter must be importable (and env-gated) even when
 # pyTelegramBotAPI is not installed, so it never breaks test collection or the
@@ -45,6 +57,9 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         self.bot = None
         self._poll_task: Optional[asyncio.Task] = None
+        self._disconnecting = False
+        self._poll_backoff_base = POLL_BACKOFF_BASE
+        self._poll_backoff_cap = POLL_BACKOFF_CAP
 
     async def connect(self) -> bool:
         if AsyncTeleBot is None:
@@ -55,12 +70,16 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
 
         try:
+            self._disconnecting = False
+            self._poll_task = None
             self.bot = AsyncTeleBot(self.token)
             self._register_handlers()
             # Run the long-lived poll loop as a background task so connect() can
-            # return immediately. _safe_poll swallows network errors so a failed
-            # reconnect never crashes the gateway runner.
+            # return immediately. _safe_poll swallows network errors and re-arms
+            # infinity_polling with exponential backoff, so a failed reconnect
+            # never crashes the gateway runner.
             self._poll_task = asyncio.ensure_future(self._safe_poll())
+            self.health = HEALTH_HEALTHY
             return True
         except Exception as e:  # pragma: no cover - defensive
             logger.error(f"Telegram connection failed: {e}")
@@ -72,10 +91,40 @@ class TelegramAdapter(BasePlatformAdapter):
             await self._handle_incoming(message)
 
     async def _safe_poll(self):
-        try:
-            await self.bot.infinity_polling()
-        except Exception as e:  # pragma: no cover - network dependent
-            logger.warning(f"Telegram polling stopped: {e}")
+        """Run ``infinity_polling`` forever, re-arming after failures.
+
+        The poll loop restarts with exponential backoff (1s, 2s, 4s, ...
+        capped at 60s) after any exception; the backoff resets on a clean run.
+        Graceful shutdown is preserved: cancellation raises cleanly and a
+        ``disconnect`` in progress makes the loop exit instead of re-arming.
+        """
+        attempts = 0
+        while not self._disconnecting:
+            try:
+                await self.bot.infinity_polling()
+                attempts = 0
+                if self._disconnecting:
+                    break
+                # infinity_polling normally blocks forever; a clean return
+                # (e.g. an external stop_polling) is re-armed after a short
+                # pause instead of hot-looping.
+                await asyncio.sleep(self._poll_backoff_base)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # network blips -> exponential backoff
+                if self._disconnecting:
+                    break
+                attempts += 1
+                delay = min(
+                    self._poll_backoff_base * (2 ** (attempts - 1)),
+                    self._poll_backoff_cap,
+                )
+                self.health = HEALTH_UNAVAILABLE
+                self.last_error = str(exc)
+                logger.warning(
+                    "Telegram polling stopped (%s); re-arming in %.1fs", exc, delay
+                )
+                await asyncio.sleep(delay)
 
     async def _handle_incoming(self, message: "Message"):
         """Normalise a raw telebot ``Message`` into a NEXUS ``MessageEvent``."""
@@ -106,20 +155,31 @@ class TelegramAdapter(BasePlatformAdapter):
                 await result
 
     async def disconnect(self):
+        self._disconnecting = True
         if self.bot is not None:
             try:
                 await self.bot.stop_polling()
             except Exception:  # pragma: no cover - network dependent
                 pass
-        if self._poll_task is not None:
-            self._poll_task.cancel()
+        poll = self._poll_task
+        if poll is not None:
+            poll.cancel()
+            try:
+                await poll
+            except (asyncio.CancelledError, Exception):  # expected on shutdown
+                pass
             self._poll_task = None
 
     async def send_text(self, chat_id: str, text: str, reply_to: Optional[str] = None) -> SendResult:
         if self.bot is None:
             return SendResult(success=False, error="Bot not connected")
         try:
-            msg = await self.bot.send_message(chat_id, text, reply_to_message_id=reply_to)
+            # Bounded retry (2 retries) for transient Telegram API blips; a
+            # persistent failure still returns a SendResult, never raises here.
+            msg = await bounded_tool_retry(
+                self.bot.send_message, chat_id, text,
+                reply_to_message_id=reply_to, retry_policy=2,
+            )
             return SendResult(success=True, message_id=str(getattr(msg, "message_id", "")))
         except Exception as e:
             return SendResult(success=False, error=str(e))

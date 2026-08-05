@@ -3,6 +3,7 @@ from __future__ import annotations
 __version__ = "2.0.0"
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from typing import Optional
@@ -23,14 +24,23 @@ class TestRunnerTool(BaseTool):
 
     def _detect_command(self, root: Path, framework: str, target: Optional[str]) -> str:
         chosen = (framework or "auto").lower().strip()
-        if chosen == "pytest" or (chosen == "auto" and (root / "pytest.ini").exists()):
+        python_configured = any((root / name).exists() for name in ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini"))
+        if chosen == "pytest" or (chosen == "auto" and python_configured):
             return f"python -m pytest {target}".strip() if target else "python -m pytest"
         if chosen in {"vitest", "jest"}:
             return f"npm test -- {target}".strip() if target else "npm test"
         if chosen == "npm":
             return f"npm test -- {target}".strip() if target else "npm test"
         if chosen == "auto":
-            if (root / "package.json").exists():
+            package_json = root / "package.json"
+            if package_json.exists():
+                try:
+                    package = json.loads(package_json.read_text(encoding="utf-8"))
+                    scripts = package.get("scripts") or {}
+                    if "test" in scripts:
+                        return f"npm test -- {target}".strip() if target else "npm test"
+                except (OSError, json.JSONDecodeError, TypeError):
+                    pass
                 return f"npm test -- {target}".strip() if target else "npm test"
             return f"python -m pytest {target}".strip() if target else "python -m pytest"
         return f"python -m pytest {target}".strip() if target else "python -m pytest"
@@ -48,14 +58,14 @@ class TestRunnerTool(BaseTool):
         try:
             sandbox = SovereignSandbox(str(root))
             chunks = []
-            async for chunk in sandbox.stream_execute(cmd, str(root)):
+            async for chunk in sandbox.stream_execute(cmd, str(root), timeout=timeout):
                 chunks.append(chunk)
             output = "".join(chunks).strip()
             exit_code = sandbox.last_exit_code
             return ToolResult(
                 success=(exit_code in (None, 0)) and "[SANDBOX_BLOCK]" not in output and "[SANDBOX_TIMEOUT]" not in output,
                 output=output,
-                metadata={"exit_code": exit_code, "command": cmd},
+                metadata={"exit_code": exit_code, "command": cmd, "workdir": str(root), "timeout": timeout},
             )
         except asyncio.TimeoutError:
             return ToolResult(success=False, error=f"Test command timed out after {timeout}s", metadata={"command": cmd})
@@ -73,7 +83,7 @@ class TestRunnerTool(BaseTool):
         root = Path(self.root_dir or os.getcwd())
         cmd = (command or "").strip() or self._detect_command(root, framework, target)
         sandbox = SovereignSandbox(str(root))
-        async for chunk in sandbox.stream_execute(cmd, str(root)):
+        async for chunk in sandbox.stream_execute(cmd, str(root), timeout=timeout):
             yield chunk
         if sandbox.last_exit_code:
             yield ToolResult(success=False, error=f"Test command exited with code {sandbox.last_exit_code}", metadata={"command": cmd})

@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { parseSseStream, type SseFrame } from '../lib/sse'
 
 export interface TimelineEvent {
@@ -66,6 +66,17 @@ interface StreamState {
   isProcessing: boolean
   error: string | null
   pendingApproval: PendingApproval | null
+  recoveredActivity: boolean
+}
+
+export type ConversationHistoryMessage = { role: 'user' | 'assistant'; content: string }
+
+function emptyStreamState(): StreamState {
+  return {
+    events: [], content: '', thinkingText: '',
+    isThinking: false, thinkingDone: false, isProcessing: false,
+    error: null, pendingApproval: null, recoveredActivity: false,
+  }
 }
 
 export interface PendingApproval {
@@ -135,6 +146,65 @@ export function acceptsSequencedUpdate(existing: TimelineEvent | undefined, inco
   return incomingSequence >= existingSequence
 }
 
+function persistedEventStatus(raw: Record<string, any>): TimelineEvent['status'] {
+  const value = String(raw.status || raw.payload?.status || '').toLowerCase()
+  if (value === 'success' || value === 'done' || value === 'completed' || value === 'ok') return 'success'
+  if (value === 'failed' || value === 'error') return 'failed'
+  if (value === 'cancelled' || value === 'canceled') return 'cancelled'
+  if (value === 'blocked') return 'blocked'
+  if (value === 'skipped') return 'skipped'
+  if (value === 'pending') return 'pending'
+  return 'running'
+}
+
+/** Convert one durable public event into the same card model used by live SSE. */
+export function timelineEventFromPersisted(raw: Record<string, any>): TimelineEvent {
+  const payload = raw.payload && typeof raw.payload === 'object' ? raw.payload : {}
+  const details = payload.payload && typeof payload.payload === 'object' ? { ...payload.payload, ...payload } : payload
+  const type = String(raw.event_type || raw.type || 'unknown')
+  const status = persistedEventStatus(raw)
+  const timestampValue = Number(raw.timestamp || raw.created_at || Date.now() / 1000)
+  const timestamp = timestampValue > 10_000_000_000 ? timestampValue : timestampValue * 1000
+  const terminal = status === 'success' || status === 'failed' || status === 'cancelled' || status === 'skipped'
+  const id = String(raw.event_id || raw.id || `replay_${raw.sequence || timestamp}`)
+  return {
+    id,
+    type: completedTypeForStatus(type, status),
+    section: eventTypeToSection(type),
+    title: String(raw.title || raw.related_tool || raw.action || details.tool || 'Work event'),
+    status,
+    timestamp,
+    runId: raw.run_id || raw.turn_id || undefined,
+    parentId: raw.parent_id || raw.parent_run_id || undefined,
+    tool: raw.related_tool || raw.tool || details.tool || undefined,
+    command: raw.related_command || raw.command || details.command || undefined,
+    path: raw.related_files?.[0] || raw.path || details.path || undefined,
+    cwd: raw.cwd || details.cwd || undefined,
+    summary: raw.summary || raw.display?.summary || details.text || undefined,
+    output: raw.output || raw.result || details.output || details.result || details.preview || undefined,
+    error: typeof raw.error === 'string' ? raw.error : raw.error?.message,
+    exitCode: typeof (raw.exit_code ?? details.exit_code) === 'number' ? (raw.exit_code ?? details.exit_code) : undefined,
+    durationMs: raw.duration_ms ?? details.duration_ms,
+    query: details.query || raw.query || undefined,
+    sources: Array.isArray(raw.sources || details.sources) ? (raw.sources || details.sources).filter((value: unknown): value is string => typeof value === 'string' && value.length > 0) : [],
+    target: raw.target || details.target || undefined,
+    server: raw.server || details.server || undefined,
+    mcpTool: raw.mcp_tool || details.mcp_tool || undefined,
+    kind: raw.kind || details.kind || undefined,
+    action: raw.action || details.action || undefined,
+    skill: raw.related_skill || raw.skill || details.skill || undefined,
+    subagent: raw.related_subagent || raw.subagent || details.subagent || undefined,
+    stage: raw.stage || details.stage || undefined,
+    visibility: raw.visibility || details.visibility || undefined,
+    sequence: typeof raw.sequence === 'number' ? raw.sequence : undefined,
+    startedAt: raw.start_time ? Number(raw.start_time) * 1000 : undefined,
+    finishedAt: raw.end_time ? Number(raw.end_time) * 1000 : terminal ? timestamp : undefined,
+    updatedAt: timestamp,
+    attempt: typeof raw.attempt === 'number' ? raw.attempt : undefined,
+    checkpointId: raw.checkpoint_id || raw.checkpointId || undefined,
+  }
+}
+
 function appendActivityOutput(current: string | undefined, chunk: string): string | undefined {
   if (!chunk) return current
   if (current?.endsWith(chunk)) return current
@@ -146,27 +216,127 @@ function completedActivityOutput(current: string | undefined, finalValue: string
   return boundedLiveOutput(!current || finalValue.length >= current.length ? finalValue : current)
 }
 
-export function useStreamChat() {
-  const [state, setState] = useState<StreamState>({
-    events: [], content: '', thinkingText: '',
-    isThinking: false, thinkingDone: false,
-    isProcessing: false, error: null,
-    pendingApproval: null,
+export function useStreamChat(sessionId?: string | null) {
+  const streamStorageKey = sessionId ? `nexus-stream-state:${sessionId}` : ''
+  const [state, setState] = useState<StreamState>(() => {
+    if (typeof window === 'undefined') {
+      return emptyStreamState()
+    }
+    try {
+      // Interrupted activity belongs to one conversation.  A global key made
+      // refresh/new-chat restore cards from the previously active session.
+      const saved = streamStorageKey ? localStorage.getItem(streamStorageKey) : null
+      if (saved) {
+        const parsed = JSON.parse(saved)
+        // Mark all running events as completed since the stream was broken
+        const completedEvents = (parsed.events || []).map((e: TimelineEvent) => ({
+          ...e,
+          status: e.status === 'running' ? 'cancelled' : e.status,
+          finishedAt: e.finishedAt || Date.now(),
+        }))
+        return {
+          ...emptyStreamState(),
+          events: completedEvents,
+          recoveredActivity: completedEvents.length > 0,
+          thinkingText: parsed.thinkingText || '',
+          thinkingDone: parsed.thinkingDone || false,
+        }
+      }
+    } catch {}
+    return emptyStreamState()
   })
   const ctrlRef = useRef<AbortController | null>(null)
   const sessionIdRef = useRef<string | null>(null)
+  const generationRef = useRef(0)
   const messagesRef = useRef<Array<{ role: string; content: string }>>([])
+  const mountedSessionRef = useRef<string | null | undefined>(undefined)
 
-  const send = useCallback(async (sessionId: string, prompt: string, options?: { showThinking?: boolean; reasoningEffort?: string }) => {
+  // Changing chats must clear the previous session's live state immediately,
+  // before any replayed history finishes loading.
+  useEffect(() => {
+    const nextSessionId = sessionId || null
+    const previousSessionId = mountedSessionRef.current
+    mountedSessionRef.current = nextSessionId
+    sessionIdRef.current = nextSessionId
+    // Preserve the per-session interrupted-run snapshot during first mount;
+    // only a real session change should clear the in-memory live state.
+    if (previousSessionId === undefined || previousSessionId === nextSessionId) return
+    ctrlRef.current?.abort()
+    generationRef.current += 1
+    messagesRef.current = []
+    setState(emptyStreamState())
+  }, [sessionId])
+
+  // A browser refresh or a dropped SSE connection must not make the UI invent
+  // its state from localStorage.  The server's ordered public event log is the
+  // authority for this conversation, so replay it whenever the active session
+  // is mounted or changes.  A live send can race this request; the generation
+  // guard and sequence comparison prevent older replay data from clobbering it.
+  useEffect(() => {
+    const sid = sessionId || null
+    if (!sid) return
+    const generation = generationRef.current
+    let cancelled = false
+    void fetch(`/api/work-events?session_id=${encodeURIComponent(sid)}&limit=500`, {
+      credentials: 'include',
+    }).then(async response => {
+      if (!response.ok) return null
+      const body = await response.json()
+      return Array.isArray(body?.events) ? body.events : []
+    }).then((records: any[] | null) => {
+      if (cancelled || !records || generation !== generationRef.current) return
+      const replayed = records.map(timelineEventFromPersisted)
+      if (!replayed.length) return
+      const deduped = new Map<string, TimelineEvent>()
+      for (const event of replayed) {
+        const existing = deduped.get(event.id)
+        if (!existing || acceptsSequencedUpdate(existing, event)) deduped.set(event.id, event)
+      }
+      setState(s => ({
+        ...s,
+        events: boundLiveEvents(Array.from(deduped.values()).sort((a, b) => (a.sequence || 0) - (b.sequence || 0))),
+        recoveredActivity: false,
+      }))
+    }).catch(() => {
+      // Live chat remains usable when replay is unavailable.
+    })
+    return () => { cancelled = true }
+  }, [sessionId])
+
+  // Persist stream state to localStorage
+  useEffect(() => {
+    const toSave = {
+      events: state.events,
+      thinkingText: state.thinkingText,
+      isThinking: state.isThinking,
+      thinkingDone: state.thinkingDone,
+      isProcessing: state.isProcessing,
+    }
+    if (streamStorageKey) localStorage.setItem(streamStorageKey, JSON.stringify(toSave))
+  }, [streamStorageKey, state.events, state.thinkingText, state.isThinking, state.thinkingDone, state.isProcessing])
+
+  // Clear persisted state when processing completes and events are empty
+  useEffect(() => {
+    if (!state.isProcessing && state.events.length === 0) {
+      if (streamStorageKey) localStorage.removeItem(streamStorageKey)
+    }
+  }, [streamStorageKey, state.isProcessing, state.events.length])
+
+  const send = useCallback(async (sessionId: string, prompt: string, options?: { showThinking?: boolean; reasoningEffort?: string; provider?: string; model?: string; profile?: string; history?: ConversationHistoryMessage[] }) => {
+    const generation = ++generationRef.current
     const ctrl = new AbortController()
     ctrlRef.current = ctrl
     sessionIdRef.current = sessionId
+
+    // Clear any persisted state from previous interrupted stream
+    localStorage.removeItem(`nexus-stream-state:${sessionId}`)
 
     setState({
       events: [], content: '', thinkingText: '',
       isThinking: false, thinkingDone: false,
       isProcessing: true, error: null,
       pendingApproval: null,
+      recoveredActivity: false,
     })
 
     try {
@@ -177,7 +347,7 @@ export function useStreamChat() {
       const timer = setTimeout(() => ctrl.abort(), timeoutMs)
       // Carry conversation history to the backend so the agent keeps context
       // across turns instead of starting blank every time.
-      const history = messagesRef.current.slice(-12)
+      const history = (options?.history || messagesRef.current).slice(-12)
       const res = await fetch('/api/chat', {
         method: 'POST',
         credentials: 'include',
@@ -188,6 +358,9 @@ export function useStreamChat() {
           messages: history,
           stream: true,
           canonical_events: true,
+          provider: options?.provider,
+          model: options?.model,
+          profile: options?.profile,
           show_thinking: options?.showThinking ?? false,
           reasoning_effort: options?.reasoningEffort || 'medium',
         }),
@@ -210,6 +383,7 @@ export function useStreamChat() {
       parseSseStream(
         reader,
         (frame: SseFrame) => {
+          if (generation !== generationRef.current) return
           if (frame.event === 'thinking') {
             try {
               const td = JSON.parse(frame.data)
@@ -245,15 +419,18 @@ export function useStreamChat() {
               const toolKind = /search|web_search/i.test(String(toolName || '')) ? 'search'
                 : /^(bash|run_command|terminal|shell)$/i.test(String(toolName || '')) ? 'command'
                   : /read|write|file|creating|modifying|deleting/i.test(String(toolName || '')) ? 'file'
-                    : ''
+                    : /mcp/i.test(String(toolName || '') + ' ' + String(details.kind || '')) ? 'tool'
+                      : /hive|subagent|agent/i.test(String(toolName || '') + ' ' + String(details.kind || '')) ? 'subagent'
+                  : ''
               const sourceType = canonicalType.startsWith('plan.step.') && toolKind
                 ? `${toolKind}.${canonicalType.endsWith('.completed') ? 'completed' : canonicalType.endsWith('.failed') ? 'failed' : 'started'}`
                 : canonicalType
-              const status: TimelineEvent['status'] = raw.status === 'success' || raw.status === 'done' || raw.status === 'completed' ? 'success'
-                : raw.status === 'failed' ? 'failed'
-                : raw.status === 'cancelled' ? 'cancelled'
-                : raw.status === 'blocked' ? 'blocked'
-                : raw.status === 'skipped' ? 'skipped'
+              const eventStatus = String(raw.status || details.status || details.target || '').toLowerCase()
+              const status: TimelineEvent['status'] = eventStatus === 'success' || eventStatus === 'done' || eventStatus === 'completed' || eventStatus === 'ok' ? 'success'
+                : eventStatus === 'failed' || eventStatus === 'error' ? 'failed'
+                : eventStatus === 'cancelled' ? 'cancelled'
+                : eventStatus === 'blocked' ? 'blocked'
+                : eventStatus === 'skipped' ? 'skipped'
                 : raw.status === 'pending' ? 'pending'
                 : 'running'
               const type = completedTypeForStatus(sourceType, status)
@@ -277,7 +454,7 @@ export function useStreamChat() {
                 output: raw.output || raw.result || details.output || details.result || details.preview,
                 error: raw.error?.message,
                 exitCode: typeof rawExitCode === 'number' ? rawExitCode : undefined,
-                durationMs: raw.duration_ms,
+                durationMs: raw.duration_ms ?? details.duration_ms,
                 query: details.query || raw.query || (toolKind === 'search' ? details.target || raw.target : undefined),
                 sources,
                 target: raw.target || details.target,
@@ -297,9 +474,9 @@ export function useStreamChat() {
                   .filter((phase: unknown): phase is { title?: unknown; subgoals?: unknown } => !!phase && typeof phase === 'object')
                   .map((phase: { title?: unknown; subgoals?: unknown }) => ({ title: typeof phase.title === 'string' ? phase.title : 'Phase', subgoals: Array.isArray(phase.subgoals) ? phase.subgoals.filter((goal: unknown): goal is string => typeof goal === 'string') : [] }))
                   : undefined,
-                startTime: raw.start_time ? raw.start_time * 1000 : undefined,
-                startedAt: raw.start_time ? raw.start_time * 1000 : undefined,
-                finishedAt: raw.end_time ? raw.end_time * 1000
+                startTime: (raw.start_time ?? details.start_time) ? (raw.start_time ?? details.start_time) * 1000 : undefined,
+                startedAt: (raw.start_time ?? details.start_time) ? (raw.start_time ?? details.start_time) * 1000 : undefined,
+                finishedAt: (raw.end_time ?? details.end_time) ? (raw.end_time ?? details.end_time) * 1000
                   : (status === 'success' || status === 'failed' || status === 'cancelled' || status === 'skipped')
                     ? (raw.timestamp ? raw.timestamp * 1000 : Date.now())
                     : undefined,
@@ -382,6 +559,7 @@ export function useStreamChat() {
                   const matched = s.events.find(e => e.id === event.id) || s.events.find(e =>
                     e.type.replace('.started', '') === baseType &&
                     e.status === 'running' &&
+                    (!e.runId || !event.runId || e.runId === event.runId) &&
                     (!completionTarget || [e.command, e.path, e.query, e.tool, e.skill, e.subagent].includes(completionTarget))
                   )
                   if (matched) {
@@ -471,15 +649,18 @@ export function useStreamChat() {
           }
         },
         () => {
+          if (generation !== generationRef.current) return
           setState(s => ({ ...s, isProcessing: false, isThinking: false }))
         },
         (err) => {
+          if (generation !== generationRef.current) return
           if (err !== 'The user aborted a request.') {
             setState(s => ({ ...s, isProcessing: false, isThinking: false, error: err }))
           }
         }
       )
     } catch (err: any) {
+      if (generation !== generationRef.current) return
       if (err.name !== 'AbortError') {
         setState(s => ({ ...s, isProcessing: false, isThinking: false, error: err.message }))
       }
@@ -509,6 +690,7 @@ export function useStreamChat() {
 
   const cancel = useCallback(() => {
     ctrlRef.current?.abort()
+    generationRef.current += 1
     const sessionId = sessionIdRef.current
     if (sessionId) {
       // Aborting the browser stream alone leaves the agent running on the
@@ -522,9 +704,12 @@ export function useStreamChat() {
   }, [])
 
   const reset = useCallback(() => {
+    const oldSessionId = sessionIdRef.current
     ctrlRef.current = null
     sessionIdRef.current = null
-    setState({ events: [], content: '', thinkingText: '', isThinking: false, thinkingDone: false, isProcessing: false, error: null, pendingApproval: null })
+    generationRef.current += 1
+    if (oldSessionId) localStorage.removeItem(`nexus-stream-state:${oldSessionId}`)
+    setState({ events: [], content: '', thinkingText: '', isThinking: false, thinkingDone: false, isProcessing: false, error: null, pendingApproval: null, recoveredActivity: false })
   }, [])
 
   return { ...state, send, cancel, reset, respondApproval }

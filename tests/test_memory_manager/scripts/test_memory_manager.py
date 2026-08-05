@@ -25,10 +25,21 @@ class TestMemoryContext:
             rag_context="rag",
             failure_vaccines="fail",
             knowledge_context="know",
+            working="work",
         )
         text = ctx.as_text()
-        for tag in ("[SESSION]", "[RAG]", "[FAILURES]", "[KNOWLEDGE]"):
+        for tag in ("[SESSION]", "[RAG]", "[FAILURES]", "[KNOWLEDGE]", "[WORKING]"):
             assert tag in text
+
+    def test_import_memory_restores_session_history(self):
+        manager = MemoryManager(".", session_id="import-test")
+        try:
+            assert manager.import_memory(json.dumps({
+                "session_history": [{"role": "user", "content": "hello"}],
+            })) is True
+            assert manager._memory == [{"role": "user", "content": "hello"}]
+        finally:
+            manager.shutdown()
 
 
 class TestMemoryManager:
@@ -108,3 +119,155 @@ class TestMemoryManager:
         import asyncio
         ctx = asyncio.run(mm.prefetch_all("test"))
         assert ctx.failure_vaccines == ""
+
+
+class TestVerifiedMemoryGate:
+    """Verified-results gate: unverified model prose is never stored as fact."""
+
+    @pytest.fixture
+    def mm(self, tmp_path):
+        m = MemoryManager(str(tmp_path), session_id="gate_sesh", max_session_lines=8)
+        yield m
+        m.shutdown()
+
+    def _learned_file(self, mm):
+        path = os.path.join(mm._opencode_memory_dir, "learned.md")
+        os.makedirs(mm._opencode_memory_dir, exist_ok=True)
+        if not os.path.isfile(path):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("seed\n")
+        return path
+
+    def _session_file(self, mm):
+        return os.path.join(mm.root, "logs", "sessions", "gate_sesh.json")
+
+    def test_sync_all_unverified_tags_transcript_and_writes_no_learnings(self, mm):
+        import asyncio
+        learned = self._learned_file(mm)
+        asyncio.run(mm.sync_all("user asks", "a long unverified model claim"))
+        # Transcript records the assistant turn but tags it unverified
+        with open(self._session_file(mm), encoding="utf-8") as f:
+            data = json.load(f)
+        assert any(
+            m.get("role") == "assistant" and m.get("verified") is False
+            for m in data
+        )
+        # No cross-session learning or forge memory may be written
+        assert open(learned, encoding="utf-8").read().strip() == "seed"
+        forge_dir = os.path.join(mm.root, "data", "memory_forge")
+        assert not os.path.isdir(forge_dir) or not os.listdir(forge_dir)
+
+    def test_sync_all_verified_persists_tool_evidence(self, mm):
+        import asyncio
+        learned = self._learned_file(mm)
+        verified_actions = [
+            {"tool": "bash", "output": "42", "success": True, "verified": True},
+        ]
+        tool_results = [
+            {"tool": "bash", "output": "42", "error": "", "success": True},
+        ]
+        asyncio.run(mm.sync_all(
+            "user asks",
+            "a long response",
+            verified_actions=verified_actions,
+            tool_results=tool_results,
+        ))
+        # .opencode/memory/learned.md got the real tool output, not model prose
+        learned_text = open(learned, encoding="utf-8").read()
+        assert "bash: 42" in learned_text
+        # MemoryForge stored the verified evidence
+        mem_dir = os.path.join(mm.root, "data", "memory_forge", "session_gate_sesh")
+        assert os.path.isfile(os.path.join(mem_dir, "memory.json"))
+        with open(os.path.join(mem_dir, "memory.json"), encoding="utf-8") as f:
+            forged = json.load(f)
+        assert "bash: 42" in forged["content"]
+        assert "a long response" not in forged["content"]
+
+    def test_sync_all_failed_action_writes_no_learnings(self, mm):
+        import asyncio
+        learned = self._learned_file(mm)
+        verified_actions = [
+            {"tool": "bash", "success": False, "error": "boom", "verified": False},
+        ]
+        tool_results = [
+            {"tool": "bash", "output": "", "error": "boom", "success": False},
+        ]
+        asyncio.run(mm.sync_all(
+            "user asks",
+            "a long response",
+            verified_actions=verified_actions,
+            tool_results=tool_results,
+        ))
+        assert open(learned, encoding="utf-8").read().strip() == "seed"
+        forge_dir = os.path.join(mm.root, "data", "memory_forge")
+        assert not os.path.isdir(forge_dir) or not os.listdir(forge_dir)
+
+    def test_prefetch_session_skips_unverified_assistant_claims(self, mm):
+        import asyncio
+        os.makedirs(os.path.join(mm.root, "logs", "sessions"), exist_ok=True)
+        with open(self._session_file(mm), "w", encoding="utf-8") as f:
+            json.dump([
+                {"role": "user", "content": "first q"},
+                {"role": "assistant", "content": "UNVERIFIED_HALLUCINATION", "verified": False},
+                {"role": "user", "content": "second q"},
+                {"role": "assistant", "content": "grounded answer", "verified": True},
+            ], f)
+        ctx = asyncio.run(mm.prefetch_all("second q"))
+        assert "UNVERIFIED_HALLUCINATION" not in ctx.session_history
+        assert "grounded answer" in ctx.session_history
+        assert "second q" in ctx.session_history
+
+    def test_legacy_assistant_entries_still_recall(self, mm):
+        # Entries written before the gate (no ``verified`` key) remain recallable
+        import asyncio
+        os.makedirs(os.path.join(mm.root, "logs", "sessions"), exist_ok=True)
+        with open(self._session_file(mm), "w", encoding="utf-8") as f:
+            json.dump([
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "legacy answer"},
+            ], f)
+        ctx = asyncio.run(mm.prefetch_all("q"))
+        assert "legacy answer" in ctx.session_history
+
+
+class TestMemoryToolProvenance:
+    def _tool(self, tmp_path):
+        from tools.memory.scripts.memory import MemoryTool
+        return MemoryTool(root_dir=str(tmp_path)), str(tmp_path)
+
+    def test_store_records_unverified_claim_provenance(self, tmp_path):
+        import asyncio
+        tool, root = self._tool(tmp_path)
+        result = asyncio.run(tool.execute(
+            "store", key="fact", content="the sky is green"
+        ))
+        assert result.success
+        store_path = tmp_path / ".nexus" / "memory" / "store.json"
+        store = json.loads(store_path.read_text(encoding="utf-8"))
+        assert store["fact"]["source"] == "llm_claim"
+        assert store["fact"]["verified"] is False
+
+    def test_store_requires_citation_for_verified(self, tmp_path):
+        import asyncio
+        tool, root = self._tool(tmp_path)
+        # A bare ``verified=True`` without a citation is still an llm claim
+        result = asyncio.run(tool.execute(
+            "store", key="k", content="x", verified=True
+        ))
+        assert result.success
+        store = json.loads((tmp_path / ".nexus" / "memory" / "store.json").read_text(encoding="utf-8"))
+        assert store["k"]["source"] == "llm_claim"
+        assert store["k"]["verified"] is False
+
+    def test_store_cited_verified_result_is_recorded(self, tmp_path):
+        import asyncio
+        tool, root = self._tool(tmp_path)
+        result = asyncio.run(tool.execute(
+            "store", key="k", content="verified fact",
+            verified_result_id="run-42", source="verified_result",
+        ))
+        assert result.success
+        store = json.loads((tmp_path / ".nexus" / "memory" / "store.json").read_text(encoding="utf-8"))
+        assert store["k"]["source"] == "verified_result"
+        assert store["k"]["verified"] is True
+        assert store["k"]["verified_result_id"] == "run-42"

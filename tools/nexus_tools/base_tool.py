@@ -22,4 +22,5 @@ class BaseTool:
         self.root_dir = root_dir
 
     async def execute(self, **kwargs) -> ToolResult:
-        raise NotImplementedError
+        """Execute the tool. Override in subclasses with real logic."""
+        return ToolResult(success=False, error=f"Tool '{self.name}' has no execute() implementation")

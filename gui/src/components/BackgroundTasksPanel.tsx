@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import Editor from '@monaco-editor/react'
 import {
   ChevronDown, ChevronRight, Clock, Loader2, PauseCircle, RotateCw, StopCircle,
+  Terminal, FileText, GitBranch, Users, Cpu,
 } from 'lucide-react'
 import type { TimelineEvent } from '../hooks/useStreamChat'
 import { formatTaskDuration, taskDurationMs } from '../lib/taskDuration'
@@ -21,18 +23,29 @@ interface PanelTask {
 interface BackgroundTasksPanelProps {
   events: TimelineEvent[]
   onCancel: () => void
-  onSteerAdd: (text: string) => void
 }
 
-const ACTIVE_STATUSES: ReadonlySet<TimelineEvent['status']> = new Set(['running', 'pending', 'blocked'])
+const ACTIVE_STATUSES: ReadonlySet<TimelineEvent['status']> = new Set(['running', 'pending', 'blocked', 'success', 'failed', 'cancelled'])
 const MAX_OUTPUT_CHARS = 12000
 
 // A background task is a real command or agent execution the user can inspect.
 // Plan steps, web results, file diffs and private diagnostics never enter here.
+// Sub-agent events are handled by HivePanel, not here.
 function isBackgroundExecution(event: TimelineEvent): boolean {
   if (event.visibility === 'internal') return false
-  return ['command.', 'terminal.', 'test.', 'git.', 'hive.', 'subagent.'].some(prefix => event.type.startsWith(prefix))
-    || (event.type.startsWith('tool.') && Boolean(event.command || event.subagent))
+  // Exclude system/meta events that shouldn't be shown
+  if (event.type === 'TASK_COMPLETE' || event.type === 'task_complete') return false
+  // Exclude sub-agent and hive events - they belong in HivePanel
+  if (event.type.startsWith('hive.') || event.type.startsWith('subagent.') || event.subagent) return false
+  // Match command events with various prefixes
+  return ['command.', 'terminal.', 'test.', 'git.', 'bash.', 'run_command.'].some(prefix => event.type.startsWith(prefix))
+    || (event.type.startsWith('tool.') && Boolean(event.command))
+    || (event.tool && Boolean(event.command))
+    || Boolean(event.command && (event.type.includes('command') || event.type.includes('terminal') || event.type.includes('bash')))
+    // Match events with tool name that indicates command execution
+    || ['bash', 'run_command', 'terminal', 'shell'].includes(event.tool || '')
+    // Match events with section indicating terminal/command work
+    || event.section === 'terminal'
 }
 
 // Stable per-run identity. Canonical events carry `run_id`; fall back to the
@@ -92,6 +105,16 @@ function StateIcon({ state }: { state: TaskState }) {
   return <Loader2 size={12} className="shrink-0 animate-spin text-primary" aria-hidden="true" />
 }
 
+function TaskTypeIcon({ event }: { event: TimelineEvent }) {
+  if (event.type.startsWith('command') || event.type.startsWith('terminal')) return <Terminal size={12} className="shrink-0 text-muted-foreground/70" aria-hidden="true" />
+  if (event.type.startsWith('test')) return <Cpu size={12} className="shrink-0 text-muted-foreground/70" aria-hidden="true" />
+  if (event.type.startsWith('git')) return <GitBranch size={12} className="shrink-0 text-muted-foreground/70" aria-hidden="true" />
+  if (event.type.startsWith('hive') || event.type.startsWith('subagent')) return <Users size={12} className="shrink-0 text-purple-500/70" aria-hidden="true" />
+  if (event.type.startsWith('tool')) return <Cpu size={12} className="shrink-0 text-muted-foreground/70" aria-hidden="true" />
+  if (event.path) return <FileText size={12} className="shrink-0 text-muted-foreground/70" aria-hidden="true" />
+  return <Loader2 size={12} className="shrink-0 text-muted-foreground/70" aria-hidden="true" />
+}
+
 function buildTasks(events: TimelineEvent[]): { tasks: PanelTask[]; retryMarkers: TimelineEvent[] } {
   const retryMarkers: TimelineEvent[] = []
   const latestById = new Map<string, TimelineEvent>()
@@ -135,7 +158,28 @@ function TaskOutput({ value }: { value: string }) {
   return (
     <div className="mb-1.5">
       <p className="text-[10px] uppercase tracking-wide text-muted-foreground/60">Output</p>
-      <pre className="mt-0.5 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-background/70 p-1.5 font-mono text-[10px] leading-relaxed text-foreground/75">{bounded}</pre>
+      <div className="mt-0.5 max-h-48 overflow-auto rounded bg-background/70">
+        <Editor
+          height="200px"
+          language="plaintext"
+          value={bounded}
+          theme="vs"
+          options={{
+            readOnly: true,
+            minimap: { enabled: false },
+            fontSize: 10,
+            lineNumbers: 'off',
+            scrollBeyondLastLine: false,
+            automaticLayout: true,
+            tabSize: 2,
+            wordWrap: 'on',
+            folding: false,
+            renderWhitespace: 'selection',
+            lineHeight: 14,
+            padding: { top: 8, bottom: 8 },
+          }}
+        />
+      </div>
     </div>
   )
 }
@@ -148,7 +192,28 @@ function TaskDetails({ task, now, onCancel }: { task: PanelTask; now: number; on
       {event.command && (
         <div className="mb-1.5">
           <p className="text-[10px] uppercase tracking-wide text-muted-foreground/60">Command</p>
-          <pre className="mt-0.5 overflow-x-auto whitespace-pre-wrap break-words rounded bg-background/70 p-1.5 font-mono text-[11px] text-foreground/85">{event.command}</pre>
+          <div className="mt-0.5 max-h-32 overflow-auto rounded bg-background/70">
+            <Editor
+              height="120px"
+              language="shell"
+              value={event.command}
+              theme="vs"
+              options={{
+                readOnly: true,
+                minimap: { enabled: false },
+                fontSize: 11,
+                lineNumbers: 'off',
+                scrollBeyondLastLine: false,
+                automaticLayout: true,
+                tabSize: 2,
+                wordWrap: 'on',
+                folding: false,
+                renderWhitespace: 'selection',
+                lineHeight: 16,
+                padding: { top: 8, bottom: 8 },
+              }}
+            />
+          </div>
         </div>
       )}
       {event.query && (
@@ -177,7 +242,32 @@ function TaskDetails({ task, now, onCancel }: { task: PanelTask; now: number; on
         {event.exitCode !== undefined && <span>Exit code <span className="tabular-nums">{event.exitCode}</span></span>}
       </div>
       {output && <TaskOutput value={output} />}
-      {event.error && <pre className="mb-1.5 mt-1 whitespace-pre-wrap break-words rounded bg-destructive/5 p-1.5 font-mono text-[10px] text-destructive/80">{event.error}</pre>}
+      {event.error && (
+        <div className="mb-1.5 mt-1">
+          <div className="max-h-32 overflow-auto rounded bg-destructive/5">
+            <Editor
+              height="120px"
+              language="plaintext"
+              value={event.error}
+              theme="vs"
+              options={{
+                readOnly: true,
+                minimap: { enabled: false },
+                fontSize: 10,
+                lineNumbers: 'off',
+                scrollBeyondLastLine: false,
+                automaticLayout: true,
+                tabSize: 2,
+                wordWrap: 'on',
+                folding: false,
+                renderWhitespace: 'selection',
+                lineHeight: 14,
+                padding: { top: 8, bottom: 8 },
+              }}
+            />
+          </div>
+        </div>
+      )}
       <div className="mt-1 flex justify-end">
         <button
           type="button"
@@ -191,13 +281,10 @@ function TaskDetails({ task, now, onCancel }: { task: PanelTask; now: number; on
   )
 }
 
-export default function BackgroundTasksPanel({ events, onCancel, onSteerAdd }: BackgroundTasksPanelProps) {
+export default function BackgroundTasksPanel({ events, onCancel }: BackgroundTasksPanelProps) {
   const [panelExpanded, setPanelExpanded] = useState(true)
-  const [steerOpen, setSteerOpen] = useState(false)
-  const [steerText, setSteerText] = useState('')
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({})
   const [now, setNow] = useState(() => Date.now())
-  const inputRef = useRef<HTMLInputElement>(null)
 
   const { tasks } = useMemo(() => buildTasks(events), [events])
 
@@ -224,19 +311,7 @@ export default function BackgroundTasksPanel({ events, onCancel, onSteerAdd }: B
     })
   }, [tasks])
 
-  useEffect(() => {
-    if (steerOpen) window.setTimeout(() => inputRef.current?.focus(), 0)
-  }, [steerOpen])
-
   const toggleTask = (id: string) => setExpandedIds(previous => ({ ...previous, [id]: !previous[id] }))
-
-  const submitSteer = () => {
-    const prompt = steerText.trim()
-    if (!prompt) return
-    onSteerAdd(prompt)
-    setSteerText('')
-    setSteerOpen(false)
-  }
 
   const activeCount = tasks.length
   if (activeCount === 0) return null
@@ -250,33 +325,14 @@ export default function BackgroundTasksPanel({ events, onCancel, onSteerAdd }: B
         className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-secondary/45"
       >
         {panelExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-        <span className="flex w-3 shrink-0 items-center justify-center"><Loader2 size={12} className="animate-spin" aria-hidden="true" /></span>
-        <span className="font-medium text-foreground/85">{activeCount} Background running</span>
+        <span className="flex w-3 shrink-0 items-center justify-center"><Loader2 size={12} className="animate-spin text-primary" aria-hidden="true" /></span>
+        <span className="font-medium text-foreground/85">{activeCount} Background task{activeCount !== 1 ? 's' : ''}</span>
       </button>
       {panelExpanded && (
         <div className="border-t border-border">
-          <div className="flex items-center justify-between gap-2 px-3 py-1.5">
-            <span className="min-w-0 truncate text-[10px] text-muted-foreground/70">Real command or agent work is running.</span>
-            <div className="flex shrink-0 items-center gap-1">
-              <button type="button" onClick={() => setSteerOpen(value => !value)} className="border border-border bg-background px-2 py-0.5 font-medium text-foreground hover:bg-secondary">Steer</button>
-              <button type="button" onClick={onCancel} className="border border-destructive/40 bg-destructive/5 px-2 py-0.5 font-medium text-destructive hover:bg-destructive/10">Stop</button>
-            </div>
+          <div className="flex items-center gap-2 px-3 py-1.5">
+            <span className="min-w-0 truncate text-[10px] text-muted-foreground/70">Commands, tests, git operations, and sub-agents running in background.</span>
           </div>
-          {steerOpen && (
-            <div className="flex gap-1.5 px-3 pb-1.5">
-              <input
-                ref={inputRef}
-                value={steerText}
-                onChange={event => setSteerText(event.target.value)}
-                onKeyDown={event => { if (event.key === 'Enter') submitSteer(); if (event.key === 'Escape') { setSteerOpen(false); setSteerText('') } }}
-                placeholder="Add a priority instruction."
-                className="min-w-0 flex-1 border border-border bg-background px-2 py-1 text-[11px] text-foreground outline-none focus:border-ring"
-                aria-label="Steer background task"
-              />
-              <button type="button" onClick={submitSteer} disabled={!steerText.trim()} className="border border-border bg-background px-2 py-1 font-medium text-foreground hover:bg-secondary disabled:opacity-40">Add</button>
-              <button type="button" onClick={() => { setSteerOpen(false); setSteerText('') }} className="border border-border bg-background px-2 py-1 hover:bg-secondary">Cancel</button>
-            </div>
-          )}
           <div>
             {tasks.map(task => {
               const isExpanded = Boolean(expandedIds[task.id])
@@ -293,6 +349,7 @@ export default function BackgroundTasksPanel({ events, onCancel, onSteerAdd }: B
                     className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left hover:bg-secondary/45 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/40"
                   >
                     <span className="flex w-4 shrink-0 items-center justify-center"><StateIcon state={task.state} /></span>
+                    <span className="flex w-4 shrink-0 items-center justify-center"><TaskTypeIcon event={task.event} /></span>
                     <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground" title={`${task.label}${task.detail ? ` · ${task.detail}` : ''}`}>
                       {task.label}{task.detail ? <span className="font-normal text-muted-foreground/70"> · {task.detail}</span> : null}
                     </span>

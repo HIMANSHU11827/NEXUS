@@ -193,7 +193,7 @@ except Exception as e:
 # ── 5. Shell Class Test ──────────────────────────────────────────────────────
 print("\n5. Shell Class")
 try:
-    from shell import TaskTracker
+    from nexus.commands import TaskTracker
     tid = TaskTracker.create("E2E test", agent="test")
     TaskTracker.update(tid, "completed")
     tasks = TaskTracker.list()

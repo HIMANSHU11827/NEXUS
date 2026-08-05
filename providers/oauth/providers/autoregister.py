@@ -41,13 +41,21 @@ def _make_oauth_provider(
             return name
 
         async def login(self, callbacks: OAuthLoginCallbacks) -> OAuthCredentials:
-            return await login_fn(
-                on_auth=callbacks.on_auth,
-                on_prompt=callbacks.on_prompt,
-                on_progress=getattr(callbacks, "on_progress", None),
-                on_manual_code_input=getattr(callbacks, "on_manual_code_input", None),
-                signal=getattr(callbacks, "signal", None),
-            )
+            # Only pass optional kwargs the target login() actually accepts.
+            # minimax/copilot do NOT define on_manual_code_input, so passing it
+            # unconditionally made `auth login <provider>` crash with a TypeError.
+            kwargs = {
+                "on_auth": callbacks.on_auth,
+                "on_prompt": callbacks.on_prompt,
+            }
+            target_params = inspect.signature(login_fn).parameters
+            if "on_progress" in target_params:
+                kwargs["on_progress"] = getattr(callbacks, "on_progress", None)
+            if "on_manual_code_input" in target_params:
+                kwargs["on_manual_code_input"] = getattr(callbacks, "on_manual_code_input", None)
+            if "signal" in target_params:
+                kwargs["signal"] = getattr(callbacks, "signal", None)
+            return await login_fn(**kwargs)
 
         async def refresh_token(self, credentials: OAuthCredentials) -> OAuthCredentials:
             result = refresh_fn(credentials.refresh)

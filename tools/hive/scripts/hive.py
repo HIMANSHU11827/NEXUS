@@ -44,7 +44,17 @@ class HiveTool(BaseTool):
     def _get_hive(self):
         if self._hive is None:
             from hive.engine import NexusHiveEngine
-            self._hive = NexusHiveEngine(root=self.root_dir or os.getcwd())
+            registry = self._runtime_context.get("tool_registry")
+            if registry is None:
+                try:
+                    from tools.nexus_tools.registry import ToolRegistry
+                    registry = ToolRegistry(self.root_dir or os.getcwd())
+                except Exception:
+                    registry = None
+            self._hive = NexusHiveEngine(
+                root=self.root_dir or os.getcwd(),
+                tool_registry=registry,
+            )
         self._hive.set_sink(self._runtime_context.get("work_event_sink"))
         return self._hive
 

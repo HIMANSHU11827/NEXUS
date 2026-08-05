@@ -11,9 +11,11 @@ import logging
 import os
 import re
 import shutil
+import socket
 import threading
 import time
 import uuid
+import urllib.parse
 from contextlib import asynccontextmanager
 from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,7 +24,11 @@ logger = logging.getLogger(__name__)
 
 from dotenv import load_dotenv
 
-load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", ".env"))
+_ENV_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Support both project-local env locations while preserving explicit process
+# settings supplied by a launcher or deployment environment.
+load_dotenv(os.path.join(_ENV_PROJECT_ROOT, ".env"), override=False)
+load_dotenv(os.path.join(_ENV_PROJECT_ROOT, "config", ".env"), override=False)
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
@@ -34,7 +40,7 @@ from nexus.runtime import (
     safe_session_id as runtime_safe_session_id,
     session_file_path as runtime_session_file_path,
 )
-from orchestrators.loop import NexusLoop
+from orchestrators import NexusLoop
 
 try:
     import yaml
@@ -83,12 +89,14 @@ _WORK_EVENT_MAX_BYTES = max(1024 * 1024, int(os.environ.get("NEXUS_WORK_EVENT_MA
 _THREAD_LOCAL = threading.local()
 _TASKS_PATH = os.path.join(_ROOT, "logs", "tasks.json")
 _CONFIG_PATH = os.path.join(_PROJECT_ROOT, "config", "nexus_config.yaml")
+_MCP_SERVERS_PATH = os.path.join(_PROJECT_ROOT, "config", "mcp_servers.json")
 _CLAUDE_SETTINGS_PATH = os.path.join(_PROJECT_ROOT, ".claude", "settings.json")
 _RUNTIME_SETTINGS = {
     "model": "",
     "provider": "",
+    "profile": "",
     "mode": "auto",
-    "sandbox_tier": "normal",
+    "sandbox_tier": "no_sandbox",
     "permission_allowlist": [],
     "agent": "",
     "goal": "",
@@ -110,6 +118,88 @@ _VOICE_PROCESS: Optional[subprocess.Popen] = None
 _VOICE_MODE = "off"
 _VOICE_STARTED_AT = 0.0
 _VOICE_LOG_PATH = os.path.join(_PROJECT_ROOT, "logs", "voice-runtime.log")
+
+# ── Hive runtime state ───────────────────────────────────────────────────────
+_HIVES: Dict[str, Dict[str, Any]] = {}
+_HIVES_LOCK = threading.Lock()
+_HIVE_ENGINE = None
+_HIVE_ENGINE_LOCK = threading.Lock()
+_HIVE_MANIFEST_PATH = os.path.join(_PROJECT_ROOT, "workspace", "hives", "index.json")
+
+
+def _persist_hive_manifest() -> None:
+    """Persist Hive metadata so restart can show interrupted work honestly."""
+    with _HIVES_LOCK:
+        payload = list(_HIVES.values())
+    os.makedirs(os.path.dirname(_HIVE_MANIFEST_PATH), exist_ok=True)
+    temporary = f"{_HIVE_MANIFEST_PATH}.{os.getpid()}.{int(time.time() * 1000)}.tmp"
+    with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, _HIVE_MANIFEST_PATH)
+
+
+def _load_hive_manifest() -> None:
+    """Load prior Hive summaries and mark unfinished processes interrupted."""
+    try:
+        with open(_HIVE_MANIFEST_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return
+    if not isinstance(payload, list):
+        return
+    with _HIVES_LOCK:
+        for item in payload:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            restored = dict(item)
+            if restored.get("status") == "running":
+                restored["status"] = "interrupted"
+                restored["resume_required"] = True
+                restored["resume_note"] = "The previous backend stopped before this Hive finished."
+                restored["agents"] = [
+                    {**agent, "status": "interrupted" if str(agent.get("status") or "").lower() in {"", "pending", "running"} else agent.get("status")}
+                    for agent in restored.get("agents", [])
+                    if isinstance(agent, dict)
+                ]
+            _HIVES[str(restored["id"])] = restored
+
+
+_load_hive_manifest()
+
+
+def _get_hive_engine():
+    """Return the process-wide Hive engine used by API-created Hives."""
+    global _HIVE_ENGINE
+    with _HIVE_ENGINE_LOCK:
+        if _HIVE_ENGINE is not None:
+            return _HIVE_ENGINE
+        from hive.engine import NexusHiveEngine
+        from tools.nexus_tools.registry import ToolRegistry
+
+        engine = NexusHiveEngine(
+            _PROJECT_ROOT,
+            tool_registry=ToolRegistry(_PROJECT_ROOT),
+        )
+
+        def sink(event):
+            # API-created Hives have no chat turn, so publish to the default
+            # work-event stream. The actual Hive event remains the source of
+            # truth; the in-memory summary below is only a compact index.
+            try:
+                _append_work_event("default", event)
+            except Exception:
+                logger.debug("Could not persist Hive work event", exc_info=True)
+
+        engine.set_sink(sink)
+        _HIVE_ENGINE = engine
+        return engine
+
+# ── Cron/Scheduler runtime state ───────────────────────────────────────────────
+_CRON_JOBS: Dict[str, Dict[str, Any]] = {}
+_CRON_JOBS_LOCK = threading.Lock()
 
 # ── Workspace checkpoints ────────────────────────────────────────────────────
 # Per-message restore points: a snapshot of the workspace taken right before a
@@ -688,7 +778,7 @@ def start_chat_workflow(session_id: str, prompt: str, turn_id: str = "") -> str:
 
 def complete_chat_workflow(session_id: str, prompt: str, turn_id: str = "", status: str = "done") -> None:
     sid = safe_session_id(session_id)
-    events = list_work_events(sid, limit=1000, active_turn_id=turn_id)
+    events = list_work_events(sid, limit=1000, turn_id=turn_id)
     if turn_id:
         events = [e for e in events if str(e.get("turn_id", "")) == turn_id]
     todo_events = [e for e in events if e.get("kind") == "todo" and e.get("phase_index") is not None]
@@ -1381,8 +1471,9 @@ def apply_runtime_settings(loop: NexusLoop) -> None:
     """Apply CLI-selected runtime settings to a loop instance."""
     model = str(_RUNTIME_SETTINGS.get("model") or "").strip()
     provider = str(_RUNTIME_SETTINGS.get("provider") or "").strip()
+    profile = str(_RUNTIME_SETTINGS.get("profile") or "").strip()
     mode = _normalize_permission_mode(str(_RUNTIME_SETTINGS.get("mode") or "auto"))
-    sandbox_tier = _normalize_sandbox_tier(str(_RUNTIME_SETTINGS.get("sandbox_tier") or "normal"))
+    sandbox_tier = _normalize_sandbox_tier(str(_RUNTIME_SETTINGS.get("sandbox_tier") or "no_sandbox"))
     agent = str(_RUNTIME_SETTINGS.get("agent") or "").strip()
     goal = str(_RUNTIME_SETTINGS.get("goal") or "").strip()
     additional_dirs = _RUNTIME_SETTINGS.get("additional_dirs") or []
@@ -1390,6 +1481,7 @@ def apply_runtime_settings(loop: NexusLoop) -> None:
 
     loop.model = model
     loop.provider_override = provider
+    loop.profile_override = profile or None
     loop.permission_mode = mode
     loop.active_agent = agent
     loop.active_goal = goal
@@ -1398,7 +1490,7 @@ def apply_runtime_settings(loop: NexusLoop) -> None:
 
     if provider:
         try:
-            loop.brain.set_override(provider)
+            loop.brain.set_override(provider, profile or None)
         except Exception as e:
             logger.warning("apply_runtime_settings: provider override %s failed: %s", provider, e)
 
@@ -1412,7 +1504,7 @@ def apply_runtime_settings(loop: NexusLoop) -> None:
 
     try:
         from permissions import PermissionMode
-        from orchestrators.loop import PermissionPolicy
+        from orchestrators.v5.core import PermissionPolicy
         from sandbox.sandbox_manager import SandboxTier
         mode_map = {
             "auto": PermissionMode.AUTO_PILOT,
@@ -1548,6 +1640,38 @@ def _save_nexus_config(config: Dict[str, Any]) -> None:
     os.replace(tmp_path, _CONFIG_PATH)
 
 
+def _sync_mcp_servers_file(config: Dict[str, Any]) -> None:
+    """Keep the registry's JSON MCP source synchronized with UI YAML settings."""
+    raw_servers = config.get("mcp_servers") if isinstance(config, dict) else {}
+    if not isinstance(raw_servers, dict):
+        raw_servers = {}
+    servers = []
+    for name, raw in sorted(raw_servers.items()):
+        if not isinstance(raw, dict):
+            continue
+        entry = dict(raw)
+        entry["name"] = str(name)
+        entry["command"] = str(entry.get("command") or entry.get("cmd") or "").strip()
+        args = entry.get("args", [])
+        if isinstance(args, str):
+            args = [part for part in args.splitlines() if part.strip()]
+        entry["args"] = [str(part) for part in args] if isinstance(args, list) else []
+        entry["active"] = bool(entry.get("active", True))
+        if not entry["command"]:
+            continue
+        servers.append(entry)
+    payload = {
+        "_note": "MCP servers to auto-start with NEXUS. Each server must have a command and args.",
+        "servers": servers,
+    }
+    os.makedirs(os.path.dirname(_MCP_SERVERS_PATH), exist_ok=True)
+    temporary = f"{_MCP_SERVERS_PATH}.{os.getpid()}.tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    os.replace(temporary, _MCP_SERVERS_PATH)
+
+
 def _load_runtime_preferences() -> None:
     try:
         config = _load_nexus_config()
@@ -1555,10 +1679,16 @@ def _load_runtime_preferences() -> None:
         if "permission_mode" in runtime:
             _RUNTIME_SETTINGS["mode"] = _normalize_permission_mode(str(runtime.get("permission_mode") or "auto"))
         if "sandbox_tier" in runtime:
-            _RUNTIME_SETTINGS["sandbox_tier"] = _normalize_sandbox_tier(str(runtime.get("sandbox_tier") or "normal"))
+            _RUNTIME_SETTINGS["sandbox_tier"] = _normalize_sandbox_tier(str(runtime.get("sandbox_tier") or "no_sandbox"))
             os.environ["NEXUS_SANDBOX_TIER"] = str(_RUNTIME_SETTINGS["sandbox_tier"])
         if "thinking" in runtime:
             _RUNTIME_SETTINGS["thinking"] = bool(runtime.get("thinking", True))
+        if "model" in runtime:
+            _RUNTIME_SETTINGS["model"] = str(runtime.get("model") or "").strip()
+        if "provider" in runtime:
+            _RUNTIME_SETTINGS["provider"] = str(runtime.get("provider") or "").strip()
+        if "profile" in runtime:
+            _RUNTIME_SETTINGS["profile"] = str(runtime.get("profile") or "").strip()
         allowlist = runtime.get("permission_allowlist")
         if isinstance(allowlist, list):
             _RUNTIME_SETTINGS["permission_allowlist"] = [str(item).strip() for item in allowlist if str(item).strip()]
@@ -1581,8 +1711,11 @@ def _save_runtime_preferences() -> None:
             config["runtime"] = runtime
         runtime["permission_mode"] = _normalize_permission_mode(_RUNTIME_SETTINGS.get("mode") or "auto")
         runtime["permission_allowlist"] = _RUNTIME_SETTINGS.get("permission_allowlist") or []
-        runtime["sandbox_tier"] = _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier") or "normal")
+        runtime["sandbox_tier"] = _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier") or "no_sandbox")
         runtime["thinking"] = bool(_RUNTIME_SETTINGS.get("thinking", True))
+        runtime["model"] = str(_RUNTIME_SETTINGS.get("model") or "").strip()
+        runtime["provider"] = str(_RUNTIME_SETTINGS.get("provider") or "").strip()
+        runtime["profile"] = str(_RUNTIME_SETTINGS.get("profile") or "").strip()
         runtime["additional_dirs"] = _RUNTIME_SETTINGS.get("additional_dirs") or []
         workspace_root = str(_RUNTIME_SETTINGS.get("workspace_root") or "").strip()
         if workspace_root:
@@ -1660,8 +1793,35 @@ def _provider_entry(config: Dict[str, Any], provider: str) -> Optional[Dict[str,
 def _flatten_providers(config: Dict[str, Any]) -> list:
     rows = []
     providers = config.get("providers", {})
-    if not isinstance(providers, dict):
-        return rows
+    if not isinstance(providers, dict) or not providers:
+        # Auto-generate providers from factory mappings if config doesn't have providers section
+        try:
+            from providers.factory import MAPPINGS
+            providers = {
+                "cloud": {},
+                "local": {},
+                "oauth": {}
+            }
+            for provider_id, (module_path, class_name) in MAPPINGS.items():
+                # Determine group based on provider type
+                if provider_id in ["ollama", "lm_studio", "llama_cpp", "vllm", "sglang"]:
+                    group = "local"
+                elif provider_id in ["claude", "github_copilot", "codex", "minimax", "chutes", "grok"]:
+                    group = "oauth"
+                else:
+                    group = "cloud"
+                
+                if group not in providers:
+                    providers[group] = {}
+                
+                providers[group][provider_id] = {
+                    "active": False,
+                    "model": "",
+                    "endpoint": ""
+                }
+        except Exception:
+            return rows
+    
     for group_name, group in providers.items():
         if not isinstance(group, dict):
             continue
@@ -1670,10 +1830,14 @@ def _flatten_providers(config: Dict[str, Any]) -> list:
                 continue
             rows.append({
                 "id": name,
+                "name": name,
                 "group": group_name,
                 "active": bool(entry.get("active", False)),
                 "model": entry.get("model", ""),
                 "endpoint": entry.get("endpoint", ""),
+                "available": True,
+                "configured": bool(entry.get("active", False)) or bool(entry.get("model", "")) or bool(entry.get("endpoint", "")),
+                "description": f"{group_name} provider",
             })
     return sorted(rows, key=lambda item: (item["group"], item["id"]))
 
@@ -1698,9 +1862,26 @@ def _save_tasks(tasks: Dict[str, dict]) -> None:
 
 
 def _clear_runtime(reason: str) -> Dict[str, Any]:
+    global _HIVE_ENGINE
     count = len(_LOOPS)
     _LOOPS.clear()
-    return {"reloaded_loops": count, "reason": reason}
+    # ToolRegistry and Hive are process-wide caches.  Clearing only session
+    # loops leaves newly-added MCP tools invisible until a full restart.
+    refreshed = False
+    try:
+        from kernel import NexusKernel
+        kernel = NexusKernel(_PROJECT_ROOT)
+        cached_registry = getattr(kernel, "_instances", {}).pop("tools", None)
+        if cached_registry is not None:
+            close = getattr(cached_registry, "close", None)
+            if callable(close):
+                close()
+            refreshed = True
+        getattr(kernel, "_instances", {}).pop("hive", None)
+        _HIVE_ENGINE = None
+    except Exception as exc:
+        logger.debug("Runtime tool cache refresh failed: %s", exc)
+    return {"reloaded_loops": count, "tool_registry_refreshed": refreshed, "reason": reason}
 
 
 def _parse_config_value(value: Any) -> Any:
@@ -1761,11 +1942,17 @@ def _config_summary() -> Dict[str, Any]:
     for name, entry in sorted((config.get("mcp_servers") or {}).items()):
         if not isinstance(entry, dict):
             continue
+        args = entry.get("args", [])
+        if isinstance(args, list):
+            args_str = " ".join(str(a) for a in args)
+        else:
+            args_str = str(args)
         mcp.append({
             "id": name,
             "description": str(entry.get("description", ""))[:120],
             "active": bool(entry.get("active", False)),
             "command": entry.get("command", ""),
+            "args": args_str,
         })
     plugins = [
         {"id": pid, "name": pid.split("@")[0], "enabled": bool(enabled)}
@@ -1782,6 +1969,49 @@ def _config_summary() -> Dict[str, Any]:
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
+
+def _provider_reachability(provider_name: str) -> Dict[str, Any]:
+    """Report configured-vs-reachable state without probing cloud providers.
+
+    Local providers are checked at the TCP level so the status endpoint cannot
+    claim LM Studio is healthy merely because the Nexus API process is alive.
+    Remote providers remain ``unknown`` here; their credentials, quotas, and
+    model availability are validated by the actual model request.
+    """
+    name = str(provider_name or "").strip().lower()
+    if name in {"auto", "", "unknown"}:
+        return {"name": name or "auto", "configured": False, "reachable": None, "reason": "provider_not_selected"}
+    try:
+        from providers.factory import NexusProviderFactory
+
+        factory = NexusProviderFactory()
+        provider = factory.get_provider_by_name("cloud", name)
+        if provider is None:
+            return {"name": name, "configured": False, "reachable": False, "reason": "provider_not_configured"}
+        endpoint = str(getattr(provider, "endpoint", "") or "")
+        parsed = urllib.parse.urlparse(endpoint)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        is_local = name in {"lm_studio", "lm-studio", "ollama", "local"} or host in {"127.0.0.1", "localhost", "::1"}
+        if not is_local:
+            return {"name": name, "configured": True, "reachable": None, "reason": "remote_probe_deferred"}
+        if not host:
+            return {"name": name, "configured": True, "reachable": False, "reason": "invalid_local_endpoint", "endpoint": endpoint}
+        try:
+            with socket.create_connection((host, port), timeout=0.8):
+                reachable = True
+        except OSError:
+            reachable = False
+        return {
+            "name": name,
+            "configured": True,
+            "reachable": reachable,
+            "reason": "reachable" if reachable else "local_server_unreachable",
+            "endpoint": endpoint,
+        }
+    except Exception as exc:
+        logger.debug("Provider reachability check failed: %s", exc)
+        return {"name": name, "configured": True, "reachable": None, "reason": "probe_failed"}
 
 @app.get("/api/health")
 def health():
@@ -1841,7 +2071,9 @@ def list_sessions():
 @app.post("/api/sessions/new")
 def create_session():
     try:
-        new_id = f"session_{int(time.time())}"
+        # A timestamp-only id collides when the user creates two chats within
+        # one second, which makes the second chat reopen the first on refresh.
+        new_id = f"session_{uuid.uuid4().hex[:16]}"
         loop = get_loop(new_id)
         loop.save_memory()
         set_active_session(new_id, source="cli-api:new")
@@ -1927,9 +2159,11 @@ async def chat(request: Request):
     prompt = chat_request.prompt
     sid = chat_request.session_id
     provider = chat_request.provider
+    profile = chat_request.profile
     model = chat_request.model
     turn_id = chat_request.turn_id
     max_tokens = chat_request.max_tokens
+    conversation_history = chat_request.messages
     stream = bool(data.get("stream", False))
     canonical_events = bool(data.get("canonical_events", False))
 
@@ -1957,6 +2191,7 @@ async def chat(request: Request):
     }
     safe_provider = provider if provider in allowed_providers else None
     safe_model = model or getattr(nexus_loop, "model", "")
+    safe_profile = profile or getattr(nexus_loop, "profile_override", "") or None
 
     async def _collect_all(gen):
         parts = []
@@ -1973,28 +2208,34 @@ async def chat(request: Request):
         return "".join(parts)
 
     async def async_generator():
-        event_sequence = 0
         previous_sink = nexus_loop.work_event_sink
         event_queue: asyncio.Queue = asyncio.Queue()
         chunk_queue: asyncio.Queue = asyncio.Queue()
         owner_loop = asyncio.get_running_loop()
 
         def stream_event_sink(payload):
-            nonlocal event_sequence
-            event_sequence += 1
-            event = CanonicalEvent.from_work_event(dict(payload), sid, event_sequence).to_dict()
+            # Allocate from the persisted session cursor so reconnects remain
+            # monotonic across streams and concurrent runs.
+            sequence = _next_work_event_sequence(work_events_path(sid))
+            event = CanonicalEvent.from_work_event(dict(payload), sid, sequence).to_dict()
             _append_work_event(sid, event)
             owner_loop.call_soon_threadsafe(event_queue.put_nowait, event)
             return event
 
         async def pump_run():
             try:
+                run_kwargs = {
+                    "provider": safe_provider,
+                    "model": safe_model,
+                    "max_tokens": max_tokens,
+                    "turn_id": turn_id,
+                    "conversation_history": conversation_history,
+                }
+                if safe_profile:
+                    run_kwargs["profile"] = safe_profile
                 async for chunk in nexus_loop.stream_run(
                     prompt,
-                    provider=safe_provider,
-                    model=safe_model,
-                    max_tokens=max_tokens,
-                    turn_id=turn_id,
+                    **run_kwargs,
                 ):
                     await chunk_queue.put(("chunk", chunk))
             except asyncio.TimeoutError:
@@ -2053,12 +2294,17 @@ async def chat(request: Request):
     if stream:
         return StreamingResponse(async_generator(), media_type="text/event-stream")
     else:
+        run_kwargs = {
+            "provider": safe_provider,
+            "model": safe_model,
+            "max_tokens": max_tokens,
+            "turn_id": turn_id,
+        }
+        if safe_profile:
+            run_kwargs["profile"] = safe_profile
         gen = nexus_loop.stream_run(
             prompt,
-            provider=safe_provider,
-            model=safe_model,
-            max_tokens=max_tokens,
-            turn_id=turn_id,
+            **run_kwargs,
         )
         text = await _collect_all(gen)
         return {"response": text}
@@ -2127,6 +2373,50 @@ def _get_available_models() -> list:
 async def list_models():
     """OpenAI-compatible model listing."""
     return {"object": "list", "data": _get_available_models()}
+
+
+@app.get("/models/saved")
+@app.get("/api/models/saved")
+async def list_saved_models():
+    """Return provider-configured models in the shape used by the GUI picker.
+
+    The GUI calls this endpoint during ``MainChat`` mount.  Keep this separate
+    from the OpenAI-compatible ``/v1/models`` contract so the UI receives the
+    provider and human-readable label it needs without reverse-engineering
+    ``owned_by``.
+    """
+    models = []
+    try:
+        prov_path = os.path.join(_PROJECT_ROOT, "config", "provider.yml")
+        if os.path.isfile(prov_path) and yaml:
+            with open(prov_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            providers = data.get("providers", {}) if isinstance(data, dict) else {}
+            if isinstance(providers, dict):
+                for provider, cfg in providers.items():
+                    if not isinstance(cfg, dict) or not cfg.get("model"):
+                        continue
+                    model = str(cfg["model"])
+                    alias = ""
+                    try:
+                        from providers.profiles import load_profile_store
+                        for profile in load_profile_store().list_profiles(str(provider)):
+                            native = str(getattr(profile, "model_id", "") or getattr(profile, "model", ""))
+                            if native == model and getattr(profile, "active", True) and getattr(profile, "enabled", True):
+                                alias = str(getattr(profile, "model_alias", "") or getattr(profile, "name", ""))
+                                break
+                    except Exception:
+                        logger.debug("server: saved model aliases unavailable", exc_info=True)
+                    models.append({
+                        "model": model,
+                        "provider": str(provider),
+                        "profile": next((str(getattr(p, "name", "")) for p in load_profile_store().list_profiles(str(provider)) if str(getattr(p, "model_id", "") or getattr(p, "model", "")) == model and getattr(p, "active", True) and getattr(p, "enabled", True)), ""),
+                        "alias": alias,
+                        "label": alias or f"{provider}: {model}",
+                    })
+    except Exception:
+        logger.warning("server: saved model listing failed", exc_info=True)
+    return {"models": models}
 
 
 @app.post("/v1/chat/completions")
@@ -2364,9 +2654,9 @@ async def run_work_command_stream(request: Request):
                 yield sse({"type": "chunk", "stream": "stderr" if text.startswith("[SANDBOX_") else "stdout", "text": text})
             output = "".join(output_parts)
             exit_code = sandbox.last_exit_code if sandbox.last_exit_code is not None else 0
-            status = "done" if exit_code == 0 else "error"
+            status = "success" if exit_code == 0 else "failed"
             completed = _append_work_event(sid, {
-                **started, "id": f"{started.get('id')}_result", "status": status,
+                **started, "id": started.get("id"), "event_id": started.get("event_id"), "status": status,
                 "stdout": output, "stderr": "", "output": output,
                 "exit_code": exit_code, "completed_at": time.time(),
             })
@@ -2374,7 +2664,7 @@ async def run_work_command_stream(request: Request):
         except Exception as exc:
             message = str(exc)
             completed = _append_work_event(sid, {
-                **started, "id": f"{started.get('id')}_result", "status": "error",
+                **started, "id": started.get("id"), "event_id": started.get("event_id"), "status": "failed",
                 "stdout": "", "stderr": message, "output": message,
                 "completed_at": time.time(),
             })
@@ -2392,7 +2682,7 @@ _TASK_COUNTER = max([int(k.split("_")[1]) for k in _TASKS if "_" in k] or [0])
 
 @app.get("/api/skills")
 def list_skills():
-    """List available skills from project config and .opencode/skills."""
+    """List the same active skills exposed to the model-facing registry."""
     summary = _config_summary()
     by_name = {skill["name"]: skill for skill in summary["skills"]}
     skills_dir = os.path.join(_PROJECT_ROOT, ".opencode", "skills")
@@ -2408,6 +2698,24 @@ def list_skills():
                     logger.warning("server:974 list_skills: suppressed error", exc_info=True)
                     pass
             by_name.setdefault(name, {"name": name, "description": desc or "NEXUS skill", "enabled": True})
+    # Keep the dashboard/API view aligned with the exact discovery source used
+    # by the direct model/tool loop.  This includes legacy and bundled skills,
+    # not only config entries and .opencode/skills folders.
+    try:
+        from tools.nexus_tools.registry import ToolRegistry
+
+        registry = ToolRegistry(_PROJECT_ROOT)
+        for name, entry in registry._tools.items():
+            if (entry.schema or {}).get("category") != "skill":
+                continue
+            availability = entry.availability()
+            by_name[name] = {
+                "name": name,
+                "description": str((entry.schema or {}).get("description", "NEXUS skill")),
+                "enabled": bool(availability.get("available", False)),
+            }
+    except Exception:
+        logger.warning("server: list_skills registry discovery failed", exc_info=True)
     return {"skills": sorted(by_name.values(), key=lambda item: item["name"])}
 
 
@@ -2537,6 +2845,608 @@ def list_mcp():
     return {"mcp": _config_summary()["mcp"]}
 
 
+@app.post("/api/mcp")
+async def create_mcp(request: Request):
+    """Create or replace an MCP server from the Settings UI."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="MCP configuration must be an object")
+    name = str(body.get("name") or "").strip()
+    command = str(body.get("command") or body.get("cmd") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="MCP server name is required")
+    if not command:
+        raise HTTPException(status_code=400, detail="MCP server command is required")
+    args = body.get("args", [])
+    if isinstance(args, str):
+        args = [part.strip() for part in args.splitlines() if part.strip()]
+    if not isinstance(args, list):
+        raise HTTPException(status_code=400, detail="MCP args must be a list or newline-separated string")
+    config = _load_nexus_config()
+    servers = config.setdefault("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+        config["mcp_servers"] = servers
+    entry = {
+        "command": command,
+        "args": [str(part) for part in args],
+        "description": str(body.get("description") or "").strip(),
+        "active": bool(body.get("active", True)),
+    }
+    for field in ("env", "working_dir"):
+        if body.get(field) is not None:
+            entry[field] = body[field]
+    servers[name] = entry
+    _save_nexus_config(config)
+    _sync_mcp_servers_file(config)
+    _clear_runtime("mcp config changed")
+    return {"status": "success", "id": name, "mcp": entry}
+
+
+@app.delete("/api/mcp/{name}")
+def delete_mcp(name: str):
+    """Remove an MCP server from both configuration stores."""
+    config = _load_nexus_config()
+    servers = config.get("mcp_servers")
+    if not isinstance(servers, dict) or name not in servers:
+        raise HTTPException(status_code=404, detail=f"MCP server not found: {name}")
+    servers.pop(name, None)
+    _save_nexus_config(config)
+    _sync_mcp_servers_file(config)
+    _clear_runtime("mcp config changed")
+    return {"status": "success", "id": name}
+
+
+@app.get("/api/hives")
+def list_hives():
+    """List hive status and active hives."""
+    try:
+        hive = _get_hive_engine()
+        personas = list(hive.list_personas().keys())
+    except Exception:
+        logger.warning("server: list_hives: suppressed error", exc_info=True)
+        personas = ["WORKER"]
+
+    with _HIVES_LOCK:
+        hives_list = []
+        for hive_id, hive_data in _HIVES.items():
+            agents = hive_data.get("agents", [])
+            engine_agents = [hive.get_agent(item.get("id", "")) for item in agents]
+            for item, live in zip(agents, engine_agents):
+                if live is not None:
+                    item["status"] = live.status
+            statuses = {str(item.get("status") or "").lower() for item in agents}
+            terminal = {"success", "failed", "cancelled", "canceled", "error"}
+            if statuses and statuses.issubset(terminal):
+                if statuses == {"success"}:
+                    hive_data["status"] = "success"
+                elif statuses.issubset({"cancelled", "canceled"}):
+                    hive_data["status"] = "cancelled"
+                else:
+                    hive_data["status"] = "failed"
+            hives_list.append({
+                "id": hive_id,
+                "status": hive_data.get("status", "unknown"),
+                "agents": agents,
+            })
+    _persist_hive_manifest()
+
+    features = _runtime_features(_load_nexus_config())
+    enabled = features.get("hive", True)
+
+    return {
+        "enabled": enabled,
+        "personas": personas,
+        "hives": hives_list
+    }
+
+
+@app.post("/api/hives")
+async def create_hive(request: Request):
+    """Create a new hive with multiple sub-agents."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    agents_input = body.get("agents", [])
+    if not isinstance(agents_input, list):
+        raise HTTPException(status_code=400, detail="agents must be a list")
+
+    if not agents_input:
+        raise HTTPException(status_code=400, detail="agents list cannot be empty")
+
+    # Validate each agent entry
+    for agent in agents_input:
+        if not isinstance(agent, dict):
+            raise HTTPException(status_code=400, detail="each agent must be a dict")
+        if "task" not in agent or not isinstance(agent["task"], str):
+            raise HTTPException(status_code=400, detail="each agent must have a 'task' string")
+        if "persona" not in agent or not isinstance(agent["persona"], str):
+            raise HTTPException(status_code=400, detail="each agent must have a 'persona' string")
+
+    try:
+        hive_engine = _get_hive_engine()
+        tasks = [(agent["task"], agent["persona"]) for agent in agents_input]
+        hive_id, spawned = await hive_engine.spawn_hive(tasks)
+    except Exception as e:
+        logger.warning(f"Hive engine spawn failed: {e}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Hive could not start: {e}")
+
+    with _HIVES_LOCK:
+        _HIVES[hive_id] = {
+            "id": hive_id,
+            "status": "running",
+            "agents": [
+                {
+                    "id": agent.agent_id,
+                    "task": agent.task,
+                    "persona": agent.persona,
+                    "status": agent.status,
+                }
+                for agent in spawned
+            ],
+            "created_at": time.time(),
+        }
+    _persist_hive_manifest()
+
+    return {
+        "status": "success",
+        "hive": {
+            "id": hive_id,
+            "status": "running",
+            "agents": _HIVES[hive_id]["agents"]
+        }
+    }
+
+
+@app.post("/api/hives/{hive_id}/cancel")
+async def cancel_hive(hive_id: str):
+    """Cancel a running hive."""
+    with _HIVES_LOCK:
+        if hive_id not in _HIVES:
+            raise HTTPException(status_code=404, detail=f"Hive {hive_id} not found")
+
+    try:
+        hive_engine = _get_hive_engine()
+        await hive_engine.cancel_hive(hive_id)
+    except Exception as e:
+        logger.warning(f"Hive {hive_id} cancel engine call failed: {e}", exc_info=True)
+
+    with _HIVES_LOCK:
+        # Mark as cancelled
+        _HIVES[hive_id]["status"] = "cancelled"
+        for agent in _HIVES[hive_id]["agents"]:
+            if str(agent.get("status") or "").lower() not in {"success", "failed", "error"}:
+                agent["status"] = "cancelled"
+    _persist_hive_manifest()
+
+    return {"status": "success"}
+
+
+@app.post("/api/hives/{hive_id}/resume")
+async def resume_hive(hive_id: str):
+    """Re-spawn the saved tasks from an interrupted/failed Hive."""
+    with _HIVES_LOCK:
+        previous = _HIVES.get(hive_id)
+        if previous is None:
+            raise HTTPException(status_code=404, detail=f"Hive {hive_id} not found")
+        if previous.get("status") == "running":
+            raise HTTPException(status_code=409, detail="Hive is already running")
+        tasks = [
+            (str(agent.get("task") or ""), str(agent.get("persona") or "WORKER"))
+            for agent in previous.get("agents", [])
+            if isinstance(agent, dict)
+            and str(agent.get("task") or "").strip()
+            and str(agent.get("status") or "pending").lower() in {"pending", "running", "interrupted"}
+        ]
+    if not tasks:
+        raise HTTPException(status_code=400, detail="Hive has no resumable tasks")
+
+    try:
+        hive_engine = _get_hive_engine()
+        new_id, spawned = await hive_engine.spawn_hive(tasks, parent_run_id=hive_id)
+    except Exception as e:
+        logger.warning("Hive %s resume failed: %s", hive_id, e, exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Hive could not resume: {e}")
+
+    with _HIVES_LOCK:
+        previous["resumed_to"] = new_id
+        previous["status"] = "superseded"
+        _HIVES[new_id] = {
+            "id": new_id,
+            "status": "running",
+            "resumed_from": hive_id,
+            "agents": [
+                {"id": agent.agent_id, "task": agent.task, "persona": agent.persona, "status": agent.status}
+                for agent in spawned
+            ],
+            "created_at": time.time(),
+        }
+    _persist_hive_manifest()
+    return {
+        "status": "success",
+        "hive": _HIVES[new_id],
+    }
+
+
+@app.get("/api/gateways")
+def list_gateways():
+    """List available gateway platforms and their status."""
+    try:
+        from gateway.platforms import all_adapters
+        from gateway.run import _PLATFORM_ENV_MAP, _has_required_env
+    except Exception:
+        logger.warning("server: list_gateways: gateway module not available", exc_info=True)
+        return {"gateways": []}
+
+    gateways = []
+    for platform in all_adapters():
+        required = _PLATFORM_ENV_MAP.get(platform, [])
+        has_env = _has_required_env(required) if required else False
+        gateways.append({
+            "id": platform,
+            "name": platform.replace("_", " ").title(),
+            "status": "idle",
+            "enabled": has_env,
+            "description": f"NEXUS {platform.replace('_', ' ')} gateway"
+        })
+
+    return {"gateways": gateways}
+
+
+@app.get("/api/cron/jobs")
+def list_cron_jobs():
+    """List scheduled cron jobs."""
+    with _CRON_JOBS_LOCK:
+        jobs = []
+        for job_id, job_data in _CRON_JOBS.items():
+            jobs.append({
+                "id": job_id,
+                "name": job_data.get("name", ""),
+                "enabled": job_data.get("enabled", True),
+                "description": f"Interval: {job_data.get('interval_minutes', 0)} minutes"
+            })
+        return {"jobs": jobs, "status": "ok"}
+
+
+@app.post("/api/cron/jobs")
+async def create_cron_job(request: Request):
+    """Create a new cron job."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    name = body.get("name")
+    prompt = body.get("prompt")
+    interval_minutes = body.get("interval_minutes")
+    enabled = body.get("enabled", True)
+
+    if not name or not isinstance(name, str):
+        raise HTTPException(status_code=400, detail="name is required")
+    if not prompt or not isinstance(prompt, str):
+        raise HTTPException(status_code=400, detail="prompt is required")
+    if not isinstance(interval_minutes, int) or interval_minutes <= 0:
+        raise HTTPException(status_code=400, detail="interval_minutes must be a positive integer")
+
+    job_id = f"cron_{uuid.uuid4().hex[:8]}"
+    with _CRON_JOBS_LOCK:
+        _CRON_JOBS[job_id] = {
+            "id": job_id,
+            "name": name,
+            "prompt": prompt,
+            "interval_minutes": interval_minutes,
+            "enabled": enabled,
+            "created_at": time.time()
+        }
+
+    return {"status": "success", "job": {"id": job_id, "name": name, "enabled": enabled}}
+
+
+# ── Voice API endpoints ────────────────────────────────────────────────────────
+
+_VOICE_ASSISTANT: Dict[str, Any] = {}
+_VOICE_LOCK = threading.Lock()
+
+
+def _get_voice_assistant(session_id: str = "default"):
+    """Get or create a VoiceAssistant instance for a session."""
+    with _VOICE_LOCK:
+        if session_id not in _VOICE_ASSISTANT:
+            try:
+                from voice.pipeline import VoiceAssistant
+                _VOICE_ASSISTANT[session_id] = VoiceAssistant(session_id=session_id)
+                _VOICE_ASSISTANT[session_id].warmup()
+            except Exception as e:
+                logger.error(f"Failed to create VoiceAssistant: {e}")
+                raise HTTPException(status_code=500, detail=f"Voice system not available: {str(e)}")
+        return _VOICE_ASSISTANT[session_id]
+
+
+@app.get("/api/voice/status")
+def voice_status(session_id: str = "default"):
+    """Get voice system status and settings."""
+    try:
+        assistant = _get_voice_assistant(session_id)
+        return {
+            "status": "ok",
+            "enabled": assistant.settings.enabled,
+            "auto_speak": assistant.settings.auto_speak,
+            "continuous_listening": assistant.settings.continuous_listening,
+            "voice_name": assistant.settings.voice_name,
+            "whisper_language": assistant.settings.whisper_language,
+            "statistics": assistant.get_voice_statistics()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/voice/listen/start")
+async def voice_listen_start(request: Request):
+    """Start voice listening (continuous mode)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    
+    session_id = body.get("session_id", "default")
+    continuous = body.get("continuous", True)
+    
+    try:
+        assistant = _get_voice_assistant(session_id)
+        if continuous:
+            assistant.start_continuous_listening()
+        return {"status": "ok", "listening": True, "continuous": continuous}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to start listening: {str(e)}")
+
+
+@app.post("/api/voice/listen/stop")
+def voice_listen_stop(session_id: str = "default"):
+    """Stop voice listening."""
+    try:
+        assistant = _get_voice_assistant(session_id)
+        assistant.stop_continuous_listening()
+        return {"status": "ok", "listening": False}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to stop listening: {str(e)}")
+
+
+@app.post("/api/voice/transcribe")
+async def voice_transcribe(request: Request):
+    """Transcribe audio data."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    
+    session_id = body.get("session_id", "default")
+    continuous = body.get("continuous", False)
+    
+    try:
+        assistant = _get_voice_assistant(session_id)
+        text = assistant.listen_once(continuous=continuous)
+        return {"status": "ok", "text": text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
+
+@app.post("/api/voice/speak")
+async def voice_speak(request: Request):
+    """Convert text to speech."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    
+    session_id = body.get("session_id", "default")
+    text = body.get("text", "")
+    blocking = body.get("blocking", False)
+    
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    
+    try:
+        assistant = _get_voice_assistant(session_id)
+        success = assistant.speak(text, blocking=blocking)
+        return {"status": "ok", "spoken": success}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}")
+
+
+@app.post("/api/voice/speak/stop")
+def voice_speak_stop(session_id: str = "default"):
+    """Stop current speech."""
+    try:
+        assistant = _get_voice_assistant(session_id)
+        assistant.stop_speaking()
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to stop speech: {str(e)}")
+
+
+@app.get("/api/voice/voices")
+def voice_voices():
+    """List available TTS voices."""
+    try:
+        from voice.pipeline import VoiceAssistant
+        return {"status": "ok", "voices": VoiceAssistant.get_available_voices(None)}
+    except Exception as e:
+        return {"status": "error", "message": str(e), "voices": []}
+
+
+@app.get("/api/voice/languages")
+def voice_languages():
+    """List supported STT languages."""
+    try:
+        from voice.pipeline import VoiceAssistant
+        return {"status": "ok", "languages": VoiceAssistant.get_available_languages(None)}
+    except Exception as e:
+        return {"status": "error", "message": str(e), "languages": []}
+
+
+@app.get("/api/voice/history")
+def voice_history(session_id: str = "default", limit: int = 10):
+    """Get transcription history."""
+    try:
+        assistant = _get_voice_assistant(session_id)
+        history = assistant.get_transcription_history(limit)
+        return {"status": "ok", "history": history}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
+
+
+@app.post("/api/voice/settings")
+async def voice_settings(request: Request):
+    """Update voice settings."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    
+    session_id = body.get("session_id", "default")
+    
+    try:
+        assistant = _get_voice_assistant(session_id)
+        # Update settings that can be changed dynamically
+        if "auto_speak" in body:
+            assistant.settings.auto_speak = body["auto_speak"]
+        if "voice_name" in body:
+            assistant.settings.voice_name = body["voice_name"]
+        if "whisper_language" in body:
+            assistant.settings.whisper_language = body["whisper_language"]
+        if "volume" in body:
+            assistant.settings.volume = body["volume"]
+        if "speech_speed" in body:
+            assistant.settings.speech_speed = body["speech_speed"]
+        
+        return {"status": "ok", "settings": {
+            "auto_speak": assistant.settings.auto_speak,
+            "voice_name": assistant.settings.voice_name,
+            "whisper_language": assistant.settings.whisper_language,
+            "volume": assistant.settings.volume,
+            "speech_speed": assistant.settings.speech_speed,
+        }}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update settings: {str(e)}")
+
+
+@app.get("/api/voice/stream")
+async def voice_stream(request: Request):
+    """Stream voice transcriptions and status updates via SSE."""
+    session_id = request.query_params.get("session_id", "default")
+    
+    async def event_stream():
+        try:
+            assistant = _get_voice_assistant(session_id)
+            
+            # Start continuous listening
+            assistant.start_continuous_listening()
+            
+            def status_callback(status: str):
+                # This would need to be integrated with the streaming mechanism
+                pass
+            
+            # Stream transcriptions as they become available
+            while True:
+                try:
+                    # Check if client disconnected
+                    if await request.is_disconnected():
+                        break
+                    
+                    # Try to get next utterance with timeout
+                    text = assistant.listen_once(continuous=True, timeout=0.25)
+                    
+                    if text and text.strip():
+                        yield f"data: {json.dumps({'type': 'transcription', 'text': text})}\n\n"
+                    
+                    # Send heartbeat
+                    yield f": keepalive\n\n"
+                    
+                except Exception as e:
+                    yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                    break
+                    
+        finally:
+            # Cleanup
+            try:
+                assistant = _get_voice_assistant(session_id)
+                assistant.stop_continuous_listening()
+            except:
+                pass
+    
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+@app.patch("/api/cron/jobs/{job_id}")
+async def update_cron_job(job_id: str, request: Request):
+    """Update a cron job."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    with _CRON_JOBS_LOCK:
+        if job_id not in _CRON_JOBS:
+            raise HTTPException(status_code=404, detail=f"Cron job {job_id} not found")
+
+        if "enabled" in body:
+            _CRON_JOBS[job_id]["enabled"] = bool(body["enabled"])
+        if "interval_minutes" in body:
+            interval = body["interval_minutes"]
+            if not isinstance(interval, int) or interval <= 0:
+                raise HTTPException(status_code=400, detail="interval_minutes must be a positive integer")
+            _CRON_JOBS[job_id]["interval_minutes"] = interval
+
+        return {"status": "success", "job": {"id": job_id, "enabled": _CRON_JOBS[job_id].get("enabled", True)}}
+
+
+@app.post("/api/cron/jobs/{job_id}/run")
+def run_cron_job(job_id: str):
+    """Manually trigger a cron job."""
+    with _CRON_JOBS_LOCK:
+        if job_id not in _CRON_JOBS:
+            raise HTTPException(status_code=404, detail=f"Cron job {job_id} not found")
+    # For now, just acknowledge - actual execution would require scheduler integration
+    return {"status": "success"}
+
+
+@app.delete("/api/cron/jobs/{job_id}")
+def delete_cron_job(job_id: str):
+    """Delete a cron job."""
+    with _CRON_JOBS_LOCK:
+        if job_id not in _CRON_JOBS:
+            raise HTTPException(status_code=404, detail=f"Cron job {job_id} not found")
+        del _CRON_JOBS[job_id]
+    return {"status": "success"}
+
+
+@app.get("/api/billing/status")
+def billing_status():
+    """Return billing status (local-first, always free)."""
+    return {
+        "status": "ok",
+        "tier": "local",
+        "message": "NEXUS AI is local-first - no billing required",
+        "usage": {},
+        "limits": {}
+    }
+
+
 @app.get("/api/providers")
 def list_provider_config():
     """List configured providers from nexus config and kernel factory."""
@@ -2576,6 +3486,140 @@ def list_provider_config():
 def list_features():
     """List runtime feature flags from nexus_config.yaml."""
     return {"features": _config_summary()["features"]}
+
+
+@app.get("/api/evolution")
+def list_evolution():
+    """List evolution system status and components."""
+    config = _load_nexus_config()
+    features = _runtime_features(config)
+    enabled = features.get("evolution", False)
+    
+    # Try to get evolution components from the evolution module
+    lifecycle = []
+    forges = []
+    try:
+        from evolution.version_manager import VersionManager
+        vm = VersionManager()
+        lifecycle.append({
+            "id": "version_manager",
+            "name": "Version Manager",
+            "available": True,
+            "enabled": True,
+            "description": "Manages versioning and rollback capabilities"
+        })
+    except Exception:
+        pass
+    
+    try:
+        from evolution.self_improvement import SelfImprovementEngine
+        lifecycle.append({
+            "id": "self_improvement",
+            "name": "Self Improvement",
+            "available": True,
+            "enabled": True,
+            "description": "Automated self-improvement through training"
+        })
+    except Exception:
+        pass
+    
+    # Add forge modules
+    forges.append({
+        "id": "code_forge",
+        "name": "Code Forge",
+        "available": True,
+        "enabled": True,
+        "description": "Generates code artifacts"
+    })
+    forges.append({
+        "id": "test_forge",
+        "name": "Test Forge", 
+        "available": True,
+        "enabled": True,
+        "description": "Generates test cases"
+    })
+    
+    return {
+        "enabled": enabled,
+        "version": "1.0.0",
+        "lifecycle": lifecycle,
+        "forges": forges
+    }
+
+
+@app.get("/api/config/files")
+def list_config_files():
+    """List all configuration files in the project."""
+    import os
+    from pathlib import Path
+    
+    config_files = []
+    project_root = _PROJECT_ROOT
+    config_extensions = ['.json', '.yaml', '.yml', '.jsnol']
+    
+    # Search in key directories
+    search_dirs = [
+        os.path.join(project_root, 'config'),
+        os.path.join(project_root, 'workspace'),
+        os.path.join(project_root, 'skills'),
+        os.path.join(project_root, 'tools'),
+        os.path.join(project_root, 'plugins'),
+        os.path.join(project_root, 'mcp'),
+        os.path.join(project_root, 'hive'),
+        os.path.join(project_root, 'evolution'),
+        os.path.join(project_root, 'safety'),
+        os.path.join(project_root, 'voice'),
+        os.path.join(project_root, 'providers'),
+        os.path.join(project_root, 'knowledge'),
+    ]
+    
+    for search_dir in search_dirs:
+        if not os.path.exists(search_dir):
+            continue
+        for root, dirs, files in os.walk(search_dir):
+            # Skip node_modules and other common exclusions
+            dirs[:] = [d for d in dirs if d not in ['node_modules', '__pycache__', '.git', 'venv']]
+            
+            for file in files:
+                if any(file.endswith(ext) for ext in config_extensions):
+                    rel_path = os.path.relpath(os.path.join(root, file), project_root)
+                    config_files.append({
+                        "name": file,
+                        "path": rel_path,
+                        "size": os.path.getsize(os.path.join(root, file)),
+                        "type": file.split('.')[-1]
+                    })
+    
+    return {"files": sorted(config_files, key=lambda x: x['path'])}
+
+
+@app.get("/api/config/file")
+def get_config_file(path: str):
+    """Read a specific configuration file."""
+    import os
+    from pathlib import Path
+    
+    # Security check - ensure path is within project root
+    project_root = _PROJECT_ROOT
+    full_path = os.path.join(project_root, path)
+    
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    if not os.path.abspath(full_path).startswith(os.path.abspath(project_root)):
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    try:
+        with open(full_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        return {
+            "path": path,
+            "content": content,
+            "size": os.path.getsize(full_path)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not read file: {str(e)}")
 
 
 @app.post("/api/approve")
@@ -2700,49 +3744,121 @@ def _create_workspace_checkpoint(workspace_root: str, session_id: str, run_id: s
     ckpt_id = uuid.uuid4().hex
     ckpt_root = os.path.join(_CHECKPOINTS_ROOT, ckpt_id)
     snapshot_root = os.path.join(ckpt_root, "snapshot")
-    os.makedirs(snapshot_root, exist_ok=True)
-    manifest: List[str] = []
-    file_count = 0
-    size_bytes = 0
-    for dirpath, dirnames, filenames in os.walk(root):
-        pruned = []
-        for name in sorted(dirnames):
-            rel_dir = os.path.relpath(os.path.join(dirpath, name), root).replace("\\", "/")
-            if not _should_skip_checkpoint_rel(rel_dir):
-                pruned.append(name)
-        dirnames[:] = pruned
-        for fn in sorted(filenames):
-            src = os.path.join(dirpath, fn)
-            if os.path.islink(src):
-                continue
-            rel = os.path.relpath(src, root).replace("\\", "/")
-            if _should_skip_checkpoint_rel(rel):
-                continue
-            dst = os.path.join(snapshot_root, rel)
-            try:
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.copy2(src, dst)
-                size_bytes += os.path.getsize(src)
-                manifest.append(rel)
-                file_count += 1
-            except (OSError, shutil.Error):
-                continue
-    manifest.sort()
-    meta = {
-        "checkpoint_id": ckpt_id,
-        "session_id": safe_session_id(session_id),
-        "run_id": str(run_id or ""),
-        "turn_id": str(turn_id or run_id or ""),
-        "created_at": time.time(),
-        "file_count": file_count,
-        "size_bytes": size_bytes,
-        "workspace_root": root,
-    }
-    with open(os.path.join(ckpt_root, "metadata.json"), "w", encoding="utf-8") as fh:
-        json.dump(meta, fh, ensure_ascii=False, indent=2)
-    with open(os.path.join(ckpt_root, "manifest.json"), "w", encoding="utf-8") as fh:
-        json.dump(manifest, fh, ensure_ascii=False, indent=2)
-    return meta
+    
+    try:
+        os.makedirs(snapshot_root, exist_ok=True)
+        manifest: List[str] = []
+        file_count = 0
+        size_bytes = 0
+        for dirpath, dirnames, filenames in os.walk(root):
+            pruned = []
+            for name in sorted(dirnames):
+                rel_dir = os.path.relpath(os.path.join(dirpath, name), root).replace("\\", "/")
+                if not _should_skip_checkpoint_rel(rel_dir):
+                    pruned.append(name)
+            dirnames[:] = pruned
+            for fn in sorted(filenames):
+                src = os.path.join(dirpath, fn)
+                if os.path.islink(src):
+                    continue
+                rel = os.path.relpath(src, root).replace("\\", "/")
+                if _should_skip_checkpoint_rel(rel):
+                    continue
+                dst = os.path.join(snapshot_root, rel)
+                try:
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(src, dst)
+                    size_bytes += os.path.getsize(src)
+                    manifest.append(rel)
+                    file_count += 1
+                except (OSError, shutil.Error):
+                    continue
+        manifest.sort()
+        meta = {
+            "checkpoint_id": ckpt_id,
+            "session_id": safe_session_id(session_id),
+            "run_id": str(run_id or ""),
+            "turn_id": str(turn_id or run_id or ""),
+            "created_at": time.time(),
+            "file_count": file_count,
+            "size_bytes": size_bytes,
+            "workspace_root": root,
+        }
+        
+        # Atomic write for metadata.json
+        meta_path = os.path.join(ckpt_root, "metadata.json")
+        meta_tmp = f"{meta_path}.tmp"
+        with open(meta_tmp, "w", encoding="utf-8") as fh:
+            json.dump(meta, fh, ensure_ascii=False, indent=2)
+        os.replace(meta_tmp, meta_path)
+        
+        # Atomic write for manifest.json
+        manifest_path = os.path.join(ckpt_root, "manifest.json")
+        manifest_tmp = f"{manifest_path}.tmp"
+        with open(manifest_tmp, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, ensure_ascii=False, indent=2)
+        os.replace(manifest_tmp, manifest_path)
+        
+        # Validate checkpoint is complete
+        if not os.path.isfile(meta_path) or not os.path.isfile(manifest_path):
+            raise OSError("Checkpoint files not written successfully")
+        
+        return meta
+    except Exception:
+        # Clean up incomplete checkpoint on any failure
+        if os.path.isdir(ckpt_root):
+            shutil.rmtree(ckpt_root, ignore_errors=True)
+        raise
+
+
+def _validate_checkpoint_integrity(ckpt_root: str) -> Tuple[bool, List[str]]:
+    """Validate checkpoint structure and return (is_valid, errors)."""
+    errors = []
+    
+    # Check directory exists
+    if not os.path.isdir(ckpt_root):
+        errors.append("Checkpoint directory does not exist")
+        return False, errors
+    
+    # Check required files
+    meta_path = os.path.join(ckpt_root, "metadata.json")
+    manifest_path = os.path.join(ckpt_root, "manifest.json")
+    snapshot_root = os.path.join(ckpt_root, "snapshot")
+    
+    if not os.path.isfile(meta_path):
+        errors.append("metadata.json is missing")
+    if not os.path.isfile(manifest_path):
+        errors.append("manifest.json is missing")
+    if not os.path.isdir(snapshot_root):
+        errors.append("snapshot directory is missing")
+    
+    # Validate metadata.json
+    if os.path.isfile(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fh:
+                meta = json.load(fh)
+            if not isinstance(meta, dict):
+                errors.append("metadata.json is not a valid JSON object")
+            elif not meta.get("checkpoint_id"):
+                errors.append("metadata.json missing checkpoint_id")
+        except json.JSONDecodeError:
+            errors.append("metadata.json is not valid JSON")
+        except OSError:
+            errors.append("metadata.json is unreadable")
+    
+    # Validate manifest.json
+    if os.path.isfile(manifest_path):
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as fh:
+                manifest = json.load(fh)
+            if not isinstance(manifest, list):
+                errors.append("manifest.json is not a valid JSON array")
+        except json.JSONDecodeError:
+            errors.append("manifest.json is not valid JSON")
+        except OSError:
+            errors.append("manifest.json is unreadable")
+    
+    return len(errors) == 0, errors
 
 
 def _load_checkpoint_meta(ckpt_root: str) -> Dict[str, Any]:
@@ -2762,16 +3878,25 @@ def _load_checkpoint_meta(ckpt_root: str) -> Dict[str, Any]:
 def _restore_workspace_checkpoint(workspace_root: str, session_id: str, checkpoint_id: str) -> Dict[str, Any]:
     ws_root = os.path.abspath(workspace_root or _workspace_root())
     ckpt_root = os.path.join(_CHECKPOINTS_ROOT, _safe_checkpoint_id(checkpoint_id))
+    
+    # Check if checkpoint directory exists first (404 if not)
     if not os.path.isdir(ckpt_root):
         raise HTTPException(status_code=404, detail="Checkpoint not found")
+    
+    # Validate checkpoint integrity for existing checkpoints (400 if corrupt)
+    is_valid, errors = _validate_checkpoint_integrity(ckpt_root)
+    if not is_valid:
+        error_detail = f"Checkpoint is corrupt: {', '.join(errors)}"
+        raise HTTPException(status_code=400, detail=error_detail)
+    
     meta = _load_checkpoint_meta(ckpt_root)
     sid = safe_session_id(session_id or str(meta.get("session_id") or ""))
     if meta.get("session_id") and str(meta["session_id"]) != sid:
         raise HTTPException(status_code=404, detail="Checkpoint not found")
+    
     snapshot_root = os.path.join(ckpt_root, "snapshot")
     manifest_path = os.path.join(ckpt_root, "manifest.json")
-    if not os.path.isdir(snapshot_root) or not os.path.isfile(manifest_path):
-        raise HTTPException(status_code=400, detail="Checkpoint is corrupt: snapshot or manifest missing")
+    
     try:
         with open(manifest_path, "r", encoding="utf-8") as fh:
             manifest = json.load(fh)
@@ -3105,7 +4230,7 @@ async def manage_runtime(request: Request):
                 "model": "",
                 "provider": "",
                 "mode": "auto",
-                "sandbox_tier": "normal",
+                "sandbox_tier": "no_sandbox",
                 "permission_allowlist": [],
                 "agent": "",
                 "goal": "",
@@ -3195,6 +4320,7 @@ async def manage_runtime(request: Request):
         else:
             raise HTTPException(status_code=400, detail=f"{action} not supported for MCP")
         _save_nexus_config(config)
+        _sync_mcp_servers_file(config)
         _clear_runtime("mcp config changed")
         return {"status": "success", "type": "mcp", "name": name, "active": bool(entry.get("active", False)) if action != "remove" else False}
 
@@ -3360,19 +4486,24 @@ def get_status():
     except Exception:
         real_agent_count = 0
 
+    provider_name = _RUNTIME_SETTINGS.get("provider") or getattr(active_provider, "provider_name", "") or "auto"
+    provider_status = _provider_reachability(provider_name)
     status = {
         "model": _RUNTIME_SETTINGS.get("model") or getattr(active_provider, "model", "") or "auto",
         "mode": _normalize_permission_mode(_RUNTIME_SETTINGS.get("mode") or "auto"),
-        "provider": _RUNTIME_SETTINGS.get("provider") or getattr(active_provider, "provider_name", "") or "auto",
+        "provider": provider_name,
         "agent": _RUNTIME_SETTINGS.get("agent") or "",
         "goal": _RUNTIME_SETTINGS.get("goal") or "",
-        "sandbox_tier": _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier", "normal")),
+        "sandbox_tier": _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier", "no_sandbox")),
         "permission_modes": ["auto", "all", "allowlist", "ask"],
         "permission_allowlist": _RUNTIME_SETTINGS.get("permission_allowlist") or [],
         "thinking": bool(_RUNTIME_SETTINGS.get("thinking", True)),
         "additional_dirs": _RUNTIME_SETTINGS.get("additional_dirs") or [],
         "workspace_root": _PROJECT_ROOT,
-        "health": "ok",
+        # Backend health and model-provider reachability are separate.  A
+        # running API with a stopped local model is degraded, not healthy.
+        "health": "degraded" if provider_status.get("configured") and not provider_status.get("reachable") else "ok",
+        "provider_status": provider_status,
         "uptime": 0,
         "session_count": len(_LOOPS),
         "agent_count": real_agent_count,
@@ -3380,6 +4511,125 @@ def get_status():
         "version": "2.1.0"
     }
     return status
+
+
+@app.get("/api/memory/statistics")
+def get_memory_statistics():
+    """Return comprehensive memory statistics."""
+    try:
+        from memory import MemoryManager
+        memory = MemoryManager(_PROJECT_ROOT)
+        stats = memory.get_statistics()
+        return {"status": "success", "statistics": stats}
+    except Exception as e:
+        logger.warning("Memory statistics failed", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/memory/search")
+async def search_memory(request: Request):
+    """Search across all memory types."""
+    try:
+        data = await request.json()
+        query = data.get("query", "")
+        memory_types = data.get("memory_types")
+        
+        if not query:
+            raise HTTPException(status_code=400, detail="Query is required")
+        
+        from memory import MemoryManager
+        memory = MemoryManager(_PROJECT_ROOT)
+        results = memory.search_memory(query, memory_types)
+        
+        return {"status": "success", "results": results, "count": len(results)}
+    except Exception as e:
+        logger.warning("Memory search failed", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/memory/export")
+async def export_memory(request: Request):
+    """Export memory data in JSON or text format."""
+    try:
+        data = await request.json()
+        format = data.get("format", "json")
+        
+        from memory import MemoryManager
+        memory = MemoryManager(_PROJECT_ROOT)
+        exported = memory.export_memory(format)
+        
+        return {"status": "success", "format": format, "data": exported}
+    except Exception as e:
+        logger.warning("Memory export failed", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/memory/import")
+async def import_memory(request: Request):
+    """Import memory data from JSON or text format."""
+    try:
+        data = await request.json()
+        import_data = data.get("data", "")
+        format = data.get("format", "json")
+        
+        if not import_data:
+            raise HTTPException(status_code=400, detail="Data is required")
+        
+        from memory import MemoryManager
+        memory = MemoryManager(_PROJECT_ROOT)
+        success = memory.import_memory(import_data, format)
+        
+        if success:
+            return {"status": "success", "message": "Memory imported successfully"}
+        else:
+            return {"status": "error", "message": "Memory import failed"}
+    except Exception as e:
+        logger.warning("Memory import failed", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/memory/clear")
+async def clear_memory(request: Request):
+    """Clear specific or all memory types."""
+    try:
+        data = await request.json()
+        memory_type = data.get("memory_type", "all")
+        
+        from memory import MemoryManager
+        memory = MemoryManager(_PROJECT_ROOT)
+        memory.clear_memory(memory_type)
+        
+        return {"status": "success", "message": f"Cleared {memory_type} memory"}
+    except Exception as e:
+        logger.warning("Memory clear failed", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/memory/sessions")
+def list_memory_sessions():
+    """List all available memory sessions."""
+    try:
+        sess_dir = os.path.join(_PROJECT_ROOT, "logs", "sessions")
+        sessions = []
+        
+        if os.path.isdir(sess_dir):
+            for f in os.listdir(sess_dir):
+                if f.endswith(".json"):
+                    path = os.path.join(sess_dir, f)
+                    stat = os.stat(path)
+                    sessions.append({
+                        "id": f[:-5],  # Remove .json
+                        "file": f,
+                        "size": stat.st_size,
+                        "modified": stat.st_mtime,
+                        "modified_iso": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime))
+                    })
+        
+        sessions.sort(key=lambda x: x["modified"], reverse=True)
+        return {"status": "success", "sessions": sessions, "count": len(sessions)}
+    except Exception as e:
+        logger.warning("List memory sessions failed", exc_info=True)
+        return {"status": "error", "message": str(e)}
 
 
 @app.post("/api/mode")
@@ -3471,11 +4721,32 @@ async def set_model(request: Request):
     """Switch model."""
     data = await request.json()
     model = str(data.get("model", "")).strip()
+    provider = str(data.get("provider", "")).strip().lower().replace(" ", "_")
+    profile = str(data.get("profile", "")).strip()
     if not model:
         raise HTTPException(status_code=400, detail="model is required")
+    if provider:
+        _RUNTIME_SETTINGS["provider"] = provider
+        if not profile:
+            _RUNTIME_SETTINGS["profile"] = ""
+    if profile:
+        if not provider:
+            raise HTTPException(status_code=400, detail="provider is required when selecting a profile")
+        try:
+            from providers.profiles import load_profile_store
+            selected = load_profile_store().get_profile(provider, profile)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Provider profile store is unavailable") from exc
+        if selected is None:
+            raise HTTPException(status_code=409, detail=f"Provider profile '{profile}' is unavailable or disabled")
+        native_model = str(getattr(selected, "model_id", "") or getattr(selected, "model", "") or model).strip()
+        if native_model and model != native_model:
+            model = native_model
+        _RUNTIME_SETTINGS["profile"] = profile
     _RUNTIME_SETTINGS["model"] = model
     apply_runtime_to_all_loops()
-    return {"status": "success", "model": model}
+    _save_runtime_preferences()
+    return {"status": "success", "model": model, "provider": _RUNTIME_SETTINGS.get("provider", ""), "profile": _RUNTIME_SETTINGS.get("profile", "")}
 
 
 @app.post("/api/provider")
@@ -3567,7 +4838,7 @@ def get_sandbox():
     """Return the current sandbox tier."""
     return {
         "status": "success",
-        "tier": _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier", "normal")),
+        "tier": _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier", "no_sandbox")),
         "available": ["no_sandbox", "normal", "docker"],
         "labels": {"no_sandbox": "none", "normal": "simple", "docker": "docker"},
     }
@@ -4208,7 +5479,11 @@ def _ensure_workspace_summary_refresh(root: str) -> None:
 
 def _workspace_root() -> str:
     configured = str(_RUNTIME_SETTINGS.get("workspace_root") or "").strip()
-    return configured or _PROJECT_ROOT
+    if configured:
+        return configured
+    # Default to workspace/ subfolder if it exists, otherwise project root
+    workspace_dir = os.path.join(_PROJECT_ROOT, "workspace")
+    return workspace_dir if os.path.isdir(workspace_dir) else _PROJECT_ROOT
 
 
 def _canonical_workspace_path(raw: str) -> str:
@@ -5610,6 +6885,178 @@ def stop_voice():
     return {"status": "success", **status}
 
 
+@app.get("/api/voice/statistics")
+def get_voice_statistics():
+    """Return comprehensive voice usage statistics."""
+    try:
+        from voice import VoiceAssistant
+        # Check if voice is properly configured
+        from config.config_loader import NexusConfigLoader
+        settings = VoiceAssistant.from_config(NexusConfigLoader())
+        assistant = VoiceAssistant(settings)
+        stats = assistant.get_voice_statistics()
+        return {"status": "success", "statistics": stats}
+    except Exception as e:
+        logger.warning("Voice statistics failed", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/voice/history")
+def get_voice_history(limit: int = 50):
+    """Return voice transcription history."""
+    try:
+        from voice import VoiceAssistant
+        from config.config_loader import NexusConfigLoader
+        settings = VoiceAssistant.from_config(NexusConfigLoader())
+        assistant = VoiceAssistant(settings)
+        history = assistant.get_transcription_history(limit=limit)
+        return {"status": "success", "history": history, "count": len(history)}
+    except Exception as e:
+        logger.warning("Voice history failed", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/voice/search")
+async def search_voice_history(request: Request):
+    """Search voice transcription history."""
+    try:
+        data = await request.json()
+        query = data.get("query", "")
+        if not query:
+            raise HTTPException(status_code=400, detail="Query is required")
+        
+        from voice import VoiceAssistant
+        from config.config_loader import NexusConfigLoader
+        settings = VoiceAssistant.from_config(NexusConfigLoader())
+        assistant = VoiceAssistant(settings)
+        results = assistant.search_transcriptions(query)
+        
+        return {"status": "success", "results": results, "count": len(results)}
+    except Exception as e:
+        logger.warning("Voice search failed", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/voice/export")
+async def export_voice_data(request: Request):
+    """Export voice data in JSON or text format."""
+    try:
+        data = await request.json()
+        format = data.get("format", "json")
+        
+        from voice import VoiceAssistant
+        from config.config_loader import NexusConfigLoader
+        settings = VoiceAssistant.from_config(NexusConfigLoader())
+        assistant = VoiceAssistant(settings)
+        exported = assistant.export_voice_data(format)
+        
+        return {"status": "success", "format": format, "data": exported}
+    except Exception as e:
+        logger.warning("Voice export failed", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/voice/clear-history")
+def clear_voice_history():
+    """Clear voice transcription history."""
+    try:
+        from voice import VoiceAssistant
+        from config.config_loader import NexusConfigLoader
+        settings = VoiceAssistant.from_config(NexusConfigLoader())
+        assistant = VoiceAssistant(settings)
+        assistant.clear_transcription_history()
+        return {"status": "success", "message": "Voice history cleared"}
+    except Exception as e:
+        logger.warning("Clear voice history failed", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/voice/reset-statistics")
+def reset_voice_statistics():
+    """Reset voice usage statistics."""
+    try:
+        from voice import VoiceAssistant
+        from config.config_loader import NexusConfigLoader
+        settings = VoiceAssistant.from_config(NexusConfigLoader())
+        assistant = VoiceAssistant(settings)
+        assistant.reset_statistics()
+        return {"status": "success", "message": "Voice statistics reset"}
+    except Exception as e:
+        logger.warning("Reset voice statistics failed", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/voice/voices")
+def get_available_voices():
+    """Return list of available TTS voices."""
+    try:
+        from voice import VoiceAssistant
+        from config.config_loader import NexusConfigLoader
+        settings = VoiceAssistant.from_config(NexusConfigLoader())
+        assistant = VoiceAssistant(settings)
+        voices = assistant.get_available_voices()
+        return {"status": "success", "voices": voices}
+    except Exception as e:
+        logger.warning("Get voices failed", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/voice/languages")
+def get_available_languages():
+    """Return list of supported STT languages."""
+    try:
+        from voice import VoiceAssistant
+        from config.config_loader import NexusConfigLoader
+        settings = VoiceAssistant.from_config(NexusConfigLoader())
+        assistant = VoiceAssistant(settings)
+        languages = assistant.get_available_languages()
+        return {"status": "success", "languages": languages}
+    except Exception as e:
+        logger.warning("Get languages failed", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/voice/devices")
+def get_audio_devices():
+    """Return available audio devices."""
+    try:
+        from voice import VoiceAssistant
+        from config.config_loader import NexusConfigLoader
+        settings = VoiceAssistant.from_config(NexusConfigLoader())
+        assistant = VoiceAssistant(settings)
+        devices = assistant.test_audio_devices()
+        return {"status": "success", "devices": devices}
+    except Exception as e:
+        logger.warning("Get audio devices failed", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/voice/settings")
+async def update_voice_settings(request: Request):
+    """Update voice settings."""
+    try:
+        data = await request.json()
+        from config.config_loader import NexusConfigLoader
+        loader = NexusConfigLoader()
+        
+        # Get current voice config
+        voice_config = loader.get("voice", {})
+        if not isinstance(voice_config, dict):
+            voice_config = {}
+        
+        # Update with provided settings
+        voice_config.update(data)
+        
+        # Save back to config
+        loader.set("voice", voice_config)
+        loader.save()
+        
+        return {"status": "success", "message": "Voice settings updated"}
+    except Exception as e:
+        logger.warning("Update voice settings failed", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
 @app.post("/api/multi_agent")
 async def multi_agent(request: Request):
     """Trigger a multi-agent workflow."""
@@ -5738,10 +7185,10 @@ async def train_local_engine(request: Request):
 @app.get("/api/engine/train/status")
 def train_status():
     global _active_train_process
-    
+
     status_file = os.path.join(_PROJECT_ROOT, "config", "self_improvement_status.json")
     status = {"status": "idle", "message": "No training has been run yet."}
-    
+
     if os.path.exists(status_file):
         try:
             with open(status_file, "r") as f:
@@ -5749,13 +7196,11 @@ def train_status():
         except Exception:
             logger.warning("server:2071 train_status: suppressed error", exc_info=True)
             pass
-            
-    # Check if process is actively running
+
     is_running = _active_train_process and _active_train_process.poll() is None
     if is_running:
         status["is_running"] = True
         if status.get("status") in ("completed", "failed"):
-            # Omit completed/failed states while training is active
             status["status"] = "training"
     else:
         status["is_running"] = False
@@ -5765,12 +7210,10 @@ def train_status():
                 status["status"] = "failed"
                 status["error"] = f"Training process terminated unexpectedly with code {exit_code}."
                 status["message"] = f"Failed: Process exited with code {exit_code}."
-                
-    return status
 
+    return status
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)
-

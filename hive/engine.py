@@ -232,6 +232,10 @@ class SubAgent:
             f"Output your reasoning and final answer. "
             f"Do not ask follow-up questions — just do the work."
         )
+        # Inject relevant skills into sub-agent context
+        skills_context = self._load_relevant_skills()
+        if skills_context:
+            base += skills_context
         if self.tool_registry is None:
             return base
         return (
@@ -239,6 +243,7 @@ class SubAgent:
             + "\n\nYou may call ONE tool per turn using exactly this format:\n"
             '<tool_call>{"tool": "<tool_name>", "params": {...}}</tool_call>\n'
             f"Available tools: {', '.join(self._available_tools()) or 'unknown'}\n"
+            + f"Tool schemas: {json.dumps(self._available_tool_schemas(), ensure_ascii=False)[:14000]}\n"
             f"You have at most {self.max_steps} tool steps. "
             "When you are finished, reply WITHOUT a tool call and start your "
             "final message with 'FINAL ANSWER:'.\n"
@@ -261,6 +266,80 @@ class SubAgent:
         except Exception:
             logger.debug("SubAgent could not enumerate tools", exc_info=True)
         return []
+
+    def _available_tool_schemas(self, limit: int = 80) -> List[Dict[str, Any]]:
+        """Expose bounded registry schemas to Hive agents, not names only."""
+        reg = self.tool_registry
+        if reg is None:
+            return []
+        schemas: List[Dict[str, Any]] = []
+        try:
+            names = self._available_tools()
+            for name in names[:max(1, int(limit))]:
+                entry = reg.get(name) if hasattr(reg, "get") else None
+                schema = getattr(entry, "schema", None)
+                if not isinstance(schema, dict):
+                    continue
+                params = schema.get("params") if isinstance(schema.get("params"), dict) else {}
+                schemas.append({
+                    "name": name,
+                    "description": str(schema.get("description") or "")[:180],
+                    "parameters": {
+                        "type": "object",
+                        "properties": {key: {
+                            "type": value.get("type", "string") if isinstance(value, dict) else "string",
+                            "description": str(value.get("description", ""))[:100] if isinstance(value, dict) else "",
+                        } for key, value in params.items()},
+                        "required": [key for key in (schema.get("required") or []) if key in params],
+                    },
+                })
+        except Exception:
+            logger.debug("SubAgent schema enumeration failed", exc_info=True)
+        return schemas
+
+    def _load_relevant_skills(self) -> str:
+        """Load skill context relevant to this sub-agent's task and persona.
+        
+        Maps persona roles to skill categories and injects matching skill prompts
+        into the sub-agent's system context. Falls back gracefully if the skills
+        engine is unavailable. Never raises.
+        """
+        try:
+            # Persona-to-category mapping
+            persona_skill_map = {
+                "RESEARCHER": ["research", "search", "web", "analysis"],
+                "ENGINEER": ["coding", "tool", "command", "process", "environment"],
+                "REVIEWER": ["testing", "error", "validation", "review"],
+                "PLANNER": ["planning", "workflow", "architecture"],
+                "TESTER": ["testing", "error", "validation", "command"],
+                "WORKER": ["tool", "general"],
+            }
+            relevant = persona_skill_map.get(self.persona.upper(), ["general"])
+            try:
+                from skills.engine import NexusSkillEngine
+                engine = NexusSkillEngine()
+            except ImportError:
+                from skills import NexusSkillMaster
+                engine = NexusSkillMaster(self.root)
+            skills = engine.list_skills()
+            if not skills:
+                return ""
+            # Match skills by category overlap with persona
+            matching = []
+            for skill in skills:
+                cat = str(skill.get("category", "")).lower()
+                skill_name = str(skill.get("name", "")).lower()
+                skill_id = str(skill.get("id", "")).lower()
+                combined = f"{cat} {skill_name} {skill_id}"
+                if any(r in combined for r in relevant):
+                    prompt = skill.get("prompt", "")
+                    if prompt:
+                        matching.append(f"## Skill: {skill.get('name', skill.get('id', '?'))}\n{prompt[:500]}")
+            if matching:
+                return "\n\n# RELEVANT SKILLS:\n\n" + "\n\n".join(matching[:3])
+            return ""
+        except Exception:
+            return ""
 
     async def _llm(self, messages: List[Dict[str, str]]) -> str:
         if not self.llm_call:

@@ -49,6 +49,14 @@ class ProviderProfile(DataClassJsonMixin):
     last_used: float = 0.0
     usage_count: int = 0
     strategy: str = STRATEGY_FILL_FIRST
+    # ``model`` remains the backwards-compatible native identifier. These
+    # explicit fields let UI selectors use a friendly alias without losing
+    # the provider-native value required for requests.
+    model: str = ""
+    model_id: str = ""
+    model_alias: str = ""
+    endpoint: str = ""
+    enabled: bool = True
 
     @property
     def in_cooldown(self) -> bool:
@@ -109,15 +117,18 @@ class ProviderProfileStore:
             return None
         if name:
             for p in profiles:
-                if p.get("name") == name:
+                if p.get("name") == name and p.get("active", True) and p.get("enabled", True) and not self._in_cooldown(p):
                     return ProviderProfile.from_dict(p)
+            return None
+        available = self._available_dicts(provider)
+        if not available:
             return None
         default_name = self._defaults.get(provider)
         if default_name:
-            for p in profiles:
+            for p in available:
                 if p.get("name") == default_name:
                     return ProviderProfile.from_dict(p)
-        return ProviderProfile.from_dict(profiles[0]) if profiles else None
+        return ProviderProfile.from_dict(available[0])
 
     def list_profiles(self, provider: Optional[str] = None) -> list[ProviderProfile]:
         result = []
@@ -174,12 +185,15 @@ class ProviderProfileStore:
         profiles = self._profiles.get(provider)
         if not profiles:
             return None
-        for i, p in enumerate(profiles):
+        eligible = [p for p in profiles if p.get("active", True) and p.get("enabled", True) and not self._in_cooldown(p)]
+        if not eligible:
+            return None
+        for i, p in enumerate(eligible):
             if p.get("name") == current_name:
-                if i + 1 < len(profiles):
-                    return ProviderProfile.from_dict(profiles[i + 1])
-                return ProviderProfile.from_dict(profiles[0])
-        return None
+                if i + 1 < len(eligible):
+                    return ProviderProfile.from_dict(eligible[i + 1])
+                return ProviderProfile.from_dict(eligible[0])
+        return ProviderProfile.from_dict(eligible[0])
 
     def mark_inactive(self, provider: str, name: str) -> None:
         profiles = self._profiles.get(provider)
@@ -193,12 +207,14 @@ class ProviderProfileStore:
 
     def _available_dicts(self, provider: str) -> list[dict]:
         profiles = self._profiles.get(provider, [])
-        now = time.time()
         return [
             p for p in profiles
-            if p.get("active", True)
-            and (p.get("cooldown_until", 0.0) or 0.0) <= now
+            if p.get("active", True) and p.get("enabled", True) and not self._in_cooldown(p)
         ]
+
+    @staticmethod
+    def _in_cooldown(profile: dict) -> bool:
+        return float(profile.get("cooldown_until", 0.0) or 0.0) > time.time()
 
     def select(self, provider: str, strategy: Optional[str] = None) -> Optional[ProviderProfile]:
         strategy = strategy or self.get_strategy(provider)

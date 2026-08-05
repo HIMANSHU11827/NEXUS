@@ -120,7 +120,18 @@ class CanonicalEvent:
 
     @classmethod
     def from_work_event(cls, event: Dict[str, Any], conversation_id: str, sequence: int) -> "CanonicalEvent":
-        status = canonical_status(event.get("status"))
+        nested_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        raw_status = event.get("status")
+        # Stage producers historically kept lifecycle completion in
+        # ``payload.target=done`` while leaving the outer status as running.
+        # Promote that terminal stage before inferring the canonical type;
+        # otherwise Plan/acting rows remain live forever after completion.
+        if (
+            str(event.get("type") or "").lower() == "stage"
+            and str(nested_payload.get("target") or "").lower() in {"done", "completed", "success"}
+        ):
+            raw_status = "success"
+        status = canonical_status(raw_status)
         run_id = str(event.get("run_id") or event.get("turn_id") or conversation_id)
         event_id = str(event.get("event_id") or event.get("id") or f"evt_{uuid.uuid4().hex}")
         path = event.get("path")
@@ -132,7 +143,6 @@ class CanonicalEvent:
             "event_type", "type", "title", "status", "created_at", "timestamp", "sequence", "duration_ms", "display",
             "related_files", "related_command", "related_tool", "related_skill", "related_subagent", "exit_code", "error",
         }
-        nested_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         extra_payload = {k: v for k, v in event.items() if k not in known}
         return cls(
             event_id=event_id, run_id=run_id, conversation_id=conversation_id,

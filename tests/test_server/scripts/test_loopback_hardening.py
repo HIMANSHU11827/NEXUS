@@ -26,7 +26,7 @@ from starlette.responses import JSONResponse
 def _import_mocks():
     patches = [
         patch("dotenv.load_dotenv"),
-        patch("orchestrators.loop.NexusLoop"),
+        patch("orchestrators.NexusLoop"),
         patch("yaml.safe_load", return_value={}),
         patch("yaml.safe_dump"),
     ]

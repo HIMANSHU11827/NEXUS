@@ -18,7 +18,7 @@ if sys.platform == "win32":
 
 from voice.audio_io import AudioIO, AudioUnavailable
 from voice.config import VoiceSettings
-from voice.stt import NexusWhisperSTT
+from voice.stt import NexusWhisperSTT, STTUnavailable
 from voice.tts import KittenTTSSpeaker
 
 
@@ -30,23 +30,115 @@ def _safe_console_text(value: str) -> str:
         return text
 
 
+# Lifecycle states exposed via VoiceAssistant.state
+STATE_IDLE = "idle"
+STATE_LISTENING = "listening"
+STATE_PROCESSING = "processing"
+STATE_STOPPED = "stopped"
+
+
 class VoiceAssistant:
+    @classmethod
+    def from_config(cls, config_loader=None, loop=None, session_id: str = "default"):
+        """Create a VoiceAssistant instance from config loader."""
+        if config_loader is None:
+            from config.config_loader import NexusConfigLoader
+            config_loader = NexusConfigLoader()
+        settings = VoiceSettings.from_config(config_loader)
+        return cls(settings, loop=loop, session_id=session_id)
+
     def __init__(self, settings: Optional[VoiceSettings] = None, loop=None, session_id: str = "default"):
         if settings is None:
             from config.config_loader import NexusConfigLoader
             settings = VoiceSettings.from_config(NexusConfigLoader())
         self.settings = settings
         self.session_id = session_id
-        self.audio = AudioIO(settings.microphone_device, settings.speaker_device, settings.sample_rate, settings.volume)
+        # Lifecycle state + ref-counted resource ownership.
+        self._state = STATE_IDLE
+        self._refcount = 0
+        self._closed = False
+        self.audio = AudioIO(
+            settings.microphone_device,
+            settings.speaker_device,
+            settings.sample_rate,
+            settings.volume,
+            vad_enabled=bool(getattr(settings, "vad_enabled", True)),
+        )
         self.stt = NexusWhisperSTT(settings)
         self.tts = KittenTTSSpeaker(settings, self.audio)
         self.loop = loop
         self._continuous_session = None
         self._continuous_status_callback = None
+        # New: Voice history and statistics
+        self._transcription_history: list[dict] = []
+        self._voice_statistics: dict = {
+            "total_transcriptions": 0,
+            "total_speak_time": 0.0,
+            "successful_turns": 0,
+            "failed_turns": 0,
+            "wake_word_activations": 0,
+            "session_start_time": None,
+        }
+
+    @property
+    def state(self) -> str:
+        """Current pipeline lifecycle state.
+
+        One of ``idle``/``listening``/``processing``/``stopped``.
+        """
+        return self._state
+
+    def open(self) -> "VoiceAssistant":
+        """Open the pipeline, surviving a previous ``close()``.
+
+        Ref-counted: resources are only released once every matching ``close()``
+        has been called.
+        """
+        if self._closed:
+            self._closed = False
+            self._refcount = 0
+            self._state = STATE_IDLE
+        self._refcount += 1
+        return self
+
+    def close(self) -> None:
+        """Release pipeline resources. Idempotent and ref-counted."""
+        if self._closed:
+            return
+        self._refcount = max(0, self._refcount - 1)
+        if self._refcount > 0:
+            return
+        self._hard_close()
+
+    def _hard_close(self) -> None:
+        try:
+            self.stop_continuous_listening()
+        except Exception:
+            logger.warning("voice/pipeline.py:close stop_continuous_listening: suppressed error", exc_info=True)
+            pass
+        try:
+            self.stop_speaking()
+        except Exception:
+            logger.warning("voice/pipeline.py:close stop_speaking: suppressed error", exc_info=True)
+            pass
+        try:
+            self.audio.stop_playback()
+        except Exception:
+            logger.warning("voice/pipeline.py:close audio stop_playback: suppressed error", exc_info=True)
+            pass
+        self._closed = True
+        self._state = STATE_STOPPED
+
+    def __enter__(self) -> "VoiceAssistant":
+        return self.open()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
 
     def _ensure_loop(self):
         if self.loop is None:
-            from orchestrators.loop import NexusLoop
+            from orchestrators import NexusLoop
             self.loop = NexusLoop()
             self.loop.load_memory(self.session_id)
         return self.loop
@@ -70,23 +162,34 @@ class VoiceAssistant:
                 print(f"[voice-warning] Failed to warmup TTS: {e}")
 
     def start_continuous_listening(self, status_callback: Optional[callable] = None) -> None:
-        if self._continuous_session is not None and self._continuous_status_callback is status_callback:
+        if self._continuous_session is not None:
+            # Guard double-start: never open a second capture session.
+            if status_callback is not None:
+                self._continuous_status_callback = status_callback
+            self._state = STATE_LISTENING
             return
-        self.stop_continuous_listening()
-        self._continuous_status_callback = status_callback
-        self._continuous_session = self.audio.open_continuous_session(
+        session = self.audio.open_continuous_session(
             self.settings.record_seconds,
             self.settings.silence_threshold,
             self.settings.silence_timeout_seconds,
             self.settings.min_speech_seconds,
             status_callback=status_callback,
         )
+        self._continuous_session = session
+        self._continuous_status_callback = status_callback
+        self._state = STATE_LISTENING
 
     def stop_continuous_listening(self) -> None:
         if self._continuous_session is not None:
-            self._continuous_session.close()
+            try:
+                self._continuous_session.close()
+            except Exception:
+                logger.warning("voice/pipeline.py:stop_continuous_listening: suppressed error", exc_info=True)
+                pass
         self._continuous_session = None
         self._continuous_status_callback = None
+        if self._state not in (STATE_STOPPED, STATE_PROCESSING):
+            self._state = STATE_IDLE
 
     def set_continuous_listening_paused(self, paused: bool) -> None:
         if self._continuous_session is None:
@@ -103,23 +206,44 @@ class VoiceAssistant:
         continuous: bool = False,
         timeout: Optional[float] = None,
     ) -> str:
-        if continuous:
-            self.start_continuous_listening(status_callback=status_callback)
-            audio = self._continuous_session.read_utterance(timeout=timeout)
-        else:
-            audio = self.audio.record_until_pause(
-                self.settings.record_seconds,
-                self.settings.silence_threshold,
-                self.settings.silence_timeout_seconds,
-                self.settings.min_speech_seconds,
-                status_callback=status_callback,
-            )
+        if not continuous:
+            self._state = STATE_LISTENING
+        try:
+            if continuous:
+                self.start_continuous_listening(status_callback=status_callback)
+                audio = self._continuous_session.read_utterance(timeout=timeout)
+            else:
+                audio = self.audio.record_until_pause(
+                    self.settings.record_seconds,
+                    self.settings.silence_threshold,
+                    self.settings.silence_timeout_seconds,
+                    self.settings.min_speech_seconds,
+                    status_callback=status_callback,
+                )
+        except Exception:
+            if not continuous:
+                self._state = STATE_IDLE
+            raise
         if self.audio.is_silent(audio, self.settings.silence_threshold):
+            if not continuous:
+                self._state = STATE_IDLE
             return ""
         # Transcription status silenced
         if status_callback:
             status_callback("processing")
-        text = self.stt.transcribe(audio, self.settings.sample_rate)
+        self._state = STATE_PROCESSING
+        stt_timeout = float(getattr(self.settings, "stt_timeout_seconds", 30.0))
+        try:
+            text = self.stt.transcribe(audio, self.settings.sample_rate, timeout=stt_timeout)
+        except STTUnavailable as exc:
+            # Preserve structured reason as a plain RuntimeError so downstream
+            # text-fallback handles it; never let one backend freeze the caller.
+            raise RuntimeError(exc.reason) from exc
+        finally:
+            if continuous and self._continuous_session is not None:
+                self._state = STATE_LISTENING
+            else:
+                self._state = STATE_IDLE
         if self._looks_like_corrupt_transcript(text):
             print("[voice] transcript looked corrupted. ignoring and listening again.")
             return ""
@@ -336,3 +460,150 @@ class VoiceAssistant:
             "you": "I am here. Please tell me what you need.",
         }
         return greetings.get(cleaned)
+
+    # New: Enhanced voice features
+    def voice_status(self) -> dict:
+        """Return structured pipeline + STT backend health for diagnostics."""
+        return {
+            "status": "ok" if self._state != STATE_STOPPED else "stopped",
+            "state": self._state,
+            "listening": self._continuous_session is not None,
+            "tts_loaded": self.tts._model is not None,
+            "stt": self.stt.get_status(),
+        }
+
+    def get_voice_statistics(self) -> dict:
+        """Return comprehensive voice usage statistics."""
+        import time
+        stats = self._voice_statistics.copy()
+        if stats["session_start_time"] is None:
+            stats["session_duration"] = 0.0
+        else:
+            stats["session_duration"] = time.time() - stats["session_start_time"]
+        stats["transcription_history_size"] = len(self._transcription_history)
+        stats["settings"] = {
+            "enabled": self.settings.enabled,
+            "auto_speak": self.settings.auto_speak,
+            "continuous_listening": self.settings.continuous_listening,
+            "voice_name": self.settings.voice_name,
+            "whisper_language": self.settings.whisper_language,
+        }
+        return stats
+
+    def get_transcription_history(self, limit: Optional[int] = None) -> list[dict]:
+        """Return transcription history, optionally limited."""
+        if limit is None:
+            return self._transcription_history.copy()
+        return self._transcription_history[-limit:]
+
+    def clear_transcription_history(self) -> None:
+        """Clear transcription history."""
+        self._transcription_history.clear()
+
+    def add_transcription_to_history(self, transcript: str, reply: str, success: bool = True) -> None:
+        """Add a transcription to history with metadata."""
+        import time
+        entry = {
+            "timestamp": time.time(),
+            "transcript": transcript,
+            "reply": reply,
+            "success": success,
+            "voice_name": self.settings.voice_name,
+            "language": self.settings.whisper_language,
+        }
+        self._transcription_history.append(entry)
+        
+        # Trim history if needed
+        limit = self.settings.transcription_history_limit
+        if len(self._transcription_history) > limit:
+            self._transcription_history = self._transcription_history[-limit:]
+        
+        # Update statistics
+        self._voice_statistics["total_transcriptions"] += 1
+        if success:
+            self._voice_statistics["successful_turns"] += 1
+        else:
+            self._voice_statistics["failed_turns"] += 1
+
+    def search_transcriptions(self, query: str) -> list[dict]:
+        """Search transcription history for a query."""
+        query_lower = query.lower()
+        results = []
+        for entry in self._transcription_history:
+            if query_lower in entry["transcript"].lower() or query_lower in entry["reply"].lower():
+                results.append(entry)
+        return results
+
+    def export_voice_data(self, format: str = "json") -> str:
+        """Export voice data in JSON or text format."""
+        import time
+        export_data = {
+            "statistics": self.get_voice_statistics(),
+            "transcription_history": self._transcription_history,
+            "settings": {
+                "enabled": self.settings.enabled,
+                "auto_speak": self.settings.auto_speak,
+                "voice_name": self.settings.voice_name,
+                "speech_speed": self.settings.speech_speed,
+                "volume": self.settings.volume,
+                "continuous_listening": self.settings.continuous_listening,
+            },
+            "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        
+        if format == "json":
+            import json
+            return json.dumps(export_data, indent=2)
+        elif format == "text":
+            lines = [
+                f"NEXUS Voice Data Export - {self.session_id}",
+                f"Exported: {export_data['exported_at']}",
+                "",
+                "=== Statistics ===",
+                f"Total transcriptions: {export_data['statistics']['total_transcriptions']}",
+                f"Successful turns: {export_data['statistics']['successful_turns']}",
+                f"Failed turns: {export_data['statistics']['failed_turns']}",
+                f"Session duration: {export_data['statistics']['session_duration']:.1f}s",
+                "",
+                "=== Recent Transcriptions ===",
+            ]
+            for entry in self._transcription_history[-10:]:
+                lines.append(f"[{entry['timestamp']}] {entry['transcript'][:100]}")
+                lines.append(f"Reply: {entry['reply'][:100]}")
+                lines.append("")
+            return "\n".join(lines)
+        else:
+            raise ValueError(f"Unsupported export format: {format}")
+
+    def get_available_voices(self) -> list[str]:
+        """Return list of available KittenTTS voices."""
+        return ["Bella", "Jasper", "Luna", "Bruno", "Rosie", "Hugo", "Kiki", "Leo"]
+
+    def get_available_languages(self) -> list[str]:
+        """Return list of supported Whisper languages."""
+        return ["auto", "en", "es", "fr", "de", "it", "pt", "nl", "ru", "zh", "ja", "ko", "hi", "ar"]
+
+    def test_audio_devices(self) -> dict:
+        """Test and return available audio devices."""
+        try:
+            import sounddevice as sd
+            devices = sd.query_devices()
+            return {
+                "input_devices": [d for d in devices if d['max_input_channels'] > 0],
+                "output_devices": [d for d in devices if d['max_output_channels'] > 0],
+                "default_input": sd.default.device[0],
+                "default_output": sd.default.device[1],
+            }
+        except Exception as e:
+            return {"error": str(e), "input_devices": [], "output_devices": []}
+
+    def reset_statistics(self) -> None:
+        """Reset voice statistics."""
+        self._voice_statistics = {
+            "total_transcriptions": 0,
+            "total_speak_time": 0.0,
+            "successful_turns": 0,
+            "failed_turns": 0,
+            "wake_word_activations": 0,
+            "session_start_time": None,
+        }

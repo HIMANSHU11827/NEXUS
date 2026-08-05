@@ -48,6 +48,7 @@ class ChatRunRequest:
     model: str
     max_tokens: Optional[int]
     turn_id: str
+    profile: str = ""
     source: str = ""
     messages: Optional[list] = None
 
@@ -67,6 +68,7 @@ def build_chat_request(
         session_id=safe_session_id(data.get("session_id", "default")),
         prompt=prompt,
         provider=normalize_provider(data.get("provider") or default_provider),
+        profile=str(data.get("profile", "") or "").strip(),
         model=str(data.get("model", "") or default_model or "").strip(),
         max_tokens=parse_max_tokens(raw_max_tokens),
         turn_id=safe_turn_id(data.get("turn_id", "")),

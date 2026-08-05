@@ -69,7 +69,7 @@ class UnifiedNexusGraph:
                 except OSError:
                     continue
         if include_code:
-            for rel in ("gui/api.py", "orchestrators/loop.py", "gui/src/App.tsx"):
+            for rel in ("gui/api.py", "orchestrators/v5/core.py", "gui/src/App.tsx"):
                 if os.path.exists(os.path.join(self.root, rel)):
                     add_node(f"file:{rel}", "file", rel)
                     edges.append({"source": "nexus", "target": f"file:{rel}", "type": "contains"})

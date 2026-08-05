@@ -172,7 +172,9 @@ class NATE_Route:
             self._faiss = faiss
         except ImportError:
             self._faiss = None
-            logger.warning("FAISS not installed, using numpy search fallback for NATE.")
+            if not getattr(self.__class__, '_faiss_warned', False):
+                self.__class__._faiss_warned = True
+                logger.warning("FAISS not installed, using numpy search fallback for NATE.")
 
     def _tokenize(self, text: str) -> List[str]:
         lowered = text.lower().replace("_", " ").replace("-", " ")

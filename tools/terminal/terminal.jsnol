@@ -1,13 +1,13 @@
 {
   "name": "terminal",
   "version": "2.0.0",
-  "description": "Run shell commands",
+  "description": "Run shell commands, including local build, preview, and development-server commands",
   "entry": "scripts/terminal.py",
   "class": "TerminalTool",
   "params": {
     "command": {"type": "string", "description": "Command to execute", "required": true},
     "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 30},
-    "workdir": {"type": "string", "description": "Working directory", "default": "."}
+    "workdir": {"type": "string", "description": "Working directory inside the workspace", "default": "."}
   },
   "category": "system"
 }

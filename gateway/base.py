@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -6,6 +7,25 @@ from enum import Enum
 from typing import Any, Awaitable, Callable, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------- #
+# Platform lifecycle states + health
+# --------------------------------------------------------------------------- #
+# Lifecycle: created -> connecting -> running -> paused -> recovering -> stopped
+STATE_CREATED = "created"
+STATE_CONNECTING = "connecting"
+STATE_RUNNING = "running"
+STATE_PAUSED = "paused"
+STATE_RECOVERING = "recovering"
+STATE_STOPPED = "stopped"
+STATE_DISABLED = "disabled"
+
+# Health: healthy / degraded / unavailable / disabled
+HEALTH_HEALTHY = "healthy"
+HEALTH_DEGRADED = "degraded"
+HEALTH_UNAVAILABLE = "unavailable"
+HEALTH_DISABLED = "disabled"
+
 
 class MessageType(Enum):
     """Types of incoming messages."""
@@ -50,9 +70,59 @@ class BasePlatformAdapter(ABC):
         self.platform = platform_name
         self._on_message: Optional[Callable[[MessageEvent], Awaitable[None]]] = None
         self._running = False
+        # Supervised lifecycle state — mirrored here by the GatewaySupervisor so
+        # any caller can read ``adapter.state`` / ``adapter.health`` directly.
+        # ``created*`` is the resting state; the supervisor drives the rest.
+        self.state = STATE_CREATED
+        self.health = HEALTH_UNAVAILABLE
+        self.last_error: Optional[str] = None
+        self.restarts = 0
+        self.paused_reason: Optional[str] = None
+        self.disabled_until = 0.0
 
     def set_message_handler(self, handler: Callable[[MessageEvent], Awaitable[None]]):
         self._on_message = handler
+
+    async def _guard_poll(
+        self,
+        poll: Callable[[], Awaitable[None]],
+        backoff_base: float = 1.0,
+        backoff_cap: float = 60.0,
+    ) -> None:
+        """Run a long-lived poll coroutine, re-arming with exponential backoff.
+
+        Shared reconnect helper for adapters that block on a polling loop
+        (``infinity_polling``, a homeserver sync, a socket listener). Any
+        exception is swallowed and the loop re-armed after ``1s, 2s, 4s, ...``
+        capped at ``backoff_cap`` instead of killing the platform permanently;
+        a clean run resets the backoff. While failing, the adapter reports
+        ``health=unavailable`` so the supervisor can schedule a reconnect. A
+        ``CancelledError`` (shutdown) propagates cleanly.
+        """
+        attempts = 0
+        while not getattr(self, "_disconnecting", False):
+            try:
+                await poll()
+                attempts = 0
+                self.health = HEALTH_HEALTHY
+                if getattr(self, "_disconnecting", False):
+                    break
+                # A poll that returns cleanly (external stop) is re-armed after
+                # a short pause instead of hot-looping.
+                await asyncio.sleep(backoff_base)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # network blips -> exponential backoff
+                if getattr(self, "_disconnecting", False):
+                    break
+                attempts += 1
+                delay = min(backoff_base * (2 ** (attempts - 1)), backoff_cap)
+                self.health = HEALTH_UNAVAILABLE
+                self.last_error = str(exc)
+                logger.warning(
+                    "%s poll stopped (%s); re-arming in %.1fs", self.platform, exc, delay
+                )
+                await asyncio.sleep(delay)
 
     @abstractmethod
     async def connect(self) -> bool:

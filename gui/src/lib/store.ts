@@ -45,7 +45,7 @@ function restoreActivity(events: Record<string, unknown>[] | undefined): Timelin
       ? { ...(payload.payload as Record<string, unknown>), ...payload }
       : payload
     const rawStatus = String(raw.status || 'running')
-    const status: TimelineEvent['status'] = rawStatus === 'success' ? 'success' : rawStatus === 'failed' ? 'failed' : rawStatus === 'cancelled' ? 'cancelled' : rawStatus === 'pending' ? 'pending' : 'running'
+    const status: TimelineEvent['status'] = rawStatus === 'success' || rawStatus === 'done' || rawStatus === 'completed' || rawStatus === 'ok' ? 'success' : rawStatus === 'failed' || rawStatus === 'error' ? 'failed' : rawStatus === 'cancelled' || rawStatus === 'canceled' ? 'cancelled' : rawStatus === 'blocked' ? 'blocked' : rawStatus === 'skipped' ? 'skipped' : rawStatus === 'pending' ? 'pending' : 'running'
     const canonicalType = String(raw.event_type || raw.type || 'unknown')
     const toolName = raw.related_tool || raw.tool || raw.name || details.tool || details.name
     // `plan.step.*` is lifecycle bookkeeping. Restore the real operation
@@ -97,6 +97,14 @@ function restoreActivity(events: Record<string, unknown>[] | undefined): Timelin
       items: Array.isArray(details.items) ? details.items.filter((item): item is string => typeof item === 'string') : undefined,
       planType: details.plan_type === 'advanced' ? 'advanced' : details.plan_type === 'simple' ? 'simple' : undefined,
       phases: Array.isArray(details.phases) ? details.phases.filter((phase): phase is { title: string; subgoals: string[] } => Boolean(phase) && typeof phase === 'object') : undefined,
+      runId: typeof raw.run_id === 'string' ? raw.run_id : typeof raw.turn_id === 'string' ? raw.turn_id : typeof details.run_id === 'string' ? details.run_id : undefined,
+      parentId: typeof raw.parent_id === 'string' ? raw.parent_id : typeof details.parent_id === 'string' ? details.parent_id : undefined,
+      sequence: typeof raw.sequence === 'number' ? raw.sequence : typeof details.sequence === 'number' ? details.sequence : undefined,
+      kind: typeof raw.kind === 'string' ? raw.kind : typeof details.kind === 'string' ? details.kind : undefined,
+      server: typeof raw.server === 'string' ? raw.server : typeof details.server === 'string' ? details.server : undefined,
+      mcpTool: typeof raw.mcp_tool === 'string' ? raw.mcp_tool : typeof details.mcp_tool === 'string' ? details.mcp_tool : undefined,
+      skill: typeof raw.skill === 'string' ? raw.skill : typeof details.skill === 'string' ? details.skill : undefined,
+      subagent: typeof raw.subagent === 'string' ? raw.subagent : typeof details.subagent === 'string' ? details.subagent : undefined,
     }
     const existingIndex = positions.get(id)
     if (existingIndex === undefined) {
@@ -180,7 +188,7 @@ interface AppState {
 
 export const useStore = create<AppState>((set, get) => ({
   sessions: [],
-  activeSessionId: null,
+  activeSessionId: typeof window !== 'undefined' ? localStorage.getItem('nexus-active-session-id') || null : null,
   isProcessing: false,
   // Start optimistic: the API can still be booting while Vite first renders.
   // The health probe immediately corrects this if it is genuinely unavailable.
@@ -217,6 +225,10 @@ export const useStore = create<AppState>((set, get) => ({
       createdAt: Date.now(),
       updatedAt: Date.now(),
     }
+    // Keep refresh/reopen tied to the chat the user just created. Without
+    // this write, reload restores the previously selected session from stale
+    // localStorage even though the UI showed the new chat before refresh.
+    localStorage.setItem('nexus-active-session-id', id)
     set(s => ({ sessions: [session, ...s.sessions], activeSessionId: id }))
     return id
   },
@@ -239,6 +251,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   setActiveSession: (id) => {
+    localStorage.setItem('nexus-active-session-id', id)
     set({ activeSessionId: id })
     get().loadSessionMessages(id)
   },
@@ -252,7 +265,7 @@ export const useStore = create<AppState>((set, get) => ({
               // The backend may have already restored the assistant text while
               // the live stream is finishing. Keep that message, but merge in
               // the completed activity rather than silently dropping it.
-              if (last && last.role === role && last.content === content) {
+              if (last && content && last.role === role && last.content === content) {
                 if (!activity?.length) return sess
                 return {
                   ...sess,
@@ -307,7 +320,12 @@ export const useStore = create<AppState>((set, get) => ({
         createdAt: dto.updated_at * 1000,
         updatedAt: dto.updated_at * 1000,
       }))
-      const activeSessionId = get().activeSessionId || sessions[0]?.id || null
+      const storedActiveId = get().activeSessionId
+      const activeSessionId = storedActiveId && sessions.find(s => s.id === storedActiveId)
+        ? storedActiveId
+        : sessions[0]?.id || null
+      if (activeSessionId) localStorage.setItem('nexus-active-session-id', activeSessionId)
+      else localStorage.removeItem('nexus-active-session-id')
       set(s => ({
         sessions: [...sessions, ...s.sessions.filter(ss => !sessions.find(s2 => s2.id === ss.id))],
         activeSessionId,

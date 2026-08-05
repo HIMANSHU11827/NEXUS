@@ -6,8 +6,8 @@ if (source.includes("apiJson('/sessions/active')") || source.includes('apiJson("
     throw new Error('startup must not auto-load the active persisted session');
 }
 
-if (!source.includes('WELCOME_HISTORY')) {
-    throw new Error('startup should render a clean welcome history');
+if (!source.includes('INITIAL_HISTORY')) {
+    throw new Error('startup should render an empty initial history');
 }
 
 if (!source.includes("useState(() => `tui_${Date.now()}`)")) {

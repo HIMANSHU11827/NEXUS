@@ -16,6 +16,34 @@ class VLMProvider(NexusBaseProvider):
         if not self.model:
             self.model = os.environ.get("NEXUS_PROVIDER_VLM_MODEL", "gpt-4o")
 
+    @staticmethod
+    def _tool_envelope(tool_calls) -> str:
+        """Convert OpenAI-compatible native calls to the V5 parser format."""
+        envelopes = []
+        for call in tool_calls or []:
+            function = call.get("function", {}) if isinstance(call, dict) else {}
+            name = str(function.get("name") or "").strip()
+            if not name:
+                continue
+            arguments = function.get("arguments", {})
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments) if arguments.strip() else {}
+                except json.JSONDecodeError:
+                    arguments = {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            envelopes.append(f"<function={name}>{json.dumps(arguments, ensure_ascii=False)}")
+        return "\n".join(envelopes)
+
+    @staticmethod
+    def _add_tool_payload(payload: dict, kwargs: dict) -> None:
+        """Preserve model-selected native tool calling when requested."""
+        if kwargs.get("tools"):
+            payload["tools"] = kwargs["tools"]
+        if kwargs.get("tool_choice"):
+            payload["tool_choice"] = kwargs["tool_choice"]
+
     def analyze_image(self, image_path: str, prompt: str = "Describe this image.") -> str:
         """Standard interface for VLM tasks."""
         import base64
@@ -48,16 +76,22 @@ class VLMProvider(NexusBaseProvider):
     def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs}
+        self._add_tool_payload(payload, kwargs)
         try:
             response = self.session.post(self.endpoint, json=payload, headers={"Authorization": f"Bearer {self.api_key}"}, timeout=60)
             if response.status_code == 200:
-                return response.json()["choices"][0]["message"]["content"]
+                data = response.json()
+                message = data["choices"][0].get("message", {})
+                native_tools = message.get("tool_calls") or []
+                if native_tools:
+                    return self._tool_envelope(native_tools)
+                return message.get("content") or ""
             return f"Error: VLM API returned {response.status_code}"
         except Exception as e:
             return f"Error: {e}"
 
     def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
-        # Basic implementation
-        yield self.generate(prompt, system_prompt, messages)
+        # Forward tools/kwargs through; generate() handles native tool_calls.
+        yield self.generate(prompt, system_prompt, messages, **kwargs)
 
 

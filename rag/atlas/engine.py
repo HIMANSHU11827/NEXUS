@@ -56,6 +56,25 @@ class NexusAtlasEngine(ThreadSafeSingleton):
         self._save_index()
         return f"Atlas Re-Index Complete. {len(self.symbols)} logical units mapped."
 
+    def ensure_indexed(self):
+        """Lazily build the symbol index on first use if it is absent.
+
+        ``knowledge/atlas_index.json`` is not shipped with the repo, so a fresh
+        check-out would otherwise report an empty Atlas forever. The first
+        retrieval call triggers a one-time AST scan so Atlas works out of the
+        box, and only then. If the scan fails (corrupt tree, unreadable root)
+        we degrade honestly to an empty symbol list rather than raising.
+        """
+        if getattr(self, "_ensured", False):
+            return
+        self._ensured = True
+        if self.symbols:
+            return
+        try:
+            self.refresh_index()
+        except Exception:
+            self.symbols = []
+
     def _get_corpus_stats(self) -> Dict[str, Any]:
         """Compute and cache corpus stats for BM25."""
         if self._corpus_stats:
@@ -112,6 +131,8 @@ class NexusAtlasEngine(ThreadSafeSingleton):
 
     def atlas_retrieve(self, query: str, top_k: int = 5) -> str:
         """Fuses symbolic data with weighted BM25 ranking."""
+        if not self.symbols:
+            self.ensure_indexed()
         if not self.symbols:
             return "Atlas index empty. Run refresh_index() first."
 

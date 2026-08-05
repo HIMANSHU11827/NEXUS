@@ -7,11 +7,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
+from memory import MemoryBudget
 
 
 class KnowledgeTool(BaseTool):
     name = "knowledge"
     description = "Query and manage the knowledge base"
+
+    def __init__(self, root_dir: Optional[str] = None, budget: Optional[MemoryBudget] = None):
+        super().__init__(root_dir)
+        self.budget = budget or MemoryBudget()
 
     def _get_store(self) -> Path:
         d = Path(self.root_dir or ".") / "knowledge"
@@ -34,14 +39,45 @@ class KnowledgeTool(BaseTool):
             elif action == "store":
                 if not title:
                     return ToolResult(success=False, error="title required")
-                entries.append({"title": title, "content": content or "", "created": datetime.now().isoformat()})
+                # Token budget: truncate oversized values with an explicit
+                # ``[truncated N chars]`` marker — never a silent discard —
+                # then cap total store growth (oldest unverified evicted first).
+                content_text = content if isinstance(content, str) else str(content or "")
+                fitted = self.budget.fit_value(content_text)
+                truncated = fitted != content_text
+                entries.append({"title": title, "content": fitted, "created": datetime.now().isoformat()})
+                evicted = self.budget.trim_store(entries)
                 self._get_store().write_text(json.dumps(entries, indent=2), encoding="utf-8")
-                return ToolResult(success=True, output=f"Stored knowledge: {title}")
+                out = f"Stored knowledge: {title}"
+                if truncated:
+                    out += f" (content truncated to {len(fitted)} chars)"
+                if evicted:
+                    out += f" (trimmed {evicted} low-value entries)"
+                return ToolResult(
+                    success=True,
+                    output=out,
+                    metadata={"truncated": truncated, "evicted": evicted},
+                )
 
             elif action == "query":
                 if not query:
                     return ToolResult(success=True, output=str(entries)[:2000])
-                results = [e for e in entries if query.lower() in e.get("content", "").lower() or query.lower() in e.get("title", "").lower()]
+                q = str(query).lower()
+                q_tokens = q.split()
+                scored: List[tuple] = []
+                for e in entries:
+                    title = str(e.get("title", "")).lower()
+                    content = str(e.get("content", "")).lower()
+                    haystack = title + "\n" + content
+                    # Exact substring match ranks first (strongest signal).
+                    if q in haystack:
+                        scored.append((5.0, e))
+                    else:
+                        hits = sum(1 for t in q_tokens if t in haystack)
+                        if hits:
+                            scored.append((1.0 * hits, e))
+                scored.sort(key=lambda item: item[0], reverse=True)
+                results = [e for _score, e in scored]
                 return ToolResult(success=True, output=json.dumps(results, indent=2)[:2000])
 
             return ToolResult(success=False, error=f"Unknown action: {action}")

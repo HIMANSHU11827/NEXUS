@@ -36,15 +36,14 @@ class SkillRegistry:
         canonical = self.root / ".opencode" / "skills"
         legacy = self.root / "skills"
         if canonical.is_dir():
-            for child in sorted(canonical.iterdir()):
-                path = child / "SKILL.md" if child.is_dir() else child
-                if path.is_file() and (path.name == "SKILL.md" or path.suffix.lower() == ".md"):
-                    yield path, "opencode"
+            for path in sorted(canonical.rglob("*")):
+                if path.is_file() and (path.name == "SKILL.md" or (path.parent == canonical and path.suffix.lower() == ".md")):
+                    if path.name not in {"README.md", "read.md"}:
+                        yield path, "opencode"
         if legacy.is_dir():
-            for child in sorted(legacy.iterdir()):
-                path = child / "SKILL.md" if child.is_dir() else child
+            for path in sorted(legacy.rglob("*")):
                 if path.is_file() and path.name not in {"README.md", "read.md"} and (
-                    path.name == "SKILL.md" or path.suffix.lower() == ".md"
+                    path.name == "SKILL.md" or (path.parent == legacy and path.suffix.lower() == ".md")
                 ):
                     yield path, "legacy"
 

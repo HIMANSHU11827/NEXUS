@@ -1,4 +1,7 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import logging
 import os
 from typing import Optional
@@ -20,6 +23,23 @@ try:
     HAS_FLASK = True
 except ImportError:
     HAS_FLASK = False
+
+
+def valid_twilio_signature(url: str, params, signature: str, auth_token: str) -> bool:
+    """Validate a Twilio ``X-Twilio-Signature`` request header (constant-time).
+
+    Twilio signs the request *url* concatenated with the alphabetically-sorted
+    form params (key + value, no separators) using HMAC-SHA1 keyed on the
+    account auth token, then base64-encodes the digest.
+    """
+    if not url or not auth_token or not signature:
+        return False
+    items = list(params.items()) if hasattr(params, "items") else list(params)
+    signed = url + "".join(key + str(value) for key, value in sorted(items))
+    digest = base64.b64encode(
+        hmac.new(auth_token.encode("utf-8"), signed.encode("utf-8"), hashlib.sha1).digest()
+    ).decode("ascii")
+    return hmac.compare_digest(digest, signature)
 
 
 class SMSAdapter(BasePlatformAdapter):
@@ -76,6 +96,11 @@ class SMSAdapter(BasePlatformAdapter):
 
         @app.route("/sms", methods=["POST"])
         def sms_webhook():
+            signature = request.headers.get("X-Twilio-Signature", "")
+            if not valid_twilio_signature(request.url, request.form, signature, self.auth_token):
+                logger.warning("Rejecting SMS webhook: invalid/missing X-Twilio-Signature")
+                return '<?xml version="1.0" encoding="UTF-8"?><Response></Response>', 403, {"Content-Type": "text/xml"}
+
             from_number = request.form.get("From", "")
             body = request.form.get("Body", "")
             msg_sid = request.form.get("MessageSid", "")

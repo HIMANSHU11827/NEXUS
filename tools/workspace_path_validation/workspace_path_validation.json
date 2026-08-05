@@ -1,0 +1,10 @@
+{
+  "name": "workspace_path_validation",
+  "version": "1.0.0",
+  "description": "NEXUS should validate that paths provided in bash commands are within the current workspace, not just rely on the sandbox to block them. This prevents user confusion and provides clearer feedback.",
+  "defaults": {},
+  "permissions": {
+    "auto_approve": false
+  },
+  "created_at": 1785655782.7105327
+}

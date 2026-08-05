@@ -10,7 +10,7 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "
 # Ensure project root is on sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from orchestrators.loop import NexusLoop
+from orchestrators import NexusLoop
 
 
 async def main():

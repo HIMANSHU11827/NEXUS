@@ -7,11 +7,16 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
+from memory import MemoryBudget, estimate_tokens
 
 
 class MemoryTool(BaseTool):
     name = "memory"
     description = "Store and retrieve memories"
+
+    def __init__(self, root_dir: Optional[str] = None, budget: Optional[MemoryBudget] = None):
+        super().__init__(root_dir)
+        self.budget = budget or MemoryBudget()
 
     def _get_store(self) -> Path:
         d = Path(self.root_dir or ".") / ".nexus" / "memory"
@@ -33,9 +38,42 @@ class MemoryTool(BaseTool):
             if action == "store":
                 if not key or content is None:
                     return ToolResult(success=False, error="key and content required")
-                store[key] = {"content": content, "timestamp": datetime.now().isoformat()}
+                # Token budget: truncate oversized values with an explicit
+                # ``[truncated N chars]`` marker — never a silent discard —
+                # then cap total store growth (oldest unverified evicted first).
+                content_text = content if isinstance(content, str) else str(content)
+                fitted = self.budget.fit_value(content_text)
+                truncated = fitted != content_text
+                # Provenance gate: unverified LLM claims are the default and are
+                # recorded as such.  An entry is only marked verified when the
+                # caller cites a verified run result (``verified_result_id`` /
+                # ``evidence``) rather than a bare llm claim.
+                verified = bool(kwargs.get("verified_result_id") or kwargs.get("evidence"))
+                source = str(kwargs.get("source") or ("verified_result" if verified else "llm_claim"))
+                store[key] = {
+                    "content": fitted,
+                    "source": source,
+                    "verified": verified,
+                    "verified_result_id":
+                        str(kwargs.get("verified_result_id") or "") or None,
+                    "timestamp": datetime.now().isoformat(),
+                }
+                evicted = self.budget.trim_store(store)
                 self._save(store)
-                return ToolResult(success=True, output=f"Stored memory: {key}")
+                out = f"Stored memory: {key}"
+                if truncated:
+                    out += f" (content truncated to {len(fitted)} chars)"
+                if evicted:
+                    out += f" (trimmed {evicted} low-value memories)"
+                return ToolResult(
+                    success=True,
+                    output=out,
+                    metadata={
+                        "truncated": truncated,
+                        "evicted": evicted,
+                        "est_tokens": estimate_tokens(fitted),
+                    },
+                )
 
             elif action == "retrieve":
                 if not key:

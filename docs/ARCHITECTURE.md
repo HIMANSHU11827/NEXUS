@@ -6,7 +6,7 @@ Nexus AI is a local-first autonomous AI agent framework with a Python backend an
 
 - **nexus/** - Boot loader (`boot()` function). Entry point for `python -m nexus`, `--setup`, `--server`, `--gui`, and `--shell`. The default route launches the Ink TUI and starts `gui.api:app` when needed.
 - **nexus/events.py** - Canonical event system with ~50 event types (run, conversation, message, plan, tool, command, file, search, web, test, subagent lifecycle). Events flow via `work_event_sink` callback and stream to GUI via SSE.
-- **orchestrators/loop.py** - `NexusLoop` - the main agent loop. Handles streaming responses (`stream_run`), tool execution, memory, provider routing, and event emission. ~2900 lines.
+- **orchestrators/v5/core.py** - V5 `NexusLoop` - the main agent loop. The live path uses the transcript-driven direct model/tool loop, registry discovery, memory, provider routing, and canonical event emission.
 - **kernel/** - Central singleton with lazy-loaded subsystems, workspace ownership, shared module cache, and health stats.
 
 ## API Layer
@@ -34,7 +34,7 @@ Nexus AI is a local-first autonomous AI agent framework with a Python backend an
 
 ## Tools
 
-- **tools/** - 19 tools organized in subdirectories:
+- **tools/** - Registry-discovered tools organized in subdirectories:
   - `bash/`, `code_search/`, `creating/`, `deep_research/`, `deleting/`, `git_ops/`, `hive/`, `knowledge/`, `memory/`, `modifying/`, `planning/`, `reading/`, `reasoning/`, `shortcuts/`, `system/`, `task/`, `terminal/`, `test_runner/`, `web_search/`
   - Each tool has a `<name>.jsnol` metadata file and handler scripts
 - **tools/nexus_tools/registry.py** - `ToolRegistry` for tool discovery and management

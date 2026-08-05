@@ -7,7 +7,9 @@ registered here with a category, description, and async handler.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -227,7 +229,7 @@ async def _cmd_verify(ctx: CommandContext) -> CommandResult:
 
 
 async def _cmd_agent_task(ctx: CommandContext, name: str, prompt: str) -> CommandResult:
-    from shell import TaskTracker
+    from nexus.commands import TaskTracker
     tid = TaskTracker.create(f"/{name}", agent="multi-agent")
     TaskTracker.update(tid, "running")
     if ctx.shell:
@@ -395,7 +397,7 @@ async def _cmd_hive(ctx: CommandContext) -> CommandResult:
 
 
 async def _cmd_tasks(ctx: CommandContext) -> CommandResult:
-    from shell import TaskTracker
+    from nexus.commands import TaskTracker
     tasks = TaskTracker.list()
     if tasks:
         lines = [f"  {t['id']:<10} {t['subject'][:50]:<50} [{t['status']}]" for t in tasks]
@@ -424,9 +426,41 @@ async def _cmd_tools(ctx: CommandContext) -> CommandResult:
 
 
 async def _cmd_agents(ctx: CommandContext) -> CommandResult:
-    if ctx.shell:
-        ctx.shell._show_agents()
-    return CommandResult()
+    """List registered subagents: live Hive workers + .claude/agents specialists."""
+    entries = []
+    # Real listing: hive engine's list_agents (hive/engine.py) for live workers.
+    try:
+        from hive import NexusHiveEngine
+        engine = NexusHiveEngine(_nexus_root(ctx))
+        for a in engine.list_agents():
+            entries.append({
+                "name": str(getattr(a, "agent_id", "") or "sub"),
+                "kind": "hive",
+                "persona": str(getattr(a, "persona", "") or ""),
+                "status": str(getattr(a, "status", "") or ""),
+            })
+    except Exception:
+        pass
+    # Fallback listing: .claude/agents/*.md specialist agent defs.
+    agents_dir = os.path.join(_nexus_root(ctx), ".claude", "agents")
+    if os.path.isdir(agents_dir):
+        for fn in sorted(os.listdir(agents_dir)):
+            if fn.endswith(".md") and not fn.startswith("_"):
+                entries.append({"name": fn[:-3], "kind": "specialist", "persona": "", "status": "defined"})
+    if not entries:
+        return CommandResult(output="no data yet", formatted="[dim]No registered subagents yet[/dim]")
+    lines = [
+        f"  {e['kind']:<11} {e['name']:<28} {e['persona'][:24]:<24} {e['status']}"
+        for e in entries
+    ]
+    return CommandResult(
+        output=f"Agents ({len(entries)}):\n" + "\n".join(lines),
+        formatted=f"[bold]Agents ({len(entries)})[/bold]\n" + "\n".join(
+            f"  [cyan]{e['kind']}[/cyan] [white]{e['name']:<28}[/white] [grey70]{e['persona'][:24]:<24}[/grey70] [{_sc(e['status'])}]{e['status']}[/{_sc(e['status'])}]"
+            for e in entries
+        ),
+        data={"agents": entries},
+    )
 
 
 async def _cmd_memory(ctx: CommandContext) -> CommandResult:
@@ -476,6 +510,312 @@ async def _cmd_monitor(ctx: CommandContext) -> CommandResult:
     return CommandResult()
 
 
+# ── Shared helpers for state-backed commands ──────────────────────────────
+
+def _nexus_root(ctx: CommandContext) -> str:
+    """Resolve the project root; tests may pin it via ctx.extra['root']."""
+    overrides = (
+        ctx.extra.get("root")
+        or getattr(ctx.loop, "root_dir", None)
+        or getattr(ctx.loop, "root", None)
+        or (getattr(getattr(ctx, "shell", None), "brain", None) and getattr(ctx.shell.brain, "root", None))
+    )
+    return str(overrides or os.getcwd())
+
+
+def _sessions_dir(ctx: CommandContext) -> str:
+    return os.path.join(_nexus_root(ctx), "logs", "sessions")
+
+
+def _latest_session_file(ctx: CommandContext) -> str:
+    """Path of the most recently written session JSON in logs/sessions; '' on failure."""
+    directory = ctx.extra.get("sessions_dir") or _sessions_dir(ctx)
+    if not os.path.isdir(directory):
+        return ""
+    candidates = [
+        os.path.join(directory, fn)
+        for fn in os.listdir(directory)
+        if fn.endswith(".json") and not fn.endswith(".meta")
+    ]
+    if not candidates:
+        return ""
+    return max(candidates, key=os.path.getmtime)
+
+
+def _load_session_messages(ctx: CommandContext) -> List[Dict[str, Any]]:
+    """Read the latest session JSON into a message list; [] on any failure."""
+    path = _latest_session_file(ctx)
+    if not path:
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [m for m in data if isinstance(m, dict)]
+
+
+# ── Compact / Context / Resume / Plans / Rewind / Hooks / MCP / Login / Cost ──
+
+async def _cmd_compact(ctx: CommandContext) -> CommandResult:
+    """Wire to the real V5 compactor (orchestrators/v5/context_manager.py)."""
+    messages = getattr(getattr(ctx, "shell", None), "conversation_history", None)
+    if not isinstance(messages, list):
+        runtime = getattr(getattr(ctx, "loop", None), "runtime", None)
+        runtime_mem = getattr(runtime, "memory", None) if runtime else None
+        messages = runtime_mem if isinstance(runtime_mem, list) else []
+    if not messages:
+        return CommandResult(output="no data yet", formatted="[dim]No conversation history to compact[/dim]")
+    try:
+        from orchestrators.v5.context_manager import ContextManager
+        mgr = ContextManager(_nexus_root(ctx))
+        compacted = mgr.compact_context(list(messages))
+        dropped = len(messages) - len(compacted)
+        return CommandResult(
+            output=f"compacted: {len(messages)} -> {len(compacted)} messages (dropped {dropped})",
+            formatted=f"[green]compacted:[/green] {len(messages)} -> {len(compacted)} messages (dropped {dropped})",
+            data={"before": len(messages), "after": len(compacted), "dropped": dropped},
+        )
+    except Exception as e:
+        return CommandResult(output=f"compact failed: {e}", success=False)
+
+
+async def _cmd_context(ctx: CommandContext) -> CommandResult:
+    """Report session context usage from the latest logs/sessions file."""
+    messages = _load_session_messages(ctx)
+    if not messages:
+        return CommandResult(output="no data yet", formatted="[dim]No session data yet[/dim]")
+    est_tokens = sum(len(str(m.get("content", ""))) // 4 for m in messages)
+    window = 200000
+    pct = (est_tokens / window) * 100
+    lines = [
+        f"Session: {ctx.session_id}",
+        f"Messages: {len(messages)}",
+        f"Est tokens: {est_tokens}",
+        f"Window: {window:,}",
+        f"Utilization: {pct:.1f}%",
+    ]
+    formatted_lines = [
+        "  [dim]Messages:[/dim] [white]%d[/white]" % len(messages),
+        "  [dim]Est tokens:[/dim] [cyan]%d[/cyan]" % est_tokens,
+        "  [dim]Window:[/dim] [white]%s[/white]" % f"{window:,}",
+        "  [dim]Utilization:[/dim] [green]%.1f%%[/green]" % pct,
+    ]
+    return CommandResult(
+        output="\n".join(lines),
+        formatted=f"[bold]Context Usage[/bold]\n" + "\n".join(formatted_lines),
+        data={"messages": len(messages), "est_tokens": est_tokens, "window": window, "percent": round(pct, 1)},
+    )
+
+
+async def _cmd_resume(ctx: CommandContext) -> CommandResult:
+    """Resume the latest run by reading the newest .nexus_v5 checkpoint (real V5Checkpoint reader)."""
+    try:
+        from orchestrators.v5.checkpoint import V5Checkpoint
+        cp = V5Checkpoint()
+        cp.root_dir = _nexus_root(ctx)
+        entries = cp._checkpoint_list(limit=1)
+        if not entries:
+            return CommandResult(output="no data yet", formatted="[dim]No checkpoints yet[/dim]")
+        path = str(entries[0].get("file") or "")
+        data = cp._checkpoint_read(path)
+        if not data:
+            return CommandResult(output="no data yet", formatted="[dim]Checkpoint unreadable[/dim]")
+        lines = [
+            f"Checkpoint: {os.path.basename(path)}",
+            f"Turn: {data.get('turn_id', '')}  phase: {data.get('phase', '')}",
+        ]
+        summary = data.get("context_summary")
+        if summary:
+            lines.append(f"Summary: {str(summary)[:160]}")
+        plan = data.get("plan") or data.get("actions")
+        if plan:
+            plan_str = str(plan)
+            lines.append("Next plan/actions: " + plan_str[:200])
+        return CommandResult(
+            output="\n".join(lines),
+            formatted="[bold]Resume[/bold]\n" + "\n".join(f"  {ln}" for ln in lines),
+            data=data,
+        )
+    except Exception:
+        return CommandResult(output="no data yet", formatted="[dim]No checkpoints yet[/dim]")
+
+
+async def _cmd_plans(ctx: CommandContext) -> CommandResult:
+    """Read the current todo.md plan via the real PlanningTool._read_plan reader."""
+    try:
+        from tools.planning.scripts.planning import PlanningTool
+    except Exception:
+        return CommandResult(output="no data yet", formatted="[dim]Planning tool unavailable[/dim]")
+    root = _nexus_root(ctx)
+    for base in (os.path.join(root, "workspace"), root):
+        try:
+            tool = PlanningTool(root_dir=base)
+            plan = tool._read_plan()
+        except Exception:
+            plan = ""
+        if plan:
+            return CommandResult(
+                output=plan,
+                formatted=f"[bold]Plan (todo.md)[/bold]\n{plan}",
+                data={"file": os.path.join(base, "todo.md"), "plan": plan},
+            )
+    return CommandResult(output="no data yet", formatted="[dim]No todo.md plan yet[/dim]")
+
+
+async def _cmd_rewind(ctx: CommandContext) -> CommandResult:
+    """List recent checkpoints and describe what a rewind WOULD do (informational only)."""
+    try:
+        from orchestrators.v5.checkpoint import V5Checkpoint
+        cp = V5Checkpoint()
+        cp.root_dir = _nexus_root(ctx)
+    except Exception:
+        return CommandResult(output="no data yet", formatted="[dim]No checkpoints yet[/dim]")
+    parts = ctx.extra.get("args", "")
+    if isinstance(parts, str):
+        parts = parts.split()
+    limit = 5
+    if len(parts) > 1:
+        try:
+            limit = max(1, min(int(parts[1]), 20))
+        except ValueError:
+            pass
+    entries = cp._checkpoint_list(limit=limit)
+    if not entries:
+        return CommandResult(output="no data yet", formatted="[dim]No checkpoints yet[/dim]")
+    lines = ["Last checkpoints:"]
+    for index, entry in enumerate(entries, start=1):
+        lines.append(
+            f"  {index}. {os.path.basename(str(entry.get('file') or ''))} "
+            f"(turn={entry.get('turn_id', '')} phase={entry.get('phase', '')})"
+        )
+    target = os.path.basename(str(entries[0].get("file") or ""))
+    lines.append("")
+    lines.append(f"confirm rewind to 1 → runtime resets to checkpoint '{target}'")
+    lines.append("  (file to re-read: " + str(entries[0].get("file") or "") + ")")
+    lines.append("Nothing has been changed; this command is informational.")
+    formatted_lines = [f"  [cyan]{ln}[/cyan]" if i else f"[bold]{ln}[/bold]" for i, ln in enumerate(lines)]
+    return CommandResult(
+        output="\n".join(lines),
+        formatted="\n".join(formatted_lines),
+        data={"candidates": entries},
+    )
+
+
+async def _cmd_hooks(ctx: CommandContext) -> CommandResult:
+    """List configured plugin hooks from the real HookRegistry (plugins/manager.py)."""
+    try:
+        from plugins.manager import HookRegistry
+    except Exception:
+        return CommandResult(output="no data yet", formatted="[dim]Hook registry unavailable[/dim]")
+    hook_reg = None
+    kernel_plugins = getattr(getattr(ctx, "loop", None), "plugins", None)
+    if kernel_plugins is not None:
+        hook_reg = getattr(kernel_plugins, "hook_registry", None)
+    if hook_reg is None:
+        hook_reg = HookRegistry()
+    lines = [f"  {event:<20} {len(hook_reg.get_hooks(event))} handler(s)" for event in HookRegistry.PLUGIN_EVENTS]
+    return CommandResult(
+        output=f"Plugin hooks ({sum(len(hook_reg.get_hooks(e)) for e in HookRegistry.PLUGIN_EVENTS)}):\n" + "\n".join(lines),
+        formatted=f"[bold]Plugin Hooks[/bold]\n" + "\n".join(
+            f"  [cyan]{event:<20}[/cyan] [white]{len(hook_reg.get_hooks(event))!s:>6}[/white] handler(s)"
+            for event in HookRegistry.PLUGIN_EVENTS
+        ),
+        data={event: len(hook_reg.get_hooks(event)) for event in HookRegistry.PLUGIN_EVENTS},
+    )
+
+
+async def _cmd_mcp(ctx: CommandContext) -> CommandResult:
+    """List MCP servers from config/mcp_servers.json with running status (real loader shape)."""
+    root = _nexus_root(ctx)
+    cfg_path = ctx.extra.get("mcp_config") or os.path.join(root, "config", "mcp_servers.json")
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as fh:
+            servers = json.load(fh)
+    except Exception:
+        return CommandResult(output="no data yet", formatted="[dim]No MCP servers configured[/dim]")
+    if isinstance(servers, dict) and isinstance(servers.get("servers"), list):
+        # Mirrors the documented {"servers": [...]} shape handled in registry.init_mcp_tools.
+        normalized = {}
+        for index, item in enumerate(servers["servers"]):
+            if isinstance(item, dict):
+                normalized[str(item.get("name") or f"server_{index}")] = item
+        servers = normalized
+    if not isinstance(servers, dict) or not servers:
+        return CommandResult(output="no data yet", formatted="[dim]No MCP servers configured[/dim]")
+    live_clients = getattr(getattr(ctx, "loop", None), "_mcp_clients", None)
+    foreign_names = {}
+    if isinstance(live_clients, dict):
+        for name, client in live_clients.items():
+            foreign_names[str(getattr(client, "command", ""))] = name
+    elif isinstance(live_clients, list):
+        for client in live_clients:
+            foreign_names[str(getattr(client, "command", ""))] = getattr(client, "command", "")
+    lines = []
+    for name, cfg in servers.items():
+        if not isinstance(cfg, dict):
+            continue
+        command = str(cfg.get("command") or cfg.get("cmd") or "")
+        running = command in foreign_names
+        enabled = cfg.get("enabled", cfg.get("active", True)) is not False
+        status = "running" if running else ("configured" if enabled else "disabled")
+        lines.append(f"  {name:<24} {status}")
+    return CommandResult(
+        output=f"MCP servers ({len(lines)}):\n" + "\n".join(lines),
+        formatted="[bold]MCP Servers[/bold]\n" + "\n".join(lines),
+        data={"servers": [name for name in servers if isinstance(servers.get(name), dict)]},
+    )
+
+
+async def _cmd_login(ctx: CommandContext) -> CommandResult:
+    """Alias to the auth CLI login: delegates to commands.auth.handle_auth_login."""
+    parts = ctx.extra.get("args", "")
+    if isinstance(parts, str):
+        parts = parts.split()
+    provider = parts[1] if len(parts) > 1 else ""
+    if not provider:
+        return CommandResult(output="Usage: /login <provider>", success=False)
+    try:
+        from types import SimpleNamespace
+        from commands.auth import handle_auth_login
+        await handle_auth_login(SimpleNamespace(provider=provider, name="default", port=None, host="127.0.0.1"))
+    except Exception as e:
+        return CommandResult(output=f"login failed: {e}", success=False)
+    return CommandResult(
+        output=f"login: {provider} initiated",
+        formatted=f"[green]Login to '{provider}' initiated[/green]\nFollow the OAuth prompts in the shell.",
+    )
+
+
+async def _cmd_cost(ctx: CommandContext) -> CommandResult:
+    """Estimate cost for the latest run at $0.001/1K tokens from logs/sessions."""
+    messages = _load_session_messages(ctx)
+    if not messages:
+        return CommandResult(output="no data yet", formatted="[dim]No session data yet[/dim]")
+    in_tokens = sum(len(str(m.get("content", ""))) // 4 for m in messages if m.get("role") == "user")
+    out_tokens = sum(len(str(m.get("content", ""))) // 4 for m in messages if m.get("role") == "assistant")
+    rate = 0.001  # dollars per 1K tokens
+    est_cost = (in_tokens + out_tokens) / 1000.0 * rate
+    lines = [
+        f"Session: {ctx.session_id}",
+        f"Input tokens: {in_tokens}",
+        f"Output tokens: {out_tokens}",
+        f"Est cost: ${est_cost:.4f} @ ${rate}/1K tokens",
+    ]
+    formatted_lines = [
+        "  [dim]Input tokens:[/dim] [cyan]%d[/cyan]" % in_tokens,
+        "  [dim]Output tokens:[/dim] [cyan]%d[/cyan]" % out_tokens,
+        f"  [dim]Est cost:[/dim] [green]${est_cost:.4f}[/green] [grey70]@ ${rate}/1K[/grey70]",
+    ]
+    return CommandResult(
+        output="\n".join(lines),
+        formatted="[bold]Estimated Cost[/bold]\n" + "\n".join(formatted_lines),
+        data={"input_tokens": in_tokens, "output_tokens": out_tokens, "est_cost": round(est_cost, 4)},
+    )
+
+
 # ── Initialize Built-in Commands ────────────────────────────────────────────
 
 def init_registry(registry: Optional[CommandRegistry] = None) -> CommandRegistry:
@@ -521,6 +861,15 @@ def init_registry(registry: Optional[CommandRegistry] = None) -> CommandRegistry
         Command("forge", "Show forge/evolution subsystem status", _cmd_forge, category="info"),
         Command("providers", "Show provider dashboard with health", _cmd_providers, category="info"),
         Command("monitor", "Show agent monitor dashboard", _cmd_monitor, category="info"),
+        Command("compact", "Compact the conversation context", _cmd_compact, category="general"),
+        Command("context", "Report session context usage (tokens, % window)", _cmd_context, category="info"),
+        Command("resume", "Resume the latest run from its checkpoint", _cmd_resume, category="general"),
+        Command("plans", "Show the current todo.md plan", _cmd_plans, category="general"),
+        Command("rewind", "List checkpoints and preview a rewind (no changes)", _cmd_rewind, category="general"),
+        Command("hooks", "List configured plugin hooks", _cmd_hooks, category="info"),
+        Command("mcp", "List MCP servers and status", _cmd_mcp, category="info"),
+        Command("login", "Login to an OAuth provider (auth CLI bridge)", _cmd_login, category="settings"),
+        Command("cost", "Estimate cost of the latest run", _cmd_cost, category="info"),
     ]
     for cmd in builtins:
         reg.register(cmd)
@@ -535,3 +884,21 @@ init_registry(_registry)
 
 def get_registry() -> CommandRegistry:
     return _registry
+
+
+# ── Task Tracker (moved from legacy shell/) ─────────────────────────────
+
+class TaskTracker:
+    """Simple in-memory task registry for /verify, /test, etc."""
+    _tasks: list[dict[str, Any]] = []
+
+    @classmethod
+    def create(cls, prompt: str) -> str:
+        import uuid
+        task_id = str(uuid.uuid4())
+        cls._tasks.append({"id": task_id, "prompt": prompt, "status": "running"})
+        return task_id
+
+    @classmethod
+    def list(cls) -> list[dict[str, Any]]:
+        return list(cls._tasks)

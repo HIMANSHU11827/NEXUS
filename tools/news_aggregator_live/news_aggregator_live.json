@@ -1,0 +1,10 @@
+{
+  "name": "news_aggregator_live",
+  "version": "1.0.0",
+  "description": "Only one search result was returned; NEXUS lacks a tool to pull multiple diverse sources for real-time news coverage to provide balanced global updates.",
+  "defaults": {},
+  "permissions": {
+    "auto_approve": false
+  },
+  "created_at": 1785654567.8405464
+}

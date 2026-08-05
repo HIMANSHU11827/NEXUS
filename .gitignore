@@ -18,6 +18,13 @@ hs_err_pid*.log
 replay_pid*.log
 
 .env
+# Secrets & credentials (oauth store for providers/oauth lives in ~/.nexus/auth
+# outside the repo, but key material placed in the tree must stay ignored)
+*.key
+*.pem
+*.p12
+*.pfx
+.oauth_store.json
 .nexus/
 .opencode/
 logs/

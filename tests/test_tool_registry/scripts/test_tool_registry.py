@@ -3,6 +3,8 @@ __version__ = "1.0.0"
 import os
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from tools.nexus_tools.registry import ToolEntry
 
 
@@ -129,6 +131,102 @@ def test_registry_summary_explains_unavailable_tools(tmp_path):
     assert summary["has_handler"] is False
 
 
+def test_registry_discovers_active_skills_as_model_tools(tmp_path):
+    skill_dir = tmp_path / ".opencode" / "skills" / "website_builder"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nid: website_builder\nname: website_builder\ndescription: Build sites\n---\nBuild a local website.",
+        encoding="utf-8",
+    )
+
+    from tools.nexus_tools.registry import ToolRegistry
+
+    registry = ToolRegistry(str(tmp_path))
+    tools = registry.list_tools(include_unavailable=True)
+
+    assert "website_builder" in tools
+    assert tools["website_builder"]["description"] == "Build sites"
+    assert tools["website_builder"]["has_handler"] is True
+
+
+def test_registry_discovers_nested_skill_tree(tmp_path):
+    skill_dir = tmp_path / "skills" / "software-development" / "python" / "code-review"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nid: nested_code_review\nname: Nested Code Review\ndescription: Review code\n---\nReview the requested code.",
+        encoding="utf-8",
+    )
+
+    from skills.registry import SkillRegistry
+
+    records = SkillRegistry(str(tmp_path)).discover()
+    assert any(record.id == "nested_code_review" for record in records)
+
+
+def test_registry_accepts_mcp_servers_list_and_normalizes_schema(tmp_path, monkeypatch):
+    import json
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "mcp_servers.json").write_text(
+        json.dumps({"servers": [{"name": "demo", "command": "demo-mcp", "args": []}]}),
+        encoding="utf-8",
+    )
+
+    class FakeClient:
+        def __init__(self, command, args):
+            self.command = command
+
+        def start(self):
+            return True
+
+        def list_tools(self):
+            return [{
+                "name": "lookup",
+                "description": "Look something up",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            }]
+
+    monkeypatch.setattr("mcp.client.MCPClient", FakeClient)
+    from tools.nexus_tools.registry import ToolRegistry
+
+    registry = ToolRegistry(str(tmp_path))
+    entry = registry.get("lookup")
+
+    assert entry is not None
+    assert entry.schema["category"] == "mcp"
+    assert entry.schema["params"]["query"]["type"] == "string"
+    assert entry.schema["required"] == ["query"]
+
+
+def test_registry_enforces_mcp_top_level_required_fields():
+    import asyncio
+
+    from tools.nexus_tools.base_tool import BaseTool, ToolResult
+    from tools.nexus_tools.registry import ToolEntry, ToolRegistry
+
+    class RequiredTool(BaseTool):
+        async def execute(self, query: str) -> ToolResult:
+            return ToolResult(success=True, output=query)
+
+    registry = object.__new__(ToolRegistry)
+    registry.root = ""
+    registry._tools = {
+        "required_tool": ToolEntry(
+            "required_tool",
+            {"params": {"query": {"type": "string"}}, "required": ["query"]},
+            RequiredTool(),
+        )
+    }
+
+    with pytest.raises(ValueError, match="requires parameter 'query'"):
+        asyncio.run(registry.execute("required_tool"))
+
+
 def test_registry_passes_hidden_runtime_context_without_validating_as_tool_param():
     from tools.nexus_tools.base_tool import BaseTool, ToolResult
     from tools.nexus_tools.registry import ToolEntry, ToolRegistry
@@ -224,3 +322,59 @@ def test_registry_binds_stream_runtime_context_after_acquiring_semaphore():
 
     assert first_result[0].output == "first:turn-1"
     assert second_result[0].output == "second:turn-2"
+
+
+def test_registry_discovers_json_metadata_and_marks_stub_unavailable(tmp_path):
+    import asyncio
+    import json
+
+    tool_dir = tmp_path / "tools" / "legacy_probe"
+    scripts = tool_dir / "scripts"
+    scripts.mkdir(parents=True)
+    (tool_dir / "legacy_probe.json").write_text(
+        json.dumps({"name": "legacy_probe", "description": "legacy"}),
+        encoding="utf-8",
+    )
+    (scripts / "legacy_probe.py").write_text(
+        "import json\n"
+        "def execute(params):\n"
+        "    return json.dumps({'result': 'not yet implemented'})\n",
+        encoding="utf-8",
+    )
+
+    from tools.nexus_tools.registry import ToolRegistry
+
+    registry = ToolRegistry(str(tmp_path))
+    summary = registry.list_tools(include_unavailable=True)["legacy_probe"]
+    assert summary["availability_reason"] == "unimplemented"
+    assert "legacy_probe" not in registry.list_tools()
+    import pytest
+    with pytest.raises(RuntimeError, match="unavailable"):
+        asyncio.run(registry.execute("legacy_probe"))
+
+
+def test_registry_stream_timeout_applies_to_native_async_generators():
+    import asyncio
+
+    from tools.nexus_tools.base_tool import BaseTool
+    from tools.nexus_tools.registry import ToolEntry, ToolRegistry
+
+    class HangingTool(BaseTool):
+        async def stream_execute(self):
+            await asyncio.sleep(10)
+            yield "never"
+
+    async def run():
+        registry = object.__new__(ToolRegistry)
+        registry.root = ""
+        registry._tools = {
+            "hanging": ToolEntry(
+                "hanging",
+                {"params": {}, "execution": {"timeout_ms": 10}},
+                HangingTool(),
+            )
+        }
+        return [chunk async for chunk in registry.stream_execute("hanging")]
+
+    result = asyncio.run(run())
+    assert result and result[0].status == "timeout"

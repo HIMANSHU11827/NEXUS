@@ -176,12 +176,13 @@ class TaskQueue:
                 cur = conn.execute(
                     """
                     SELECT id FROM tasks
-                    WHERE state IN (?, ?)
+                    WHERE state = ?
+                       OR (state = ? AND (leased_until IS NULL OR leased_until <= ?))
                     ORDER BY CAST(JSON_EXTRACT(payload, '$.priority')
                         AS INTEGER) DESC, id ASC
                     LIMIT 1
                     """,
-                    (STATE_QUEUED, STATE_RETRYING),
+                    (STATE_QUEUED, STATE_RETRYING, now),
                 )
                 row = cur.fetchone()
                 if row is None:
@@ -209,21 +210,28 @@ class TaskQueue:
             finally:
                 conn.close()
 
-    def complete(self, task_id: int, result: Any) -> bool:
-        """Mark a task completed, storing its result."""
+    def complete(self, task_id: int, result: Any, lease_token: Optional[str] = None) -> bool:
+        """Mark a task completed, only when the caller still owns its lease.
+
+        ``lease_token`` is optional for backwards-compatible administrative
+        callers. Workers must pass the token returned by :meth:`lease`; an
+        expired worker can then never overwrite a newer worker's result.
+        """
         ts = _now()
         with self._lock:
             conn = self._connect()
             try:
-                cur = conn.execute(
-                    """
+                query = """
                     UPDATE tasks
                     SET state = ?, result = ?, lease_token = NULL,
                         leased_until = NULL, updated_at = ?
                     WHERE id = ?
-                    """,
-                    (STATE_COMPLETED, json.dumps(result), ts, task_id),
-                )
+                """
+                params: tuple[Any, ...] = (STATE_COMPLETED, json.dumps(result), ts, task_id)
+                if lease_token:
+                    query += " AND state = ? AND lease_token = ?"
+                    params += (STATE_LEASED, lease_token)
+                cur = conn.execute(query, params)
                 conn.commit()
                 return cur.rowcount > 0
             finally:
@@ -234,6 +242,7 @@ class TaskQueue:
         task_id: int,
         error: str,
         requeue_after: Optional[float] = None,
+        lease_token: Optional[str] = None,
     ) -> bool:
         """Mark a task failed.
 
@@ -246,10 +255,12 @@ class TaskQueue:
         with self._lock:
             conn = self._connect()
             try:
-                cur = conn.execute(
-                    "SELECT attempts, max_attempts FROM tasks WHERE id = ?",
-                    (task_id,),
-                )
+                select = "SELECT attempts, max_attempts FROM tasks WHERE id = ?"
+                select_params: tuple[Any, ...] = (task_id,)
+                if lease_token:
+                    select += " AND state = ? AND lease_token = ?"
+                    select_params += (STATE_LEASED, lease_token)
+                cur = conn.execute(select, select_params)
                 row = cur.fetchone()
                 if row is None:
                     return False
@@ -261,26 +272,31 @@ class TaskQueue:
                 else:
                     new_state = STATE_FAILED
                 delay = requeue_after or 0.0
-                cur = conn.execute(
-                    """
+                query = """
                     UPDATE tasks
                     SET state = ?, error = ?, lease_token = NULL,
                         leased_until = ?, updated_at = ?
                     WHERE id = ?
-                    """,
-                    (new_state, str(error), ts + delay, ts, task_id),
-                )
+                """
+                params: tuple[Any, ...] = (new_state, str(error), ts + delay, ts, task_id)
+                if lease_token:
+                    query += " AND state = ? AND lease_token = ?"
+                    params += (STATE_LEASED, lease_token)
+                cur = conn.execute(query, params)
                 conn.commit()
                 return cur.rowcount > 0
             finally:
                 conn.close()
 
-    def ack_lease(self, task_id: int, token: str) -> bool:
-        """Confirm a worker still holds the lease for task_id.
+    def ack_lease(self, task_id: int, token: str, timeout_sec: Optional[float] = None) -> bool:
+        """Confirm a worker still holds the lease for task_id, renewing it.
 
-        Returns True if the given token matches the stored lease_token (i.e.
-        the lease is still valid / owned by this worker). Useful for
-        heartbeat / ownership checks before doing work.
+        Returns True only when the given token matches the stored lease_token
+        (i.e. the lease is still valid / owned by this worker). When
+        ``timeout_sec`` is given the lease is *renewed* — ``leased_until`` is
+        pushed forward to ``now + timeout_sec`` — so a long-running worker can
+        heart-beat its lease before it expires. With no ``timeout_sec`` this
+        behaves exactly as before (pure ownership check).
         """
         with self._lock:
             conn = self._connect()
@@ -289,9 +305,20 @@ class TaskQueue:
                     "SELECT lease_token FROM tasks WHERE id = ?", (task_id,)
                 )
                 row = cur.fetchone()
-                if row is None:
+                if row is None or row["lease_token"] != token:
                     return False
-                return row["lease_token"] == token
+                if timeout_sec is not None:
+                    conn.execute(
+                        """
+                        UPDATE tasks
+                        SET leased_until = ?, updated_at = ?
+                        WHERE id = ? AND state = ? AND lease_token = ?
+                        """,
+                        (_now() + float(timeout_sec), _now(), task_id,
+                         STATE_LEASED, token),
+                    )
+                    conn.commit()
+                return True
             finally:
                 conn.close()
 
@@ -316,8 +343,12 @@ class TaskQueue:
             conn = self._connect()
             try:
                 cur = conn.execute(
-                    "SELECT COUNT(*) AS n FROM tasks WHERE state IN (?, ?)",
-                    (STATE_QUEUED, STATE_RETRYING),
+                    """
+                    SELECT COUNT(*) AS n FROM tasks
+                    WHERE state = ?
+                       OR (state = ? AND (leased_until IS NULL OR leased_until <= ?))
+                    """,
+                    (STATE_QUEUED, STATE_RETRYING, _now()),
                 )
                 return int(cur.fetchone()["n"])
             finally:
@@ -372,6 +403,25 @@ class TaskQueue:
                 cur = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
                 row = cur.fetchone()
                 return self._row_to_dict(row) if row else None
+            finally:
+                conn.close()
+
+    def list_unfinished(self, session_id: str = "") -> List[Dict[str, Any]]:
+        """Return queued, retrying, or leased tasks that survive a restart."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "SELECT * FROM tasks WHERE state IN (?, ?, ?) ORDER BY id ASC",
+                    (STATE_QUEUED, STATE_RETRYING, STATE_LEASED),
+                )
+                rows = [self._row_to_dict(row) for row in cur.fetchall()]
+                if not session_id:
+                    return rows
+                return [
+                    row for row in rows
+                    if str((row.get("payload") or {}).get("meta", {}).get("session_id") or "") == str(session_id)
+                ]
             finally:
                 conn.close()
 

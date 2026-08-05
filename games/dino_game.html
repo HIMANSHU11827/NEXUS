@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NEXUS Dino Game</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background: linear-gradient(#dbeafe, #f8fafc 52%, #dcfce7 52%);
+    font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+    color: #111827;
+  }
+  .wrap { width: min(920px, 94vw); }
+  .hud {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 12px;
+    font-weight: 800;
+  }
+  .hint { color: #475569; font-weight: 650; }
+  #game {
+    position: relative;
+    width: 100%;
+    height: 260px;
+    overflow: hidden;
+    border: 3px solid #111827;
+    border-radius: 16px;
+    background:
+      radial-gradient(circle at 80% 22%, #fde68a 0 32px, transparent 33px),
+      linear-gradient(#bfdbfe 0 62%, #86efac 62% 100%);
+    box-shadow: 0 18px 40px rgba(15, 23, 42, .18);
+  }
+  #ground {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 38px;
+    height: 5px;
+    background: #334155;
+  }
+  #dino {
+    position: absolute;
+    left: 74px;
+    bottom: 43px;
+    width: 48px;
+    height: 52px;
+    border-radius: 13px 13px 8px 8px;
+    background: #16a34a;
+    box-shadow: inset -8px 0 #15803d;
+  }
+  #dino::before {
+    content: "";
+    position: absolute;
+    right: 7px;
+    top: 10px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 2px 1px 0 #111827;
+  }
+  #dino::after {
+    content: "";
+    position: absolute;
+    left: -18px;
+    bottom: 11px;
+    border-top: 10px solid transparent;
+    border-bottom: 5px solid transparent;
+    border-right: 22px solid #15803d;
+  }
+  #cactus {
+    position: absolute;
+    right: -60px;
+    bottom: 43px;
+    width: 34px;
+    height: 62px;
+    border-radius: 11px 11px 5px 5px;
+    background: #0f766e;
+    box-shadow: inset -6px 0 #115e59;
+  }
+  #cactus::before,
+  #cactus::after {
+    content: "";
+    position: absolute;
+    width: 18px;
+    height: 28px;
+    border-radius: 9px;
+    background: #0f766e;
+    top: 18px;
+  }
+  #cactus::before { left: -13px; }
+  #cactus::after { right: -13px; top: 28px; }
+  #message {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    pointer-events: none;
+    font-size: clamp(22px, 4vw, 42px);
+    font-weight: 900;
+    color: rgba(17, 24, 39, .82);
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="hud">
+      <div>NEXUS Dino</div>
+      <div>Score: <span id="score">0</span></div>
+      <div class="hint">Space / Up / Click to jump</div>
+    </div>
+    <section id="game" aria-label="Dino game">
+      <div id="ground"></div>
+      <div id="dino"></div>
+      <div id="cactus"></div>
+      <div id="message"></div>
+    </section>
+  </main>
+<script>
+  const game = document.getElementById('game');
+  const dino = document.getElementById('dino');
+  const cactus = document.getElementById('cactus');
+  const scoreEl = document.getElementById('score');
+  const message = document.getElementById('message');
+  let y = 0, vy = 0, cactusX = game.clientWidth + 80, score = 0, speed = 5.2, over = false;
+  function jump() {
+    if (over) { restart(); return; }
+    if (y === 0) vy = 15;
+  }
+  function restart() {
+    y = 0; vy = 0; cactusX = game.clientWidth + 80; score = 0; speed = 5.2; over = false; message.textContent = '';
+    requestAnimationFrame(loop);
+  }
+  function rectsHit(a, b) {
+    return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+  }
+  function loop() {
+    if (over) return;
+    vy -= .72;
+    y = Math.max(0, y + vy);
+    if (y === 0 && vy < 0) vy = 0;
+    dino.style.transform = 'translateY(' + (-y) + 'px)';
+    cactusX -= speed;
+    if (cactusX < -90) { cactusX = game.clientWidth + Math.random() * 240; score += 1; speed += .18; }
+    cactus.style.transform = 'translateX(' + cactusX + 'px)';
+    scoreEl.textContent = String(score);
+    if (rectsHit(dino.getBoundingClientRect(), cactus.getBoundingClientRect())) {
+      over = true;
+      message.innerHTML = 'Game Over<br><span style="font-size:18px">click or press Space to restart</span>';
+      return;
+    }
+    requestAnimationFrame(loop);
+  }
+  addEventListener('keydown', e => { if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); jump(); } });
+  game.addEventListener('pointerdown', jump);
+  restart();
+</script>
+</body>
+</html>

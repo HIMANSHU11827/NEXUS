@@ -159,19 +159,34 @@ class IntentRouter:
         if len(text_lower) < 30 and total_score < 3.0:
             needs_tools = False
 
-        # ⚡ 3.9: Skill-Deep Mapping (Prioritize Learned Logic)
-        from skills import NexusSkillMaster
-        from utils.nexus_path import _ROOT
-        skills = NexusSkillMaster(_ROOT).list_skills()
-        for s in skills:
-            if s["id"].lower() in text_lower:
-                return IntentResult(
-                    intent=f"SKILL:{s['id']}",
-                    confidence=0.98,
-                    needs_tools=True,
-                    tool_hints=["use_skill"],
-                    complexity="medium"
-                )
+        # Skill-Deep Mapping (Prioritize Learned Logic)
+        try:
+            from skills.engine import NexusSkillEngine
+            engine = NexusSkillEngine()
+            skills = engine.list_skills()
+            for s in skills:
+                sid = (s.get("id") or s.get("name") or "").lower()
+                if sid and sid in text_lower:
+                    return IntentResult(
+                        intent=f"SKILL:{s['id']}",
+                        confidence=0.98,
+                        needs_tools=True,
+                        tool_hints=["use_skill"],
+                        complexity="medium"
+                    )
+        except ImportError:
+            from skills import NexusSkillMaster
+            from utils.nexus_path import _ROOT
+            skills = NexusSkillMaster(_ROOT).list_skills()
+            for s in skills:
+                if s["id"].lower() in text_lower:
+                    return IntentResult(
+                        intent=f"SKILL:{s['id']}",
+                        confidence=0.98,
+                        needs_tools=True,
+                        tool_hints=["use_skill"],
+                        complexity="medium"
+                    )
 
         if scores:
             best_intent = max(scores, key=scores.get)

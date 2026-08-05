@@ -29,7 +29,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # 🌌 [NEXUS_PATH_CORE]
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-load_dotenv(os.path.join(_ROOT, "config", ".env"))
+# Keep GUI-launched API workers consistent with the standalone server.
+load_dotenv(os.path.join(_ROOT, ".env"), override=False)
+load_dotenv(os.path.join(_ROOT, "config", ".env"), override=False)
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from nexus.events import CanonicalEvent
@@ -43,7 +45,7 @@ from nexus.runtime import (
 from nexus.runtime import (
     session_file_path as runtime_session_file_path,
 )
-from orchestrators.loop import NexusLoop
+from orchestrators import NexusLoop
 from utils.context_scrubber import StreamingContextScrubber
 
 _UPLOAD_DIR = os.path.join(_ROOT, "workspace", "uploads")
@@ -1424,8 +1426,14 @@ def _apply_sandbox_tier(loop: NexusLoop) -> None:
     from sandbox.sandbox_manager import SandboxTier
 
     loop.sandbox_tier = SandboxTier(_SANDBOX_TIER)
-    loop.sandbox.tier = loop.sandbox_tier
-    loop.sandbox.root = _SANDBOX_ROOT
+    sandbox = getattr(loop, "sandbox", None)
+    if sandbox is None:
+        ensure_sandbox = getattr(loop, "_sandbox", None)
+        sandbox = ensure_sandbox() if callable(ensure_sandbox) else getattr(getattr(loop, "runtime", None), "sandbox", None)
+    if sandbox is None:
+        raise RuntimeError("Sandbox is unavailable; refusing to start a GUI session without execution isolation")
+    sandbox.tier = loop.sandbox_tier
+    sandbox.root = _SANDBOX_ROOT
 
 
 def bind_live_work_event_sink(loop: NexusLoop, session_id: str, turn_id: str, out_queue) -> tuple[Any, Any]:

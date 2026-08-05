@@ -35,7 +35,7 @@ PROTECTED = guard.PROTECTED_DIRS
 class TestIsCorePath:
     def test_protected_dirs_are_detected(self):
         for d in PROTECTED:
-            assert is_core_path(os.path.join(d, "loop.py")) is True
+            assert is_core_path(os.path.join(d, "v5", "core.py")) is True
             assert is_core_path(os.path.join(d, "sub", "mod.py")) is True
 
     def test_non_core_is_not_detected(self):
@@ -56,7 +56,7 @@ class TestIsCorePath:
 class TestAssertNotRewritingCore:
     def test_blocks_protected_path(self):
         with pytest.raises(CoreRewriteBlocked):
-            guard.assert_not_rewriting_core("orchestrators/loop.py", "write")
+            guard.assert_not_rewriting_core("orchestrators/v5/core.py", "write")
 
     def test_block_is_permissionerror_subclass(self):
         with pytest.raises(PermissionError):
@@ -83,7 +83,7 @@ class TestGuardedOpen:
 
     def test_append_to_core_is_blocked(self, tmp_path):
         with pytest.raises(CoreRewriteBlocked):
-            guarded_open("orchestrators/loop.py", "a")
+            guarded_open("orchestrators/v5/core.py", "a")
 
     def test_safe_write_and_read(self, tmp_path):
         f = tmp_path / "safe.txt"
@@ -130,7 +130,7 @@ class TestGuardedWriters:
 
     def test_jsonl_append_blocks_core(self, tmp_path):
         with pytest.raises(CoreRewriteBlocked):
-            guarded_jsonl_append("orchestrators/loop.py", {"x": 1})
+            guarded_jsonl_append("orchestrators/v5/core.py", {"x": 1})
 
 
 # ── protected_core_writes scope ─────────────────────────────────────────────
@@ -163,22 +163,21 @@ class TestEnableFlag:
 # ── verify_core_integrity ──────────────────────────────────────────────────
 class TestVerifyCoreIntegrity:
     def test_clean_root_returns_true(self, tmp_path):
-        core = tmp_path / "orchestrators"
-        core.mkdir()
-        (core / "loop.py").write_text("def main():\n    return 1\n", encoding="utf-8")
+        core = tmp_path / "orchestrators" / "v5"
+        core.mkdir(parents=True)
+        (core / "core.py").write_text("def main():\n    return 1\n", encoding="utf-8")
         assert guard.verify_core_integrity(str(tmp_path)) is True
 
     def test_corrupted_marker_returns_false(self, tmp_path):
-        core = tmp_path / "orchestrators"
-        core.mkdir()
-        # The historical runtime corruption marker from loop.py.
-        (core / "loop.py").write_text("x = getcworkspace\n", encoding="utf-8")
+        core = tmp_path / "orchestrators" / "v5"
+        core.mkdir(parents=True)
+        (core / "core.py").write_text("x = getcworkspace\n", encoding="utf-8")
         assert guard.verify_core_integrity(str(tmp_path)) is False
 
     def test_syntax_error_returns_false(self, tmp_path):
-        core = tmp_path / "orchestrators"
-        core.mkdir()
-        (core / "loop.py").write_text("def broken(:\n", encoding="utf-8")
+        core = tmp_path / "orchestrators" / "v5"
+        core.mkdir(parents=True)
+        (core / "core.py").write_text("def broken(:\n", encoding="utf-8")
         assert guard.verify_core_integrity(str(tmp_path)) is False
 
     def test_missing_loop_returns_false(self, tmp_path):

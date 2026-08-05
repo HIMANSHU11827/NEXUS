@@ -11,7 +11,7 @@ from tools.nexus_tools.base_tool import BaseTool, ToolResult
 
 class TerminalTool(BaseTool):
     name = "terminal"
-    description = "Run shell commands"
+    description = "Run shell commands, including local build, preview, and development-server commands"
 
     async def execute(self, command: str, timeout: int = 30, workdir: Optional[str] = None, **kwargs) -> ToolResult:
         try:
@@ -25,7 +25,7 @@ class TerminalTool(BaseTool):
             return ToolResult(
                 success=(exit_code in (None, 0)) and "[SANDBOX_BLOCK]" not in output and "[SANDBOX_TIMEOUT]" not in output,
                 output=output,
-                metadata={"exit_code": exit_code},
+                metadata={"exit_code": exit_code, "command": command, "workdir": os.path.abspath(cwd), "timeout": timeout},
             )
         except asyncio.TimeoutError:
             return ToolResult(success=False, error=f"Command timed out after {timeout}s")

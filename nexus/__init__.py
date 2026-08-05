@@ -44,6 +44,14 @@ def _resolve_root() -> str:
             _project = os.getcwd()
         if _root not in sys.path:
             sys.path.insert(0, _root)
+    # The project root must be searched before the nexus package dir, otherwise
+    # `import commands` would resolve to nexus/commands.py (a plain module) and
+    # shadow the top-level `commands/` package. `_project` is usually already on
+    # sys.path from the `python -m nexus` invocation, so the old `not in`
+    # guard skipped prepending it and left `_root` first. Always give the
+    # project root precedence.
+    if sys.path and sys.path[0] != _project:
+        sys.path.insert(0, _project)
     if _project not in sys.path:
         sys.path.insert(0, _project)
     return _project
@@ -52,7 +60,10 @@ def _resolve_root() -> str:
 def _setup_environment() -> str:
     project_root = _resolve_root()
 
-    load_dotenv(os.path.join(project_root, "config", ".env"))
+    # Support both the legacy config/.env and the repository-root .env while
+    # allowing explicitly injected process settings to win.
+    load_dotenv(os.path.join(project_root, ".env"), override=False)
+    load_dotenv(os.path.join(project_root, "config", ".env"), override=False)
 
     if os.name == "nt":
         venv_scripts = os.path.join(project_root, ".venv", "Scripts")
@@ -132,7 +143,7 @@ def _quick_configure(project_root: str) -> None:
     os.makedirs(config_dir, exist_ok=True)
 
     env = load_env(project_root)
-    env.setdefault("NEXUS_SANDBOX_TIER", "normal")
+    env.setdefault("NEXUS_SANDBOX_TIER", "no_sandbox")
     save_env(project_root, env)
 
     cfg = load_provider_yml(project_root)
@@ -162,7 +173,7 @@ def _quick_configure(project_root: str) -> None:
             "thinking_mode": True,
             "log_level": "INFO",
             "language": "en",
-            "sandbox_tier": "normal",
+            "sandbox_tier": "no_sandbox",
             "theme": {
                 "name": "dark",
                 "primary": "bold magenta",
@@ -188,6 +199,7 @@ def _apply_command_alias(argv: list[str]) -> list[str]:
         "nexus-server": "--server",
         "nexus-api": "--server",
         "nexus-gateway": "--gateway",
+        "nexus-v5": "--v5",
         "nexus-setup": "--setup",
         "nexus-configure": "--setup",
         "nexus-config": "--setup",
@@ -244,6 +256,7 @@ def _make_parser() -> argparse.ArgumentParser:
   python -m nexus --gui              Start GUI + backend
   python -m nexus --server           Start API server only
   python -m nexus --gateway          Start gateway
+  python -m nexus --v5               Start the V5 engine REPL
   python -m nexus --setup            Run setup wizard
   python -m nexus --quick            Quick start (skip wizard)
   python -m nexus --reset            Factory reset + setup wizard
@@ -259,7 +272,9 @@ def _make_parser() -> argparse.ArgumentParser:
     group.add_argument("--gui", action="store_true", help="Start GUI + backend")
     group.add_argument("--server", action="store_true", help="Start API server only")
     group.add_argument("--gateway", action="store_true", help="Start gateway")
+    group.add_argument("--v5", action="store_true", help="Start the V5 engine (interactive REPL)")
     group.add_argument("--autonomous", action="store_true", help="Start the 24/7 durable task-queue driver (pulls tasks and runs them forever)")
+    group.add_argument("--mission", type=str, metavar="GOAL", help="Start a 24/7 long-horizon mission for GOAL (decomposed into milestones, run until done, survives restart)")
     group.add_argument("--setup", action="store_true", help="Run setup wizard")
     group.add_argument("--quick", action="store_true", help="Quick start with defaults")
     group.add_argument("--reset", action="store_true", help="Reset config to factory defaults")
@@ -267,7 +282,19 @@ def _make_parser() -> argparse.ArgumentParser:
     group.add_argument("--export-full", type=str, metavar="PATH", help="Export everything (config+memory+knowledge+workspace+logs+auth)")
     group.add_argument("--import", dest="import_path", type=str, metavar="PATH", help="Import config from a zip file")
     group.add_argument("--import-full", dest="import_full_path", type=str, metavar="PATH", help="Import full system backup")
+    group.add_argument("--observe", nargs="?", const="default", metavar="SESSION", help="Stream public canonical events without starting GUI/TUI")
     p.add_argument("--version", "-v", action="store_true", help="Show version")
+    p.add_argument("--after-sequence", type=int, default=0, help="Resume event observation after this sequence")
+    p.add_argument("--observe-format", choices=("json", "text"), default="json", help="Observer output format")
+    p.add_argument("--observe-once", action="store_true", help="Replay persisted events and exit")
+    # Wire the `auth` subcommand tree (login/logout/add-key/list/set-default/...)
+    # so `nexus auth login <provider>` actually reaches commands.auth handlers.
+    try:
+        from commands.auth import init_auth_cli
+        subparsers = p.add_subparsers(dest="command")
+        init_auth_cli(subparsers)
+    except Exception as exc:  # never break normal boot if auth wiring fails
+        print(f"warning: auth CLI unavailable: {exc}")
     return p
 
 
@@ -400,6 +427,32 @@ def _api_is_ready() -> bool:
         return False
 
 
+def _api_is_current() -> bool:
+    """Distinguish the current server contract from an older stale process."""
+    try:
+        import httpx
+        token = os.environ.get("NEXUS_DASHBOARD_TOKEN", "").strip() or "nexus-local-tui"
+        response = httpx.get(
+            "http://127.0.0.1:8000/api/status",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=1.5,
+        )
+        payload = response.json() if response.status_code == 200 else {}
+        return isinstance(payload, dict) and "provider_status" in payload
+    except Exception:
+        return False
+
+
+def _port_is_listening(port: int) -> bool:
+    """Small local probe used to avoid starting duplicate GUI processes."""
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
 def _find_npm_executable() -> str | None:
     if os.name == "nt":
         return shutil.which("npm.cmd") or shutil.which("npm.exe") or shutil.which("npm")
@@ -460,13 +513,13 @@ def _run_ink_tui(project_root: str, console) -> int:
 
 
 def _run_rich_shell() -> int:
-    """Compatibility entrypoint for the removed Rich shell.
-
-    The legacy ``shell/`` implementation is no longer shipped, so keep the
-    documented command usable by routing it through the maintained Ink client.
-    """
-    from rich.console import Console
-    return _run_ink_tui(_setup_environment(), Console())
+    """Launch the V5 Rich shell (replaces legacy shell/ adapter)."""
+    from orchestrators.v5.runner import run_v5_repl
+    try:
+        asyncio.run(run_v5_repl(_setup_environment()))
+    except KeyboardInterrupt:
+        pass
+    return 0
 
 
 def _first_run_choice(console, panel, box) -> str:
@@ -556,6 +609,38 @@ def boot():
 
     args = _make_parser().parse_args()
 
+    # Dispatch `nexus auth <command>` to the auth CLI handlers.
+    if getattr(args, "command", None) == "auth":
+        from commands.auth import (
+            handle_auth_add_key,
+            handle_auth_auto_detect,
+            handle_auth_delete_profile,
+            handle_auth_list,
+            handle_auth_login,
+            handle_auth_logout,
+            handle_auth_set_default,
+            handle_auth_strategy,
+        )
+        handler_map = {
+            "login": handle_auth_login,
+            "logout": handle_auth_logout,
+            "add-key": handle_auth_add_key,
+            "list": handle_auth_list,
+            "set-default": handle_auth_set_default,
+            "delete-profile": handle_auth_delete_profile,
+            "auto-detect": handle_auth_auto_detect,
+            "strategy": handle_auth_strategy,
+        }
+        sub = getattr(args, "auth_command", None)
+        handler = handler_map.get(sub)
+        if handler is None:
+            print("auth: unknown subcommand. Try: login, logout, add-key, list, set-default, delete-profile, auto-detect, strategy")
+            return
+        result = handler(args)
+        if asyncio.iscoroutine(result):
+            asyncio.run(result)
+        return
+
     signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
 
     from rich import box
@@ -566,6 +651,17 @@ def boot():
     if args.version:
         _print_banner(console)
         return
+
+    if args.observe is not None:
+        from nexus.observer import run_observer
+        return run_observer(
+            project_root,
+            args.observe,
+            after_sequence=args.after_sequence,
+            output=sys.stdout,
+            format=args.observe_format,
+            follow=not args.observe_once,
+        )
 
     if args.reset:
         console.print("[yellow]Resetting configuration to factory defaults...[/yellow]")
@@ -637,6 +733,17 @@ def boot():
             _quick_configure(project_root)
         console.print()
 
+    if args.v5:
+        _print_banner(console)
+        console.print("[bold green]Starting NEXUS V5 engine...[/bold green]")
+        console.print("[dim]V5 is the canonical NEXUS loop used by the API, Hive, and TUI.[/dim]")
+        from orchestrators.v5.runner import run_v5_repl
+        try:
+            asyncio.run(run_v5_repl(project_root))
+        except KeyboardInterrupt:
+            pass
+        return
+
     if args.gateway:
         _print_banner(console)
         console.print("[bold green]Starting Gateway...[/bold green]")
@@ -665,6 +772,13 @@ def boot():
         console.print("[bold green]Starting GUI + Backend...[/bold green]")
         import subprocess
 
+        # Reuse a current local GUI/backend instead of creating duplicate
+        # servers. If the process is stale, replace only the known NEXUS
+        # ports so the browser cannot remain connected to an old backend.
+        if _api_is_ready() and _api_is_current() and _port_is_listening(5173):
+            console.print("[yellow]NEXUS GUI is already running on :5173; reusing it.[/yellow]")
+            return
+
         _kill_windows_port(8000)
         _kill_windows_port(5173)
 
@@ -677,11 +791,32 @@ def boot():
         asyncio.run(_wait_for_health("http://127.0.0.1:8000/api/health", label="API server"))
         try:
             if os.name == "nt":
-                subprocess.run(["npm.cmd", "run", "dev"], cwd=os.path.join(project_root, "gui"))
+                subprocess.run(
+                    ["npm.cmd", "run", "dev", "--", "--host", "127.0.0.1"],
+                    cwd=os.path.join(project_root, "gui"),
+                )
             else:
-                subprocess.run(["npm", "run", "dev"], cwd=os.path.join(project_root, "gui"))
+                subprocess.run(
+                    ["npm", "run", "dev", "--", "--host", "127.0.0.1"],
+                    cwd=os.path.join(project_root, "gui"),
+                )
         finally:
             proc.terminate()
+        return
+
+    if args.mission:
+        _print_banner(console)
+        console.print(f"[bold green]Starting 24/7 Mission...[/bold green]")
+        console.print(f"[dim]Goal: {args.mission}[/dim]")
+        console.print("[dim]Milestones run through the durable queue until the goal is complete, resuming after any restart.[/dim]")
+        from queue.mission import MissionRunner
+        from queue.driver import run_forever
+        runner = MissionRunner(root=project_root)
+        runner.create_mission(args.mission)
+        try:
+            asyncio.run(run_forever(workers=1, missions=True, root=project_root))
+        except KeyboardInterrupt:
+            pass
         return
 
     if args.autonomous:
@@ -691,7 +826,7 @@ def boot():
         console.print("[dim]Enqueue with:  python -m queue.enqueue \"your task\"[/dim]")
         from queue.driver import run_forever
         try:
-            asyncio.run(run_forever(workers=1))
+            asyncio.run(run_forever(workers=1, missions=True))
         except KeyboardInterrupt:
             pass
         return

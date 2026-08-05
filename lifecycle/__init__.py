@@ -1,8 +1,17 @@
 """NEXUS Lifecycle Framework — state machine lifecycle managers for all subsystems.
 
-Provides unified lifecycle tracking for skills, plugins, tools, cron jobs,
-self-improvement, and memory. Each lifecycle manager implements a state machine
-with defined states, valid transitions, and transition hooks.
+Two layers:
+
+1. Per-entity lifecycle managers (LifecycleState + LifecycleEvent) for skills,
+   plugins, tools, cron jobs, self-improvement, and memory. Each manager
+   implements a state machine with defined states, valid transitions, and
+   transition hooks, and persists to ``~/.nexus/lifecycle``.
+
+2. A component supervision layer (LifecycleStage + ComponentSupervisor) that
+   tracks coarse stages (created -> initializing -> ready -> running <-> paused
+   -> stopping -> stopped, plus failed/recovering/quarantined) with
+   dependency-ordered startup/shutdown, timeouts, quarantine, and restart
+   recovery. Use ``get_component_supervisor()`` for the shared supervisor.
 
 Inspired by Hermes Agent's curator and plugin lifecycle patterns.
 """
@@ -10,6 +19,8 @@ Inspired by Hermes Agent's curator and plugin lifecycle patterns.
 import logging
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional
+
+from .persistence import load_state, save_state
 
 
 class LifecycleState(Enum):
@@ -53,6 +64,8 @@ class LifecycleManager:
         self._pre_hooks: Dict[str, List] = {}
         self._post_hooks: Dict[str, List] = {}
         self._valid_transitions: Dict[LifecycleState, set] = {}
+        # Subclasses opt into persistence by setting this to a stable key.
+        self._persist_key: Optional[str] = None
 
     def register_entity(self, entity_id: str, initial_state: LifecycleState = LifecycleState.CREATED):
         """Register a new entity in the lifecycle tracker."""
@@ -76,6 +89,7 @@ class LifecycleManager:
         self._states[entity_id] = to_state
         self._record_event(entity_id, current, to_state, metadata)
         self._run_hooks("post", entity_id, current, to_state, metadata)
+        self._persist()
         return True
 
     def add_pre_hook(self, transition_name: str, fn):
@@ -112,6 +126,70 @@ class LifecycleManager:
                 _logger = logging.getLogger("nexus.lifecycle")
                 _logger.warning("lifecycle/__init__.py:110 _run_hooks: suppressed error", exc_info=True)
 
+    # -- JSON persistence ---------------------------------------------------
+    def _persist(self) -> None:
+        """Best-effort persistence hook. Subclasses opt in via `_persist_key`."""
+        if not self._persist_key:
+            return
+        payload = self._state_payload()
+        payload.update(self._override_payload())
+        save_state(self._persist_key, payload)
+
+    def _state_payload(self) -> Dict[str, Any]:
+        return {
+            "states": {k: v.name for k, v in self._states.items()},
+            "events": [
+                {
+                    "entity_type": e.entity_type,
+                    "entity_id": e.entity_id,
+                    "from_state": e.from_state.name if e.from_state else None,
+                    "to_state": e.to_state.name if e.to_state else None,
+                    "metadata": e.metadata,
+                }
+                for e in self._events
+            ],
+        }
+
+    def _override_payload(self) -> Dict[str, Any]:
+        """Subclass hook: add domain dicts to the persisted payload."""
+        return {}
+
+    def _apply_override_payload(self, payload: Dict[str, Any]) -> None:
+        """Subclass hook: restore domain dicts from the payload."""
+        return
+
+    def _restore_persisted(self) -> None:
+        """Restore prior persisted state into this manager (best-effort)."""
+        if not self._persist_key:
+            return
+        payload = load_state(self._persist_key)
+        if not payload:
+            return
+        try:
+            for entity_id, state_name in (payload.get("states") or {}).items():
+                try:
+                    self._states[entity_id] = LifecycleState[state_name]
+                except (KeyError, TypeError):
+                    pass
+            self._events = []
+            for ev in payload.get("events") or []:
+                try:
+                    self._events.append(
+                        LifecycleEvent(
+                            entity_type=ev.get("entity_type", self.__class__.__name__),
+                            entity_id=ev.get("entity_id", ""),
+                            from_state=LifecycleState[ev["from_state"]] if ev.get("from_state") else None,
+                            to_state=LifecycleState[ev["to_state"]] if ev.get("to_state") else None,
+                            metadata=ev.get("metadata") or {},
+                        )
+                    )
+                except (KeyError, TypeError):
+                    continue
+            self._apply_override_payload(payload)
+        except Exception:
+            _logger = logging.getLogger("nexus.lifecycle")
+            _logger.warning("lifecycle/__init__.py: _restore_persisted: suppressed error", exc_info=True)
+
     def get_stats(self) -> Dict[str, Any]:
         states = {}
         for s in self._states.values():
@@ -130,6 +208,7 @@ from .self_improvement_lifecycle import SelfImprovementLifecycle
 from .self_improvement_lifecycle import SelfImprovementState as ImprovementState
 from .skill_lifecycle import SkillLifecycle, SkillState
 from .tool_lifecycle import ToolLifecycle, ToolState
+from .supervisor import ComponentSupervisor, LifecycleStage, StageTransitionError, get_component_supervisor
 
 __all__ = [
     "LifecycleState", "LifecycleEvent", "LifecycleManager",
@@ -139,4 +218,6 @@ __all__ = [
     "CronLifecycle", "CronState",
     "SelfImprovementLifecycle", "ImprovementState",
     "MemoryLifecycle", "MemoryState",
+    "LifecycleStage", "StageTransitionError", "ComponentSupervisor",
+    "get_component_supervisor",
 ]

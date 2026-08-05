@@ -24,7 +24,7 @@ class SovereignSandbox:
     def __init__(self, root_dir: str):
         self.root = os.path.abspath(root_dir)
         
-        tier_env = os.environ.get("NEXUS_SANDBOX_TIER", "normal").lower()
+        tier_env = os.environ.get("NEXUS_SANDBOX_TIER", "no_sandbox").lower()
         try:
             self.tier = SandboxTier(tier_env)
         except ValueError:
@@ -86,6 +86,9 @@ class SovereignSandbox:
             return self._workspace_block(f"workdir is outside workspace: {target_dir}")
 
         for raw_path in self._iter_command_paths(command, target_dir):
+            # Expand %VAR% / $VAR / ${VAR} before resolving so env-var
+            # references cannot smuggle absolute outside paths past the guard.
+            raw_path = os.path.expandvars(raw_path)
             if raw_path.startswith("~"):
                 resolved = os.path.abspath(os.path.expanduser(raw_path))
             elif os.path.isabs(raw_path):
@@ -156,10 +159,23 @@ class SovereignSandbox:
                 env["PATH"] = venv_scripts + os.pathsep + env.get("PATH", "")
 
         if self.tier == SandboxTier.DOCKER:
+            # Fail closed: a missing Docker daemon yields a block, never a
+            # silent host fallback for a request that asked for isolation.
+            if not self._docker_available():
+                self.last_exit_code = -1
+                yield (
+                    "[SANDBOX_BLOCK]: DOCKER tier is active but Docker is not "
+                    "available. Failing closed instead of falling back to the host."
+                )
+                return
             rel_workdir = os.path.relpath(target_dir, self.root).replace("\\", "/")
             container_workdir = f"/workspace/{rel_workdir}" if rel_workdir != "." else "/workspace"
+            # Network and image write access are disabled: the container only
+            # sees the mounted workspace and cannot mutate its own filesystem.
             process = await asyncio.create_subprocess_exec(
                 "docker", "run", "--rm",
+                "--network=none",
+                "--read-only",
                 "-v", f"{self.root}:/workspace",
                 "-w", container_workdir,
                 "nexus-worker", "sh", "-c", command,
@@ -252,33 +268,51 @@ class SovereignSandbox:
         except Exception as e:
             return f"[SANDBOX_ERROR]: {str(e)}"
 
-    def _execute_docker(self, command: str, workdir: str) -> str:
-        """Containerized isolation via Docker."""
+    @staticmethod
+    def _docker_available() -> bool:
+        """Best-effort probe that the Docker CLI and daemon are reachable.
+
+        Returns False on any probe failure so DOCKER-tier requests can fail
+        closed instead of silently degrading to host execution.
+        """
         try:
-            # Check if docker daemon is running
-            subprocess.run(
+            probe = subprocess.run(
                 ["docker", "info"],
                 capture_output=True,
                 check=True,
-                timeout=5
+                timeout=5,
             )
+            return bool(getattr(probe, "returncode", -1) == 0)
         except Exception:
-            logger.warning("Docker daemon not available. Falling back to restricted Normal sandbox.")
-            return self._execute_restricted(command, workdir)
-        
+            return False
+
+    def _execute_docker(self, command: str, workdir: str) -> str:
+        """Containerized isolation via Docker (fail-closed)."""
+        # DOCKER tier must never silently fall back to host execution: an
+        # unavailable daemon is a hard block, not an excuse to lower isolation.
+        if not self._docker_available():
+            return (
+                "[SANDBOX_BLOCK]: DOCKER tier is active but Docker is not "
+                "available. Failing closed instead of falling back to the host."
+            )
+
         try:
             rel_workdir = os.path.relpath(workdir, self.root).replace("\\", "/")
             container_workdir = f"/workspace/{rel_workdir}" if rel_workdir != "." else "/workspace"
-            
-            # Map Windows path format or posix format to container volume mount
+
+            # Map Windows path format or posix format to container volume mount.
+            # Network and write access are disabled by default: the container
+            # can only see the mounted workspace and cannot mutate its image.
             docker_cmd = [
                 "docker", "run", "--rm",
+                "--network=none",
+                "--read-only",
                 "-v", f"{self.root}:/workspace",
                 "-w", container_workdir,
                 "nexus-worker",
                 "sh", "-c", command
             ]
-            
+
             process = subprocess.run(
                 docker_cmd,
                 capture_output=True,

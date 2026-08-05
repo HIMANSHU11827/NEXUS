@@ -1,0 +1,10 @@
+{
+  "name": "safe_file_path_tracking",
+  "version": "1.0.0",
+  "description": "NEXUS attempted to execute a file outside the known project directory without verifying the path, causing a MODULE_NOT_FOUND error. A tool or skill to validate file locations before execution would prevent this.",
+  "defaults": {},
+  "permissions": {
+    "auto_approve": false
+  },
+  "created_at": 1785605335.43874
+}

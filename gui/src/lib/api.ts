@@ -109,6 +109,18 @@ export interface InventoryItem {
   [key: string]: unknown
 }
 
+export interface RuntimeProviderStatus {
+  model?: string
+  provider?: string
+  health?: string
+  provider_status?: {
+    configured?: boolean
+    reachable?: boolean | null
+    endpoint?: string
+    reason?: string
+  }
+}
+
 export interface WorkspaceValidation {
   valid: boolean
   reason?: string
@@ -421,6 +433,7 @@ export interface SafetySaveResult {
 export const api = {
   request: <T>(path: string, opts: RequestOptions = {}): Promise<T> => request<T>(path, opts),
   health: () => request<{ status: string }>('/health'),
+  status: () => request<RuntimeProviderStatus>('/status'),
   probePort: (port: string) => request<{ port: number; address: string; status: string }>('/ports/probe', { method: 'POST', body: JSON.stringify({ port }) }),
 
   state: () => request<Record<string, unknown>>('/state'),
@@ -445,7 +458,7 @@ export const api = {
   tools: () => request<{ tools: InventoryItem[] }>('/tools'),
   plugins: () => request<{ plugins: InventoryItem[] }>('/plugins'),
   mcp: () => request<{ mcp: InventoryItem[] }>('/mcp'),
-  createMcp: (value: { name: string; command: string; args: string[]; description?: string; active?: boolean; env?: Record<string, string> }) =>
+  createMcp: (value: { name: string; command: string; args: string[]; description?: string; active?: boolean; env?: Record<string, string>; working_dir?: string }) =>
     request<{ status: string; id: string }>('/mcp', { method: 'POST', body: JSON.stringify(value) }),
   deleteMcp: (name: string) => request<{ status: string }>(`/mcp/${encodeURIComponent(name)}`, { method: 'DELETE' }),
   gateways: () => request<{ gateways: InventoryItem[] }>('/gateways'),
@@ -453,11 +466,11 @@ export const api = {
   hives: () => request<{ enabled: boolean; personas: string[]; hives: HiveItem[] }>('/hives'),
   createHive: (agents: Array<{ task: string; persona: string }>) => request<{ status: string; hive: HiveItem }>('/hives', { method: 'POST', body: JSON.stringify({ agents }) }),
   cancelHive: (id: string) => request<{ status: string }>(`/hives/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  resumeHive: (id: string) => request<{ status: string; hive: HiveItem }>(`/hives/${encodeURIComponent(id)}/resume`, { method: 'POST' }),
   features: () => request<{ features: Record<string, unknown> }>('/features'),
   evolution: () => request<{ enabled: boolean; version: string; lifecycle: InventoryItem[]; forges: InventoryItem[] }>('/evolution'),
-  voiceStatus: () => request<{ running: boolean; mode: string; phase: string; started_at?: number; transcript_preview?: string; reply_preview?: string }>('/voice/status'),
-  startVoice: (mode: 'auto' | 'manual' | 'text' = 'auto') => request<{ running: boolean; mode: string; phase: string }>('/voice/start', { method: 'POST', body: JSON.stringify({ mode }) }),
-  stopVoice: () => request<{ running: boolean; mode: string; phase: string }>('/voice/stop', { method: 'POST' }),
+  configFiles: () => request<{ files: Array<{ name: string; path: string; size: number; type: string }> }>('/config/files'),
+  configFile: (path: string) => request<{ path: string; content: string; size: number }>(`/config/file?path=${encodeURIComponent(path)}`),
   billing: () => request<{ status: string; message?: string; tier?: string; usage?: Record<string, unknown>; limits?: Record<string, unknown> }>('/billing/status'),
   cronJobs: () => request<{ jobs: InventoryItem[]; status?: string; message?: string }>('/cron/jobs'),
   createCronJob: (value: { name: string; prompt: string; interval_minutes: number; enabled?: boolean }) => request<{ status: string; job: InventoryItem }>('/cron/jobs', { method: 'POST', body: JSON.stringify(value) }),
@@ -466,8 +479,9 @@ export const api = {
   deleteCronJob: (id: string) => request<{ status: string }>(`/cron/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   manage: (type: string, name: string, action: 'enable' | 'disable' | 'reload' | 'set' | 'model', value?: unknown) =>
     request<{ status: string; enabled?: boolean; active?: boolean; model?: string }>('/manage', { method: 'POST', body: JSON.stringify({ type, name, action, value }) }),
-  setModel: (model: string, sessionId?: string) => request<{ status: string; model: string }>('/model', { method: 'POST', body: JSON.stringify({ model, ...(sessionId ? { session_id: sessionId } : {}) }) }),
-  savedModels: () => request<{ models: Array<{ model: string; provider: string; label: string }> }>('/models/saved'),
+  setModel: (model: string, sessionId?: string, provider?: string, profile?: string) => request<{ status: string; model: string; provider?: string; profile?: string }>('/model', { method: 'POST', body: JSON.stringify({ model, ...(sessionId ? { session_id: sessionId } : {}), ...(provider ? { provider } : {}), ...(profile ? { profile } : {}) }) }),
+  getModel: () => request<{ status: string; model: string; provider?: string; profile?: string }>('/model'),
+  savedModels: () => request<{ models: Array<{ model: string; provider: string; alias?: string; label: string }> }>('/models/saved'),
   setProvider: (provider: string) => request<{ status: string; provider: string }>('/provider', { method: 'POST', body: JSON.stringify({ provider }) }),
   setAgent: (agent: string) => request<{ status: string; agent: string }>('/agent', { method: 'POST', body: JSON.stringify({ agent }) }),
   setGoal: (goal: string) => request<{ status: string; goal: string }>('/goal', { method: 'POST', body: JSON.stringify({ goal }) }),
@@ -504,6 +518,14 @@ export const api = {
   safetyDiagnostics: () => request<{ status: string; run_at: number; checks: SafetyDiagnostic[] }>('/safety/diagnostics'),
   safetyPresets: () => request<{ presets: SafetyPreset[] }>('/safety/presets'),
   safetyApplyPreset: (preset: string) => request<SafetySaveResult>('/safety/presets/apply', { method: 'POST', body: JSON.stringify({ preset }) }),
+
+  memoryStatistics: () => request<{ status: string; statistics: Record<string, unknown> }>('/memory/statistics'),
+  memorySearch: (query: string, memoryTypes?: string[]) => request<{ status: string; results: Array<{ type: string; content: string; match_position: number }>; count: number }>('/memory/search', { method: 'POST', body: JSON.stringify({ query, memory_types: memoryTypes }) }),
+  memoryExport: (format: 'json' | 'text' = 'json') => request<{ status: string; format: string; data: string }>('/memory/export', { method: 'POST', body: JSON.stringify({ format }) }),
+  memoryImport: (data: string, format: 'json' | 'text' = 'json') => request<{ status: string; message: string }>('/memory/import', { method: 'POST', body: JSON.stringify({ data, format }) }),
+  memoryClear: (memoryType: string = 'all') => request<{ status: string; message: string }>('/memory/clear', { method: 'POST', body: JSON.stringify({ memory_type: memoryType }) }),
+  memorySessions: () => request<{ status: string; sessions: Array<{ id: string; file: string; size: number; modified: number; modified_iso: string }>; count: number }>('/memory/sessions'),
+
 
   workspace: (opts?: RequestOptions) => request<WorkspaceSummary>('/workspace', opts),
   workspaceGit: () => request<WorkspaceGit>('/workspace/git'),
@@ -710,6 +732,117 @@ export const api = {
       }
     } catch (error) { onError(error instanceof Error ? error.message : 'Terminal request failed') }
   },
+
+  // Voice API
+  voiceStatus: async (sessionId = 'default') => {
+    return request<{ status: string; enabled: boolean; auto_speak: boolean; continuous_listening: boolean; voice_name: string; whisper_language: string; statistics: Record<string, unknown> }>(`/voice/status?session_id=${sessionId}`)
+  },
+
+  voiceListenStart: async (sessionId = 'default', continuous = true) => {
+    return request<{ status: string; listening: boolean; continuous: boolean }>('/voice/listen/start', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sessionId, continuous }),
+    })
+  },
+
+  voiceListenStop: async (sessionId = 'default') => {
+    return request<{ status: string; listening: boolean }>(`/voice/listen/stop?session_id=${sessionId}`, { method: 'POST' })
+  },
+
+  voiceTranscribe: async (sessionId = 'default', continuous = false) => {
+    return request<{ status: string; text: string }>('/voice/transcribe', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sessionId, continuous }),
+    })
+  },
+
+  voiceSpeak: async (text: string, sessionId = 'default', blocking = false) => {
+    return request<{ status: string; spoken: boolean }>('/voice/speak', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sessionId, text, blocking }),
+    })
+  },
+
+  voiceSpeakStop: async (sessionId = 'default') => {
+    return request<{ status: string }>(`/voice/speak/stop?session_id=${sessionId}`, { method: 'POST' })
+  },
+
+  voiceVoices: async () => {
+    return request<{ status: string; voices: string[] }>('/voice/voices')
+  },
+
+  voiceLanguages: async () => {
+    return request<{ status: string; languages: string[] }>('/voice/languages')
+  },
+
+  voiceHistory: async (sessionId = 'default', limit = 10) => {
+    return request<{ status: string; history: Array<{ timestamp: number; transcript: string; reply: string; success: boolean; voice_name?: string; language?: string }> }>(`/voice/history?session_id=${sessionId}&limit=${limit}`)
+  },
+
+  voiceStatistics: async () => request<{ status: string; statistics: Record<string, unknown> }>('/voice/statistics'),
+  voiceSearch: async (query: string) => request<{ status: string; results: Array<{ timestamp: number; transcript: string; reply: string; success: boolean; voice_name?: string; language?: string }> }>('/voice/search', { method: 'POST', body: JSON.stringify({ query }) }),
+  voiceExport: async (format: 'json' | 'text' = 'json') => request<{ status: string; format: string; data: string }>('/voice/export', { method: 'POST', body: JSON.stringify({ format }) }),
+  voiceClearHistory: async () => request<{ status: string; message: string }>('/voice/clear-history', { method: 'POST' }),
+  voiceResetStatistics: async () => request<{ status: string; message: string }>('/voice/reset-statistics', { method: 'POST' }),
+  voiceDevices: async () => request<{ status: string; devices: Record<string, unknown> }>('/voice/devices'),
+  startVoice: async (mode = 'auto') => request<{ status: string; running?: boolean }>('/voice/start', { method: 'POST', body: JSON.stringify({ mode }) }),
+  stopVoice: async () => request<{ status: string; running?: boolean }>('/voice/stop', { method: 'POST' }),
+
+  voiceSettings: async (settings: Record<string, unknown>, sessionId = 'default') => {
+    return request<{ status: string; settings: Record<string, unknown> }>('/voice/settings', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sessionId, ...settings }),
+    })
+  },
+
+  voiceStream: (sessionId = 'default', onTranscription: (text: string) => void, onError: (error: string) => void): AbortController => {
+    const ctrl = new AbortController()
+    const url = `${BASE}/voice/stream?session_id=${sessionId}`
+    
+    fetch(url, {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      signal: ctrl.signal,
+    }).then(async res => {
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ detail: res.statusText }))
+        onError(body.detail || `Request failed: ${res.status}`)
+        return
+      }
+      const reader = res.body?.getReader()
+      if (!reader) { onError('Stream unavailable'); return }
+      const decoder = new TextDecoder()
+      let buffer = ''
+      
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6)
+            try {
+              const parsed = JSON.parse(data)
+              if (parsed.type === 'transcription' && parsed.text) {
+                onTranscription(parsed.text)
+              } else if (parsed.type === 'error') {
+                onError(parsed.message || 'Voice stream error')
+              }
+            } catch (e) {
+              // Ignore parse errors for keepalive
+            }
+          }
+        }
+      }
+    }).catch(err => {
+      if (err.name !== 'AbortError') onError(err.message)
+    })
+    
+    return ctrl
+  },
 } as const
 
 export interface OAuthLoginRun {
@@ -732,4 +865,8 @@ export interface HiveItem {
   id: string
   status?: string
   agents: HiveAgentItem[]
+  resumed_from?: string
+  resumed_to?: string
+  resume_required?: boolean
+  resume_note?: string
 }

@@ -3,7 +3,13 @@ import logging
 import os
 from typing import Optional
 
-from gateway.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+from gateway.base import (
+    HEALTH_HEALTHY,
+    BasePlatformAdapter,
+    MessageEvent,
+    MessageType,
+    SendResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +76,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
             # Start the Discord client as a background task so connect() returns.
             self._run_task = asyncio.ensure_future(self.client.start(self.token))
+            self.health = HEALTH_HEALTHY
             return True
         except Exception as e:  # pragma: no cover - defensive
             logger.error(f"Discord connection failed: {e}")

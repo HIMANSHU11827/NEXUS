@@ -10,6 +10,48 @@ from providers.reliability import redact_secrets
 logger = logging.getLogger(__name__)
 
 
+def _run_coro_safely(coro):
+    """Run an async coroutine whether or not an event loop is already running.
+
+    ``asyncio.run`` raises ``RuntimeError`` when called inside an already-running
+    loop (GUI/TUI/API request contexts). Using a per-thread loop via
+    ``asyncio.run`` is only safe at the top level, so detect the running loop and
+    fall back to ``run_until_complete`` on the current thread's loop.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop in this thread — safe to drive our own.
+        return asyncio.run(coro)
+    # A loop is already running; run_until_complete is forbidden on a running
+    # loop, so drive a fresh loop on a background thread and return its result.
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
+def _environment_value(name: str) -> str:
+    """Read a provider secret without requiring detached Windows processes to
+    inherit a refreshed environment block.
+
+    Process environment remains the primary source. The Windows user profile
+    fallback is only used when a launcher (for example WMI/Task Scheduler)
+    starts the API with an older process environment.
+    """
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    if os.name == "nt":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+                value, _ = winreg.QueryValueEx(key, name)
+                return str(value or "").strip()
+        except (FileNotFoundError, OSError, TypeError):
+            pass
+    return ""
+
+
 def get_loader() -> Any:
     mod = importlib.import_module("config.config_loader")
     return getattr(mod, "NexusConfigLoader")()
@@ -20,7 +62,7 @@ def _configured_api_key(value: Any) -> Optional[str]:
     if not key or "YOUR_" in key:
         return None
     if key.startswith("${") and key.endswith("}"):
-        return os.environ.get(key[2:-1], "").strip() or None
+        return _environment_value(key[2:-1]) or None
     return key
 
 
@@ -45,7 +87,7 @@ def _resolve_api_key(provider_id: str, profile_name: Optional[str] = None) -> Op
             import time
             if time.time() * 1000 >= credentials.expires and oauth_provider is not None:
                 try:
-                    credentials = asyncio.run(oauth_provider.refresh_token(credentials))
+                    credentials = _run_coro_safely(oauth_provider.refresh_token(credentials))
                     store.set(provider_id, credentials)
                 except Exception:
                     logger.warning("OAuth token refresh failed for provider %s; refusing expired credentials", provider_id, exc_info=True)
@@ -139,6 +181,33 @@ class NexusProviderFactory(ThreadSafeSingleton):
         self.group = self.loader.get_system("provider_group", "cloud")
         self.name = provider_name or self.loader.get_system("provider_name", "openrouter")
         self._consecutive_errors = 0
+        logger.info("ProviderFactory init: default=%r group=%r name=%r", provider_name, self.group, self.name)
+
+    @staticmethod
+    def offline_mode() -> bool:
+        """Return whether remote provider access is explicitly disabled.
+
+        Offline mode still permits local OpenAI-compatible servers such as LM
+        Studio.  It is intentionally opt-in so existing cloud deployments do
+        not change behavior unexpectedly.
+        """
+        return os.environ.get("NEXUS_OFFLINE_MODE", "").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+
+    @staticmethod
+    def _is_local_provider(provider_id: str, provider: Any) -> bool:
+        name = str(provider_id or "").strip().lower()
+        endpoint = str(getattr(provider, "endpoint", "") or "").lower()
+        return NexusProviderFactory._is_local_provider_name(name) or any(
+            host in endpoint for host in ("127.0.0.1", "localhost", "::1")
+        )
+
+    @staticmethod
+    def _is_local_provider_name(provider_id: str) -> bool:
+        return str(provider_id or "").strip().lower() in {
+            "lm_studio", "lm-studio", "ollama", "local"
+        }
 
     def _load_provider_instance(self, target_name: str) -> Any:
         if target_name in MAPPINGS:
@@ -164,16 +233,40 @@ class NexusProviderFactory(ThreadSafeSingleton):
             provider.model = inst_config.get("model") or provider.model
             provider.endpoint = inst_config.get("endpoint") or provider.endpoint
 
+            # A named profile is the selected runtime connection, not only a
+            # credential lookup. Apply its native model and endpoint as well so
+            # GUI model/profile selection reaches local OpenAI-compatible
+            # servers such as LM Studio.
+            if profile:
+                try:
+                    from providers.profiles import load_profile_store
+                    selected_profile = load_profile_store().get_profile(provider_id, profile)
+                    if selected_profile is not None:
+                        profile_model = str(getattr(selected_profile, "model_id", "") or getattr(selected_profile, "model", "") or "").strip()
+                        profile_endpoint = str(getattr(selected_profile, "endpoint", "") or "").strip()
+                        if profile_model:
+                            provider.model = profile_model
+                        if profile_endpoint:
+                            provider.endpoint = profile_endpoint
+                except Exception:
+                    logger.debug("factory: selected profile settings unavailable for %s/%s", provider_id, profile, exc_info=True)
+
             config_key = _configured_api_key(inst_config.get("api_key"))
             env_key = (
-                os.environ.get(f"{provider_id.upper()}_API_KEY", "").strip()
-                or os.environ.get(f"{target_name.upper()}_API_KEY", "").strip()
+                _environment_value(f"{provider_id.upper()}_API_KEY")
+                or _environment_value(f"{target_name.upper()}_API_KEY")
             )
             key = config_key or _resolve_api_key(provider_id, profile) or env_key
             if key:
-                provider.api_key = key
-                if hasattr(provider, "headers"):
-                    provider.headers["Authorization"] = f"Bearer {key}"
+                # Live credential refresh: reload_credentials() bakes the newly
+                # resolved key into every auth header (raw + Authorization)
+                # instead of assuming every provider uses a Bearer header.
+                if hasattr(provider, "reload_credentials"):
+                    provider.reload_credentials(key)
+                else:
+                    provider.api_key = key
+                    if hasattr(provider, "headers"):
+                        provider.headers["Authorization"] = f"Bearer {key}"
             elif parent and provider:
                 # Read the PARENT provider's configured key (the intent of this
                 # branch) — not the same child value that already evaluated falsy.
@@ -183,9 +276,12 @@ class NexusProviderFactory(ThreadSafeSingleton):
                 except Exception:
                     parent_key = None
                 if parent_key:
-                    provider.api_key = parent_key
-                    if hasattr(provider, "headers"):
-                        provider.headers["Authorization"] = f"Bearer {provider.api_key}"
+                    if hasattr(provider, "reload_credentials"):
+                        provider.reload_credentials(parent_key)
+                    else:
+                        provider.api_key = parent_key
+                        if hasattr(provider, "headers"):
+                            provider.headers["Authorization"] = f"Bearer {provider.api_key}"
 
             provider._provider_id = provider_id
             provider._profile_name = profile
@@ -228,6 +324,8 @@ class NexusProviderFactory(ThreadSafeSingleton):
 
     def next_provider_fallback(self, current: str) -> Optional[str]:
         try:
+            if self.offline_mode():
+                return None
             cfg = self.loader.get("provider", {})
             chain = cfg.get("fallback_chain", []) if isinstance(cfg, dict) else []
             if current in chain:
@@ -248,7 +346,11 @@ class NexusProviderFactory(ThreadSafeSingleton):
         automatically falls through to the next configured provider instead of
         silently emitting empty output.
         """
-        if self._provider and self._consecutive_errors < 3:
+        if self._provider and self._consecutive_errors < 3 and not (
+            self.offline_mode() and not self._is_local_provider(
+                getattr(self._provider, "_provider_id", ""), self._provider
+            )
+        ):
             return self._provider
         try:
             cfg = self.loader.get("provider", {})
@@ -262,12 +364,25 @@ class NexusProviderFactory(ThreadSafeSingleton):
                     candidates.append(n)
             for name in candidates:
                 provider = self.get_provider_by_name(self.group, name)
-                if provider is not None and getattr(provider, "api_key", None):
+                is_local = self._is_local_provider(name, provider)
+                if self.offline_mode() and not is_local:
+                    logger.info("ProviderFactory: skipping remote provider %r in offline mode", name)
+                    continue
+                # Local servers commonly authenticate by loopback and therefore
+                # legitimately have no API key.  Requiring a key here caused
+                # LM Studio to be skipped before its connection was attempted.
+                has_key = bool(provider is not None and (
+                    getattr(provider, "api_key", None) or is_local
+                ))
+                logger.info("ProviderFactory: trying %r -> provider=%s has_key=%s", name, type(provider).__name__ if provider else None, has_key)
+                if has_key:
                     self._provider = provider
                     self._consecutive_errors = 0
                     return provider
         except Exception:
             logger.warning("providers/factory.py: get_provider fallback failed", exc_info=True)
+        if self.offline_mode() and not self._is_local_provider_name(self.name):
+            return None
         self._provider = self.get_provider_by_name(self.group, self.name)
         return self._provider
 

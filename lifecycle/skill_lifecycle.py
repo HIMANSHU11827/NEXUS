@@ -41,6 +41,8 @@ class SkillLifecycle(LifecycleManager):
         }
         self._metadata: Dict[str, Dict[str, Any]] = {}
         self._versions: Dict[str, List[str]] = {}
+        self._persist_key = "skill"
+        self._restore_persisted()
 
     def create_skill(self, skill_id: str, name: str, category: Optional[str] = None) -> str:
         self.register_entity(skill_id, LifecycleState.CREATED)
@@ -49,6 +51,7 @@ class SkillLifecycle(LifecycleManager):
             "version": default_version(),
         }
         self._versions[skill_id] = [default_version()]
+        self._persist()
         return f"Skill '{name}' v{default_version()} registered in CREATED state."
 
     def improve_skill(self, skill_id: str, is_major: bool = False) -> str:
@@ -61,6 +64,7 @@ class SkillLifecycle(LifecycleManager):
         self._versions.setdefault(skill_id, []).append(new_ver)
         self.activate(skill_id)
         kind = "major" if is_major else "minor"
+        self._persist()
         return f"Skill '{self._metadata[skill_id]['name']}' {kind} improved: v{current} → v{new_ver}"
 
     def get_version(self, skill_id: str) -> str:
@@ -88,6 +92,7 @@ class SkillLifecycle(LifecycleManager):
         if skill_id in self._metadata:
             self._metadata[skill_id]["use_count"] = self._metadata[skill_id].get("use_count", 0) + 1
         self.activate(skill_id)
+        self._persist()
 
     def get_metadata(self, skill_id: str) -> Optional[Dict[str, Any]]:
         return self._metadata.get(skill_id)
@@ -100,6 +105,16 @@ class SkillLifecycle(LifecycleManager):
 
     def get_active_skills(self) -> List[str]:
         return [sid for sid, state in self._states.items() if state == LifecycleState.ACTIVE]
+
+    def _override_payload(self) -> Dict[str, Any]:
+        return {
+            "metadata": self._metadata,
+            "versions": self._versions,
+        }
+
+    def _apply_override_payload(self, payload: Dict[str, Any]) -> None:
+        self._metadata = payload.get("metadata", {}) or {}
+        self._versions = payload.get("versions", {}) or {}
 
     def get_stats(self) -> Dict[str, Any]:
         states = {}

@@ -53,11 +53,11 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for full details.
 | Layer | Components | Status |
 |-------|-----------|--------|
 | **Boot** | `nexus/` (boot, events, commands, runtime) | **Stable** |
-| **Agent Loop** | `orchestrators/loop.py` — `NexusLoop` (3555 lines, rebuilt) | **Stable** |
+| **Agent Loop** | `orchestrators/v5/core.py` — V5 `NexusLoop` with the direct model/tool loop | **Stable** |
 | **Kernel** | `kernel/` — thread-safe singleton, 19 lazy-loaded subsystems | **Stable** |
 | **API** | `server/` (FastAPI v2.1.0), `gui/api.py` (GUI backend) | **Stable** |
 | **Providers** | 45+ LLM providers with OAuth, health, auto-heal, fallback chains | **Stable** |
-| **Tools** | 19 registered tools (BaseTool + ToolRegistry + .jsnol discovery) | **Stable** |
+| **Tools** | Registry-discovered tools and skills (BaseTool + ToolRegistry + `.jsnol` metadata) | **Stable** |
 | **Intelligence** | `intelligence/` — MoE Router + NATE 5-layer fused tool engine | **Beta** |
 | **Reasoning** | `reasoning/` — HyperReasoningEngine (planner/critic/verifier) | **Beta** |
 | **Memory** | `memory/` — multi-source MemoryManager with parallel prefetch/sync | **Stable** |
@@ -108,7 +108,7 @@ Environment variables take precedence. See `config/provider.yml` for all configu
 
 Tools are discovered from `tools/<name>/` directories via `.jsnol` metadata files and registered by `ToolRegistry`. Each tool exposes JSON schema for LLM function calling and extends `BaseTool`.
 
-**19 registered tools**: bash, code_search, creating, deep_research, deleting, git_ops, hive, knowledge, memory, modifying, planning, reading, reasoning (stub), shortcuts, system (partial), task, terminal, test_runner, web_search
+**Tools are discovered at runtime** from `tools/<name>/<name>.jsnol` metadata and active local skills. The model receives the current executable registry, including available MCP tools, rather than a hardcoded tool list.
 
 **Security model**:
 - **3-tier sandbox**: `NO_SANDBOX` / `NORMAL` / `DOCKER`
@@ -140,7 +140,7 @@ nexus/              Boot loader, events, commands, runtime, run context
 server/             FastAPI HTTP/SSE server (port 8000, v2.1.0)
 orchestrators/      NexusLoop agent loop (3555 lines, rebuilt)
 providers/          45+ LLM provider implementations + OAuth
-tools/              19 registered tools with .jsnol + BaseTool
+tools/              Registry-discovered tools with .jsnol metadata + BaseTool
 gui/                React 18 + Vite + TypeScript frontend (port 5173, rebuilt)
 tui/                Ink-based TUI (React 19, 5000+ lines)
 shell/              Legacy Rich-based compat shim

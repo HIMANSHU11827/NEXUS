@@ -226,7 +226,7 @@ SANDBOX_MODES: Dict[str, Dict[str, Any]] = {
     },
 }
 
-# New mode -> legacy engine value (the engine used by orchestrators.loop).
+# New mode -> legacy engine value (the engine used by orchestrators).
 PERMISSION_TO_LEGACY = {
     "automatic": "auto",
     "ask": "ask",

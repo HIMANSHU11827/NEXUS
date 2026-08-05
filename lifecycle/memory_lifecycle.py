@@ -47,6 +47,8 @@ class MemoryLifecycle(LifecycleManager):
         self._memory_info: Dict[str, Dict[str, Any]] = {}
         self._access_logs: Dict[str, List[str]] = {}
         self._versions: Dict[str, List[str]] = {}
+        self._persist_key = "memory"
+        self._restore_persisted()
 
     def _to_ls(self, state_str: str) -> LifecycleState:
         mapping = {
@@ -72,6 +74,7 @@ class MemoryLifecycle(LifecycleManager):
         self._versions[memory_id] = [default_version()]
         self._access_logs[memory_id] = []
         self.register_entity(memory_id, LifecycleState.CREATED)
+        self._persist()
         return f"Memory '{memory_id}' v{default_version()} stored (type={memory_type})."
 
     def improve_memory(self, memory_id: str, is_major: bool = False) -> str:
@@ -83,6 +86,7 @@ class MemoryLifecycle(LifecycleManager):
         self._memory_info[memory_id]["version"] = new_ver
         self._versions.setdefault(memory_id, []).append(new_ver)
         kind = "major" if is_major else "minor"
+        self._persist()
         return f"Memory '{memory_id}' {kind} improved: v{current} → v{new_ver}"
 
     def get_version(self, memory_id: str) -> str:
@@ -97,6 +101,7 @@ class MemoryLifecycle(LifecycleManager):
         self._memory_states[memory_id] = "accessed"
         self._memory_info[memory_id]["access_count"] += 1
         self._access_logs[memory_id].append(datetime.now().isoformat())
+        self._persist()
         return True
 
     def consolidate_memory(self, memory_id: str) -> bool:
@@ -104,6 +109,7 @@ class MemoryLifecycle(LifecycleManager):
             return False
         self._memory_states[memory_id] = "consolidated"
         self._memory_info[memory_id]["consolidated"] = datetime.now().isoformat()
+        self._persist()
         return True
 
     def archive_memory(self, memory_id: str) -> bool:
@@ -111,6 +117,7 @@ class MemoryLifecycle(LifecycleManager):
             return False
         self._memory_states[memory_id] = "archived"
         self._memory_info[memory_id]["archived"] = datetime.now().isoformat()
+        self._persist()
         return True
 
     def evict_memory(self, memory_id: str) -> bool:
@@ -118,15 +125,18 @@ class MemoryLifecycle(LifecycleManager):
             return False
         self._memory_states[memory_id] = "evicted"
         self._memory_info[memory_id]["evicted"] = datetime.now().isoformat()
+        self._persist()
         return True
 
     def mark_error(self, memory_id: str) -> bool:
         self._memory_states[memory_id] = "error"
+        self._persist()
         return True
 
     def set_importance(self, memory_id: str, importance: float):
         if memory_id in self._memory_info:
             self._memory_info[memory_id]["importance"] = max(0.0, min(1.0, importance))
+            self._persist()
 
     def get_memory_state(self, memory_id: str) -> Optional[str]:
         return self._memory_states.get(memory_id)
@@ -140,6 +150,20 @@ class MemoryLifecycle(LifecycleManager):
 
     def search_by_type(self, memory_type: str) -> List[str]:
         return [mid for mid, info in self._memory_info.items() if info.get("type") == memory_type]
+
+    def _override_payload(self) -> Dict[str, Any]:
+        return {
+            "memory_states": self._memory_states,
+            "memory_info": self._memory_info,
+            "access_logs": self._access_logs,
+            "versions": self._versions,
+        }
+
+    def _apply_override_payload(self, payload: Dict[str, Any]) -> None:
+        self._memory_states = payload.get("memory_states", {}) or {}
+        self._memory_info = payload.get("memory_info", {}) or {}
+        self._access_logs = payload.get("access_logs", {}) or {}
+        self._versions = payload.get("versions", {}) or {}
 
     def get_stats(self) -> Dict[str, Any]:
         states = {}

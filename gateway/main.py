@@ -1,13 +1,20 @@
 """
 NEXUS Unified Gateway Commander.
-Launches all platform adapters + an optional Meta webhook server.
+Launches all platform adapters under the supervised GatewaySupervisor + an
+optional Meta webhook server.
+
+The supervisor reconnects failed platforms with exponential backoff, disables
+crash-looping adapters with a cooldown, and persists lifecycle state to
+~/.nexus/gateway/state.json so a disabled platform is honoured across restarts.
+GatewayRunner remains available for programs that want plain connect/disconnect;
+this entry point uses the supervised runtime.
 """
 
 import asyncio
 import logging
 import os
 
-from gateway.run import GatewayRunner
+from gateway.supervisor import GatewaySupervisor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,28 +26,42 @@ logger = logging.getLogger("NEXUS-GATEWAY")
 async def main():
     logger.info("Initializing Unified Gateway Commander...")
 
-    runner = GatewayRunner()
+    runner = GatewaySupervisor()
     runner.register_all()
 
     logger.info("Launching all active intelligence gateways...")
 
-    # Start the gateway runner in a task
+    # Start the supervised gateway runner in a task.
     gateway_task = asyncio.create_task(runner.run())
 
-    # If Meta tokens exist, start a lightweight webhook server for Meta webhooks
-    meta_adapters = {p: a for p, a in runner.adapters.items() if p in ("facebook", "instagram", "whatsapp", "meta")}
+    # Start the lightweight webhook server to receive inbound messages from any
+    # configured platform (Meta/WhatsApp, LINE, Teams, Feishu, WeCom, Weixin,
+    # YuanBao, QQBot, DingTalk, Google Chat, BlueBubbles). Each platform's route
+    # is registered only when that platform's env credentials are present,
+    # which webhook_server.build_platform_routes enforces per route.
     verify_token = os.getenv("META_VERIFY_TOKEN", "")
-    if meta_adapters:
-        try:
-            from gateway.webhook_server import start_webhook_server
-            webhook_task = asyncio.create_task(start_webhook_server(meta_adapters, verify_token))
-            logger.info("Meta webhook server started on port 8080.")
-            await asyncio.gather(gateway_task, webhook_task)
-        except ImportError:
-            logger.warning("webhook_server module not found — Meta webhooks not available.")
+    try:
+        if runner.adapters:
+            try:
+                from gateway.webhook_server import start_webhook_server
+                webhook_task = asyncio.create_task(
+                    start_webhook_server(runner.adapters, verify_token)
+                )
+                logger.info("Webhook server started on port 8080.")
+                await asyncio.gather(gateway_task, webhook_task)
+            except ImportError:
+                logger.warning(
+                    "webhook_server module not found — inbound webhooks not available."
+                )
+                await gateway_task
+        else:
             await gateway_task
-    else:
-        await gateway_task
+    finally:
+        # Graceful shutdown: cancel tasks, await disconnects, flush lifecycle state.
+        try:
+            await runner.stop_all()
+        except Exception:  # degrade softly on shutdown
+            logger.warning("gateway/main.py stop_all suppressed error", exc_info=True)
 
 
 def run():

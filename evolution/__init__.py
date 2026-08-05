@@ -6,6 +6,12 @@ from evolution.logs import EvolutionLog
 from evolution.memory_forge.scripts.forge import MemoryForge
 from evolution.nudge.scripts.engine import NudgeEngine
 from evolution.plugin_forge.scripts.forge import PluginForge
+from evolution.quality import (
+    forge_guard,
+    looks_like_provider_error,
+    rejected_result,
+    validate_forge_output,
+)
 from evolution.self_improvement.scripts.engine import (
     ImprovementRecord,
     SelfImprovementEngine,
@@ -20,4 +26,6 @@ __all__ = [
     "ToolForge", "SkillForge", "PluginForge", "MemoryForge", "KnowledgeForge",
     "NudgeEngine", "SelfImprovementEngine", "ImprovementRecord", "NexusIntentEngine",
     "VersionManager",
+    "forge_guard", "validate_forge_output", "rejected_result",
+    "looks_like_provider_error",
 ]

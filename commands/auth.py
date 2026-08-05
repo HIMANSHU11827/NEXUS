@@ -79,6 +79,13 @@ async def handle_auth_login(args) -> None:
             print(f"Account: {email}")
     except RuntimeError as e:
         print(f"\nLogin failed: {e}")
+    except Exception as e:
+        # Network errors (httpx/httpcore connection failures, timeouts) and any
+        # unexpected provider error must surface as a clean message, never as an
+        # unhandled traceback to the shell.
+        print(f"\nLogin failed: {type(e).__name__}: {e}")
+        print("Check the provider credentials, network access, and that any"
+              " required OAuth client_id is configured.")
     except KeyboardInterrupt:
         print("\nLogin cancelled")
 

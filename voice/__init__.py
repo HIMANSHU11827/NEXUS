@@ -2,5 +2,10 @@
 
 from voice.config import VoiceSettings
 from voice.pipeline import VoiceAssistant
+from voice.stt import STTUnavailable
 
-__all__ = ["VoiceAssistant", "VoiceSettings"]
+# Compatibility alias for the redesigned pipeline. ``VoiceAssistant`` remains
+# the canonical name used by the server/GUI/TUI callers.
+VoicePipeline = VoiceAssistant
+
+__all__ = ["VoiceAssistant", "VoicePipeline", "VoiceSettings", "STTUnavailable"]

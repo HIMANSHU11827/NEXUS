@@ -3,11 +3,26 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from skills.registry import SkillRegistry
 
 logger = logging.getLogger("NEXUS_SKILLS")
+
+#: Env override that restores legacy "inject every active skill prompt".
+NEXUS_ALL_SKILLS_ENV = "NEXUS_ALL_SKILLS_INJECT"
+DEFAULT_SELECTION_LIMIT = 3
+
+
+def _fallback_tokenize(text: str) -> Set[str]:
+    _STOPWORDS = {
+        "a", "an", "the", "and", "or", "of", "to", "for", "in", "on", "with",
+        "at", "by", "from", "is", "are", "was", "were", "be", "use", "using",
+        "i", "you", "it", "this", "that", "please", "help", "me", "my", "not",
+    }
+    if not text:
+        return set()
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in _STOPWORDS and len(w) > 1}
 
 
 class NexusSkillMaster:
@@ -54,6 +69,7 @@ class NexusSkillMaster:
     def _load_all(self):
         self._cache.clear()
         for skill in SkillRegistry(self._root).discover():
+            tags, required = self._parse_extra_meta(skill.path)
             self._cache[skill.id] = {
                 "id": skill.id,
                 "name": skill.name,
@@ -62,7 +78,50 @@ class NexusSkillMaster:
                 "prompt": skill.prompt,
                 "filepath": skill.path,
                 "source": skill.source,
+                "tags": tags,
+                "required": required,
             }
+
+    @staticmethod
+    def _parse_extra_meta(filepath: str) -> "tuple[list, bool]":
+        """Read ``tags``/``required`` from a SKILL.md frontmatter. Never raises.
+
+        Handles top-level ``tags: [a, b]``, ``tags: a, b``, and the nested
+        ``metadata: {hermes: {tags: [...]}}`` convention used by bundled skills.
+        """
+        tags: List[str] = []
+        required = False
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except Exception:
+            return tags, required
+        m = re.match(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n?(.*)$", content, re.DOTALL)
+        if not m:
+            return tags, required
+        front = m.group(1)
+        # Tags: accept ``tags: [a, b]``, ``tags: a, b`` and the nested
+        # ``metadata: {hermes: {tags: [...]}}`` convention used by bundled skills.
+        for line in front.splitlines():
+            stripped = line.strip()
+            if stripped.lower().startswith("tags:"):
+                raw = stripped.split(":", 1)[1].strip()
+                if "[" in raw:
+                    inner = raw.split("[", 1)[1].split("]", 1)[0]
+                    tags.extend(t.strip() for t in inner.split(",") if t.strip())
+                else:
+                    tags.extend(t.strip() for t in raw.split(",") if t.strip())
+        req = re.findall(r"(?im)^[ \t]*required:[ \t]*(.+?)[ \t]*$", front)
+        if req:
+            required = req[-1].strip().strip("\"'").lower() in ("true", "yes", "1", "always")
+        seen = set()
+        deduped = []
+        for t in tags:
+            key = t.casefold()
+            if key not in seen:
+                seen.add(key)
+                deduped.append(t)
+        return deduped, required
 
     def _parse_frontmatter(self, content: str) -> Optional[Dict[str, Any]]:
         m = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", content, re.DOTALL)
@@ -119,16 +178,73 @@ class NexusSkillMaster:
                     result.add(str(name))
         return {item for item in result if item}
 
-    def get_active_prompt(self) -> str:
+    def get_active_prompt(self, task_text: Optional[str] = None, limit: int = DEFAULT_SELECTION_LIMIT) -> str:
+        """Build the injected prompt block.
+
+        With a ``task_text`` and no ``NEXUS_ALL_SKILLS_INJECT=1`` override the
+        block contains only the runtime-selected skills (top-K matches plus any
+        required skills). Without a task the full active-skill prompt
+        concatenation is returned for backward compatibility.
+        """
+        selected = self.select_skills(task_text or "", limit=limit)
+        return "\n\n".join(v.get("prompt", "") for v in selected if v.get("prompt"))
+
+    # ─── Runtime selection ──────────────────────────────────────
+
+    def select_skills(self, task_text: str = "", limit: int = DEFAULT_SELECTION_LIMIT) -> List[Dict[str, Any]]:
+        """Score active skills against ``task_text`` and return at most ``limit``.
+
+        Cheap token-overlap on frontmatter ``description`` + ``tags`` (no
+        dependencies). ``required: true`` skills are always included.
+        ``NEXUS_ALL_SKILLS_INJECT=1`` bypasses selection. Never raises; on error
+        falls back to every active skill.
+        """
         disabled = self._disabled_skill_ids()
-        parts = []
-        for skill_id, skill in self._cache.items():
-            if skill_id in disabled or str(skill.get("name", skill_id)) in disabled:
-                continue
-            prompt = skill.get("prompt", "")
-            if prompt:
-                parts.append(prompt)
-        return "\n\n".join(parts)
+        candidates = [
+            v
+            for k, v in self._cache.items()
+            if k not in disabled
+            and str(v.get("name", k)) not in disabled
+            and v.get("prompt")
+        ]
+        if os.environ.get(NEXUS_ALL_SKILLS_ENV) == "1":
+            return list(candidates)
+        if not task_text or not str(task_text).strip():
+            return list(candidates)
+        try:
+            required = [v for v in candidates if v.get("required")]
+            pool = [v for v in candidates if not v.get("required")]
+            scored = [
+                (score, v)
+                for score, v in ((self._score_skill(v, task_text), v) for v in pool)
+                if score > 0
+            ]
+            scored.sort(key=lambda pair: (-pair[0], pair[1].get("name", "").casefold()))
+            top = [v for score, v in scored[: max(0, limit - len(required))]]
+            return list(required) + top
+        except Exception:
+            logger.warning("Skill selection failed; falling back to all skills", exc_info=True)
+            return list(candidates)
+
+    @staticmethod
+    def _score_skill(skill: Dict[str, Any], task_text: str) -> float:
+        """Token overlap between the task and the skill's description + tags + name."""
+        try:
+            from skills.engine import _tokenize
+        except Exception:
+            _tokenize = _fallback_tokenize
+        task_tokens = _tokenize(task_text)
+        if not task_tokens:
+            return 0.0
+        haystack = (
+            f"{skill.get('description', '')} "
+            f"{' '.join(skill.get('tags', []))} {skill.get('name', '')}"
+        )
+        skill_tokens = _tokenize(haystack)
+        matched = len(task_tokens & skill_tokens) if skill_tokens else 0
+        if matched == 0:
+            return 0.0
+        return matched * (matched / len(skill_tokens))
 
     def load_skill(self, name: str) -> bool:
         self._load_all()

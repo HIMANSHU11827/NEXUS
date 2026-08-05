@@ -50,7 +50,7 @@ except Exception as e:
 # ── 2. Shell Tests ─────────────────────────────────────────────────────────────
 print("\n2. Shell")
 try:
-    from shell import TaskTracker
+    from nexus.commands import TaskTracker
     tid = TaskTracker.create("Runtime test")
     TaskTracker.update(tid, "completed")
     tasks = TaskTracker.list()

@@ -62,6 +62,7 @@ export default function FileExplorer({ onFileOpen }: FileExplorerProps) {
   const [filter, setFilter] = useState('')
   // An empty value deliberately means the project's workspace folder.
   const [rootPath, setRootPath] = useState('')
+  const [actualWorkspaceRoot, setActualWorkspaceRoot] = useState('')
   const [showFolderPicker, setShowFolderPicker] = useState(false)
   const [folderInput, setFolderInput] = useState('')
   const [creating, setCreating] = useState<{ parent: string; type: 'file' | 'folder' } | null>(null)
@@ -91,6 +92,15 @@ export default function FileExplorer({ onFileOpen }: FileExplorerProps) {
   useEffect(() => { if (creating) createRef.current?.focus() }, [creating])
   useEffect(() => { if (renaming) renameRef.current?.focus() }, [renaming])
   useEffect(() => { if (editingFile) editorRef.current?.focus() }, [editingFile])
+  
+  // Fetch actual workspace root to display correct folder name
+  useEffect(() => {
+    api.workspace().then((summary: any) => {
+      if (summary?.root) {
+        setActualWorkspaceRoot(summary.root)
+      }
+    }).catch(() => {})
+  }, [])
   useEffect(() => {
     const refreshTree = () => {
       fetchChildren(ROOT_KEY)
@@ -106,7 +116,7 @@ export default function FileExplorer({ onFileOpen }: FileExplorerProps) {
     setChildrenMap(p => { const n = { ...p }; Object.keys(n).forEach(k => { if (k.startsWith(path) || k === parent) delete n[k] }); return n })
   }
 
-  const selectFolder = (event: React.FormEvent) => {
+  const selectFolder = async (event: React.FormEvent) => {
     event.preventDefault()
     const nextRoot = folderInput.trim()
     setRootPath(nextRoot)
@@ -114,22 +124,44 @@ export default function FileExplorer({ onFileOpen }: FileExplorerProps) {
     setExpanded(new Set())
     setFilter('')
     setShowFolderPicker(false)
+    // Update backend workspace root when custom folder is selected
+    if (nextRoot) {
+      try {
+        await api.setSandbox('no_sandbox', nextRoot)
+        setActualWorkspaceRoot(nextRoot)
+      } catch (error) {
+        console.error('Failed to set workspace root:', error)
+      }
+    }
     window.dispatchEvent(new CustomEvent('nexus-sandbox-folder', { detail: { path: nextRoot } }))
   }
 
-  const resetToWorkspace = () => {
+  const resetToWorkspace = async () => {
     setRootPath('')
     setFolderInput('')
     setChildrenMap({ [ROOT_KEY]: [] })
     setExpanded(new Set())
     setFilter('')
     setShowFolderPicker(false)
+    // Reset backend workspace root to default
+    try {
+      await api.setSandbox('no_sandbox', '')
+      // Refresh actual workspace root from backend
+      const summary = await api.workspace()
+      if (summary?.root) {
+        setActualWorkspaceRoot(summary.root)
+      }
+    } catch (error) {
+      console.error('Failed to reset workspace root:', error)
+    }
     window.dispatchEvent(new CustomEvent('nexus-sandbox-folder', { detail: { path: '' } }))
   }
 
   const rootName = rootPath
     ? rootPath.replace(/\\/g, '/').split('/').filter(Boolean).pop() || rootPath
-    : 'Workspace'
+    : (actualWorkspaceRoot
+        ? actualWorkspaceRoot.replace(/\\/g, '/').split('/').filter(Boolean).pop() || actualWorkspaceRoot
+        : 'Workspace')
 
   useEffect(() => {
     if (filter.trim()) {
@@ -337,8 +369,8 @@ export default function FileExplorer({ onFileOpen }: FileExplorerProps) {
       <div className="px-3 pt-3 pb-2.5 border-b border-border space-y-2">
         <div className="flex items-center justify-between">
           <div className="min-w-0">
-            <h2 className="truncate text-[10px] font-semibold tracking-wider text-muted-foreground uppercase" title={rootPath || 'Project workspace'}>{rootName}</h2>
-            <p className="mt-0.5 truncate text-[10px] text-muted-foreground/45" title={rootPath || 'Project workspace'}>{rootPath || 'Project workspace'}</p>
+            <h2 className="truncate text-[10px] font-semibold tracking-wider text-muted-foreground uppercase" title={rootPath || actualWorkspaceRoot || 'Project workspace'}>{rootName}</h2>
+            <p className="mt-0.5 truncate text-[10px] text-muted-foreground/45" title={rootPath || actualWorkspaceRoot || 'Project workspace'}>{rootPath || actualWorkspaceRoot || 'Project workspace'}</p>
           </div>
           <div className="flex items-center gap-0.5">
             <button onClick={() => { setFolderInput(rootPath); setShowFolderPicker(value => !value) }} aria-label="Choose folder" title="Choose folder" className="size-5 flex items-center justify-center rounded hover:bg-secondary text-muted-foreground/50 hover:text-muted-foreground">

@@ -34,7 +34,7 @@ User
 ## Three User Interfaces
 
 A user can send a mission from **any** of these three interfaces. All three feed the same
-agent core (`orchestrators/loop.py` today; `core/mission/` as the wrapper matures).
+agent core (`orchestrators/v5/core.py`; `core/mission/` as the wrapper matures).
 
 | Interface | Path | Role |
 |-----------|------|------|
@@ -133,7 +133,7 @@ core/mission/
 
 ### 3. Reasoning Layer
 
-The current `orchestrators/loop.py` remains the brain loop, but it should emit
+The current `orchestrators/v5/core.py` is the brain loop and emits
 structured mission events instead of only plain stream text.
 
 Responsibilities:

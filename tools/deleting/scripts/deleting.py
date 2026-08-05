@@ -13,7 +13,7 @@ class DeletingTool(BaseTool):
     async def execute(self, path: str, **kwargs) -> ToolResult:
         try:
             full = os.path.normpath(os.path.join(self.root_dir, path)) if self.root_dir and not os.path.isabs(path) else os.path.normpath(path)
-            if self.root_dir and not full.startswith(os.path.normpath(self.root_dir)):
+            if self.root_dir and os.path.commonpath([os.path.abspath(self.root_dir), full]) != os.path.abspath(self.root_dir):
                 return ToolResult(success=False, error=f"Path traversal blocked: {path}")
             if not os.path.isfile(full):
                 return ToolResult(success=False, error=f"File not found: {path}")

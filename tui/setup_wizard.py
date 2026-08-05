@@ -2315,7 +2315,7 @@ def finish(root_dir: str):
     summary.add_row("[bold]🌐 Language[/bold]", settings.get("language", "en"))
     summary.add_row("[bold]📝 Log level[/bold]", settings.get("log_level", "INFO"))
 
-    sandbox_tier = settings.get("sandbox_tier", env.get("NEXUS_SANDBOX_TIER", "normal"))
+    sandbox_tier = settings.get("sandbox_tier", env.get("NEXUS_SANDBOX_TIER", "no_sandbox"))
     summary.add_row("[bold]🛡️  Sandbox[/bold]", sandbox_tier)
 
     summary.add_row("[bold]🤖 Provider[/bold]", f"{prov_name} ({prov_model})")

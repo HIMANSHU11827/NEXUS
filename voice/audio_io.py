@@ -12,6 +12,38 @@ class AudioUnavailable(RuntimeError):
     pass
 
 
+def trim_silence(audio: Any, threshold: float, sample_rate: int = 16000, hop_ms: int = 10) -> Any:
+    """Trim leading/trailing silence from an audio buffer.
+
+    Numpy-only, stdlib-safe energy-based trimmer. Falls back to an empty array
+    when the whole buffer is below ``threshold`` (RMS). Threshold is expected to
+    be the same RMS ``silence_threshold`` used elsewhere in the pipeline.
+    """
+    import numpy as np
+
+    samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if samples.size == 0:
+        return samples
+    hop = max(1, int(sample_rate * hop_ms / 1000.0))
+    n_frames = max(1, int(np.ceil(len(samples) / float(hop))))
+    rms = np.empty(n_frames, dtype=np.float32)
+    for i in range(n_frames):
+        seg = samples[i * hop:(i + 1) * hop]
+        if seg.size:
+            rms[i] = float(np.sqrt(np.mean(np.square(seg))))
+        else:
+            rms[i] = 0.0
+    active = rms > float(threshold)
+    if not np.any(active):
+        return samples[:0]
+    active_idx = np.where(active)[0]
+    start_frame = int(active_idx[0])
+    end_frame = int(active_idx[-1]) + 1
+    start = start_frame * hop
+    end = min(len(samples), end_frame * hop)
+    return samples[start:end]
+
+
 class ContinuousSpeechSession:
     def __init__(
         self,
@@ -74,8 +106,6 @@ class ContinuousSpeechSession:
             self.status_callback(state)
 
     def _capture_loop(self) -> None:
-        import torch
-
         self.audio_io._load_vad()
         sd = self.audio_io._sounddevice()
         stream_rate = self.audio_io.input_sample_rate
@@ -119,6 +149,7 @@ class ContinuousSpeechSession:
                         vad_input = audio_chunk_16k[:chunk_frames_silero]
                     else:
                         vad_input = np.pad(audio_chunk_16k, (0, chunk_frames_silero - chunk_len))
+                    import torch
                     with torch.no_grad():
                         tensor_chunk = torch.from_numpy(vad_input)
                         prob = self.audio_io._vad_model(tensor_chunk, silero_rate).item()
@@ -159,20 +190,22 @@ class ContinuousSpeechSession:
                 if captured:
                     raw = np.concatenate(captured)
                     resampled = self.audio_io._resample_if_needed(raw, stream_rate)
-                    if resampled.size:
-                        self._segments.put(resampled)
+                    trimmed = trim_silence(resampled, self.silence_threshold, self.audio_io.sample_rate)
+                    if trimmed.size:
+                        self._segments.put(trimmed)
                 captured, preroll, speech_started, chunks_since_speech, speech_chunks_count = reset_state()
                 self._emit_status("waiting")
 
 
 class AudioIO:
-    def __init__(self, input_device: Optional[int | str], output_device: Optional[int | str], sample_rate: int, volume: float = 1.0):
+    def __init__(self, input_device: Optional[int | str], output_device: Optional[int | str], sample_rate: int, volume: float = 1.0, vad_enabled: bool = True):
         self.input_device = self._resolve_device(input_device, want_input=True)
         self.output_device = self._resolve_device(output_device, want_input=False)
         self.sample_rate = sample_rate
         self.input_sample_rate = self._resolve_input_sample_rate(self.input_device, self.sample_rate)
         self.output_sample_rate = self._resolve_output_sample_rate(self.output_device, self.sample_rate)
         self.volume = max(0.0, min(float(volume), 2.0))
+        self.vad_enabled = bool(vad_enabled)
         self._play_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._vad_model = None
@@ -345,6 +378,9 @@ class AudioIO:
     def _load_vad(self):
         if self._vad_model is not None:
             return
+        if not self.vad_enabled:
+            self._vad_model = False
+            return
         try:
             from silero_vad import load_silero_vad
             self._vad_model = load_silero_vad()
@@ -361,7 +397,6 @@ class AudioIO:
         min_speech_seconds: float,
         status_callback: Optional[callable] = None,
     ) -> Any:
-        import torch
         self._load_vad()
 
         sd = self._sounddevice()
@@ -412,6 +447,7 @@ class AudioIO:
                         vad_input = audio_chunk_16k[:chunk_frames_silero]
                     else:
                         vad_input = np.pad(audio_chunk_16k, (0, chunk_frames_silero - chunk_len))
+                    import torch
                     with torch.no_grad():
                         tensor_chunk = torch.from_numpy(vad_input)
                         prob = self._vad_model(tensor_chunk, silero_rate).item()
@@ -453,7 +489,8 @@ class AudioIO:
 
         # Concatenate at native rate then resample to the STT target rate
         raw = np.concatenate(captured)
-        return self._resample_if_needed(raw, stream_rate)
+        resampled = self._resample_if_needed(raw, stream_rate)
+        return trim_silence(resampled, float(silence_threshold), self.sample_rate)
 
     def open_continuous_session(
         self,

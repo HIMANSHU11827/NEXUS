@@ -3,6 +3,13 @@
 
 Query, store, and manage the NEXUS knowledge base.
 
+## Search semantics
+Retrieval is **keyword-based** — substring match on query/title/content plus
+term-overlap ranking. It is deliberately **not** semantic/vector search:
+results are ordered by substring hits first, then term overlap. The `store`
+action and the substring fallback in `query` are described accurately above;
+no embeddings are computed by this tool.
+
 ## Parameters
 - `action` (string, required): query | store | list | delete
 - `query` (string, optional): Search query

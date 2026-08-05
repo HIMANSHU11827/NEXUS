@@ -2,9 +2,7 @@ import os
 
 import pytest
 
-import tools.bash.scripts.bash as bash_module
 import tools.terminal.scripts.terminal as terminal_module
-from tools.bash.scripts.bash import BashTool
 from tools.terminal.scripts.terminal import TerminalTool
 
 
@@ -13,7 +11,7 @@ def _read_command(path: str) -> str:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool_cls", [BashTool, TerminalTool])
+@pytest.mark.parametrize("tool_cls", [TerminalTool])
 async def test_shell_tools_use_normal_sandbox_for_outside_paths(tmp_path, monkeypatch, tool_cls):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -44,7 +42,7 @@ async def test_normal_streaming_sandbox_does_not_expose_process_secrets(tmp_path
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_cls", "module"),
-    [(BashTool, bash_module), (TerminalTool, terminal_module)],
+    [(TerminalTool, terminal_module)],
 )
 async def test_shell_tools_forward_timeout_to_sandbox(tmp_path, monkeypatch, tool_cls, module):
     calls = []

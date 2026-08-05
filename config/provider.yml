@@ -6,16 +6,45 @@ providers:
     max_tokens: 8192
     api_key: ${DEEPSEEK_API_KEY}
   openrouter:
-    model: openrouter/auto
+    model: nvidia/nemotron-3-ultra-550b-a55b:free
     endpoint: https://openrouter.ai/api/v1/chat/completions
     temperature: 0.7
     max_tokens: 8192
     api_key: ${OPENROUTER_API_KEY}
+  lm_studio:
+    model: qwen3.5-0.8b-coder-calude-full
+    endpoint: http://127.0.0.1:1234/v1/chat/completions
+    temperature: 0.2
+    max_tokens: 4096
+  # OpenAI-compatible endpoint that accepts the xAI OAuth access token from
+  # `nexus auth login grok` as `Authorization: Bearer`. Maps to XAIProvider;
+  # no api_key is stored here — it is resolved from the OAuth token store.
+  grok:
+    model: grok-4.3
+    endpoint: https://api.x.ai/v1/chat/completions
+    temperature: 0.7
+    max_tokens: 8192
 version: 1.1.0
 default_provider: deepseek
 fallback_chain:
 - deepseek
 - openrouter
+- lm_studio
+
+# --------------------------------------------------------------------------
+# OAuth providers registered via `nexus auth login <id>` whose token CANNOT be
+# sent as a plain Bearer/API key against a known OpenAI-compatible endpoint.
+# They are intentionally NOT added to `providers:` above so UniversalProvider
+# never POSTs them at its http://localhost:8000/v1/chat/completions default.
+# --------------------------------------------------------------------------
+documented_blocker:
+  codex: "ChatGPT OAuth token must be sent to chatgpt.com/backend-api/codex with Cloudflare originator + ChatGPT-Account-ID headers (see .research/hermes-agent); no plain-Bearer OpenAI-compatible endpoint."
+  claude: "Token is a Claude.ai/Platform session token; Anthropic Messages API (api.anthropic.com/v1/messages) is not OpenAI-compatible and requires x-api-key/anthropic-version."
+  github-copilot: "api.individual.githubcopilot.com/chat/completions is OpenAI-compatible and Bearer-authenticated, but requires Copilot-specific headers (Openai-Intent, Copilot-Integration-Id, Editor-Version, ...) that UniversalProvider never sends. OAuth id is 'github-copilot' but the factory mapping is 'github_copilot'."
+  minimax: "Device-flow client_id is the placeholder 'YOUR_MINIMAX_CLIENT_ID' unless NEXUS_MINIMAX_CLIENT_ID is set; no validated OpenAI-compatible Bearer endpoint."
+  chutes: "No clearly documented OpenAI-compatible endpoint for the chutes.ai OAuth token."
+  qwen: "DashScope compatible-mode endpoint is known, but an Aliyun consumer OAuth token is NOT validated as a DashScope API-key Bearer (needs a sk-* DashScope key)."
+  gemini: "OAuth token is a Google access token with a placeholder client_id; Gemini native API requires x-goog-api-key, not a Bearer token."
 
 # --------------------------------------------------------------------------
 # Reliability: retry/backoff and circuit breaker (providers/reliability.py)
@@ -54,11 +83,20 @@ model_capabilities:
       tools: true
       streaming: true
       structured_output: true
+      # Optional task-routing annotations (providers/model_bench.py). latency_ms
+      # is ms to first token; cost_per_1m is USD per 1M tokens. benchmarks map
+      # per-task model scores used to rank this provider for matching tasks.
+      cost_per_1m: 0.28
+      latency_ms: 1200
+      benchmarks: {coding: 0.91, reasoning: 0.88, chat: 0.72, summarization: 0.76, search: 0.70}
     openrouter:
       context_window: 128000
       max_output_tokens: 8192
       tools: true
       streaming: true
+      cost_per_1m: 2.5
+      latency_ms: 2400
+      benchmarks: {coding: 0.84, reasoning: 0.82, chat: 0.80, summarization: 0.82, search: 0.78}
     openai:
       context_window: 128000
       max_output_tokens: 16384
@@ -83,14 +121,75 @@ model_capabilities:
       max_output_tokens: 8192
       tools: true
       streaming: true
+    mistral:
+      context_window: 128000
+      max_output_tokens: 8192
+      tools: true
+      streaming: true
+    qwen:
+      context_window: 128000
+      max_output_tokens: 8192
+      tools: true
+      streaming: true
+    xai:
+      context_window: 131072
+      max_output_tokens: 8192
+      tools: true
+      streaming: true
+    fireworks:
+      context_window: 128000
+      max_output_tokens: 8192
+      tools: true
+      streaming: true
+    together:
+      context_window: 8192
+      max_output_tokens: 8192
+      tools: true
+      streaming: true
+    sambanova:
+      context_window: 128000
+      max_output_tokens: 8192
+      tools: true
+      streaming: true
+    nvidia:
+      context_window: 128000
+      max_output_tokens: 8192
+      tools: true
+      streaming: true
+    cohere:
+      context_window: 128000
+      max_output_tokens: 8192
+      tools: true
+      streaming: true
+    llama_cpp:
+      context_window: 32768
+      max_output_tokens: 4096
+      tools: true
+      streaming: true
+    universal:
+      context_window: 128000
+      max_output_tokens: 16384
+      tools: true
+      streaming: true
+      structured_output: true
+    commandcode:
+      context_window: 128000
+      max_output_tokens: 16384
+      tools: true
+      streaming: true
     ollama:
       context_window: 32768
       max_output_tokens: 4096
+      tools: true
       streaming: true
     lm_studio:
       context_window: 32768
       max_output_tokens: 4096
+      tools: true
       streaming: true
+      cost_per_1m: 0.0
+      latency_ms: 420
+      benchmarks: {coding: 0.55, reasoning: 0.48, chat: 0.70, summarization: 0.66, search: 0.60}
   models:
     deepseek-chat:
       context_window: 65536

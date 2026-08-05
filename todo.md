@@ -1,8 +1,9 @@
 TODO LIST
 
-TASK NAME: Create a file named e2e_hello.txt with the exact content "hello e2e checkpoint" in the workspace using the write file tool. Only do this one file write and nothing else.
+TASK NAME: Do these 3 things in order using tools: 1. Create file step1.txt with content step1-done. 2. Read step1.txt and confirm content. 3. Create step2.txt. List all step*.txt files after done.
 PLAN TYPE: Simple
 
-1. [ ] Invoke the write file tool with target path e2e_hello.txt in the workspace
-2. [ ] Set the file content to exactly: hello e2e checkpoint
-3. [ ] Execute the single file write operation and do not perform any other actions
+1. [ ] Create step1.txt with content 'step1-done'
+2. [ ] Read step1.txt to confirm its content
+3. [ ] Create step2.txt
+4. [ ] List all step*.txt files to verify both exist

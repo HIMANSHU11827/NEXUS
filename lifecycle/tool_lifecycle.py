@@ -37,6 +37,8 @@ class ToolLifecycle(LifecycleManager):
         self._error_counts: Dict[str, int] = {}
         self._durations: Dict[str, List[float]] = {}
         self._versions: Dict[str, List[str]] = {}
+        self._persist_key = "tool"
+        self._restore_persisted()
 
     def discover_tool(self, tool_id: str, name: str, toolset: str = "core") -> str:
         self._tool_states[tool_id] = "discovered"
@@ -49,6 +51,7 @@ class ToolLifecycle(LifecycleManager):
         self._error_counts[tool_id] = 0
         self._durations[tool_id] = []
         self.register_entity(tool_id, LifecycleState.CREATED)
+        self._persist()
         return f"Tool '{name}' v{default_version()} discovered."
 
     def improve_tool(self, tool_id: str, is_major: bool = False) -> str:
@@ -60,6 +63,7 @@ class ToolLifecycle(LifecycleManager):
         self._tool_info[tool_id]["version"] = new_ver
         self._versions.setdefault(tool_id, []).append(new_ver)
         kind = "major" if is_major else "minor"
+        self._persist()
         return f"Tool '{self._tool_info[tool_id]['name']}' {kind} improved: v{current} → v{new_ver}"
 
     def get_version(self, tool_id: str) -> str:
@@ -72,18 +76,21 @@ class ToolLifecycle(LifecycleManager):
         if self._tool_states.get(tool_id) != "discovered":
             return False
         self._tool_states[tool_id] = "registered"
+        self._persist()
         return True
 
     def enable_tool(self, tool_id: str) -> bool:
         if self._tool_states.get(tool_id) not in ("registered", "disabled"):
             return False
         self._tool_states[tool_id] = "enabled"
+        self._persist()
         return True
 
     def disable_tool(self, tool_id: str) -> bool:
         if self._tool_states.get(tool_id) != "enabled":
             return False
         self._tool_states[tool_id] = "disabled"
+        self._persist()
         return True
 
     def deprecate_tool(self, tool_id: str, replacement: Optional[str] = None) -> bool:
@@ -93,11 +100,13 @@ class ToolLifecycle(LifecycleManager):
         self._tool_states[tool_id] = "deprecated"
         if replacement:
             self._tool_info[tool_id]["replacement"] = replacement
+        self._persist()
         return True
 
     def mark_error(self, tool_id: str) -> bool:
         self._tool_states[tool_id] = "error"
         self._error_counts[tool_id] = self._error_counts.get(tool_id, 0) + 1
+        self._persist()
         return True
 
     def record_call(self, tool_id: str, duration_ms: float, success: bool):
@@ -105,6 +114,7 @@ class ToolLifecycle(LifecycleManager):
         self._durations.setdefault(tool_id, []).append(duration_ms)
         if not success:
             self._error_counts[tool_id] = self._error_counts.get(tool_id, 0) + 1
+        self._persist()
 
     def get_tool_state(self, tool_id: str) -> Optional[str]:
         return self._tool_states.get(tool_id)
@@ -130,6 +140,26 @@ class ToolLifecycle(LifecycleManager):
             "avg_duration_ms": round(avg_duration, 2),
             "info": self._tool_info.get(tool_id),
         }
+
+    def _override_payload(self) -> Dict[str, Any]:
+        return {
+            "tool_states": self._tool_states,
+            "tool_info": self._tool_info,
+            "call_counts": self._call_counts,
+            "error_counts": self._error_counts,
+            "durations": self._durations,
+            "versions": self._versions,
+        }
+
+    def _apply_override_payload(self, payload: Dict[str, Any]) -> None:
+        self._tool_states = payload.get("tool_states", {}) or {}
+        self._tool_info = payload.get("tool_info", {}) or {}
+        self._call_counts = payload.get("call_counts", {}) or {}
+        self._error_counts = payload.get("error_counts", {}) or {}
+        self._durations = {
+            tid: list(vals) for tid, vals in (payload.get("durations", {}) or {}).items()
+        }
+        self._versions = payload.get("versions", {}) or {}
 
     def get_stats(self) -> Dict[str, Any]:
         states = {}

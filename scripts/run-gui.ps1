@@ -19,6 +19,20 @@ $ApiErrLog = Join-Path $Logs "gui-api-$RunStamp.err.log"
 $ViteOutLog = Join-Path $Logs "gui-vite-$RunStamp.out.log"
 $ViteErrLog = Join-Path $Logs "gui-vite-$RunStamp.err.log"
 
+# Detached processes do not reliably receive newly-created user environment
+# variables through WMI. Import provider secrets from the current user's
+# environment before spawning the API so ${DEEPSEEK_API_KEY}, OPENROUTER_API_KEY,
+# and other configured provider references reach the actual server process.
+foreach ($secretName in @(
+  "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "XAI_API_KEY"
+)) {
+  if (-not [Environment]::GetEnvironmentVariable($secretName, "Process")) {
+    $userSecret = [Environment]::GetEnvironmentVariable($secretName, "User")
+    if ($userSecret) { Set-Item -Path "Env:$secretName" -Value $userSecret }
+  }
+}
+
 function Stop-PortOwner {
   param([int]$Port)
   $owners = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
@@ -61,8 +75,8 @@ $OldPythonPath = $env:PYTHONPATH
 try {
   Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
   Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
-  $cmd = 'cmd.exe /c "cd /d "' + $Root + '" && "' + $VenvPython + '" -m uvicorn server:app --host 127.0.0.1 --port ' + $ApiPort + ' > "' + $ApiOutLog + '" 2> "' + $ApiErrLog + '""'
-  Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList $cmd | Out-Null
+  $apiArgs = @('-m', 'uvicorn', 'server:app', '--host', '127.0.0.1', '--port', [string]$ApiPort)
+  Start-Process -FilePath $VenvPython -ArgumentList $apiArgs -WorkingDirectory $Root -RedirectStandardOutput $ApiOutLog -RedirectStandardError $ApiErrLog -WindowStyle Hidden | Out-Null
 } finally {
   if ($null -ne $OldPythonHome) { $env:PYTHONHOME = $OldPythonHome } else { Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue }
   if ($null -ne $OldPythonPath) { $env:PYTHONPATH = $OldPythonPath } else { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue }
@@ -81,8 +95,8 @@ if (-not (Wait-HttpOk -Url "http://127.0.0.1:$ApiPort/api/state" -Seconds 90)) {
 }
 
 Write-Host "Starting GUI on http://127.0.0.1:$WebPort ..." -ForegroundColor Cyan
-$cmd = 'cmd.exe /c "cd /d "' + $Gui + '" && npm run dev -- --host 127.0.0.1 --port ' + $WebPort + ' > "' + $ViteOutLog + '" 2> "' + $ViteErrLog + '""'
-Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList $cmd | Out-Null
+$viteArgs = @('run', 'dev', '--', '--host', '127.0.0.1', '--port', [string]$WebPort)
+Start-Process -FilePath 'npm.cmd' -ArgumentList $viteArgs -WorkingDirectory $Gui -RedirectStandardOutput $ViteOutLog -RedirectStandardError $ViteErrLog -WindowStyle Hidden | Out-Null
 
 if (-not (Wait-HttpOk -Url "http://127.0.0.1:$WebPort" -Seconds 60)) {
   Write-Host "Frontend did not become healthy." -ForegroundColor Red

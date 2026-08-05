@@ -8,6 +8,8 @@ This module is wired into the real call path in :mod:`providers.router`.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import os
 import random
@@ -16,7 +18,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, Optional, TypeVar
+from typing import Any, Callable, Dict, Optional, TypeVar, Union
 
 logger = logging.getLogger("NEXUS_PROVIDER_RELIABILITY")
 
@@ -509,32 +511,114 @@ def _looks_like_error_string(result: Any) -> bool:
 
 
 def call_with_reliability(
-    provider_id: str,
-    func: Callable[..., T],
+    provider_id: Any,
+    func: Optional[Callable[..., T]] = None,
     *args: Any,
     policy: Optional[RetryPolicy] = None,
+    retry_policy: Optional[Union[RetryPolicy, int]] = None,
     breakers: Optional[CircuitBreakerRegistry] = None,
     sleep: Callable[[float], None] = time.sleep,
     on_attempt_failure: Optional[Callable[[Classification, int], None]] = None,
     **kwargs: Any,
-) -> T:
-    """Execute ``func`` with classification, retry/backoff and a circuit breaker.
+) -> Any:
+    """Execute a callable with classification, bounded retry/backoff and, in
+    the provider form, a circuit breaker.
+
+    Two call signatures are supported:
+
+    * Provider form (unchanged behaviour, used by ``providers.router``)::
+
+          call_with_reliability(provider_id, provider.generate, messages=...,
+                                policy=self.retry_policy, breakers=self.breakers, ...)
+
+    * Gateway / tool form (no provider key)::
+
+          call_with_reliability(fn, retry_policy=2)          # 2 retries
+          call_with_reliability(fn, retry_policy=RetryPolicy(...))
+
+      ``fn`` may be sync (invoked directly) or async (awaited); when unwrapped
+      the returned awaitable is carried untouched.
 
     Raises :class:`ProviderCallError` (never containing secrets) on final
-    failure, or :class:`CircuitOpenError` if the breaker is open.
+    failure, or :class:`CircuitOpenError` if the provider breaker is open.
     """
-    policy = policy or RetryPolicy()
-    breaker = breakers.get(provider_id) if breakers else None
-    last: Optional[Classification] = None
+    provider_form = func is not None
+    if provider_form:
+        fn, p_id = func, provider_id
+        rp = policy if policy is not None else retry_policy
+    else:
+        fn, p_id = provider_id, ""
+        rp = retry_policy if retry_policy is not None else policy
 
-    for attempt in range(1, max(1, policy.max_attempts) + 1):
+    if rp is None:
+        rp = RetryPolicy()
+    elif isinstance(rp, int):
+        # ``retry_policy=2`` means "retry up to 2 times" -> 3 attempts.
+        rp = RetryPolicy(max_attempts=max(1, int(rp) + 1))
+
+    breaker = breakers.get(p_id) if (breakers is not None and provider_form) else None
+    provider_label = p_id or "gateway/tool"
+
+    if inspect.iscoroutinefunction(fn):
+        async def _async_call() -> T:
+            last: Optional[Classification] = None
+            for attempt in range(1, max(1, rp.max_attempts) + 1):
+                if breaker is not None:
+                    breaker.before_call()  # raises CircuitOpenError when open
+                try:
+                    result = await fn(*args, **kwargs)
+                    if _looks_like_error_string(result):
+                        raise ProviderCallError(classify_failure(body=result), p_id)
+                    if breaker is not None:
+                        breaker.record_success()
+                    return result
+                except CircuitOpenError:
+                    raise
+                except ProviderCallError as exc:
+                    classification = exc.classification
+                except BaseException as exc:  # noqa: BLE001 - classified below
+                    status = getattr(getattr(exc, "response", None), "status_code", None)
+                    headers = getattr(getattr(exc, "response", None), "headers", None)
+                    classification = classify_failure(exc, status_code=status, headers=headers)
+
+                last = classification
+                if breaker is not None:
+                    breaker.record_failure()
+                if on_attempt_failure is not None:
+                    try:
+                        on_attempt_failure(classification, attempt)
+                    except Exception:
+                        logger.debug("on_attempt_failure hook raised", exc_info=True)
+
+                logger.warning(
+                    "'%s' attempt %d/%d failed: %s (%s)",
+                    provider_label, attempt, rp.max_attempts,
+                    classification.failure_class.value, classification.strategy.value,
+                )
+
+                if not classification.retryable or attempt >= rp.max_attempts:
+                    raise ProviderCallError(classification, p_id)
+
+                delay = rp.compute_delay(attempt, classification.retry_after)
+                if delay > 0:
+                    if sleep is time.sleep:
+                        await asyncio.sleep(delay)
+                    else:
+                        sleep(delay)
+
+            raise ProviderCallError(last or classify_failure(body="unknown failure"), p_id)
+
+        return _async_call()
+
+    last = None
+    for attempt in range(1, max(1, rp.max_attempts) + 1):
         if breaker is not None:
             breaker.before_call()  # raises CircuitOpenError when open
         try:
-            result = func(*args, **kwargs)
+            result = fn(*args, **kwargs)
             if _looks_like_error_string(result):
                 raise ProviderCallError(
-                    classify_failure(body=result), provider_id
+                    classify_failure(body=result), p_id
                 )
             if breaker is not None:
                 breaker.record_success()
@@ -558,16 +642,37 @@ def call_with_reliability(
                 logger.debug("on_attempt_failure hook raised", exc_info=True)
 
         logger.warning(
-            "provider '%s' attempt %d/%d failed: %s (%s)",
-            provider_id, attempt, policy.max_attempts,
+            "'%s' attempt %d/%d failed: %s (%s)",
+            provider_label, attempt, rp.max_attempts,
             classification.failure_class.value, classification.strategy.value,
         )
 
-        if not classification.retryable or attempt >= policy.max_attempts:
-            raise ProviderCallError(classification, provider_id)
+        if not classification.retryable or attempt >= rp.max_attempts:
+            raise ProviderCallError(classification, p_id)
 
-        delay = policy.compute_delay(attempt, classification.retry_after)
+        delay = rp.compute_delay(attempt, classification.retry_after)
         if delay > 0:
             sleep(delay)
 
-    raise ProviderCallError(last or classify_failure(body="unknown failure"), provider_id)
+    raise ProviderCallError(last or classify_failure(body="unknown failure"), p_id)
+
+
+def bounded_tool_retry(
+    fn: Callable[..., T],
+    *args: Any,
+    retry_policy: Optional[Union[RetryPolicy, int]] = None,
+    **kwargs: Any,
+) -> Any:
+    """Run ``fn`` with a bounded retry/backoff policy for tool and gateway work.
+
+    ``retry_policy`` may be a :class:`RetryPolicy` or an ``int`` meaning the
+    number of retries (``retries + 1`` total attempts). Async callables are
+    awaited (the returned awaitable must be ``await``-ed); sync callables are
+    invoked directly. Degrades to a plain single-call when ``fn`` is not
+    callable.
+    """
+    if not callable(fn):
+        return fn
+    return call_with_reliability(
+        fn, None, *args, retry_policy=retry_policy, **kwargs
+    )

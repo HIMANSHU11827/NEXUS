@@ -150,6 +150,72 @@ class NexusPromptEngine:
         except OSError:
             return ""
 
+    @staticmethod
+    def _get_environment_line(root_dir: str, context_map: str = "") -> str:
+        """One compact environment-grounding line (safe: never raises).
+
+        Unlike ``get_environment_segment`` this stays on a single line and
+        any kernel/hardware failure degrades to a static line so prompt
+        building can never crash the live loop.
+        """
+        line = f"# ENV: {platform.system()} | Root: {root_dir}"
+        try:
+            from kernel import get_nexus_kernel
+            kernel = get_nexus_kernel(root_dir=root_dir)
+            hal = getattr(kernel, "hal", None)
+            if hal is not None:
+                footprint = hal.get_hardware_footprint()
+                if footprint:
+                    line += f" | HW: {str(footprint)[:120]}"
+        except Exception:
+            pass
+        if context_map:
+            trimmed = context_map[:300] + "..." if len(context_map) > 300 else context_map
+            line += f" | Grounding: {trimmed}"
+        return line
+
+    @classmethod
+    def build_live_system_prompt(
+        cls,
+        root_dir: str,
+        *,
+        role: str = "ARCHITECT",
+        intent: str = "chat",
+        complexity: str = "simple",
+        needs_tools: bool = False,
+        context_map: str = "",
+        max_chars: int = 4000,
+    ) -> str:
+        """Assemble a COMPACT, token-budgeted live system prompt.
+
+        Uses only the light, safe segments (identity, adaptive-collaboration,
+        role, project rules, special-focus, one-line env). Never calls the
+        heavy ``build_super_prompt`` (KnowledgeVault + kernel.horizons). Each
+        segment is wrapped so a raised segment is skipped — prompt building
+        must never crash the live loop — and the total is trimmed to respect
+        *max_chars*.
+        """
+        builders = (
+            cls.get_identity_segment,
+            lambda: cls.get_adaptive_collaboration_segment(intent, complexity, needs_tools),
+            lambda: cls.get_role_segment(role),
+            lambda: cls.get_rules_segment(root_dir),
+            lambda: cls.get_special_focus_segment(root_dir),
+            lambda: cls._get_environment_line(root_dir, context_map),
+        )
+        segments: List[str] = []
+        for build in builders:
+            try:
+                segment = str(build() or "").strip()
+            except Exception:
+                segment = ""
+            if segment:
+                segments.append(segment)
+        compact = "\n".join(segments)
+        if len(compact) > max_chars:
+            compact = compact[: max(0, max_chars - 3)] + "..."
+        return compact
+
     @classmethod
     def build_super_prompt(
         cls,

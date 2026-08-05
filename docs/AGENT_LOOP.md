@@ -1,6 +1,6 @@
 # NEXUS Unified Cognitive Loop
 
-The `NexusLoop` (`orchestrators/loop.py`) is the NEXUS runtime harness. The TUI/GUI backend, standalone server, Rich shell, gateways, and hive tools all enter this contract. It coordinates request-scoped provider selection, context, permissions, command risk scoring, sandbox routing, tool execution, verification, memory persistence, cancellation, and canonical work events.
+The V5 `NexusLoop` (`orchestrators/v5/core.py`) is the NEXUS runtime harness. The TUI/GUI backend, standalone server, Rich shell, gateways, and hive tools all enter this contract. It coordinates request-scoped provider selection, context, permissions, command risk scoring, sandbox routing, tool execution, verification, memory persistence, cancellation, and canonical work events.
 
 ---
 

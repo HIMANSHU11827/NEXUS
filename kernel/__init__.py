@@ -1,4 +1,23 @@
-"""NEXUS kernel: shared runtime services for tools, providers, memory, and telemetry."""
+"""NEXUS kernel: shared runtime services for tools, providers, memory, and telemetry.
+
+Redesigned bootstrap:
+  * Thread-safe singleton (``get_nexus_kernel()``) with lazy-loaded subsystems.
+  * Each lazy subsystem loads behind its own try/except — a failure degrades to
+    a :class:`FailedSubsystem` placeholder (``loaded=False``, records ``error``)
+    instead of crashing ``get_nexus_kernel()``.
+  * ``kernel.health_check()`` reports per-subsystem ``{name, loaded, ok, error,
+    latency_ms}`` and never raises.
+  * Declared dependency ordering (``after`` refs): a subsystem whose dependency
+    failed is skipped with a recorded reason instead of raising.
+  * Memoized lazy properties with first-access latency tracking; nothing is
+    pre-loaded until accessed.
+  * ``kernel.reset()`` drops the cached singleton cleanly;
+    ``kernel.reload(reason=...)`` drops cached instances so loaders re-run and
+    records the reason.
+  * ``kernel.get_component_stages()`` maps loaded subsystems to ``LifecycleStage``
+    names by importing the lifecycle constants read-only (degrades to a minimal
+    dict if lifecycle is unavailable). Lifecycle is NOT wired into the kernel.
+"""
 
 import glob
 import json
@@ -7,7 +26,7 @@ import os
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import psutil
 from dotenv import load_dotenv
@@ -23,17 +42,128 @@ if os.path.isfile(_env_path):
 _requests: Any = import_requests()
 logger = logging.getLogger("NEXUS_KERNEL")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Soft-degrade primitives
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _Missing:
+    """Singleton sentinel returned when a FailedSubsystem attribute is touched.
+
+    Callable, iterable, and falsy, so attribute chains degrade gracefully
+    instead of raising. Anything seriously sensitive (dunders) still raises
+    AttributeError to keep Python internals safe.
+    """
+
+    def __new__(cls):
+        if getattr(cls, "_instance", None) is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __call__(self, *args: Any, **kwargs: Any) -> "_Missing":
+        return self
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __iter__(self):
+        return iter(())
+
+    def __len__(self) -> int:
+        return 0
+
+    def __eq__(self, other: Any) -> bool:
+        return other is self
+
+    def __hash__(self) -> int:
+        return hash("_Missing")
+
+    def __getattr__(self, item: str) -> "_Missing":
+        if item.startswith("__"):
+            raise AttributeError(item)
+        return self
+
+    def __repr__(self) -> str:
+        return "<missing>"
+
+
+_MISSING = _Missing()
+
+
+class FailedSubsystem:
+    """Placeholder for a subsystem that could not be loaded.
+
+    Carries the failure/skip reason and load latency so callers and
+    ``health_check()`` can diagnose the fault. Attribute and method access
+    soft-degrades to the ``_MISSING`` sentinel rather than raising, so one sick
+    subsystem can never take the whole kernel down.
+    """
+
+    def __init__(self,
+                 name: str,
+                 error: Optional[BaseException] = None,
+                 reason: Optional[str] = None,
+                 latency_ms: Optional[float] = None) -> None:
+        self.name = name
+        self.error = error
+        self.reason = reason
+        self.latency_ms = latency_ms
+        self.loaded = False
+        self.ok = False
+        self.skipped = reason is not None
+
+    @property
+    def msg(self) -> str:
+        if self.error is not None:
+            return f"{type(self.error).__name__}: {self.error}"
+        return self.reason or "unknown failure"
+
+    def __getattr__(self, item: str) -> Any:
+        if item.startswith("__"):
+            raise AttributeError(item)
+        return _MISSING
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return f"<FailedSubsystem name={self.name!r} {self.msg!r}>"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Subsystem registry — registration order is load order.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Each entry: {"loader": callable(self) -> instance, "after": tuple of names
+# that must load first (dependency ordering)}.
+_SUBSYSTEMS: Dict[str, Dict[str, Any]] = {}
+
+
+def _register(name: str, after: Tuple[str, ...] = ()) -> Callable:
+    """Register a subsystem loader with optional dependency refs."""
+    def deco(fn: Callable) -> Callable:
+        _SUBSYSTEMS[name] = {"loader": fn, "after": tuple(after)}
+        return fn
+    return deco
+
+
 class NexusKernel(ThreadSafeSingleton):
     """
     Shared core runtime.
     Lazily owns configuration, provider routing, tools, RAG, memory, and telemetry.
     """
 
+    # Degraded stage names used when the lifecycle package is unavailable.
+    _MINIMAL_STAGES: Dict[str, str] = {
+        "CREATED": "created", "READY": "ready", "RUNNING": "running",
+        "FAILED": "failed", "QUARANTINED": "quarantined",
+    }
+
     def __init__(self, root_dir: Optional[str] = None) -> None:
         if getattr(self, "_initialized", False):
             return
         self._initialized = True
-        
+
         # ── 1. Path Initialization ──
         _curr = os.path.dirname(os.path.abspath(__file__))
         self.root = root_dir if root_dir else os.path.dirname(_curr)
@@ -46,201 +176,278 @@ class NexusKernel(ThreadSafeSingleton):
         self.token_usage = 0
         self.model_mesh: Dict[str, List[str]] = {}
         self._state_path = os.path.join(self.workspace, "kernel_state.json")
-        
+
         # ── 3. Private Cache for Lazy Loading ──
         self._instances: Dict[str, Any] = {}
         self._lock = threading.RLock()
+        self._load_latency_ms: Dict[str, float] = {}
 
-        # ── 4. Boot Sequence ──
+        # ── 4. Reload & Lifecycle Bookkeeping ──
+        self._reload_reason: Optional[str] = None
+        self._reload_history: List[Dict[str, Any]] = []
+        self._lifecycle_stage_cache: Optional[Dict[str, str]] = None
+
+        # ── 5. Boot Sequence ──
         logger.info(f"--- NEXUS KERNEL active (ID: {s(self.kernel_id, 4)}) ---")
         self._restore_state()
 
-    def _get_or_init(self, key: str, class_factory: Any) -> Any:
-        with self._lock:
-            if key not in self._instances:
-                logger.info(f"[*] Lazy-loading module: {key}...")
-                self._instances[key] = class_factory()
-            return self._instances[key]
+    # ── Subsystem Loaders ────────────────────────────────────────────────────
+    # Registered in load order. Each loader runs behind its own try/except
+    # inside _component(): import errors AND constructor failures both degrade
+    # to a FailedSubsystem placeholder instead of crashing the kernel.
 
-    @property
+    @_register("config")
     def config(self):
-        try:
-            from config.config_loader import NexusConfigLoader
-        except ImportError:
-            logger.warning("Subsystem 'config' not available")
-            return {}
-        return self._get_or_init("config", NexusConfigLoader)
+        from config.config_loader import NexusConfigLoader
+        return NexusConfigLoader()
 
-    @property
+    @_register("moe")
     def moe(self):
-        try:
-            from intelligence.moe_router import NexusMoERouter
-        except ImportError:
-            logger.warning("Subsystem 'moe' not available")
-            return {}
-        return self._get_or_init("moe", NexusMoERouter)
+        from intelligence.moe_router import NexusMoERouter
+        return NexusMoERouter()
 
-    @property
+    @_register("moa", after=("moe",))
     def moa(self):
-        try:
-            from intelligence.moa import MixtureOfArchitects
-        except ImportError:
-            logger.warning("Subsystem 'moa' not available")
-            return {}
-        return self._get_or_init("moa", lambda: MixtureOfArchitects(self.moe.base_router))
+        from intelligence.moa import MixtureOfArchitects
+        return MixtureOfArchitects(self.moe.base_router)
 
-    @property
+    @_register("nerve")
     def nerve(self):
-        try:
-            from neural.nerve_center import NexusNerveCenter
-        except ImportError:
-            logger.warning("Subsystem 'nerve' not available")
-            return {}
-        return self._get_or_init("nerve", lambda: NexusNerveCenter(self.root))
+        from neural.nerve_center import NexusNerveCenter
+        return NexusNerveCenter(self.root)
 
-    @property
+    @_register("omni")
     def omni(self):
-        try:
-            from evolution.omni_kernel import OmniEvolutionKernel
-        except ImportError:
-            logger.warning("Subsystem 'omni' not available")
-            return {}
-        return self._get_or_init("omni", lambda: OmniEvolutionKernel(self.root))
+        from evolution.omni_kernel import OmniEvolutionKernel
+        return OmniEvolutionKernel(self.root)
 
-    @property
+    @_register("hyper")
     def hyper(self):
-        try:
-            from evolution.hyper_kernel import HyperKernel
-        except ImportError:
-            logger.warning("Subsystem 'hyper' not available")
-            return {}
-        return self._get_or_init("hyper", lambda: HyperKernel(self.root))
+        from evolution.hyper_kernel import HyperKernel
+        return HyperKernel(self.root)
 
-    @property
+    @_register("researcher")
     def researcher(self):
-        try:
-            from evolution.researcher import NexusResearcher
-        except ImportError:
-            logger.warning("Subsystem 'researcher' not available")
-            return {}
-        return self._get_or_init("researcher", lambda: NexusResearcher(self.root))
+        from evolution.researcher import NexusResearcher
+        return NexusResearcher(self.root)
 
-    @property
+    @_register("persistence")
     def persistence(self):
-        try:
-            from context.persistence import NexusFilePersistence
-        except ImportError:
-            logger.warning("Subsystem 'persistence' not available")
-            return {}
-        return self._get_or_init("persistence", lambda: NexusFilePersistence(self.root))
+        from context.persistence import NexusFilePersistence
+        return NexusFilePersistence(self.root)
 
-    @property
+    @_register("hal")
     def hal(self):
-        try:
-            from hardware.manager import NexusHardwareManager
-        except ImportError:
-            logger.warning("Subsystem 'hal' not available")
-            return {}
-        return self._get_or_init("hal", NexusHardwareManager)
+        from hardware.manager import NexusHardwareManager
+        return NexusHardwareManager()
 
-    @property
+    @_register("horizons")
     def horizons(self):
-        try:
-            from evolution.horizons import StrategicHorizons
-        except ImportError:
-            logger.warning("Subsystem 'horizons' not available")
-            return {}
-        return self._get_or_init("horizons", lambda: StrategicHorizons(self.root))
+        from evolution.horizons import StrategicHorizons
+        return StrategicHorizons(self.root)
 
-    @property
+    @_register("local_brain")
     def local_brain(self):
-        try:
-            from intelligence.local_brain import NexusLocalBrain
-        except ImportError:
-            logger.warning("Subsystem 'local_brain' not available")
-            return {}
-        return self._get_or_init("local_brain", lambda: NexusLocalBrain(self.root))
+        from intelligence.local_brain import NexusLocalBrain
+        return NexusLocalBrain(self.root)
 
-    @property
+    @_register("trainer")
     def trainer(self):
-        try:
-            from neural.trainer import NexusTrainer
-        except ImportError:
-            logger.warning("Subsystem 'trainer' not available")
-            return {}
-        return self._get_or_init("trainer", lambda: NexusTrainer(self.root))
+        from neural.trainer import NexusTrainer
+        return NexusTrainer(self.root)
 
-    @property
+    @_register("indexer")
     def indexer(self):
-        try:
-            from indexer import NexusSemanticIndexer
-        except ImportError:
-            logger.warning("Subsystem 'indexer' not available")
-            return {}
-        return self._get_or_init("indexer", lambda: NexusSemanticIndexer(self.root))
+        from indexer import NexusSemanticIndexer
+        return NexusSemanticIndexer(self.root)
 
-    @property
+    @_register("intent")
     def intent(self):
-        try:
-            from evolution.intent.scripts.engine import NexusIntentEngine
-        except ImportError:
-            logger.warning("Subsystem 'intent' not available")
-            return {}
-        return self._get_or_init("intent", NexusIntentEngine)
+        from evolution.intent.scripts.engine import NexusIntentEngine
+        return NexusIntentEngine()
 
-    @property
+    @_register("prover")
     def prover(self):
-        try:
-            from safety.prover import LogicProver
-        except ImportError:
-            logger.warning("Subsystem 'prover' not available")
-            return {}
-        return self._get_or_init("prover", lambda: LogicProver(strictness=0.9))
+        from safety.prover import LogicProver
+        return LogicProver(strictness=0.9)
 
-    @property
+    @_register("tools")
     def tools(self):
-        try:
-            from tools.nexus_tools.registry import ToolRegistry
-        except ImportError:
-            logger.warning("Subsystem 'tools' not available")
-            return {}
-        return self._get_or_init("tools", lambda: ToolRegistry(self.root))
+        from tools.nexus_tools.registry import ToolRegistry
+        return ToolRegistry(self.root)
 
-    @property
+    @_register("telemetry")
     def telemetry(self):
-        try:
-            from kernel.telemetry import NexusTelemetryDB
-        except ImportError:
-            logger.warning("Subsystem 'telemetry' not available")
-            return {}
-        return self._get_or_init("telemetry", NexusTelemetryDB)
+        from kernel.telemetry import NexusTelemetryDB
+        return NexusTelemetryDB()
 
-    @property
+    @_register("rag")
     def rag(self):
-        try:
-            from rag.engine import NexusAtlasRAG
-        except ImportError:
-            logger.warning("Subsystem 'rag' not available")
-            return {}
-        return self._get_or_init("rag", NexusAtlasRAG)
+        from rag.engine import NexusAtlasRAG
+        return NexusAtlasRAG()
 
-    @property
+    @_register("hive")
     def hive(self):
-        try:
-            from hive.engine import NexusHiveEngine
-        except ImportError:
-            logger.warning("Subsystem 'hive' not available")
-            return {}
-        return self._get_or_init("hive", lambda: NexusHiveEngine(self.root))
+        from hive.engine import NexusHiveEngine
+        return NexusHiveEngine(self.root)
 
-    @property
+    @_register("plugins")
     def plugins(self):
+        from plugins.manager import PluginManager
+        return PluginManager(self.root)
+
+    # ── Lazy loading core ────────────────────────────────────────────────────
+
+    def _component(self, name: str, loader: Optional[Callable[[], Any]] = None) -> Any:
+        """Memoized, fault-isolated lazy loader for a subsystem.
+
+        Returns the cached instance when present (memoization — subsystems are
+        never double-loaded). On first access it resolves ``after`` dependency
+        refs in declared order; a dependency that failed skips this subsystem
+        with a recorded reason. Any import or construction error degrades to a
+        :class:`FailedSubsystem` placeholder instead of raising.
+        """
+        with self._lock:
+            cached = self._instances.get(name)
+            if cached is not None:
+                return cached
+
+            spec = _SUBSYSTEMS.get(name, {})
+            effective_loader = loader if loader is not None else spec.get("loader")
+
+            if loader is None:
+                # Dependency ordering: prerequisites must load first.
+                for dep in spec.get("after", ()):
+                    dep_instance = self._component(dep)
+                    if isinstance(dep_instance, FailedSubsystem):
+                        placeholder = FailedSubsystem(name, reason=f"dependency '{dep}' failed")
+                        self._instances[name] = placeholder
+                        logger.warning("Subsystem '%s' skipped: dependency '%s' failed", name, dep)
+                        return placeholder
+
+            if effective_loader is None:
+                placeholder = FailedSubsystem(
+                    name, error=RuntimeError(f"no loader registered for subsystem '{name}'"))
+                self._instances[name] = placeholder
+                return placeholder
+
+            started = time.perf_counter()
+            try:
+                # Registry loaders take self; explicit _get_or_init() loaders are
+                # zero-argument closures/classes (kept for backward compat).
+                instance = effective_loader(self) if loader is None else effective_loader()
+            except Exception as exc:  # noqa: BLE001 — hard isolation boundary
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
+                placeholder = FailedSubsystem(name, error=exc, latency_ms=elapsed_ms)
+                self._instances[name] = placeholder
+                logger.warning("Subsystem '%s' failed to load (%.1f ms): %s: %s",
+                               name, elapsed_ms, type(exc).__name__, exc)
+                return placeholder
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            self._load_latency_ms[name] = elapsed_ms
+            self._instances[name] = instance
+            logger.info("[*] Lazy-loaded module: %s (%.1f ms)", name, elapsed_ms)
+            return instance
+
+    def _get_or_init(self, key: str, class_factory: Any) -> Any:
+        """Backward-compatible memoized lazy accessor with fault isolation."""
+        return self._component(key, loader=class_factory)
+
+    # ── Health / lifecycle / control ─────────────────────────────────────────
+
+    def health_check(self) -> Dict[str, Dict[str, Any]]:
+        """Per-subsystem health report. Never raises.
+
+        Ensures every registered subsystem is (re)loaded, reporting one entry
+        per subsystem: ``{name, loaded, ok, error, latency_ms}``.
+        """
+        report: Dict[str, Dict[str, Any]] = {}
+        for name in list(_SUBSYSTEMS):
+            try:
+                instance = self._component(name)
+            except Exception as exc:  # belt-and-braces: never raise
+                report[name] = {
+                    "name": name, "loaded": False, "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}", "latency_ms": None,
+                }
+                continue
+            if isinstance(instance, FailedSubsystem):
+                report[name] = {
+                    "name": name, "loaded": False, "ok": False,
+                    "error": instance.msg, "latency_ms": instance.latency_ms,
+                }
+            else:
+                report[name] = {
+                    "name": name, "loaded": True, "ok": True,
+                    "error": None, "latency_ms": self._load_latency_ms.get(name),
+                }
+        return report
+
+    def reload(self, reason: str = "manual", eager: bool = False) -> Dict[str, Any]:
+        """Drop cached subsystem instances so loaders re-run (lazy by default).
+
+        Records the reload reason (plus a timestamped history entry). With
+        ``eager=True``, forces every subsystem to reload immediately and
+        returns the resulting health report.
+        """
+        with self._lock:
+            dropped = len(self._instances)
+            self._instances.clear()
+            self._load_latency_ms = {}
+            self._reload_reason = reason
+            self._reload_history.append({
+                "reason": reason, "timestamp": time.time(), "dropped": dropped,
+            })
+        logger.info("[KERNEL]: Reloading subsystem cache (reason=%s, dropped=%d)", reason, dropped)
+        if eager:
+            report = self.health_check()
+            ok_count = sum(1 for value in report.values() if value["ok"])
+            return {"reason": reason, "dropped": dropped, "loaded": ok_count, "report": report}
+        return {"reason": reason, "dropped": dropped}
+
+    @classmethod
+    def reset(cls) -> bool:
+        """Drop the cached singleton cleanly (module global + class cache)."""
+        global _kernel
+        _kernel = None
+        cls._reset_instance()
+        logger.info("[KERNEL]: Singleton reset — next get_nexus_kernel() builds a fresh instance")
+        return True
+
+    def get_component_stages(self) -> Dict[str, str]:
+        """Map every subsystem to a ``LifecycleStage`` name (read-only).
+
+        Loaded -> ``running``, failed -> ``failed``, dependency-skipped ->
+        ``quarantined``, not-yet-accessed -> ``created``. Imports the lifecycle
+        constants lazily and degrades to a minimal map if lifecycle is
+        unavailable. Lifecycle is NOT wired into the kernel.
+        """
+        stages = self._lifecycle_stage_names()
+        out: Dict[str, str] = {}
+        with self._lock:
+            for name in _SUBSYSTEMS:
+                inst = self._instances.get(name)
+                if isinstance(inst, FailedSubsystem):
+                    out[name] = stages.get("QUARANTINED" if inst.skipped else "FAILED", "failed")
+                elif inst is not None:
+                    out[name] = stages.get("RUNNING", "running")
+                else:
+                    out[name] = stages.get("CREATED", "created")
+        return out
+
+    def _lifecycle_stage_names(self) -> Dict[str, str]:
+        cache = self._lifecycle_stage_cache
+        if cache is not None:
+            return cache
         try:
-            from plugins.manager import PluginManager
-        except ImportError:
-            logger.warning("Subsystem 'plugins' not available")
-            return {}
-        return self._get_or_init("plugins", lambda: PluginManager(self.root))
+            from lifecycle.supervisor import LifecycleStage
+            cache = {stage.name: stage.value for stage in LifecycleStage}
+        except Exception:  # lifecycle optional — degrade gracefully
+            cache = dict(self._MINIMAL_STAGES)
+        self._lifecycle_stage_cache = cache
+        return cache
+
+    # ── State persistence ────────────────────────────────────────────────────
 
     def _save_state(self) -> None:
         """Atomically saves the kernel state to disk."""
@@ -326,8 +533,27 @@ class NexusKernel(ThreadSafeSingleton):
         except (AttributeError, TypeError):
             logger.warning("kernel/__init__.py:326 suppressed error", exc_info=True)
 
+
+# Build the public lazy properties from the registered loaders. Each property
+# defers to _component(), which provides memoization + fault isolation.
+for _name in list(_SUBSYSTEMS):
+    def _make_subsystem_property(name: str, loader_fn: Callable) -> property:
+        @property
+        def subsystem(self) -> Any:  # noqa: N805 — bound property getter
+            return self._component(name)
+        subsystem.__name__ = name
+        doc = getattr(loader_fn, "__doc__", None)
+        subsystem.__doc__ = doc or f"Lazily-loaded, fault-isolated subsystem: '{name}'."
+        return subsystem
+
+    setattr(NexusKernel, _name, _make_subsystem_property(_name, _SUBSYSTEMS[_name]["loader"]))
+
+del _make_subsystem_property, _name
+
+
 # --- GLOBAL WRAPPER (For Singleton Access) ---
 _kernel = None
+
 
 def get_nexus_kernel(root_dir: Optional[str] = None) -> NexusKernel:
     global _kernel

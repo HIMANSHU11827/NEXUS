@@ -1,40 +1,13 @@
-# NEXUS AI Skills Module
+# Nexus local skills
 
-Skills are `.md` files stored in the `skills/` directory with YAML frontmatter:
+This directory is the self-contained skill source used by Nexus discovery.
+Hermes Agent's public skill tree is vendored here as local prompt and workflow
+knowledge; Nexus does not import Hermes at runtime or fetch skills from the
+network. Discovery walks nested directories and loads only `SKILL.md` records.
 
-```yaml
----
-id: skill-name
-name: Skill Name
-description: What this skill does
-category: tool
----
-Skill prompt content here...
-```
+The previous Nexus-only skills are preserved in
+`workspace/legacy-skills-backup-20260804` so the migration is reversible.
 
-## Usage
-
-```python
-from skills import NexusSkillMaster
-
-# Initialize (singleton)
-master = NexusSkillMaster("/path/to/project")
-
-# List all loaded skills
-skills = master.list_skills()
-
-# Get concatenated active prompt
-prompt = master.get_active_prompt()
-
-# Create a new skill
-result = master.craft_skill("My Skill", "You are an expert at...")
-
-# Reload skills from disk
-master.load_skill("my_skill")
-
-# Delete a skill
-master.delete_skill("my_skill")
-
-# Full deep scan
-scan = master.deep_scan()
-```
+Skills describe capabilities and workflows. They do not grant permissions by
+themselves: execution still goes through Nexus's registered tools, sandbox,
+safety checks, and MCP trust boundaries.

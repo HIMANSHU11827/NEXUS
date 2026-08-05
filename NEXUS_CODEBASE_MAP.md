@@ -20,7 +20,7 @@
 | 7 | `intelligence/` | MoE Router + NATE 5-Layer Engine | Beta |
 | 8 | `rag/` | BM25 + SimHash + Atlas Deep Indexing | Beta |
 | 9 | `reasoning/` | HyperReasoningEngine | Beta |
-| 10 | `tools/` | 19 Registered Tools (BaseTool + .jsnol) | Stable |
+| 10 | `tools/` | Registry-discovered tools (BaseTool + .jsnol) | Stable |
 | 11 | `hive/` | Sub-Agent Engine | Beta |
 | 12 | `skills/` | Skill Registry (SKILL.md) | Stable |
 | 13 | `plugins/` | Plugin System + Trust Model | Beta |
@@ -82,7 +82,7 @@
 ### Python Files
 | File | Description |
 |------|-------------|
-| `orchestrators/loop.py` | **NexusLoop** — 3,555-line sovereign loop. Permission policies (AUTO, AI_DECIDE, ASK_ALL, CHECKLIST), ToolCall, HookRegistry, `stream_run()`, tool grounding (8 extraction strategies), memory management, risk scoring, self-improvement hooks, evolution integration |
+| `orchestrators/v5/core.py` | **NexusLoop V5** — canonical sovereign loop. Direct model/tool turns, registry discovery, permission policies, memory management, risk scoring, Hive/MCP integration, verification, and canonical work events |
 | `orchestrators/__init__.py` | Package docstring |
 
 ### Notes
@@ -147,7 +147,7 @@
 
 ## 5. `tools/` — Tool Registry & Tool Implementations
 
-**Purpose**: Tool discovery via `.jsnol` metadata files. 19 registered tools with BaseTool abstract class and ToolRegistry.
+**Purpose**: Runtime tool discovery via `.jsnol` metadata, active local skills, and MCP adapters. The model receives the current executable registry through `ToolRegistry`.
 
 ### Core Registry
 | File | Description |

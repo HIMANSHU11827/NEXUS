@@ -15,7 +15,7 @@ A thread-safe singleton managing lazy-loading for all core services:
 *   **RAG Engine:** Long-term vector memory (BM25 + hybrid vector).
 *   **Tool Registry:** Hardened access to current tools: bash, code_search, creating, deep_research, deleting, git_ops, hive, knowledge, memory, modifying, planning, reading, reasoning, shortcuts, system, task, terminal, test_runner, web_search.
 
-### Unified Cognitive Loop (`orchestrators/loop.py`)
+### Unified Cognitive Loop (`orchestrators/v5/core.py`)
 The current `NexusLoop` uses a unified model/tool runtime rather than the removed `SCAState` enum. It grounds prompt context, classifies whether real tools are required, streams provider output, extracts tool calls, applies permission/risk/sandbox checks, executes read tools in parallel and write tools sequentially, verifies outcomes, persists session memory, and emits canonical work events throughout.
 
 ### Evolution & Version System (`evolution/` package)

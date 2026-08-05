@@ -1,12 +1,16 @@
-import { Send, Copy, Check, CheckCircle, CheckCircle2, StopCircle, Loader2, Globe, Terminal, FileEdit, Search, Code, XCircle, ChevronDown, ChevronRight, ExternalLink, Mic, MicOff, Volume2, VolumeX, Cpu, ShieldCheck, MonitorUp, MonitorOff, Headphones, FolderOpen, Plus, GitBranch } from 'lucide-react'
+import { Send, Copy, Check, CheckCircle, CheckCircle2, StopCircle, Globe, Terminal, FileEdit, Search, Code, Users, XCircle, ChevronDown, ChevronRight, ExternalLink, Mic, MicOff, Volume2, VolumeX, Cpu, ShieldCheck, MonitorUp, MonitorOff, Headphones, FolderOpen, Plus, GitBranch } from 'lucide-react'
 import { createElement, useState, useRef, useEffect, useCallback, type ReactNode } from 'react'
 import { useStore, type Message } from '../lib/store'
 import { api } from '../lib/api'
 import ApprovalPanel from './ApprovalPanel'
 import BackgroundTasksPanel from './BackgroundTasksPanel'
+import HivePanel from './HivePanel'
+import QueuePanel from './QueuePanel'
+import ClaudeAnimation from './ClaudeAnimation'
 import { useStreamChat, type TimelineEvent } from '../hooks/useStreamChat'
 import { formatTaskDuration, taskDurationMs, type TaskTiming } from '../lib/taskDuration'
 import mascot from '../assets/nexus-mascot-brand.png'
+import MonacoEditor from '@monaco-editor/react'
 
 type BrowserSpeechRecognition = {
   continuous: boolean
@@ -21,12 +25,23 @@ type BrowserSpeechRecognition = {
 }
 
 type BrowserSpeechRecognitionConstructor = new () => BrowserSpeechRecognition
-type SavedModel = { model: string; provider: string; label: string }
+type SavedModel = { model: string; provider: string; profile?: string; alias?: string; label: string }
 type ModelPreferences = { thinking: boolean; effort: string }
 type Attachment = { name: string; path: string }
 type QueuedTask = { id: string; prompt: string; attachments: Attachment[] }
 
 const defaultModelPreferences: ModelPreferences = { thinking: false, effort: 'medium' }
+
+function Spinner({ size = 14, className = '' }: { size?: number; className?: string }) {
+  return (
+    <span className={`inline-block animate-spin ${className}`} style={{ width: size, height: size }}>
+      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeDasharray="31.416" strokeDashoffset="25.133" className="opacity-25" />
+        <path d="M12 2C6.477 2 2 6.477 2 12" stroke="currentColor" strokeWidth="3" strokeLinecap="round" className="opacity-75" />
+      </svg>
+    </span>
+  )
+}
 
 declare global {
   interface Window {
@@ -80,6 +95,7 @@ function extractCodeBlocks(text: string) {
   if (last < text.length) parts.push({ type: 'text', content: text.slice(last) })
   return parts
 }
+
 
 /** Render the small, safe Markdown subset returned by providers without injecting HTML. */
 function InlineMarkdown({ text }: { text: string }) {
@@ -245,6 +261,40 @@ function MarkdownText({ text }: { text: string }) {
 
 function CodeBlock({ code, language }: { code: string; language?: string }) {
   const [copied, setCopied] = useState(false)
+  const languageMap: Record<string, string> = {
+    ts: 'typescript',
+    tsx: 'typescript',
+    js: 'javascript',
+    jsx: 'javascript',
+    py: 'python',
+    rs: 'rust',
+    go: 'go',
+    css: 'css',
+    scss: 'scss',
+    html: 'html',
+    json: 'json',
+    toml: 'toml',
+    yml: 'yaml',
+    yaml: 'yaml',
+    md: 'markdown',
+    xml: 'xml',
+    txt: 'plaintext',
+    sh: 'shell',
+    bash: 'shell',
+    zsh: 'shell',
+    ps1: 'powershell',
+    c: 'c',
+    cpp: 'cpp',
+    h: 'c',
+    hpp: 'cpp',
+    java: 'java',
+    kt: 'kotlin',
+    swift: 'swift',
+    php: 'php',
+    rb: 'ruby',
+    sql: 'sql',
+  }
+  const detectedLanguage = languageMap[language || ''] || language || 'plaintext'
   return (
     <div className="my-2 rounded-lg overflow-hidden border border-border bg-secondary/50 not-prose">
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-border bg-secondary/30">
@@ -257,7 +307,28 @@ function CodeBlock({ code, language }: { code: string; language?: string }) {
           <span>{copied ? 'Copied' : 'Copy'}</span>
         </button>
       </div>
-      <pre className="p-3 overflow-x-auto text-xs leading-relaxed text-foreground/80"><code>{code}</code></pre>
+      <div className="max-h-96 overflow-auto">
+        <MonacoEditor
+          height="300px"
+          language={detectedLanguage}
+          value={code}
+          theme="vs"
+          options={{
+            readOnly: true,
+            minimap: { enabled: false },
+            fontSize: 12,
+            lineNumbers: 'on',
+            scrollBeyondLastLine: false,
+            automaticLayout: true,
+            tabSize: 2,
+            wordWrap: 'on',
+            folding: true,
+            renderWhitespace: 'selection',
+            lineHeight: 18,
+            padding: { top: 12, bottom: 12 },
+          }}
+        />
+      </div>
     </div>
   )
 }
@@ -374,7 +445,7 @@ function MessageEntry({ msg }: { msg: Message }) {
                   title={restoreBlocked ? 'This checkpoint is no longer available.' : 'Restore the files changed by this run.'}
                   className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground transition hover:text-foreground disabled:opacity-50"
                 >
-                  {restoring ? <Loader2 size={14} className="animate-spin" /> : <GitBranch size={14} />}
+                  {restoring ? <Spinner size={14} className="text-muted-foreground" /> : <GitBranch size={14} />}
                   <span>{restoring ? 'Restoring…' : 'Restore Checkpoint'}</span>
                 </button>
               ) : (
@@ -395,7 +466,7 @@ function MessageEntry({ msg }: { msg: Message }) {
                 <div className="mt-2 flex justify-end gap-2">
                   <button type="button" onClick={() => setConfirmOpen(false)} disabled={restoring} className="rounded px-3 py-1 text-xs text-muted-foreground transition hover:bg-secondary disabled:opacity-50">Cancel</button>
                   <button type="button" onClick={confirmRestore} disabled={restoring} className="flex items-center gap-1.5 rounded bg-foreground px-3 py-1 text-xs font-medium text-background transition hover:opacity-80 disabled:opacity-50">
-                    {restoring && <Loader2 size={12} className="animate-spin" />}
+                    {restoring && <Spinner size={12} className="text-background" />}
                     <span>{restoring ? 'Restoring…' : 'Confirm Restore'}</span>
                   </button>
                 </div>
@@ -414,6 +485,7 @@ function eventIcon(type: string) {
   if (type.startsWith('file')) return FileEdit
   if (type.startsWith('search') || type.startsWith('web') || type.startsWith('browse') || type.startsWith('browser')) return Search
   if (type.startsWith('tool') || type.startsWith('mcp')) return Globe
+  if (type.startsWith('hive') || type.startsWith('subagent')) return Users
   if (type.startsWith('code') || type.startsWith('generate')) return Code
   return Code
 }
@@ -437,6 +509,9 @@ function toolLabel(event: TimelineEvent): string {
   if (event.type.startsWith('git')) return 'Git'
   if (event.type.startsWith('test')) return 'Test'
   if (event.type.startsWith('plan')) return 'Plan'
+  if (event.stage === 'planning') return 'Plan'
+  if (event.kind === 'mcp') return 'MCP'
+  if (event.kind === 'hive' || event.kind === 'subagent') return 'Hive'
   if (event.type.startsWith('tool')) return event.tool || 'Tool'
   if (event.type.startsWith('mcp')) return 'MCP'
   if (event.type.startsWith('hive') || event.type.startsWith('subagent')) return event.subagent || 'Sub-agent'
@@ -557,7 +632,28 @@ function ActivityCode({ value }: { value: string }) {
   return (
     <div className="border-t border-border/50 px-2 py-2">
       {output.truncated && <p className="mb-1 text-[10px] text-muted-foreground/60">Showing the last 12,000 characters emitted by this activity.</p>}
-      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded bg-background/70 p-2 font-mono text-[11px] leading-relaxed text-foreground/80">{output.value}</pre>
+      <div className="max-h-80 overflow-auto rounded bg-background/70">
+        <MonacoEditor
+          height="320px"
+          language="plaintext"
+          value={output.value}
+          theme="vs"
+          options={{
+            readOnly: true,
+            minimap: { enabled: false },
+            fontSize: 11,
+            lineNumbers: 'on',
+            scrollBeyondLastLine: false,
+            automaticLayout: true,
+            tabSize: 2,
+            wordWrap: 'on',
+            folding: true,
+            renderWhitespace: 'selection',
+            lineHeight: 16,
+            padding: { top: 8, bottom: 8 },
+          }}
+        />
+      </div>
     </div>
   )
 }
@@ -608,11 +704,57 @@ function EventDetails({ event }: { event: TimelineEvent }) {
   if (isTerminalEvent(event)) {
     return (
       <div className="border-t border-border/50 px-2 py-2 text-[11px] text-foreground/75">
-        {event.command && <pre className="mb-2 overflow-auto whitespace-pre-wrap rounded bg-background/70 p-2 font-mono text-[11px] leading-relaxed">{event.command}</pre>}
+        {event.command && (
+          <div className="mb-2 max-h-32 overflow-auto rounded bg-background/70">
+            <MonacoEditor
+              height="120px"
+              language="shell"
+              value={event.command}
+              theme="vs"
+              options={{
+                readOnly: true,
+                minimap: { enabled: false },
+                fontSize: 11,
+                lineNumbers: 'off',
+                scrollBeyondLastLine: false,
+                automaticLayout: true,
+                tabSize: 2,
+                wordWrap: 'on',
+                folding: false,
+                renderWhitespace: 'selection',
+                lineHeight: 16,
+                padding: { top: 8, bottom: 8 },
+              }}
+            />
+          </div>
+        )}
         {event.cwd && <p className="mb-1 text-muted-foreground/70">Workspace: {event.cwd}</p>}
         {event.exitCode !== undefined && <p className="mb-1 text-muted-foreground/70">Exit code: {event.exitCode}</p>}
         {output && <ActivityCode value={output} />}
-        {event.error && !output && <pre className="mt-1 whitespace-pre-wrap rounded bg-destructive/5 p-2 font-mono text-destructive/80">{event.error}</pre>}
+        {event.error && !output && (
+          <div className="mt-1 max-h-32 overflow-auto rounded bg-destructive/5">
+            <MonacoEditor
+              height="120px"
+              language="plaintext"
+              value={event.error}
+              theme="vs"
+              options={{
+                readOnly: true,
+                minimap: { enabled: false },
+                fontSize: 11,
+                lineNumbers: 'off',
+                scrollBeyondLastLine: false,
+                automaticLayout: true,
+                tabSize: 2,
+                wordWrap: 'on',
+                folding: false,
+                renderWhitespace: 'selection',
+                lineHeight: 16,
+                padding: { top: 8, bottom: 8 },
+              }}
+            />
+          </div>
+        )}
       </div>
     )
   }
@@ -669,7 +811,7 @@ function EventDetails({ event }: { event: TimelineEvent }) {
   )
 }
 
-function LiveRunStatus({ events, onStop }: { events: TimelineEvent[]; onStop: () => void }) {
+function LiveRunStatus({ events }: { events: TimelineEvent[] }) {
   const startedAt = useRef(Date.now())
   const [elapsed, setElapsed] = useState(0)
   useEffect(() => {
@@ -688,19 +830,9 @@ function LiveRunStatus({ events, onStop }: { events: TimelineEvent[]; onStop: ()
 
   return (
     <div role="status" aria-live="polite" className="mb-2 flex items-center gap-2 text-xs font-semibold text-foreground/80">
-      <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/10">
-        <Loader2 size={14} className="animate-spin text-primary" aria-hidden="true" />
-      </span>
+      <ClaudeAnimation />
       <span>{label}</span>
       <span className="tabular-nums text-muted-foreground/70">· {formatDuration(elapsed)}</span>
-      <span className="flex items-center gap-0.5" aria-hidden="true">
-        <i className="h-1 w-1 rounded-full bg-primary animate-pulse" />
-        <i className="h-1 w-1 rounded-full bg-primary animate-pulse [animation-delay:150ms]" />
-        <i className="h-1 w-1 rounded-full bg-primary animate-pulse [animation-delay:300ms]" />
-      </span>
-      <button type="button" onClick={onStop} className="ml-1 rounded border border-border/70 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:border-destructive/40 hover:text-destructive">
-        Stop
-      </button>
     </div>
   )
 }
@@ -792,7 +924,7 @@ function ToolEventItem({ event, now }: { event: TimelineEvent; now: number }) {
       >
         <span className="shrink-0 text-muted-foreground/50">{hasDetails ? (expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />) : <span className="block size-3" />}</span>
         <span className="shrink-0" aria-label={statusLabel}>
-          {active ? <Loader2 size={12} className="animate-spin text-muted-foreground/60" />
+          {active ? <Spinner size={12} className="text-muted-foreground/60" />
             : isFailed ? <XCircle size={12} className="text-destructive/70" />
             : isDone ? <CheckCircle2 size={12} className="text-emerald-600/70" />
             : <Icon size={12} className="text-muted-foreground/55" />}
@@ -815,7 +947,7 @@ const EXTERNAL_PREFIXES = ['assistant.progress', 'plan.', 'tool.', 'command.', '
 // Public activity allowlist. An event whose canonical type is unknown is still
 // shown when the backend labelled it with one of these public work kinds, so a
 // real approval prompt, retry, or failure can never be silently dropped.
-export const PUBLIC_ACTIVITY_KINDS = ['file', 'command', 'search', 'browser', 'mcp', 'skill', 'plugin', 'hive', 'todo', 'approval', 'retry', 'error']
+const PUBLIC_ACTIVITY_KINDS = ['file', 'command', 'search', 'browser', 'mcp', 'skill', 'plugin', 'hive', 'todo', 'approval', 'retry', 'error']
 
 // Private grounding and internal self-diagnostics are never public evidence and
 // must never replay into the visible timeline.
@@ -854,9 +986,15 @@ function isExternalEvent(event: TimelineEvent): boolean {
   // lost simply because the backend provided a phase label.
   if (String(event.visibility || '').toLowerCase() === 'internal') return false
   if (isPrivateDiagnosticEvent(event)) return false
+  // Planning stage events are explicitly public backend evidence, even when
+  // canonicalization names them status.changed rather than plan.started.
+  if (String(event.stage || '').toLowerCase() === 'planning'
+    && String(event.visibility || '').toLowerCase() === 'public') return true
   if (isActionableEvent(event)) return true
   if (event.kind && PUBLIC_ACTIVITY_KINDS.includes(String(event.kind).toLowerCase())) return true
-  if (event.type.endsWith('.stdout') || event.type.endsWith('.stderr') || event.type.endsWith('.output') || event.type.endsWith('.result')) return false
+  // Output/result records are public evidence too.  The renderer can now
+  // display them as standalone cards when a producer omitted a parent
+  // lifecycle event, so never discard terminal or search output here.
   return EXTERNAL_PREFIXES.some(p => event.type.startsWith(p))
 }
 
@@ -878,7 +1016,8 @@ function deduplicateEvents(events: TimelineEvent[]): TimelineEvent[] {
       .replace('.completed', '')
       .replace('.failed', '')
       .replace('.cancelled', '')
-    const dedupKey = `${baseType}|${ev.tool || ev.skill || ev.subagent || ''}|${ev.command || ev.path || ev.query || ev.title || ''}`
+    const runIdentity = ev.runId || ev.parentId || 'runless'
+    const dedupKey = `${runIdentity}|${baseType}|${ev.tool || ev.skill || ev.subagent || ''}|${ev.command || ev.path || ev.query || ev.title || ev.id}`
     const existing = map.get(dedupKey)
     if (!existing || existing.status === 'running' || existing.status === 'pending') {
       if (!existing) {
@@ -951,27 +1090,28 @@ function EventActivity({ events }: { events: TimelineEvent[] }) {
 
 export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => void }) {
   const { addMessage, getActiveSession, activeSessionId, createSession, backendAvailable } = useStore()
-  const { content, events, thinkingText, isThinking, thinkingDone, isProcessing, error, send, cancel, reset, pendingApproval, respondApproval } = useStreamChat()
+  const { content, events, thinkingText, isThinking, thinkingDone, isProcessing, recoveredActivity, error, send, cancel, reset, pendingApproval, respondApproval } = useStreamChat(activeSessionId)
   const [input, setInput] = useState('')
-  const [isListening, setIsListening] = useState(false)
+  const [isMicListening, setIsMicListening] = useState(false)
+  const [isBackendListening, setIsBackendListening] = useState(false)
   const [speechEnabled, setSpeechEnabled] = useState(() => localStorage.getItem('nexus-speech-enabled') === 'true')
   const [speechError, setSpeechError] = useState('')
+  const [voiceStreamController, setVoiceStreamController] = useState<AbortController | null>(null)
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null)
   const [screenError, setScreenError] = useState('')
   const [voiceMode, setVoiceMode] = useState(false)
   const [savedModels, setSavedModels] = useState<SavedModel[]>([])
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('nexus-selected-model') || '')
+  const [modelError, setModelError] = useState('')
   const [permissionMode, setPermissionMode] = useState(() => localStorage.getItem('nexus-permission-mode') || 'auto')
-  const [sandboxTier, setSandboxTier] = useState(() => localStorage.getItem('nexus-sandbox-tier') || 'normal')
+  // Preserve an existing explicit choice; default new sessions to no sandbox.
+  const [sandboxTier, setSandboxTier] = useState(() => localStorage.getItem('nexus-sandbox-tier') || 'no_sandbox')
   const [sandboxRoot, setSandboxRoot] = useState(() => localStorage.getItem('nexus-sandbox-root') || '')
   const [sandboxError, setSandboxError] = useState('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [isUploading, setIsUploading] = useState(false)
   const [attachmentError, setAttachmentError] = useState('')
   const [queuedTasks, setQueuedTasks] = useState<QueuedTask[]>([])
-  const [queueExpanded, setQueueExpanded] = useState(false)
-  const [editingQueuedId, setEditingQueuedId] = useState<string | null>(null)
-  const [editingQueuedPrompt, setEditingQueuedPrompt] = useState('')
   const [showModelPicker, setShowModelPicker] = useState(false)
   const [modelSearch, setModelSearch] = useState('')
   const [modelPreferences, setModelPreferences] = useState<Record<string, ModelPreferences>>(() => {
@@ -1077,7 +1217,8 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
   }, [session?.messages.length, isProcessing, content])
 
   useEffect(() => {
-    if (hasStreamed.current && !isProcessing && content && activeSessionId && content !== lastSavedContent.current) {
+    if (hasStreamed.current && !isProcessing && activeSessionId
+      && (content !== lastSavedContent.current || events.length > 0)) {
       // Keep the safe, backend-sanitized thought marker with the completed
       // assistant turn so historical chats show the same activity cards as a
       // live run. The backend never sends private chain-of-thought here.
@@ -1094,7 +1235,7 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
           }]
         : events
       addMessage(activeSessionId, 'assistant', content, completedActivity)
-      speakResponse(content)
+      if (content) speakResponse(content)
       hasStreamed.current = false
       lastSavedContent.current = content
     }
@@ -1102,6 +1243,7 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
 
   useEffect(() => () => {
     recognitionRef.current?.abort()
+    voiceStreamController?.abort()
     if ('speechSynthesis' in window) window.speechSynthesis.cancel()
   }, [])
 
@@ -1114,10 +1256,18 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
   }, [screenStream])
 
   useEffect(() => {
-    api.savedModels().then(result => {
+    Promise.all([
+      api.savedModels(),
+      api.getModel().catch(() => ({ model: '', provider: '' })),
+    ]).then(([result, active]) => {
       const models = result.models || []
       setSavedModels(models)
       setSelectedModel(current => {
+        const activeModel = String(active.model || '').trim()
+        if (activeModel && models.some(item => item.model === activeModel)) {
+          localStorage.setItem('nexus-selected-model', activeModel)
+          return activeModel
+        }
         if (models.some(item => item.model === current)) return current
         const next = models[0]?.model || ''
         localStorage.setItem('nexus-selected-model', next)
@@ -1127,15 +1277,19 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
   }, [])
 
   const toggleListening = () => {
-    if (isListening) {
-      recognitionRef.current?.stop()
+    if (isMicListening) {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop()
+      }
       return
     }
+    
     const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!Recognition) {
       setSpeechError('Voice input is not supported in this browser.')
       return
     }
+    
     setSpeechError('')
     const recognition = new Recognition()
     recognition.continuous = true
@@ -1154,10 +1308,40 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
     recognition.onerror = (event) => {
       if (event.error !== 'aborted') setSpeechError(event.error === 'not-allowed' ? 'Microphone permission was denied.' : `Microphone error: ${event.error}`)
     }
-    recognition.onend = () => setIsListening(false)
+    recognition.onend = () => setIsMicListening(false)
     recognitionRef.current = recognition
     recognition.start()
-    setIsListening(true)
+    setIsMicListening(true)
+  }
+
+  const toggleBackendListening = async () => {
+    if (isBackendListening) {
+      voiceStreamController?.abort()
+      setVoiceStreamController(null)
+      setIsBackendListening(false)
+      return
+    }
+    
+    try {
+      setSpeechError('')
+      setIsBackendListening(true)
+      
+      const controller = api.voiceStream(
+        activeSessionId || 'default',
+        (text) => {
+          setInput(previous => `${previous}${previous.trim() ? ' ' : ''}${text.trim()}`)
+        },
+        (error) => {
+          setSpeechError(error)
+          setIsBackendListening(false)
+        }
+      )
+      
+      setVoiceStreamController(controller)
+    } catch (error) {
+      setSpeechError(error instanceof Error ? error.message : 'Failed to start voice stream')
+      setIsBackendListening(false)
+    }
   }
 
   const toggleSpeech = () => {
@@ -1169,16 +1353,35 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
 
   const enterVoiceMode = () => {
     setVoiceMode(true)
-    if (!speechEnabled) {
-      setSpeechEnabled(true)
-      localStorage.setItem('nexus-speech-enabled', 'true')
-    }
-    if (!isListening) window.setTimeout(toggleListening, 100)
+    // Auto-start backend continuous listening when entering voice mode
+    if (!isBackendListening) window.setTimeout(toggleBackendListening, 100)
   }
 
   const exitVoiceMode = () => {
-    recognitionRef.current?.stop()
+    voiceStreamController?.abort()
+    setVoiceStreamController(null)
+    setIsBackendListening(false)
     setVoiceMode(false)
+  }
+
+  function VoiceModeIndicator() {
+    return (
+      <div className="mb-2 flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/5 px-3 py-2">
+        <div className={`flex size-8 items-center justify-center rounded-full ${isBackendListening ? 'bg-blue-500 animate-pulse' : 'bg-muted-foreground/20'} transition-all`}>
+          <Mic size={16} className={isBackendListening ? 'text-white' : 'text-muted-foreground'} />
+        </div>
+        <span className="flex-1 text-sm text-blue-700 dark:text-blue-300">
+          {isBackendListening ? 'Listening...' : 'Voice Mode Active'}
+        </span>
+        <button
+          type="button"
+          onClick={exitVoiceMode}
+          className="rounded px-2 py-1 text-[10px] font-medium text-blue-700 hover:bg-blue-500/10 dark:text-blue-300"
+        >
+          Exit
+        </button>
+      </div>
+    )
   }
 
   const stopScreenShare = () => {
@@ -1213,19 +1416,48 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
       if (!sid) sid = await createSession()
       await api.setPermissions(permissionMode, sid!)
       await api.setSandbox(sandboxTier, sandboxRoot)
-      if (selectedModel) await api.setModel(selectedModel, sid!)
+      const selected = selectedModel ? savedModels.find(item => item.model === selectedModel) : undefined
+      if (selectedModel) {
+        await api.setModel(selectedModel, sid!, selected?.provider, selected?.profile)
+      }
       const attachmentNote = task.attachments.length ? `\n\nAttached files in the Nexus workspace:\n${task.attachments.map(item => `- ${item.path}`).join('\n')}` : ''
+      const promptWithAttachments = `${task.prompt}${attachmentNote}`
+      const priorHistory = (getActiveSession()?.messages || []).map(message => ({
+        role: message.role,
+        content: message.content,
+      }))
+      const history = [...priorHistory, { role: 'user' as const, content: promptWithAttachments }]
       addMessage(sid!, 'user', task.prompt)
       lastSavedContent.current = ''
       hasStreamed.current = true
       const modelOptions = selectedModel ? settingsForModel(selectedModel) : defaultModelPreferences
-      await send(sid!, `${task.prompt}${attachmentNote}`, { showThinking: modelOptions.thinking, reasoningEffort: modelOptions.effort })
+      await send(sid!, promptWithAttachments, {
+        showThinking: modelOptions.thinking,
+        reasoningEffort: modelOptions.effort,
+        provider: selected?.provider,
+        model: selected?.model || selectedModel,
+        profile: selected?.profile,
+        history,
+      })
     } finally {
       isSending.current = false
       const [next, ...remaining] = taskQueueRef.current
       taskQueueRef.current = remaining
       setQueuedTasks(remaining)
       if (next) void runTask(next)
+    }
+  }
+
+  const selectSavedModel = async (item: SavedModel) => {
+    setSelectedModel(item.model)
+    localStorage.setItem('nexus-selected-model', item.model)
+    setModelError('')
+    setShowModelPicker(false)
+    setModelSearch('')
+    try {
+      await api.setModel(item.model, activeSessionId || undefined, item.provider, item.profile)
+    } catch (error) {
+      setModelError(error instanceof Error ? error.message : 'Could not switch model.')
     }
   }
 
@@ -1247,7 +1479,6 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
     const remaining = taskQueueRef.current.filter(task => task.id !== id)
     taskQueueRef.current = remaining
     setQueuedTasks(remaining)
-    if (editingQueuedId === id) setEditingQueuedId(null)
   }
 
   const steerQueuedTask = (task: QueuedTask) => {
@@ -1257,20 +1488,11 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
     window.setTimeout(() => textareaRef.current?.focus(), 0)
   }
 
-  const saveQueuedTask = (id: string) => {
-    const prompt = editingQueuedPrompt.trim()
-    if (!prompt) return
+  const saveQueuedTask = (id: string, prompt: string) => {
+    if (!prompt.trim()) return
     const updated = taskQueueRef.current.map(task => task.id === id ? { ...task, prompt } : task)
     taskQueueRef.current = updated
     setQueuedTasks(updated)
-    setEditingQueuedId(null)
-  }
-
-  const enqueueSteer = (text: string) => {
-    const task = { id: crypto.randomUUID(), prompt: text, attachments: [] as Attachment[] }
-    taskQueueRef.current = [task, ...taskQueueRef.current]
-    setQueuedTasks(taskQueueRef.current)
-    setQueueExpanded(true)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1322,14 +1544,14 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
                 finishes, the same rows are stored with the assistant message above. */}
             {isProcessing && (
               <div className="mb-5" style={{ animation: 'nexus-fade-in 0.25s ease-out' }}>
-                <LiveRunStatus events={events} onStop={cancel} />
+                <LiveRunStatus events={events} />
                 
                 {(isThinking || thinkingDone) && thinkingText && (
                   <div className="mb-2 overflow-hidden rounded-lg border border-dashed border-border bg-secondary/25">
                     <div className="flex items-center gap-2 px-3 py-2 text-left text-[11px]">
                       <Cpu size={12} className={isThinking ? 'animate-pulse text-muted-foreground' : 'text-muted-foreground/70'} />
                       <span className="font-semibold text-foreground/80">Thought</span>
-                      {isThinking && <Loader2 size={11} className="animate-spin text-muted-foreground/60" />}
+                      {isThinking && <Spinner size={11} className="text-muted-foreground/60" />}
                       {thinkingDone && <CheckCircle2 size={11} className="text-emerald-600/70" />}
                     </div>
                     <div className="border-t border-border/50 px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground/75">
@@ -1345,14 +1567,28 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
 
                 {/* Response text */}
                 {isProcessing && content && (
-                  <div className="text-sm leading-relaxed text-foreground/85">
-                    {extractCodeBlocks(content).map((part, i) =>
-                      part.type === 'code'
-                        ? <CodeBlock key={i} code={part.content} language={part.language} />
-                        : <MarkdownText key={i} text={part.content} />
-                    )}
+                  <div className="mb-5 flex justify-start" data-testid="streaming-message-bubble">
+                    <div className="flex max-w-[min(86%,760px)] flex-col items-start">
+                      <div className="mb-1.5 px-1 text-xs font-medium text-muted-foreground">Nexus</div>
+                      <div className="relative w-full rounded-lg border border-border/80 bg-card/70 px-4 pb-5 pt-1.5 text-foreground/90 shadow-sm">
+                        <div className="text-sm leading-relaxed">
+                          {extractCodeBlocks(content).map((part, i) =>
+                            part.type === 'code'
+                              ? <CodeBlock key={i} code={part.content} language={part.language} />
+                              : <MarkdownText key={i} text={part.content} />
+                          )}
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 )}
+              </div>
+            )}
+
+            {recoveredActivity && !isProcessing && events.length > 0 && (
+              <div className="mb-5" data-testid="recovered-activity">
+                <div className="mb-2 text-xs font-medium text-muted-foreground">Recovered activity</div>
+                <EventActivity events={events} />
               </div>
             )}
 
@@ -1375,8 +1611,10 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
             onRespond={respondApproval}
           />
         ) : null}
-        <BackgroundTasksPanel events={events} onCancel={cancel} onSteerAdd={enqueueSteer} />
-        {queuedTasks.length > 0 && <div className="mb-1 border border-border bg-secondary/25 text-[11px] text-muted-foreground"><button type="button" onClick={() => setQueueExpanded(value => !value)} aria-expanded={queueExpanded} className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-secondary/45">{queueExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}<Code size={12} /><span>{queuedTasks.length} Queued</span></button>{queueExpanded && <div className="border-t border-border px-3 py-1.5">{queuedTasks.map((task, index) => { const editing = editingQueuedId === task.id; return <div key={task.id} className="flex items-center gap-2 py-1.5"><span className="text-muted-foreground">{index + 1}.</span>{editing ? <input autoFocus value={editingQueuedPrompt} onChange={event => setEditingQueuedPrompt(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') saveQueuedTask(task.id); if (event.key === 'Escape') setEditingQueuedId(null) }} className="min-w-0 flex-1 border border-border bg-background px-1.5 py-1 text-[11px] text-foreground outline-none" aria-label="Edit queued request" /> : <span className="min-w-0 flex-1 truncate">{task.prompt}</span>}<div className="flex shrink-0 items-center gap-1">{editing ? <><button type="button" onClick={() => saveQueuedTask(task.id)} className="px-1.5 py-1 hover:bg-secondary">Save</button><button type="button" onClick={() => setEditingQueuedId(null)} className="px-1.5 py-1 hover:bg-secondary">Cancel</button></> : <><button type="button" onClick={() => steerQueuedTask(task)} className="px-1.5 py-1 hover:bg-secondary">Steer</button><button type="button" onClick={() => { setEditingQueuedId(task.id); setEditingQueuedPrompt(task.prompt) }} className="flex size-6 items-center justify-center hover:bg-secondary" aria-label={`Edit queued request: ${task.prompt}`}><FileEdit size={13} /></button><button type="button" onClick={() => removeQueuedTask(task.id)} className="flex size-6 items-center justify-center hover:bg-secondary" aria-label={`Delete queued request: ${task.prompt}`}><XCircle size={13} /></button></>}</div></div>})}</div>}</div>}
+        <HivePanel events={events} />
+        <BackgroundTasksPanel events={events} onCancel={cancel} />
+        <QueuePanel tasks={queuedTasks} onSteer={steerQueuedTask} onRemove={removeQueuedTask} onSave={saveQueuedTask} />
+        {voiceMode && <VoiceModeIndicator />}
         {screenStream && <div className="mb-2 flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/5 px-2 py-1.5"><video ref={screenPreviewRef} autoPlay muted playsInline className="h-10 w-16 rounded object-cover" /><span className="min-w-0 flex-1 truncate text-[11px] font-medium text-blue-700 dark:text-blue-300">Screen sharing is active</span><button type="button" onClick={stopScreenShare} className="rounded px-2 py-1 text-[10px] font-medium text-blue-700 hover:bg-blue-500/10 dark:text-blue-300">Stop</button></div>}
         <div className="relative rounded-md border border-border bg-secondary/90 p-1 shadow-[0_8px_28px_rgba(15,23,42,0.06)] transition focus-within:border-ring/50 focus-within:ring-2 focus-within:ring-ring/10">
           {showSlashMenu && <div className="absolute bottom-full left-0 right-0 z-30 mb-1 overflow-hidden border border-border bg-background shadow-xl" role="listbox" aria-label="Nexus commands">{matchingCommands.length > 0 ? <>{matchingCommands.map(command => <button key={command.name} type="button" role="option" onMouseDown={event => event.preventDefault()} onClick={() => { setInput(`/${command.name} `); window.setTimeout(() => textareaRef.current?.focus(), 0) }} className="flex w-full items-center gap-3 border-b border-border/60 px-3 py-2 text-left hover:bg-secondary last:border-b-0"><code className="w-24 shrink-0 text-xs font-medium text-foreground">/{command.name}</code><span className="truncate text-[11px] text-muted-foreground">{command.description}</span></button>)}<div className="px-3 py-1.5 text-[10px] text-muted-foreground">Choose a command, then add any details.</div></> : <div className="px-3 py-2 text-xs text-muted-foreground">No Nexus command found.</div>}</div>}
@@ -1399,9 +1637,9 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
               <button onClick={handleSend} aria-label="Send message" title="Send message" disabled={!input.trim() || !backendAvailable} className="flex size-8 items-center justify-center rounded-sm bg-foreground text-background transition hover:opacity-80 disabled:opacity-15 disabled:hover:opacity-15"><Send size={14} /></button>
             )}
           </div>
-          {(attachments.length > 0 || isUploading) && <div className="mx-2 mb-1 flex flex-wrap items-center gap-1.5">{attachments.map(item => <span key={item.path} className="flex max-w-52 items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[11px] text-foreground"><span className="truncate">{item.name}</span><button type="button" onClick={() => setAttachments(current => current.filter(attachment => attachment.path !== item.path))} aria-label={`Remove ${item.name}`} className="text-muted-foreground hover:text-foreground"><XCircle size={13} /></button></span>)}{isUploading && <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><Loader2 size={12} className="animate-spin" /> Uploading…</span>}</div>}
+          {(attachments.length > 0 || isUploading) && <div className="mx-2 mb-1 flex flex-wrap items-center gap-1.5">{attachments.map(item => <span key={item.path} className="flex max-w-52 items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[11px] text-foreground"><span className="truncate">{item.name}</span><button type="button" onClick={() => setAttachments(current => current.filter(attachment => attachment.path !== item.path))} aria-label={`Remove ${item.name}`} className="text-muted-foreground hover:text-foreground"><XCircle size={13} /></button></span>)}{isUploading && <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><Spinner size={12} /> Uploading…</span>}</div>}
           <div className="mt-0.5 flex items-center justify-between gap-2 border-t border-border/60 pt-0.5">
-            <div className="order-2 flex min-w-0 items-center gap-0.5 overflow-x-auto">
+            <div className="order-2 flex min-w-0 items-center gap-0.5 overflow-visible">
             <label className="flex h-7 max-w-32 items-center gap-1 rounded-lg px-1 text-muted-foreground hover:bg-foreground/5" title="Choose permission mode">
               <ShieldCheck size={13} className="shrink-0" />
               <select
@@ -1433,12 +1671,12 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
             {sandboxTier !== 'no_sandbox' && <button type="button" onClick={chooseSandboxFolder} title={sandboxRoot ? `Sandbox folder: ${sandboxRoot}` : 'Sandbox folder: Nexus workspace'} className="flex h-7 max-w-32 items-center gap-1 rounded-lg px-1 text-muted-foreground hover:bg-foreground/5 hover:text-foreground"><FolderOpen size={14} className="shrink-0" /><span className="max-w-20 truncate text-[11px]">{sandboxRoot ? sandboxRoot.replace(/\\/g, '/').split('/').filter(Boolean).pop() : 'Workspace'}</span></button>}
             {savedModels.length > 0 && (
               <div className="relative">
-                <button type="button" onClick={() => {
+                <button type="button" data-testid="model-selector" onClick={() => {
                   const opening = !showModelPicker
                   setShowModelPicker(opening)
                 }} aria-expanded={showModelPicker} title="Saved model, thinking and effort" className="flex h-7 max-w-36 items-center gap-1 rounded-lg px-1 text-muted-foreground hover:bg-foreground/5 hover:text-foreground">
                   <Cpu size={13} className="shrink-0" />
-                  <span className="max-w-24 truncate text-[11px]">{selectedModel || 'Models'}</span>
+                  <span className="max-w-24 truncate text-[11px]">{savedModels.find(item => item.model === selectedModel)?.label || selectedModel || 'Models'}</span>
                   <ChevronDown size={12} />
                 </button>
                 {showModelPicker && (
@@ -1448,7 +1686,7 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
                       {savedModels.filter(item => `${item.model} ${item.provider}`.toLowerCase().includes(modelSearch.toLowerCase())).map(item => {
                         const preferences = settingsForModel(item.model)
                         return <div key={item.model} className={`mb-1 rounded-md border ${selectedModel === item.model ? 'border-border bg-secondary/70' : 'border-transparent bg-secondary/35'}`}>
-                          <button type="button" onClick={() => { setSelectedModel(item.model); localStorage.setItem('nexus-selected-model', item.model) }} className={`flex w-full items-center justify-between gap-3 rounded-md px-2 py-2 text-left text-xs ${selectedModel === item.model ? 'text-foreground' : 'text-muted-foreground hover:bg-secondary/70 hover:text-foreground'}`}>
+                          <button type="button" data-testid={`saved-model-${item.provider}-${item.model}`} onClick={() => void selectSavedModel(item)} className={`flex w-full items-center justify-between gap-3 rounded-md px-2 py-2 text-left text-xs ${selectedModel === item.model ? 'text-foreground' : 'text-muted-foreground hover:bg-secondary/70 hover:text-foreground'}`}>
                             <span className="min-w-0 truncate">{item.label}</span>{selectedModel === item.model && <Check size={13} className="shrink-0" />}
                           </button>
                           <div className="border-t border-border/60 px-2 py-2">
@@ -1502,12 +1740,12 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
               type="button"
               onClick={toggleListening}
               disabled={isProcessing}
-              aria-label={isListening ? 'Stop voice input' : 'Start voice input'}
-              aria-pressed={isListening}
-              title={isListening ? 'Listening — click to stop' : 'Speak to type'}
-              className={`flex size-8 items-center justify-center rounded-lg transition disabled:opacity-30 ${isListening ? 'bg-red-500 text-white animate-pulse hover:bg-red-600' : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground'}`}
+              aria-label={isMicListening ? 'Stop voice input' : 'Start voice input'}
+              aria-pressed={isMicListening}
+              title={isMicListening ? 'Listening — click to stop' : 'Speak to type'}
+              className={`flex size-8 items-center justify-center rounded-lg transition disabled:opacity-30 ${isMicListening ? 'bg-red-500 text-white animate-pulse hover:bg-red-600' : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground'}`}
             >
-              {isListening ? <MicOff size={16} /> : <Mic size={16} />}
+              {isMicListening ? <MicOff size={16} /> : <Mic size={16} />}
             </button>
             </div>
           </div>
@@ -1515,6 +1753,7 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
         {speechError && <p role="status" className="mt-1 text-[10px] text-destructive/75">{speechError}</p>}
         {screenError && <p role="status" className="mt-1 text-[10px] text-destructive/75">{screenError}</p>}
         {sandboxError && <p role="status" className="mt-1 text-[10px] text-destructive/75">{sandboxError}</p>}
+        {modelError && <p role="alert" className="mt-1 text-[10px] text-destructive/75">{modelError}</p>}
         {attachmentError && <p role="status" className="mt-1 text-[10px] text-destructive/75">{attachmentError}</p>}
       </div>
     </div>

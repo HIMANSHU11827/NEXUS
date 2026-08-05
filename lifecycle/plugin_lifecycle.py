@@ -52,6 +52,8 @@ class PluginLifecycle(LifecycleManager):
             "on_load": [], "on_register": [], "on_start": [],
             "on_stop": [], "on_unload": [],
         }
+        self._persist_key = "plugin"
+        self._restore_persisted()
 
     def _to_ls(self, state_str: str) -> LifecycleState:
         mapping = {
@@ -71,6 +73,7 @@ class PluginLifecycle(LifecycleManager):
         self._plugin_info[plugin_id] = {"name": name, "version": ver}
         self._versions[plugin_id] = [ver]
         self.register_entity(plugin_id, LifecycleState.CREATED)
+        self._persist()
         return f"Plugin '{name}' v{ver} discovered."
 
     def improve_plugin(self, plugin_id: str, is_major: bool = False) -> str:
@@ -82,6 +85,7 @@ class PluginLifecycle(LifecycleManager):
         self._plugin_info[plugin_id]["version"] = new_ver
         self._versions.setdefault(plugin_id, []).append(new_ver)
         kind = "major" if is_major else "minor"
+        self._persist()
         return f"Plugin '{self._plugin_info[plugin_id]['name']}' {kind} improved: v{current} → v{new_ver}"
 
     def get_version(self, plugin_id: str) -> str:
@@ -95,6 +99,7 @@ class PluginLifecycle(LifecycleManager):
             return False
         self._plugin_states[plugin_id] = "loaded"
         self._run_plugin_hooks("on_load", plugin_id)
+        self._persist()
         return True
 
     def register_plugin(self, plugin_id: str) -> bool:
@@ -102,6 +107,7 @@ class PluginLifecycle(LifecycleManager):
             return False
         self._plugin_states[plugin_id] = "registered"
         self._run_plugin_hooks("on_register", plugin_id)
+        self._persist()
         return True
 
     def start_plugin(self, plugin_id: str) -> bool:
@@ -109,6 +115,7 @@ class PluginLifecycle(LifecycleManager):
             return False
         self._plugin_states[plugin_id] = "running"
         self._run_plugin_hooks("on_start", plugin_id)
+        self._persist()
         return True
 
     def stop_plugin(self, plugin_id: str) -> bool:
@@ -116,6 +123,7 @@ class PluginLifecycle(LifecycleManager):
             return False
         self._plugin_states[plugin_id] = "stopped"
         self._run_plugin_hooks("on_stop", plugin_id)
+        self._persist()
         return True
 
     def unload_plugin(self, plugin_id: str) -> bool:
@@ -124,10 +132,12 @@ class PluginLifecycle(LifecycleManager):
             return False
         self._plugin_states[plugin_id] = "unloaded"
         self._run_plugin_hooks("on_unload", plugin_id)
+        self._persist()
         return True
 
     def mark_error(self, plugin_id: str) -> bool:
         self._plugin_states[plugin_id] = "error"
+        self._persist()
         return True
 
     def add_hook(self, hook_name: str, fn):
@@ -151,6 +161,18 @@ class PluginLifecycle(LifecycleManager):
 
     def list_plugins_by_state(self, state: str) -> List[str]:
         return [pid for pid, s in self._plugin_states.items() if s == state]
+
+    def _override_payload(self) -> Dict[str, Any]:
+        return {
+            "plugin_states": self._plugin_states,
+            "plugin_info": self._plugin_info,
+            "versions": self._versions,
+        }
+
+    def _apply_override_payload(self, payload: Dict[str, Any]) -> None:
+        self._plugin_states = payload.get("plugin_states", {}) or {}
+        self._plugin_info = payload.get("plugin_info", {}) or {}
+        self._versions = payload.get("versions", {}) or {}
 
     def get_stats(self) -> Dict[str, Any]:
         states = {}

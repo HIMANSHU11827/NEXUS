@@ -3,9 +3,13 @@ from __future__ import annotations
 __version__ = "2.0.0"
 import asyncio
 import html
+import ipaddress
 import logging
+import os
 import re
+from datetime import datetime, timezone
 from html.parser import HTMLParser
+from socket import SOCK_STREAM, getaddrinfo
 from urllib import error as urlerror
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -77,6 +81,64 @@ class _PlainTextParser(HTMLParser):
         return " ".join("".join(self.text).split())
 
 
+#: SSRF guard for direct URL fetches. Fetching is only allowed to public
+#: internet destinations unless the operator explicitly opts in to private
+#: fetches (NEXUS_WEB_FETCH_ALLOW_PRIVATE=1) for local development.
+_PRIVATE_FETCH_ALLOWED = os.environ.get("NEXUS_WEB_FETCH_ALLOW_PRIVATE", "").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+
+#: Well-known cloud metadata hostnames (in addition to 169.254.169.254) that
+#: must never be fetched, even if they resolve to public-looking IPs.
+_CLOUD_METADATA_HOSTS = frozenset({
+    "169.254.169.254",
+    "metadata.google.internal",
+    "metadata.azure.internal",
+    "instance-data",
+    "instance-data.ec2.internal",
+    "167.254.169.254",
+})
+
+
+def _ssrf_block_reason(url: str) -> str | None:
+    """Return a reason string if ``url`` must not be fetched, else ``None``.
+
+    Uses ipaddress + DNS resolution, so loopback, private, link-local,
+    reserved, multicast, and unspecified targets are all refused. When a
+    hostname cannot be resolved we refuse as well (fail closed).
+    """
+    if _PRIVATE_FETCH_ALLOWED:
+        return None
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return "malformed URL"
+    if parsed.scheme not in ("http", "https"):
+        return f"unsupported scheme: {parsed.scheme or 'none'}"
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        return "URL has no hostname"
+    if host in _CLOUD_METADATA_HOSTS:
+        return "cloud metadata endpoint is blocked"
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return "invalid port in URL"
+    try:
+        resolved = getaddrinfo(host, port, type=SOCK_STREAM)
+    except OSError:
+        return "hostname could not be resolved"
+    for info in resolved:
+        sockaddr = info[4]
+        try:
+            ip = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            continue
+        if not ip.is_global:
+            return f"internal/private address blocked: {ip}"
+    return None
+
+
 class WebSearchTool(BaseTool):
     name = "web_search"
     description = "Search the web by query or fetch a URL"
@@ -97,10 +159,29 @@ class WebSearchTool(BaseTool):
                 return await self._fetch_url(q, timeout, max_results)
 
             limit = max(1, min(int(max_results or 5), 10))
-            results = await asyncio.to_thread(self._search, q, limit)
+            attempted = [q]
+            lowered = q.lower()
+            if "today" in lowered:
+                attempted.append(re.sub(r"\btoday\b", "latest", q, flags=re.IGNORECASE))
+                attempted.append(
+                    f"{q} {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+                )
+            elif "latest" not in lowered and "breaking" in lowered:
+                attempted.append(f"{q} latest")
+            results = []
+            used_query = q
+            for candidate in dict.fromkeys(attempted):
+                results = await asyncio.to_thread(self._search, candidate, limit)
+                if results:
+                    used_query = candidate
+                    break
             if not results:
-                return ToolResult(success=False, error=f"No web results found for: {q}")
-            lines = [f"Web search results for: {q}"]
+                return ToolResult(
+                    success=False,
+                    error=f"No web results found after trying: {', '.join(dict.fromkeys(attempted))}",
+                    metadata={"attempted_queries": list(dict.fromkeys(attempted))},
+                )
+            lines = [f"Web search results for: {used_query}"]
             for item in results:
                 line = f"- [{item['title']}]({item['url']})"
                 if item.get("snippet"):
@@ -112,6 +193,13 @@ class WebSearchTool(BaseTool):
 
     async def _fetch_url(self, url: str, timeout: int, max_chars: int) -> ToolResult:
         try:
+            block = _ssrf_block_reason(url)
+            if block:
+                return ToolResult(
+                    success=False,
+                    error=f"URL fetch blocked (SSRF guard): {block}",
+                    metadata={"url": url},
+                )
             req = Request(
                 url,
                 headers={

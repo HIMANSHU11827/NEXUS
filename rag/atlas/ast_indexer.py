@@ -64,14 +64,23 @@ class AtlasASTIndexer:
         return symbols
 
     def scan_workspace(self, exclude: Optional[List[str]] = None) -> str:
-        """Full workspace scan for symbolic logical units."""
+        """Full workspace scan for symbolic logical units.
+
+        Default excludes intentionally skip vendored environments and scratch
+        dirs (``.venv``, ``.voice-venv``, ``site-packages``, ``__pycache__``)
+        so the symbol index contains first-party code only — the repo ships
+        multiple virtualenvs and indexing their site-packages would pollute
+        retrieval with third-party internals and bloat the JSON to hundreds
+        of MB.
+        """
         if exclude is None:
-            exclude = [".git", "__pycache__", "node_modules", "workspace", "knowledge"]
-            
+            exclude = [".git", "__pycache__", "node_modules", "workspace", "knowledge", ".venv", ".voice-venv", ".research", ".tmp"]
+        excludes = set(exclude)
+
         self.symbols = []
         count = 0
         for root, dirs, files in os.walk(self.root):
-            dirs[:] = [d for d in dirs if d not in exclude]
+            dirs[:] = [d for d in dirs if d not in excludes and "site-packages" not in d.lower()]
             for f in files:
                 if f.endswith(".py"):
                     rel = os.path.relpath(os.path.join(root, f), self.root).replace("\\", "/")
