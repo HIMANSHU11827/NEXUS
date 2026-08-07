@@ -1,15 +1,15 @@
 {
   "name": "task",
   "version": "2.0.0",
-  "description": "Create, track, manage, and complete tasks with dependencies",
+  "description": "Manage checklist tasks backed by the active planning todo.md",
   "entry": "scripts/task.py",
   "class": "TaskTool",
   "params": {
     "action": {"type": "string", "description": "create|list|update|delete|status", "required": true},
-    "id": {"type": "string", "description": "Task ID"},
+    "id": {"type": "string", "description": "Task ID; required for update/delete"},
     "title": {"type": "string", "description": "Task title"},
     "description": {"type": "string", "description": "Task description"},
-    "status": {"type": "string", "description": "pending|in_progress|completed|blocked"}
+    "status": {"type": "string", "description": "pending|in_progress|completed"}
   },
   "category": "management"
 }

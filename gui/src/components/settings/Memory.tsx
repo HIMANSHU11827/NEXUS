@@ -12,6 +12,7 @@ export function MemorySettings({ state }: { state: Record<string, unknown> }) {
   const [searchResults, setSearchResults] = useState<Array<{ type: string; content: string; match_position: number }>>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [message, setMessage] = useState('')
   const [activeTab, setActiveTab] = useState<'overview' | 'search' | 'sessions' | 'export'>('overview')
   const [exportFormat, setExportFormat] = useState<'json' | 'text'>('json')
   const [exportData, setExportData] = useState('')
@@ -43,7 +44,7 @@ export function MemorySettings({ state }: { state: Record<string, unknown> }) {
 
   const performSearch = async () => {
     if (!searchQuery.trim()) return
-    setLoading(true); setError('')
+    setLoading(true); setError(''); setMessage('')
     try {
       const result = await api.memorySearch(searchQuery)
       if (result.status === 'success') {
@@ -59,7 +60,7 @@ export function MemorySettings({ state }: { state: Record<string, unknown> }) {
   }
 
   const performExport = async () => {
-    setLoading(true); setError('')
+    setLoading(true); setError(''); setMessage('')
     try {
       const result = await api.memoryExport(exportFormat)
       if (result.status === 'success') {
@@ -76,12 +77,12 @@ export function MemorySettings({ state }: { state: Record<string, unknown> }) {
 
   const performImport = async () => {
     if (!importData.trim()) return
-    setLoading(true); setError('')
+    setLoading(true); setError(''); setMessage('')
     try {
       const result = await api.memoryImport(importData, importFormat)
       if (result.status === 'success') {
         setImportData('')
-        setError('Memory imported successfully')
+        setMessage('Memory imported successfully')
       } else {
         setError('Import failed')
       }
@@ -94,11 +95,11 @@ export function MemorySettings({ state }: { state: Record<string, unknown> }) {
 
   const performClear = async () => {
     if (!window.confirm(`Clear ${clearType} memory? This cannot be undone.`)) return
-    setLoading(true); setError('')
+    setLoading(true); setError(''); setMessage('')
     try {
       const result = await api.memoryClear(clearType)
       if (result.status === 'success') {
-        setError(result.message)
+        setMessage(result.message || 'Memory cleared successfully')
         loadStats()
       } else {
         setError('Clear failed')
@@ -119,6 +120,7 @@ export function MemorySettings({ state }: { state: Record<string, unknown> }) {
     <div><h3 className="text-sm font-semibold">Memory & context</h3><p className="mt-1 text-sm text-muted-foreground">Manage NEXUS memory systems including sessions, in-memory data, and knowledge retrieval.</p></div>
     
     {error && <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive" role="alert">{error}</div>}
+    {message && <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-400" role="status">{message}</div>}
     
     <div className="flex gap-2 border-b border-border">
       {[

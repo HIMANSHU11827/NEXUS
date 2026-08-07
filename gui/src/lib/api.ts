@@ -39,7 +39,8 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     })
     if (!res.ok) {
       const body = await res.json().catch(() => ({ detail: res.statusText }))
-      throw new Error(body.detail || `Request failed: ${res.status}`)
+      const detail = body?.detail || body?.message || body?.error?.message || body?.error || res.statusText
+      throw new Error(typeof detail === 'string' ? detail : `Request failed: ${res.status}`)
     }
     try {
       return await res.json()
@@ -725,7 +726,14 @@ export const api = {
         const records = buffer.split('\n\n'); buffer = records.pop() || ''
         for (const record of records) {
           const line = record.split('\n').find(item => item.startsWith('data: ')); if (!line) continue
-          const payload = JSON.parse(line.slice(6)) as Record<string, unknown>
+          let payload: Record<string, unknown>
+          try {
+            payload = JSON.parse(line.slice(6)) as Record<string, unknown>
+          } catch {
+            // A partial/corrupt SSE frame must not terminate the terminal
+            // stream; the durable event replay remains authoritative.
+            continue
+          }
           if (payload.type === 'chunk') onChunk(String(payload.text || ''), payload.stream === 'stderr' ? 'stderr' : 'stdout')
           if (payload.type === 'done') onDone({ status: String(payload.status || 'done'), output: String(payload.output || ''), exit_code: typeof payload.exit_code === 'number' ? payload.exit_code : undefined })
         }

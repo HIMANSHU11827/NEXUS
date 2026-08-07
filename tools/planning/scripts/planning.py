@@ -5,9 +5,12 @@ __version__ = "2.0.0"
 import json
 import os
 import re
+import uuid
 from typing import Any
 
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
+from nexus.control_plane import create_checklist_plan
+from nexus.work_items import reconcile_checklist_work_item
 
 
 class PlanningTool(BaseTool):
@@ -40,7 +43,9 @@ class PlanningTool(BaseTool):
                         success=False,
                         error="Planning failed: the model did not return a valid task-specific plan",
                     )
+                plan = self._ensure_stable_ids(plan, self._read_plan())
                 self._write_plan(plan)
+                self._sync_work_items(plan, str(kwargs.get("session_id") or "default"))
                 return ToolResult(success=True, output=plan, metadata={
                     "file": self._todo_path(),
                     "action": "create",
@@ -66,7 +71,9 @@ class PlanningTool(BaseTool):
             else:
                 return ToolResult(success=False, error=f"Unsupported planning action: {action}")
 
+            plan = self._ensure_stable_ids(plan, self._read_plan())
             self._write_plan(plan)
+            self._sync_work_items(plan, str(kwargs.get("session_id") or "default"))
             return ToolResult(success=True, output=plan, metadata={"file": self._todo_path(), "action": operation})
         except Exception as exc:
             return ToolResult(success=False, error=str(exc))
@@ -84,6 +91,45 @@ class PlanningTool(BaseTool):
     def _write_plan(self, plan: str) -> None:
         with open(self._todo_path(), "w", encoding="utf-8") as handle:
             handle.write(plan.rstrip() + "\n")
+
+    @staticmethod
+    def _ensure_stable_ids(plan: str, previous: str = "") -> str:
+        prior: dict[str, str] = {}
+        for line in (previous or "").splitlines():
+            match = re.match(r"^\s*(?:\d+\.\s+|-\s+)\[[ xX~>/]\]\s+\[([^\]]+)\]\s+(.+?)\s*$", line)
+            if match:
+                prior[match.group(2).strip().lower()] = match.group(1).strip()
+
+        def replace(match: re.Match) -> str:
+            prefix, mark, body = match.group(1), match.group(2), match.group(3).strip()
+            if re.match(r"^\[[^\]]+\]\s+", body):
+                return match.group(0)
+            task_id = prior.get(body.lower()) or f"task_{uuid.uuid4().hex[:12]}"
+            return f"{prefix}[{mark}] [{task_id}] {body}"
+
+        return re.sub(r"^(\s*(?:\d+\.\s+|-\s+))\[([ xX~>/])\]\s+(.+?)\s*$", replace, plan, flags=re.MULTILINE)
+
+    def _sync_work_items(self, plan: str, session_id: str) -> None:
+        rows = []
+        for line in plan.splitlines():
+            match = re.match(r"^\s*(?:\d+\.\s+|-\s+)\[([ xX~>/])\]\s+\[([^\]]+)\]\s+(.+?)\s*$", line)
+            if not match:
+                continue
+            mark, task_id, title = match.groups()
+            status = {"x": "completed", "~": "in_progress", ">": "in_progress"}.get(mark.lower(), "pending")
+            rows.append({"id": task_id, "title": title, "status": status})
+        if not rows:
+            return
+        goal_match = re.search(r"^TASK NAME:\s*(.+?)\s*$", plan, flags=re.MULTILINE | re.IGNORECASE)
+        goal = goal_match.group(1).strip() if goal_match else "Task checklist"
+        durable_plan = create_checklist_plan(
+            root=self.root_dir or ".", session_id=session_id, title=goal, goal=goal, rows=rows,
+        )
+        for row in rows:
+            reconcile_checklist_work_item(
+                root=self.root_dir or ".", session_id=session_id, task_id=row["id"],
+                title=row["title"], checklist_status=row["status"], plan_id=durable_plan.plan_id,
+            )
 
     def _plan_from_spec(self, goal: str, plan_spec: Any) -> str:
         """Validate a model-generated JSON plan before writing it to todo.md."""

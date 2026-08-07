@@ -1,5 +1,8 @@
 import json
+import os
 import queue
+import subprocess
+import sys
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -8,6 +11,12 @@ from starlette.requests import Request
 from gui import api
 from nexus.events import EVENT_STATUSES, EVENT_TYPES, CanonicalEvent
 from nexus.run_context import start_run_context
+
+
+def _reset_gui_event_state(monkeypatch, directory):
+    monkeypatch.setattr(api, "_WORK_EVENTS_DIR", str(directory))
+    api._WORK_EVENT_SEQUENCES.clear()
+    api._WORK_EVENT_CACHE.clear()
 
 
 def test_list_work_events_keeps_latest_state_for_same_event_id(tmp_path, monkeypatch):
@@ -32,6 +41,45 @@ def test_list_work_events_keeps_latest_state_for_same_event_id(tmp_path, monkeyp
     result = api.list_work_events(session_id)
 
     assert result == [events[-1]]
+
+
+def test_gui_append_reconciles_sequence_after_external_writer(tmp_path, monkeypatch):
+    _reset_gui_event_state(monkeypatch, tmp_path)
+    first = api.append_work_event("external-writer", {"id": "first", "kind": "tool", "status": "done"})
+    path = Path(api.work_events_path("external-writer"))
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps({"id": "external", "sequence": 40, "kind": "tool", "status": "done"}) + "\n")
+    api._WORK_EVENT_CACHE.clear()
+
+    next_event = api.append_work_event("external-writer", {"id": "next", "kind": "tool", "status": "done"})
+
+    assert first["sequence"] == 1
+    assert next_event["sequence"] == 41
+
+
+def test_gui_append_sequences_are_unique_across_worker_processes(tmp_path, monkeypatch):
+    _reset_gui_event_state(monkeypatch, tmp_path)
+    worker = (
+        "from gui import api; "
+        "api._WORK_EVENTS_DIR = r'%s'; "
+        "[api.append_work_event('parallel', {'id': str(i), 'kind': 'tool', 'status': 'done'}) for i in range(8)]"
+    ) % str(tmp_path).replace("'", "''")
+    processes = [subprocess.Popen([sys.executable, "-c", worker], cwd=str(Path(__file__).parents[3]), env=os.environ.copy()) for _ in range(2)]
+    for process in processes:
+        assert process.wait(timeout=30) == 0
+
+    records = [json.loads(line) for line in Path(api.work_events_path("parallel")).read_text(encoding="utf-8").splitlines()]
+    sequences = [int(record["sequence"]) for record in records]
+    assert len(sequences) == 16
+    assert sorted(sequences) == list(range(1, 17))
+
+
+def test_gui_append_flushes_event_before_return(tmp_path, monkeypatch):
+    _reset_gui_event_state(monkeypatch, tmp_path)
+    event = api.append_work_event("durable", {"id": "durable-event", "kind": "tool", "status": "done"})
+
+    persisted = Path(api.work_events_path("durable")).read_text(encoding="utf-8")
+    assert json.loads(persisted)["event_id"] == event["event_id"]
 
 
 def test_list_work_events_preserves_first_seen_timeline_order(tmp_path, monkeypatch):
@@ -88,6 +136,28 @@ def test_append_work_event_persists_complete_canonical_envelope(tmp_path, monkey
     CanonicalEvent(**{key: second[key] for key in required})
 
 
+def test_append_work_event_persists_resumable_assistant_completion(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_WORK_EVENTS_DIR", str(tmp_path))
+    api._WORK_EVENT_SEQUENCES.clear()
+
+    event = api.append_work_event(
+        "assistant-session",
+        {
+            "event_id": "message_turn-1",
+            "event_type": "message.completed",
+            "run_id": "turn-1",
+            "turn_id": "turn-1",
+            "kind": "message",
+            "status": "success",
+            "payload": {"content": "Recovered final answer"},
+        },
+    )
+
+    assert event["event_type"] == "message.completed"
+    assert event["sequence"] == 1
+    assert event["payload"]["content"] == "Recovered final answer"
+    replay = api.replay_work_events_after("assistant-session", 0)
+    assert replay[0]["payload"]["content"] == "Recovered final answer"
 def test_canonical_event_registry_covers_required_runtime_families():
     assert EVENT_STATUSES == {"pending", "running", "success", "failed", "blocked", "skipped", "cancelled"}
     for family in ("run", "conversation", "message", "plan", "phase", "tool", "command", "file", "search", "web", "test", "subagent", "handoff", "memory", "skill"):
@@ -166,6 +236,24 @@ def test_replay_cursor_accepts_last_event_id_and_returns_only_newer_events(tmp_p
     assert [event["sequence"] for event in response["events"]] == [2, 3]
     assert response["after_sequence"] == 1
     assert response["next_sequence"] == 3
+    assert response["oldest_sequence"] == 1
+    assert response["replay_truncated"] is False
+
+
+def test_replay_cursor_reports_retention_gap(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_WORK_EVENTS_DIR", str(tmp_path))
+    api._WORK_EVENT_SEQUENCES.clear()
+    api._WORK_EVENT_CACHE.clear()
+    path = Path(api.work_events_path("gap-session"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps({"id": f"event-{index}", "sequence": index, "status": "done"}) for index in (5, 6)) + "\n",
+        encoding="utf-8",
+    )
+    request = Request({"type": "http", "method": "GET", "path": "/api/work-events", "headers": [(b"last-event-id", b"1")]})
+    response = api.get_work_events(request, "gap-session", limit=20)
+    assert response["oldest_sequence"] == 5
+    assert response["replay_truncated"] is True
 
 
 def test_cursor_replay_preserves_each_lifecycle_record_after_cursor(tmp_path, monkeypatch):
@@ -298,6 +386,27 @@ def test_cancel_endpoint_aborts_loop_and_persists_run_cancelled(tmp_path, monkey
     api._LOOPS.clear()
 
 
+def test_cancel_endpoint_targets_requested_run_when_supported(monkeypatch):
+    class FakeLoop:
+        _current_turn_id = "other-run"
+
+        def __init__(self):
+            self.requested = []
+
+        def request_abort(self, run_id):
+            self.requested.append(run_id)
+            return True
+
+    loop = FakeLoop()
+    api._LOOPS["targeted-cancel"] = loop
+    try:
+        response = api.cancel_chat("targeted-cancel", turn_id="requested-run")
+        assert response["run_id"] == "requested-run"
+        assert loop.requested == ["requested-run"]
+    finally:
+        api._LOOPS.clear()
+
+
 def test_chat_endpoint_rejects_empty_prompt_before_loop_lookup(monkeypatch):
     def fail_get_loop(_session_id):
         raise AssertionError("empty prompt should be rejected before loop lookup")
@@ -352,6 +461,7 @@ def test_chat_endpoint_passes_turn_model_and_max_tokens_to_loop(tmp_path, monkey
                 "provider": "OpenAI",
                 "model": "gpt-test",
                 "max_tokens": 123,
+                "timeout_seconds": 7,
             },
         )
 
@@ -363,6 +473,8 @@ def test_chat_endpoint_passes_turn_model_and_max_tokens_to_loop(tmp_path, monkey
         "model": "gpt-test",
         "max_tokens": 123,
         "turn_id": "turn-123",
+        "deadline_seconds": 7.0,
+        "conversation_history": None,
     }
 
 
@@ -474,6 +586,11 @@ def test_network_and_empty_stream_failures_are_visible_in_the_turn():
     assert "setState(s => ({ ...s, error:" in use_source or "error: frame.data" in use_source
 
 
+def test_legacy_async_stream_has_one_done_marker_owner():
+    source = (Path(__file__).parents[3] / "gui" / "api.py").read_text(encoding="utf-8")
+    assert source.count('stream_queue.put(("done", ""))') == 1
+
+
 def test_live_gui_state_is_bounded_and_keeps_stable_id_deduplication():
     # The live GUI caps retained events and output, and collapses stable ids
     # so the feed stays bounded and responsive. These live bounds now live in
@@ -495,3 +612,14 @@ def test_live_command_output_is_tail_bounded_before_rendering():
     assert "MAX_LIVE_OUTPUT_CHARS = 256 * 1024" in utility
     assert "earlier output omitted" in utility
     assert "boundedLiveOutput(" in utility
+
+
+def test_gui_event_replay_skips_malformed_sequence_and_invalid_utf8(tmp_path, monkeypatch):
+    _reset_gui_event_state(monkeypatch, tmp_path)
+    path = Path(api.work_events_path("hostile"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        handle.write(b"{\"id\":\"bad\",\"sequence\":\"bad\"}\n\xff\xfe\n")
+        handle.write(json.dumps({"id": "valid", "sequence": 7, "status": "success"}).encode() + b"\n")
+    assert api.replay_work_events_after("hostile", 0, limit=20)[0]["id"] == "valid"
+    assert any(item.get("id") == "valid" for item in api.list_work_events("hostile"))

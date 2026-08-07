@@ -40,6 +40,27 @@ def parse_max_tokens(value: Any) -> Optional[int]:
         raise ValueError("max_tokens must be an integer") from exc
 
 
+def build_resume_prompt(prompt: str, resume_context: Any) -> str:
+    """Build the shared continuation envelope used by chat adapters.
+
+    Keeping this pure and centralized prevents the server and legacy GUI from
+    drifting in wording or accidentally omitting unfinished task context.
+    """
+    base = str(prompt or "")
+    context = str(resume_context or "")
+    if not context.strip():
+        return base
+    return (
+        f"{base}\n\n"
+        "[NEXUS_RESUME_CONTEXT]\n"
+        "Continue the saved task below instead of restarting from scratch. "
+        "Use the unfinished phases/items as the real work plan, update todo.md as work progresses, "
+        "and emit only real work activity events for actual files, commands, tools, searches, or browser actions.\n\n"
+        f"{context}\n"
+        "[/NEXUS_RESUME_CONTEXT]"
+    )
+
+
 @dataclass(frozen=True)
 class ChatRunRequest:
     session_id: str

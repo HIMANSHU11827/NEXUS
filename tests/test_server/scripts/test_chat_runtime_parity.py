@@ -163,7 +163,148 @@ def test_server_chat_passes_turn_and_max_tokens_to_loop(monkeypatch):
         "model": "gpt-test",
         "max_tokens": 321,
         "turn_id": "turn-server",
+        "conversation_history": None,
+        "deadline_seconds": 30.0,
     }
+
+
+def test_server_chat_timeout_emits_error_before_one_terminal_marker(monkeypatch):
+    import asyncio
+    import server
+
+    captured = {}
+
+    class FakeLoop:
+        is_running = False
+        model = "default-model"
+        work_event_sink = None
+
+        def request_abort(self, run_id, reason=""):
+            captured["abort"] = (run_id, reason)
+            return True
+
+        async def stream_run(self, prompt, **kwargs):
+            await asyncio.sleep(2)
+            yield {"type": "content", "data": "late"}
+
+    monkeypatch.setattr(server, "get_loop", lambda _sid: FakeLoop())
+    monkeypatch.setattr(server, "set_active_session", lambda *args, **kwargs: None)
+
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/api/chat",
+            json={
+                "prompt": "stall",
+                "session_id": "server-timeout-chat",
+                "turn_id": "timeout-turn",
+                "timeout_seconds": 1,
+                "stream": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert "Response timed out after 1 seconds" in response.text
+    assert response.text.count("event: error") == 1
+    assert captured["abort"] == ("timeout-turn", "deadline_exceeded")
+
+
+def test_server_chat_uses_resume_workflow_context_and_completes_workflow(monkeypatch):
+    import server
+
+    captured = {}
+
+    class FakeLoop:
+        is_running = False
+        model = "default-model"
+        work_event_sink = None
+
+        async def stream_run(self, prompt, **kwargs):
+            captured["prompt"] = prompt
+            yield {"type": "content", "data": "resumed"}
+
+    def fake_start(session_id, prompt, turn_id):
+        captured["start"] = (session_id, prompt, turn_id)
+        return "unfinished phase"
+
+    def fake_complete(session_id, prompt, turn_id, status="done"):
+        captured["complete"] = (session_id, prompt, turn_id, status)
+
+    monkeypatch.setattr(server, "get_loop", lambda _sid: FakeLoop())
+    monkeypatch.setattr(server, "set_active_session", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "start_chat_workflow", fake_start)
+    monkeypatch.setattr(server, "complete_chat_workflow", fake_complete)
+
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/api/chat",
+            json={"prompt": "continue", "session_id": "resume-server", "turn_id": "resume-turn"},
+        )
+
+    assert response.status_code == 200
+    assert "[NEXUS_RESUME_CONTEXT]" in captured["prompt"]
+    assert "unfinished phase" in captured["prompt"]
+    assert captured["start"] == ("resume-server", "continue", "resume-turn")
+    assert captured["complete"] == ("resume-server", "continue", "resume-turn", "done")
+
+
+def test_server_failed_terminal_chunk_marks_workflow_failed(monkeypatch):
+    import server
+
+    captured = {}
+
+    class FakeLoop:
+        is_running = False
+        model = "default-model"
+        work_event_sink = None
+
+        async def stream_run(self, prompt, **kwargs):
+            yield {"type": "done", "data": {"success": False, "error": "tool failed"}}
+
+    monkeypatch.setattr(server, "get_loop", lambda _sid: FakeLoop())
+    monkeypatch.setattr(server, "set_active_session", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "complete_chat_workflow", lambda *args: captured.setdefault("args", args))
+
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/api/chat",
+            json={"prompt": "fail", "session_id": "failed-workflow", "turn_id": "failed-turn", "stream": True},
+        )
+
+    assert response.status_code == 200
+    assert captured["args"][-1] == "failed"
+
+
+def test_server_non_stream_timeout_requests_run_abort(monkeypatch):
+    import asyncio
+    import server
+
+    captured = {}
+
+    class FakeLoop:
+        is_running = False
+        model = "default-model"
+        work_event_sink = None
+
+        def request_abort(self, run_id, reason=""):
+            captured["abort"] = (run_id, reason)
+            return True
+
+        async def stream_run(self, prompt, **kwargs):
+            await asyncio.sleep(2)
+            yield {"type": "content", "data": "late"}
+
+    monkeypatch.setattr(server, "get_loop", lambda _sid: FakeLoop())
+    monkeypatch.setattr(server, "set_active_session", lambda *args, **kwargs: None)
+
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/api/chat",
+            json={"prompt": "stall", "session_id": "nonstream-timeout", "turn_id": "nonstream-turn", "timeout_seconds": 1},
+        )
+
+    assert response.status_code == 200
+    assert "Response timed out after 1 seconds" in response.json()["response"]
+    assert captured["abort"] == ("nonstream-turn", "deadline_exceeded")
 
 
 def test_server_run_context_endpoints_list_and_read_runs(tmp_path, monkeypatch):

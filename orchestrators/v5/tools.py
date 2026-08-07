@@ -17,12 +17,14 @@ Extracted from ``core.py`` and upgraded to unified-loop parity:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+from contextlib import suppress
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -46,6 +48,60 @@ class V5ToolExecutor:
     """Mixin providing real tool execution with security checks."""
 
     COMMAND_ALIASES = ("bash", "run_command", "terminal", "shell", "execute_command")
+
+    def _current_run_control(self):
+        registry = getattr(self, "_run_controls", None)
+        current = str(getattr(self, "_current_turn_id", "") or "")
+        return registry.get(current) if registry is not None and current else None
+
+    def _remaining_run_budget(self) -> Optional[float]:
+        control = self._current_run_control()
+        remaining = getattr(control, "remaining", None) if control is not None else None
+        if remaining is not None and remaining <= 0:
+            check_deadline = getattr(self, "_check_deadline", None)
+            if callable(check_deadline):
+                check_deadline()
+            raise asyncio.TimeoutError("V5 run deadline exceeded")
+        return remaining
+
+    async def _await_run_budget(self, awaitable):
+        """Await one operation while observing the active run's budget/cancel."""
+        control = self._current_run_control()
+        if control is None:
+            return await awaitable
+        task = asyncio.ensure_future(awaitable)
+        try:
+            while not task.done():
+                if control.cancelled:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+                    raise asyncio.CancelledError(control.reason or "V5 run cancelled")
+                remaining = control.remaining
+                if remaining is not None and remaining <= 0:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+                    raise asyncio.TimeoutError("V5 run deadline exceeded")
+                wait_for = min(0.05, remaining) if remaining is not None else 0.05
+                await asyncio.wait({task}, timeout=max(0.001, wait_for))
+            return await task
+        except BaseException:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            raise
+
+    async def _next_run_stream_item(self, iterator):
+        """Read one stream item with a freshly computed run budget."""
+        return await self._await_run_budget(iterator.__anext__())
+
+    async def _close_stream(self, iterator) -> None:
+        close = getattr(iterator, "aclose", None)
+        if callable(close):
+            with suppress(Exception):
+                await close()
 
     # ────────────────────────────────────────────────────────────────────────
     # EXECUTION
@@ -87,6 +143,10 @@ class V5ToolExecutor:
                     raise RuntimeError(error_text)
 
             permissions = self.runtime.permissions
+            if permissions is None:
+                error_text = "Permission system unavailable; command execution is blocked"
+                await self._emit_tool_event(call, status="blocked", error=error_text)
+                raise RuntimeError(error_text)
             if permissions is not None:
                 try:
                     result = permissions.check(
@@ -116,13 +176,23 @@ class V5ToolExecutor:
 
             chunks: List[str] = []
             sequence = 0
-            async for chunk in sandbox.stream_execute(
-                cmd,
-                workdir=call.params.get("cwd") or call.params.get("working_directory"),
-            ):
-                chunks.append(chunk)
-                await self._emit_tool_chunk(call, chunk, sequence)
-                sequence += 1
+            stream_kwargs = {
+                "workdir": call.params.get("cwd") or call.params.get("working_directory"),
+            }
+            remaining = self._remaining_run_budget()
+            if remaining is not None:
+                stream_kwargs["timeout"] = max(0.001, remaining)
+            iterator = sandbox.stream_execute(cmd, **stream_kwargs)
+            try:
+                while True:
+                    chunk = await self._next_run_stream_item(iterator)
+                    chunks.append(chunk)
+                    await self._emit_tool_chunk(call, chunk, sequence)
+                    sequence += 1
+            except StopAsyncIteration:
+                pass
+            finally:
+                await self._close_stream(iterator)
             result = "".join(chunks)
             exit_code = getattr(sandbox, "last_exit_code", None)
             if exit_code not in (None, 0):
@@ -196,11 +266,21 @@ class V5ToolExecutor:
             "root": self.root_dir,
             "tool_registry": registry,
         }
+        control = self._current_run_control()
+        remaining = self._remaining_run_budget()
+        if control is not None:
+            runtime_context["run_control"] = control
+            runtime_context["deadline_remaining"] = remaining
+        stream_params = {**call.params, "_runtime_context": runtime_context}
+        if control is not None:
+            stream_params["_cancel_token"] = control.cancel_event
+        iterator = registry.stream_execute(call.name, **stream_params)
         try:
-            async for item in registry.stream_execute(
-                call.name,
-                **{**call.params, "_runtime_context": runtime_context},
-            ):
+            while True:
+                try:
+                    item = await self._next_run_stream_item(iterator)
+                except StopAsyncIteration:
+                    break
                 if ToolResult is not None and isinstance(item, ToolResult):
                     text = str(item.output or item.error or "")
                     if not item.success:
@@ -220,6 +300,8 @@ class V5ToolExecutor:
             error_text = f"Error: tool execution failed: {e}"
             await self._emit_tool_event(call, status="error", error=error_text)
             raise RuntimeError(error_text)
+        finally:
+            await self._close_stream(iterator)
 
         result = "".join(chunks)
         if failed_error:
@@ -296,7 +378,9 @@ class V5ToolExecutor:
 
         permissions = self.runtime.permissions
         if permissions is None:
-            return True
+            setattr(call, "_denied_reason", "permission system unavailable")
+            self.logger.error("Blocking tool %s because the permission system is unavailable", call.name)
+            return False
         command = str(
             call.params.get("command")
             or call.params.get("cmd")
@@ -394,14 +478,14 @@ class V5ToolExecutor:
                 action=action,
                 reason="ask-mode approval requested by V5 loop",
                 turn_id=self._current_turn_id or "",
-                timeout_s=300.0,
+                timeout_s=min(300.0, remaining) if (remaining := self._remaining_run_budget()) is not None else 300.0,
             )
         except Exception as e:
             self.logger.warning(f"Approval broker unavailable: {e}")
             return False
         await self._emit_work_event(request.to_event())
 
-        decision = await broker.wait(request.request_id)
+        decision = await self._await_run_budget(broker.wait(request.request_id))
         granted = decision in (DECISION_ALLOW, DECISION_ALLOW_ALWAYS)
 
         if decision == DECISION_ALLOW_ALWAYS:
@@ -576,7 +660,7 @@ class V5ToolExecutor:
             broker = self._approval_broker()
             if broker is None:
                 return False
-            decision = await broker.wait(request_id)
+            decision = await self._await_run_budget(broker.wait(request_id))
             if decision in ("allow", "allow_always"):
                 self._remember_approval(call)
                 return True
@@ -752,21 +836,30 @@ class V5ToolExecutor:
             sandbox = getattr(getattr(self, "runtime", None), "sandbox", None)
             if sandbox is not None and hasattr(sandbox, "stream_execute"):
                 chunks: List[str] = []
-                async for chunk in sandbox.stream_execute(
-                    f'python "{file_path}"',
-                    workdir=workdir or self.root_dir,
-                ):
-                    chunks.append(str(chunk))
+                stream_kwargs = {"workdir": workdir or self.root_dir}
+                remaining = self._remaining_run_budget()
+                if remaining is not None:
+                    stream_kwargs["timeout"] = max(0.001, remaining)
+                iterator = sandbox.stream_execute(f'python "{file_path}"', **stream_kwargs)
+                try:
+                    while True:
+                        try:
+                            chunks.append(str(await self._next_run_stream_item(iterator)))
+                        except StopAsyncIteration:
+                            break
+                finally:
+                    await self._close_stream(iterator)
                 output = "".join(chunks)[:20000]
                 exit_code = getattr(sandbox, "last_exit_code", None)
                 if exit_code not in (None, 0):
                     output += f"\nError: code-action exited with code {exit_code}"
                 return output
+            remaining = self._remaining_run_budget()
             process = subprocess.run(
                 [sys.executable, file_path],
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=min(60.0, remaining) if remaining is not None else 60,
             )
             output = (process.stdout or "")[:20000]
             if process.returncode != 0:

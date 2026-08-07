@@ -14,6 +14,7 @@ import glob
 import json
 import logging
 import os
+import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
@@ -140,8 +141,20 @@ class V5Checkpoint:
             )
             snapshot["memory_len"] = len(getattr(runtime, "memory", None) or [])
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as fh:
-                json.dump(snapshot, fh, ensure_ascii=False, indent=2, default=str)
+            # Replace the checkpoint atomically so a process crash cannot
+            # leave the only phase snapshot as truncated JSON.
+            fd, temp_path = tempfile.mkstemp(
+                prefix=".checkpoint-", suffix=".tmp", dir=os.path.dirname(path)
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(snapshot, fh, ensure_ascii=False, indent=2, default=str)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(temp_path, path)
+            finally:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
             return path
         except Exception:
             return None

@@ -4,6 +4,7 @@ import pytest
 
 from nexus.runtime import (
     build_chat_request,
+    build_resume_prompt,
     parse_max_tokens,
     safe_session_id,
     safe_turn_id,
@@ -53,3 +54,11 @@ def test_build_chat_request_normalizes_shared_chat_fields():
 def test_build_chat_request_rejects_empty_prompt():
     with pytest.raises(ValueError, match="prompt is required"):
         build_chat_request({"prompt": "   "})
+
+
+def test_build_resume_prompt_is_shared_and_noops_without_context():
+    assert build_resume_prompt("continue", "") == "continue"
+    prompt = build_resume_prompt("continue", "unfinished phase")
+    assert prompt.startswith("continue\n\n[NEXUS_RESUME_CONTEXT]")
+    assert "unfinished phase" in prompt
+    assert prompt.endswith("[/NEXUS_RESUME_CONTEXT]")

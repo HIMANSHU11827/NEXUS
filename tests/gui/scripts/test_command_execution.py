@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 import authentication
@@ -53,6 +55,33 @@ def test_command_stream_uses_real_executor_and_exit_code(tmp_path, monkeypatch):
     assert "tools.nexus_tools.bash_tool" not in response.text
 
 
+def test_command_stream_terminal_event_replaces_started_sequence(tmp_path, monkeypatch):
+    """A terminal event copied from start must not deadlock sequence allocation."""
+    monkeypatch.setattr(api, "_WORK_EVENTS_DIR", str(tmp_path))
+    api._LOOPS.clear()
+    client = _authed_client(monkeypatch)
+
+    response = client.post(
+        "/api/work-events/run-command-stream",
+        json={
+            "session_id": "command-sequence-regression",
+            "command": 'python -c "print(\'SEQUENCE_OK\')"',
+            "timeout": 5,
+        },
+    )
+
+    assert response.status_code == 200
+    assert '"type": "done"' in response.text
+    assert "SEQUENCE_OK" in response.text
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "command-sequence-regression.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["status"] for event in events] == ["running", "success"]
+    assert events[0]["sequence"] < events[1]["sequence"]
+    assert events[1]["source_sequence"] == events[0]["sequence"]
+
+
 def test_command_stream_uses_shared_permission_decision_log(tmp_path, monkeypatch):
     permissions, old_mode, old_rules, old_allowlist, old_decisions = _clean_permissions()
     try:
@@ -78,6 +107,42 @@ def test_command_stream_uses_shared_permission_decision_log(tmp_path, monkeypatc
         assert decisions[-1]["session_id"] == "permission-proof"
         assert decisions[-1]["turn_id"] == "turn-1"
         assert decisions[-1]["granted"] is False
+    finally:
+        permissions.set_mode(old_mode)
+        permissions._rules = old_rules
+        permissions._pre_authorized_list = old_allowlist
+        permissions._decision_log = old_decisions
+        api._LOOPS.clear()
+
+
+def test_command_stream_forwards_requested_timeout_and_surfaces_timeout_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_WORK_EVENTS_DIR", str(tmp_path))
+    api._LOOPS.clear()
+    calls = []
+
+    class FakeSandbox:
+        last_exit_code = -1
+
+        def __init__(self, root_dir):
+            self.root_dir = root_dir
+
+        async def stream_execute(self, command, workdir=None, timeout=None):
+            calls.append(timeout)
+            yield "[SANDBOX_TIMEOUT]: Execution exceeded 5 seconds."
+
+    monkeypatch.setattr("sandbox.sandbox_manager.SovereignSandbox", FakeSandbox)
+    permissions, old_mode, old_rules, old_allowlist, old_decisions = _clean_permissions()
+    try:
+        permissions.set_mode(PermissionMode.BYPASS)
+        client = _authed_client(monkeypatch)
+        response = client.post(
+            "/api/work-events/run-command-stream",
+            json={"session_id": "timeout-proof", "command": "slow", "timeout": 5},
+        )
+        assert response.status_code == 200
+        assert calls == [5]
+        assert '"exit_code": -1' in response.text
+        assert '"stderr": "[SANDBOX_TIMEOUT]' in response.text
     finally:
         permissions.set_mode(old_mode)
         permissions._rules = old_rules

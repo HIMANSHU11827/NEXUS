@@ -1,6 +1,7 @@
 """Regression tests for the V5 transcript-driven model/tool loop."""
 
 import asyncio
+import time
 
 from orchestrators.v5.core import NexusLoopV5, _DuckPerceived
 from orchestrators.v5.events import V5EventEmitter
@@ -74,6 +75,36 @@ def test_direct_loop_replays_tool_result_to_model_without_planner(tmp_path):
     assert seen[1][-1] == {
         "role": "tool", "name": "fixture_tool", "tool_call_id": "call-1", "content": "6"
     }
+
+
+def test_direct_loop_executes_tools_when_a_run_deadline_is_active(tmp_path):
+    """Deadline enforcement must not break every model-selected tool call."""
+    loop = NexusLoopV5(str(tmp_path), session_id="deadline-tool-test")
+    replies = iter([
+        _native("fixture_tool", "{}", "call-deadline"),
+        {"choices": [{"message": {"content": "The tool completed."}}]},
+    ])
+
+    async def model(_messages, **_kwargs):
+        return next(replies)
+
+    async def tool(_call):
+        return "verified output"
+
+    loop._safe_model_call_raw = model
+    loop._get_tool_schemas = lambda **_kwargs: []
+    loop._run_tool = tool
+    loop._current_turn_id = "turn-deadline-tool-test"
+    loop._run_controls.register(
+        loop._current_turn_id,
+        deadline_at=time.monotonic() + 5,
+    )
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("run the tool"))
+
+    assert result["success"] is True
+    assert result["calls_executed"] == 1
+    assert result["actions"][0]["output"] == "verified output"
 
 
 def test_direct_loop_is_bounded_and_does_not_call_planner(tmp_path):

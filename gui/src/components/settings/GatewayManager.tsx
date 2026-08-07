@@ -6,11 +6,10 @@ import { labelFor, Description } from './utils'
 export function GatewayManager({ items, pending, onToggle }: { items: InventoryItem[]; pending: string; onToggle: (name: string, enabled: boolean) => void }) {
   const [activeTab, setActiveTab] = useState<'overview' | 'platforms' | 'messages' | 'settings'>('overview')
 
-  // Mock statistics for demonstration
   const stats = {
     totalPlatforms: items.length,
     activePlatforms: items.filter(i => i.enabled).length,
-    totalMessages: Math.floor(Math.random() * 5000),
+    totalMessages: null as number | null,
     activeConnections: items.filter(i => i.available && i.enabled).length,
   }
 
@@ -74,8 +73,8 @@ export function GatewayManager({ items, pending, onToggle }: { items: InventoryI
                 <MessageSquare size={18} className="text-muted-foreground" />
                 <p className="text-xs font-medium text-muted-foreground">Total Messages</p>
               </div>
-              <p className="mt-2 text-2xl font-bold">{stats.totalMessages}</p>
-              <p className="mt-1 text-xs text-muted-foreground">This month</p>
+              <p className="mt-2 text-2xl font-bold">{stats.totalMessages ?? '—'}</p>
+              <p className="mt-1 text-xs text-muted-foreground">Message volume not reported by the server</p>
             </div>
             <div className="rounded-lg border border-border bg-card p-4">
               <div className="flex items-center gap-2">
@@ -90,8 +89,8 @@ export function GatewayManager({ items, pending, onToggle }: { items: InventoryI
                 <Send size={18} className="text-muted-foreground" />
                 <p className="text-xs font-medium text-muted-foreground">Response Rate</p>
               </div>
-              <p className="mt-2 text-2xl font-bold">98.5%</p>
-              <p className="mt-1 text-xs text-muted-foreground">Success rate</p>
+              <p className="mt-2 text-2xl font-bold">—</p>
+              <p className="mt-1 text-xs text-muted-foreground">Not reported by the server</p>
             </div>
           </div>
 
@@ -310,7 +309,7 @@ export function GatewayManager({ items, pending, onToggle }: { items: InventoryI
             </div>
 
             <div className="flex items-center justify-between pt-4 border-t border-border">
-              <p className="text-xs text-muted-foreground">Showing 5 of 1,234 messages</p>
+              <p className="text-xs text-muted-foreground">Message history is not reported by the server.</p>
               <div className="flex gap-2">
                 <button className="px-3 py-1 text-xs rounded-md border border-border text-muted-foreground" disabled>
                   Previous

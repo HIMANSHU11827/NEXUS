@@ -740,7 +740,7 @@ class ToolRegistry:
         while True:
             try:
                 async with entry._semaphore:
-                    if cancel_token and cancel_token.is_cancelled:
+                    if _is_cancelled(cancel_token):
                         return ToolCallResult(
                             name=entry.name, status=STATUS_BLOCKED,
                             error_info={"type": "CancelledError", "message": "Tool execution cancelled"},
@@ -805,7 +805,7 @@ class ToolRegistry:
         while True:
             try:
                 async with entry._semaphore:
-                    if cancel_token and cancel_token.is_cancelled:
+                    if _is_cancelled(cancel_token):
                         yield ToolCallResult(
                             name=entry.name, status=STATUS_BLOCKED,
                             error_info={"type": "CancelledError", "message": "Tool execution cancelled"},
@@ -821,7 +821,7 @@ class ToolRegistry:
                         if inspect.isasyncgen(result):
                             try:
                                 while True:
-                                    if cancel_token and cancel_token.is_cancelled:
+                                    if _is_cancelled(cancel_token):
                                         yield ToolCallResult(name=entry.name, status=STATUS_BLOCKED, error="Cancelled")
                                         return
                                     try:
@@ -840,7 +840,7 @@ class ToolRegistry:
                         if inspect.isgenerator(result):
                             sentinel = object()
                             while True:
-                                if cancel_token and cancel_token.is_cancelled:
+                                if _is_cancelled(cancel_token):
                                     yield ToolCallResult(name=entry.name, status=STATUS_BLOCKED, error="Cancelled")
                                     return
                                 chunk = await asyncio.to_thread(next, result, sentinel)
@@ -1205,4 +1205,15 @@ class CancellationToken:
 
     def reset(self) -> None:
         self._cancelled = False
+
+
+def _is_cancelled(token: Any) -> bool:
+    """Accept Nexus tokens and standard asyncio/threading Event objects."""
+    if token is None:
+        return False
+    value = getattr(token, "is_cancelled", None)
+    if value is not None:
+        return bool(value() if callable(value) else value)
+    is_set = getattr(token, "is_set", None)
+    return bool(is_set()) if callable(is_set) else False
 

@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
 EVENT_TYPES = frozenset(
-    """run.started run.status run.completed run.failed run.cancelled
+    """run.started run.status run.completed run.failed run.cancelled run.timed_out
 conversation.created conversation.updated message.started message.delta message.completed message.failed
 assistant.progress
 plan.started plan.updated plan.completed plan.failed phase.started phase.updated phase.completed phase.failed

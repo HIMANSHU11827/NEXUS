@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import Editor from '@monaco-editor/react'
 import {
-  ChevronDown, ChevronRight, Clock, Loader2, PauseCircle, RotateCw, StopCircle,
+  CheckCircle2, ChevronDown, ChevronRight, Clock, Loader2, PauseCircle, RotateCw, StopCircle, XCircle,
   Terminal, FileText, GitBranch, Users, Cpu,
 } from 'lucide-react'
 import type { TimelineEvent } from '../hooks/useStreamChat'
@@ -22,10 +22,25 @@ interface PanelTask {
 
 interface BackgroundTasksPanelProps {
   events: TimelineEvent[]
-  onCancel: () => void
+  onCancel: (runId: string) => void
+  sessionId: string | null
 }
 
-const ACTIVE_STATUSES: ReadonlySet<TimelineEvent['status']> = new Set(['running', 'pending', 'blocked', 'success', 'failed', 'cancelled'])
+type DurableWorkItemStatus = 'planned' | 'running' | 'waiting' | 'applied' | 'failed' | 'cancelled'
+
+interface DurableWorkItem {
+  task_id: string
+  title: string
+  description?: string
+  status: DurableWorkItemStatus | string
+  run_id?: string
+  plan_id?: string
+  created_at?: number
+  updated_at?: number
+  completed_at?: number | null
+}
+
+const ACTIVE_STATUSES: ReadonlySet<TimelineEvent['status']> = new Set(['running', 'pending', 'blocked'])
 const MAX_OUTPUT_CHARS = 12000
 
 // A background task is a real command or agent execution the user can inspect.
@@ -103,6 +118,160 @@ function StateIcon({ state }: { state: TaskState }) {
   if (state === 'retrying') return <RotateCw size={12} className="shrink-0 animate-spin text-amber-500" aria-hidden="true" />
   if (state === 'paused') return <PauseCircle size={12} className="shrink-0 text-sky-500" aria-hidden="true" />
   return <Loader2 size={12} className="shrink-0 animate-spin text-primary" aria-hidden="true" />
+}
+
+const DURABLE_STATUS_LABEL: Record<DurableWorkItemStatus, string> = {
+  planned: 'Planned',
+  running: 'Running',
+  waiting: 'Waiting',
+  applied: 'Applied',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+}
+
+function durableStatus(value: string): DurableWorkItemStatus | null {
+  return value in DURABLE_STATUS_LABEL ? value as DurableWorkItemStatus : null
+}
+
+function DurableStatusIcon({ status }: { status: DurableWorkItemStatus }) {
+  if (status === 'applied') return <CheckCircle2 size={12} className="shrink-0 text-emerald-500" aria-hidden="true" />
+  if (status === 'failed') return <XCircle size={12} className="shrink-0 text-destructive" aria-hidden="true" />
+  if (status === 'cancelled') return <XCircle size={12} className="shrink-0 text-muted-foreground" aria-hidden="true" />
+  if (status === 'waiting') return <Clock size={12} className="shrink-0 text-amber-500" aria-hidden="true" />
+  if (status === 'running') return <Loader2 size={12} className="shrink-0 animate-spin text-primary" aria-hidden="true" />
+  return <Clock size={12} className="shrink-0 text-sky-500" aria-hidden="true" />
+}
+
+function durableStatusColor(status: DurableWorkItemStatus): string {
+  if (status === 'applied') return 'text-emerald-600 dark:text-emerald-400'
+  if (status === 'failed') return 'text-destructive'
+  if (status === 'cancelled') return 'text-muted-foreground'
+  if (status === 'waiting') return 'text-amber-600 dark:text-amber-400'
+  if (status === 'running') return 'text-primary'
+  return 'text-sky-600 dark:text-sky-400'
+}
+
+function DurableWorkItems({
+  sessionId,
+  refreshKey,
+  onCancel,
+}: {
+  sessionId: string | null
+  refreshKey: number
+  onCancel: (runId: string) => void
+}) {
+  const [items, setItems] = useState<DurableWorkItem[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const [panelExpanded, setPanelExpanded] = useState(true)
+
+  const load = async (signal?: AbortSignal) => {
+    if (!sessionId) {
+      setItems([])
+      setError('')
+      setLoading(false)
+      return
+    }
+    setLoading(true)
+    setError('')
+    try {
+      const response = await fetch(`/api/work-items?session_id=${encodeURIComponent(sessionId)}&limit=100`, {
+        credentials: 'include',
+        cache: 'no-store',
+        signal,
+      })
+      const payload = await response.json().catch(() => ({})) as { detail?: string; work_items?: DurableWorkItem[] }
+      if (!response.ok) throw new Error(payload.detail || `Could not load durable work (${response.status}).`)
+      setItems(Array.isArray(payload.work_items) ? payload.work_items : [])
+    } catch (cause) {
+      if (cause instanceof DOMException && cause.name === 'AbortError') return
+      setError(cause instanceof Error ? cause.message : 'Could not load durable work.')
+    } finally {
+      if (!signal?.aborted) setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void load(controller.signal)
+    return () => controller.abort()
+  }, [sessionId, refreshKey])
+
+  const visibleItems = items
+    .map(item => ({ item, status: durableStatus(item.status) }))
+    .filter((entry): entry is { item: DurableWorkItem; status: DurableWorkItemStatus } => entry.status !== null)
+
+  useEffect(() => {
+    setExpanded(previous => {
+      const ids = new Set(visibleItems.map(({ item }) => item.task_id))
+      const next: Record<string, boolean> = {}
+      for (const [id, value] of Object.entries(previous)) if (ids.has(id)) next[id] = value
+      return Object.keys(next).length === Object.keys(previous).length ? previous : next
+    })
+  }, [items])
+
+  // The durable-work panel is an on-demand status surface, not an empty-state
+  // prompt. Once loading completes successfully with no valid work items, keep
+  // it out of the chat view. Loading and errors remain visible so users still
+  // receive truthful feedback when the data cannot yet be determined.
+  if (!sessionId || (!loading && !error && visibleItems.length === 0)) return null
+  return (
+    <div className="mb-1 border border-border bg-background text-[11px] text-muted-foreground" data-testid="durable-work-items">
+      <button
+        type="button"
+        onClick={() => setPanelExpanded(value => !value)}
+        aria-expanded={panelExpanded}
+        className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-secondary/45"
+      >
+        {panelExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        <span className="font-medium text-foreground/85">Durable work</span>
+        {!loading && !error && <span className="text-[10px] text-muted-foreground/70">{visibleItems.length}</span>}
+      </button>
+      {panelExpanded && (
+        <div className="border-t border-border">
+          {loading && <div className="flex items-center gap-2 px-3 py-2 text-[10px]" role="status"><Loader2 size={12} className="animate-spin" /> Loading saved work…</div>}
+          {!loading && error && (
+            <div className="flex items-center gap-2 px-3 py-2 text-[10px] text-destructive" role="alert">
+              <XCircle size={12} aria-hidden="true" />
+              <span className="min-w-0 flex-1">{error}</span>
+              <button type="button" onClick={() => void load()} className="shrink-0 rounded border border-destructive/30 px-1.5 py-0.5 font-medium hover:bg-destructive/10">Retry</button>
+            </div>
+          )}
+          {!loading && !error && visibleItems.map(({ item, status }) => {
+            const isExpanded = Boolean(expanded[item.task_id])
+            const canCancel = Boolean(item.run_id) && (status === 'running' || status === 'waiting')
+            return (
+              <div key={item.task_id} className="border-t border-border/60 first:border-t-0">
+                <button
+                  type="button"
+                  onClick={() => setExpanded(previous => ({ ...previous, [item.task_id]: !previous[item.task_id] }))}
+                  aria-expanded={isExpanded}
+                  className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left hover:bg-secondary/45 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/40"
+                >
+                  <span className="flex w-4 shrink-0 items-center justify-center"><DurableStatusIcon status={status} /></span>
+                  <span className="min-w-0 flex-1 truncate font-medium text-foreground" title={item.title}>{item.title}</span>
+                  <span className={`shrink-0 font-medium ${durableStatusColor(status)}`}>{DURABLE_STATUS_LABEL[status]}</span>
+                  <span className="text-muted-foreground/50">{isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
+                </button>
+                {isExpanded && (
+                  <div className="border-t border-border/50 bg-secondary/10 px-3 py-2 text-[10px]">
+                    {item.description && <p className="mb-1 break-words text-muted-foreground">{item.description}</p>}
+                    <div className="flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground/80">
+                      <span>Task <code>{item.task_id}</code></span>
+                      {item.plan_id && <span>Plan <code>{item.plan_id}</code></span>}
+                      {item.run_id && <span>Run <code>{item.run_id}</code></span>}
+                    </div>
+                    {canCancel && <div className="mt-2 flex justify-end"><button type="button" onClick={() => onCancel(item.run_id!)} className="flex items-center gap-1 rounded border border-destructive/40 bg-destructive/5 px-2 py-1 font-medium text-destructive hover:bg-destructive/10"><StopCircle size={12} /> Cancel run</button></div>}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function TaskTypeIcon({ event }: { event: TimelineEvent }) {
@@ -184,7 +353,7 @@ function TaskOutput({ value }: { value: string }) {
   )
 }
 
-function TaskDetails({ task, now, onCancel }: { task: PanelTask; now: number; onCancel: () => void }) {
+function TaskDetails({ task, now, onCancel }: { task: PanelTask; now: number; onCancel: (runId: string) => void }) {
   const event = task.event
   const output = event.output || event.lines?.filter(Boolean).join('') || ''
   return (
@@ -271,7 +440,7 @@ function TaskDetails({ task, now, onCancel }: { task: PanelTask; now: number; on
       <div className="mt-1 flex justify-end">
         <button
           type="button"
-          onClick={onCancel}
+          onClick={() => onCancel(runIdOf(event))}
           className="flex items-center gap-1 rounded border border-destructive/40 bg-destructive/5 px-2 py-1 font-medium text-destructive hover:bg-destructive/10"
         >
           <StopCircle size={12} /> Cancel
@@ -281,12 +450,16 @@ function TaskDetails({ task, now, onCancel }: { task: PanelTask; now: number; on
   )
 }
 
-export default function BackgroundTasksPanel({ events, onCancel }: BackgroundTasksPanelProps) {
+export default function BackgroundTasksPanel({ events, onCancel, sessionId }: BackgroundTasksPanelProps) {
   const [panelExpanded, setPanelExpanded] = useState(true)
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({})
   const [now, setNow] = useState(() => Date.now())
 
   const { tasks } = useMemo(() => buildTasks(events), [events])
+  const durableRefreshKey = useMemo(() => {
+    const activeRuns = tasks.map(task => runIdOf(task.event)).sort().join('|')
+    return `${activeRuns}:${tasks.length}`
+  }, [tasks])
 
   // One shared per-second timer for every row. Stopped as soon as no active
   // task remains; torn down on unmount so nothing leaks.
@@ -314,21 +487,21 @@ export default function BackgroundTasksPanel({ events, onCancel }: BackgroundTas
   const toggleTask = (id: string) => setExpandedIds(previous => ({ ...previous, [id]: !previous[id] }))
 
   const activeCount = tasks.length
-  if (activeCount === 0) return null
-
   return (
-    <div className="mb-1 border border-border bg-secondary/25 text-[11px] text-muted-foreground">
-      <button
-        type="button"
-        onClick={() => setPanelExpanded(value => !value)}
-        aria-expanded={panelExpanded}
-        className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-secondary/45"
-      >
-        {panelExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-        <span className="flex w-3 shrink-0 items-center justify-center"><Loader2 size={12} className="animate-spin text-primary" aria-hidden="true" /></span>
-        <span className="font-medium text-foreground/85">{activeCount} Background task{activeCount !== 1 ? 's' : ''}</span>
-      </button>
-      {panelExpanded && (
+    <>
+      <DurableWorkItems sessionId={sessionId} refreshKey={durableRefreshKey.length} onCancel={onCancel} />
+      {activeCount > 0 && <div className="mb-1 border border-border bg-secondary/25 text-[11px] text-muted-foreground">
+        <button
+          type="button"
+          onClick={() => setPanelExpanded(value => !value)}
+          aria-expanded={panelExpanded}
+          className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-secondary/45"
+        >
+          {panelExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+          <span className="flex w-3 shrink-0 items-center justify-center"><Loader2 size={12} className="animate-spin text-primary" aria-hidden="true" /></span>
+          <span className="font-medium text-foreground/85">{activeCount} Background task{activeCount !== 1 ? 's' : ''}</span>
+        </button>
+        {panelExpanded && (
         <div className="border-t border-border">
           <div className="flex items-center gap-2 px-3 py-1.5">
             <span className="min-w-0 truncate text-[10px] text-muted-foreground/70">Commands, tests, git operations, and sub-agents running in background.</span>
@@ -365,7 +538,8 @@ export default function BackgroundTasksPanel({ events, onCancel }: BackgroundTas
             })}
           </div>
         </div>
-      )}
-    </div>
+        )}
+      </div>}
+    </>
   )
 }

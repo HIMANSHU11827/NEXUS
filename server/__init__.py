@@ -12,11 +12,12 @@ import os
 import re
 import shutil
 import socket
+import sqlite3
 import threading
 import time
 import uuid
 import urllib.parse
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,11 +36,20 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
 from nexus.events import CanonicalEvent
 from nexus.run_context import list_run_contexts, load_run_context
+from nexus.work_items import (
+    list_work_items,
+    load_work_item,
+    project_work_item_event,
+    replay_work_item_event_log,
+)
+from nexus.control_plane import project_plan_event
 from nexus.runtime import (
+    build_resume_prompt,
     build_chat_request,
     safe_session_id as runtime_safe_session_id,
     session_file_path as runtime_session_file_path,
 )
+from nexus.task_workflow import complete_task_workflow, start_task_workflow
 from orchestrators import NexusLoop
 
 try:
@@ -86,6 +96,27 @@ _WORK_EVENT_CACHE_LOCK = threading.RLock()
 _WORK_EVENT_CACHE: Dict[str, Tuple[Tuple[int, int], List[Dict[str, Any]], int]] = {}
 _WORK_EVENT_MAX_RECORDS = max(100, int(os.environ.get("NEXUS_WORK_EVENT_MAX_RECORDS", "10000")))
 _WORK_EVENT_MAX_BYTES = max(1024 * 1024, int(os.environ.get("NEXUS_WORK_EVENT_MAX_BYTES", str(50 * 1024 * 1024))))
+_WORK_EVENT_STREAM_QUEUE_SIZE = max(32, int(os.environ.get("NEXUS_WORK_EVENT_STREAM_QUEUE_SIZE", "512")))
+_CHAT_CHUNK_QUEUE_SIZE = max(16, int(os.environ.get("NEXUS_CHAT_CHUNK_QUEUE_SIZE", "128")))
+_CHAT_HEARTBEAT_SECONDS = max(5.0, float(os.environ.get("NEXUS_CHAT_HEARTBEAT_SECONDS", "15")))
+
+
+@contextmanager
+def _interprocess_event_lock(path: str):
+    """Lock one session's event stream across server worker processes."""
+    lock_path = f"{path}.lock.sqlite"
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    connection = sqlite3.connect(lock_path, timeout=60.0, isolation_level=None)
+    try:
+        connection.execute("CREATE TABLE IF NOT EXISTS event_mutex (id INTEGER PRIMARY KEY CHECK (id = 1))")
+        connection.execute("INSERT OR IGNORE INTO event_mutex(id) VALUES (1)")
+        connection.execute("BEGIN IMMEDIATE")
+        yield
+    finally:
+        try:
+            connection.rollback()
+        finally:
+            connection.close()
 _THREAD_LOCAL = threading.local()
 _TASKS_PATH = os.path.join(_ROOT, "logs", "tasks.json")
 _CONFIG_PATH = os.path.join(_PROJECT_ROOT, "config", "nexus_config.yaml")
@@ -503,24 +534,40 @@ def work_events_path(session_id: str) -> str:
     return os.path.join(_WORK_EVENTS_DIR, f"{sid}.jsonl")
 
 
-def _next_work_event_sequence(path: str) -> int:
+def _safe_event_sequence(event: Dict[str, Any], default: int = 0) -> int:
+    """Normalize untrusted persisted sequence values for all read paths."""
+    try:
+        value = int(event.get("sequence") or default)
+    except (AttributeError, TypeError, ValueError):
+        return max(0, int(default or 0))
+    return max(0, value)
+
+
+def _next_work_event_sequence_unlocked(path: str) -> int:
     """Return a restart-safe monotonic sequence for one persisted work stream."""
     with _WORK_EVENT_SEQUENCE_LOCK:
-        if path not in _WORK_EVENT_SEQUENCES:
-            last = 0
-            try:
-                with open(path, "r", encoding="utf-8") as handle:
-                    for line in handle:
-                        try:
-                            event = json.loads(line)
-                            last = max(last, int(event.get("sequence") or 0))
-                        except (AttributeError, json.JSONDecodeError, TypeError, ValueError):
-                            continue
-            except FileNotFoundError:
-                pass
-            _WORK_EVENT_SEQUENCES[path] = last
-        _WORK_EVENT_SEQUENCES[path] += 1
+        # Reconcile the persisted high-water mark while holding the
+        # cross-process mutex. A worker's in-memory cache may be stale after a
+        # different worker appended records.
+        last = _WORK_EVENT_SEQUENCES.get(path, 0)
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    try:
+                        event = json.loads(line)
+                        last = max(last, _safe_event_sequence(event))
+                    except (AttributeError, json.JSONDecodeError, TypeError, ValueError):
+                        continue
+        except FileNotFoundError:
+            pass
+        _WORK_EVENT_SEQUENCES[path] = last + 1
         return _WORK_EVENT_SEQUENCES[path]
+
+
+def _next_work_event_sequence(path: str) -> int:
+    """Allocate a sequence while holding both process and OS-level locks."""
+    with _interprocess_event_lock(path):
+        return _next_work_event_sequence_unlocked(path)
 
 
 # ----------------------------------------------------------------------
@@ -544,7 +591,7 @@ def _scan_work_event_log(path: str) -> Tuple[List[Dict[str, Any]], int]:
     record_count = 0
     if not os.path.exists(path):
         return [], 0
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
             try:
                 event = json.loads(line)
@@ -565,7 +612,12 @@ def _scan_work_event_log(path: str) -> Tuple[List[Dict[str, Any]], int]:
     retained = list(tail)
     retained_ids = {str(event.get("event_id") or event.get("id") or "") for event in retained}
     retained.extend(event for event_id, event in active.items() if event_id not in retained_ids)
-    retained.sort(key=lambda event: int(event.get("sequence") or 0))
+    def sequence_key(event: Dict[str, Any]) -> int:
+        try:
+            return max(0, int(event.get("sequence") or 0))
+        except (AttributeError, TypeError, ValueError):
+            return 0
+    retained.sort(key=sequence_key)
     return retained, record_count
 
 
@@ -669,8 +721,17 @@ def latest_todo_snapshot(session_id: str) -> Dict[str, Any]:
     path = work_events_path(session_id)
     if os.path.exists(path):
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                raw_events = [json.loads(line) for line in f if line.strip()]
+            raw_events = []
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    if isinstance(event, dict):
+                        raw_events.append(event)
             for event in reversed(raw_events):
                 if not isinstance(event, dict):
                     continue
@@ -759,85 +820,28 @@ def append_todo_events_from_content(
 
 
 def start_chat_workflow(session_id: str, prompt: str, turn_id: str = "") -> str:
-    # A todo.md plan belongs to the active turn. Clear stale plans before the
-    # model/orchestrator decides whether this prompt actually needs phases.
-    if prompt_requests_resume(prompt):
-        snapshot = latest_todo_snapshot(session_id)
-        content = str(snapshot.get("content") or "")
-        if content:
-            append_todo_events_from_content(
-                session_id,
-                content,
-                turn_id,
-                resumed_from_turn_id=str(snapshot.get("turn_id") or ""),
-            )
-            return content
-    clear_workspace_todo_plan()
-    return ""
+    return start_task_workflow(
+        session_id,
+        prompt,
+        turn_id,
+        prompt_requests_resume=prompt_requests_resume,
+        latest_snapshot=latest_todo_snapshot,
+        append_todo_events=append_todo_events_from_content,
+        clear_plan=clear_workspace_todo_plan,
+    )
 
 
 def complete_chat_workflow(session_id: str, prompt: str, turn_id: str = "", status: str = "done") -> None:
-    sid = safe_session_id(session_id)
-    events = list_work_events(sid, limit=1000, turn_id=turn_id)
-    if turn_id:
-        events = [e for e in events if str(e.get("turn_id", "")) == turn_id]
-    todo_events = [e for e in events if e.get("kind") == "todo" and e.get("phase_index") is not None]
-    if not todo_events:
-        return
-    
-    # Sort todo events by phase_index
-    todo_events.sort(key=lambda x: int(x.get("phase_index") or 0))
-
-    final_status = str(status or "done").lower()
-    if final_status != "done":
-        updated_events = []
-        for e in todo_events:
-            if str(e.get("status") or "").lower() in {"running", "working"}:
-                e["status"] = final_status
-                updated_events.append(e)
-        for event in updated_events:
-            append_work_event(sid, event)
-        return
-    
-    updated_events = []
-    for e in todo_events:
-        items = e.get("items") or []
-        e["checked_items"] = list(items)
-        e["status"] = "done"
-        updated_events.append(e)
-        
-    prompt_text = todo_events[0].get("task", "Agent Workspace Plan")
-    lines = ["## TODO List", "", f"Task: {prompt_text}", ""]
-    for e in todo_events:
-        idx = e.get("phase_index")
-        title = e.get("title")
-        items = e.get("items") or []
-        lines.append(f"- [x] Phase {idx}: {title}")
-        for item in items:
-            lines.append(f"  - [x] {item}")
-            
-    todo_content = "\n".join(lines).strip() + "\n"
-    todo_rel_path = write_workspace_todo_plan(todo_content)
-    
-    todo_file_event = {
-        "kind": "file",
-        "type": "file",
-        "action": "Edit file",
-        "title": "todo.md",
-        "task": prompt_text,
-        "target": todo_rel_path,
-        "path": todo_rel_path,
-        "preview": todo_content,
-        "status": "done",
-        "turn_id": turn_id,
-        "phase": f"Phase {len(todo_events)}: {todo_events[-1].get('title')}",
-        "phase_index": len(todo_events),
-        "role": "planning_artifact",
-    }
-    updated_events.append(todo_file_event)
-    
-    for event in updated_events:
-        append_work_event(sid, event)
+    complete_task_workflow(
+        session_id,
+        prompt,
+        turn_id,
+        status,
+        safe_session_id=safe_session_id,
+        list_events=lambda sid, tid: list_work_events(sid, limit=1000, turn_id=tid),
+        append_event=append_work_event,
+        write_plan=write_workspace_todo_plan,
+    )
 
 
 def refresh_provider_runtime() -> str:
@@ -1151,10 +1155,10 @@ def append_work_event(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any
             event["preview_error"] = str(exc)
     os.makedirs(_WORK_EVENTS_DIR, exist_ok=True)
     path = work_events_path(session_id)
-    with _WORK_EVENT_APPEND_LOCK:
+    with _WORK_EVENT_APPEND_LOCK, _interprocess_event_lock(path):
         if event.get("sequence") is not None:
             event["source_sequence"] = event["sequence"]
-        sequence = _next_work_event_sequence(path)
+        sequence = _next_work_event_sequence_unlocked(path)
         canonical = CanonicalEvent.from_work_event(event, event["session_id"], sequence).to_dict()
         event["legacy_type"] = event.get("type")
         event["legacy_status"] = event.get("status")
@@ -1164,13 +1168,23 @@ def append_work_event(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any
         event["id"] = event["event_id"]
         event["session_id"] = event["conversation_id"]
         event["created_at"] = event["timestamp"]
-        with open(path, "a", encoding="utf-8") as f:
+        with open(path, "a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
         _invalidate_work_event_cache(path)
         _compact_work_event_log_if_needed(path)
         
     if hasattr(_THREAD_LOCAL, "appended_events"):
         _THREAD_LOCAL.appended_events.append(event)
+
+    # Project only the persisted canonical/public event.  The projector is
+    # deliberately append-free, so this cannot recursively write events.
+    try:
+        project_work_item_event(root=_RUN_ROOT, session_id=event["conversation_id"], event=event)
+        project_plan_event(root=_RUN_ROOT, session_id=event["conversation_id"], event=event)
+    except Exception:
+        logger.debug("Could not project work event onto WorkItem", exc_info=True)
         
     if event.get("kind") not in ("todo", "planning_artifact") and event.get("role") != "planning_artifact":
         try:
@@ -1234,7 +1248,7 @@ def replay_work_events_after(session_id: str, after_sequence: int, limit: int = 
     for event in raw_events:
         if str(event.get("visibility", "")).lower() == "internal":
             continue
-        if int(event.get("sequence") or 0) > after_sequence:
+        if _safe_event_sequence(event) > after_sequence:
             events.append(event)
             if len(events) >= max(1, min(limit, 1000)):
                 break
@@ -1252,7 +1266,12 @@ def bind_live_work_event_sink(loop: NexusLoop, session_id: str, turn_id: str, ou
         event = append_work_event(session_id, enriched)
         run_key = str(enriched.get("run_id") or turn_id or "")
         if run_key:
-            if str(enriched.get("event_type") or "") in ("run.completed", "run.failed", "run.cancelled"):
+            if str(enriched.get("event_type") or "") in (
+                "run.completed",
+                "run.failed",
+                "run.cancelled",
+                "run.timed_out",
+            ):
                 _unregister_checkpoint_pusher(run_key)
             else:
                 _register_checkpoint_pusher(run_key, lambda evt: out_queue.put(("event", evt)))
@@ -1281,19 +1300,45 @@ def _append_work_event(session_id: str, event: Dict[str, Any]) -> Dict[str, Any]
     sid = safe_session_id(session_id)
     payload = dict(event)
     payload.setdefault("session_id", sid)
+    # Every persisted event needs a stable identity so lifecycle updates (for
+    # example command running -> success) collapse into one timeline record.
+    # The legacy server path previously allowed anonymous command events,
+    # which made its start and terminal records appear twice.
+    event_id = str(payload.get("event_id") or payload.get("id") or f"evt_{uuid.uuid4().hex}")
+    payload["event_id"] = event_id
+    payload["id"] = event_id
     path = work_events_path(sid)
-    with _WORK_EVENT_APPEND_LOCK:
+    with _WORK_EVENT_APPEND_LOCK, _interprocess_event_lock(path):
         if not payload.get("sequence"):
-            payload["sequence"] = _next_work_event_sequence(path)
+            payload["sequence"] = _next_work_event_sequence_unlocked(path)
         else:
             try:
                 sequence = int(payload.get("sequence") or 0)
+                allocate_replacement = False
                 with _WORK_EVENT_SEQUENCE_LOCK:
-                    _WORK_EVENT_SEQUENCES[path] = max(_WORK_EVENT_SEQUENCES.get(path, 0), sequence)
+                    current = _WORK_EVENT_SEQUENCES.get(path, 0)
+                    if sequence <= current:
+                        payload["source_sequence"] = sequence
+                        # Do not allocate while holding the non-reentrant
+                        # sequence lock.  The allocator acquires that lock
+                        # itself; terminal command events commonly copy the
+                        # started event's sequence and used to deadlock here.
+                        allocate_replacement = True
+                    else:
+                        _WORK_EVENT_SEQUENCES[path] = sequence
+                if allocate_replacement:
+                    payload["sequence"] = _next_work_event_sequence_unlocked(path)
             except (TypeError, ValueError):
-                payload["sequence"] = _next_work_event_sequence(path)
+                payload["sequence"] = _next_work_event_sequence_unlocked(path)
         with open(path, "a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    try:
+        project_work_item_event(root=_RUN_ROOT, session_id=sid, event=payload)
+        project_plan_event(root=_RUN_ROOT, session_id=sid, event=payload)
+    except Exception:
+        logger.debug("Could not project legacy work event onto WorkItem", exc_info=True)
     _maybe_trigger_checkpoint(sid, payload)
     return payload
 
@@ -1388,10 +1433,38 @@ def work_event_run_summary(session_id: str, run_id: str) -> Dict[str, Any]:
     }
 
 
+def _public_run_event_limit(limit: int) -> int:
+    try:
+        value = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="limit must be an integer") from exc
+    if value < 1 or value > 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+    return value
+
+
+def list_public_run_events(session_id: str, run_id: str, limit: int = 1000) -> List[Dict[str, Any]]:
+    """Return bounded append-only public events for one run without collapsing ids."""
+    safe_limit = _public_run_event_limit(limit)
+    raw_events, _ = _cached_work_events(work_events_path(session_id))
+    events: List[Dict[str, Any]] = []
+    for event in raw_events:
+        if str(event.get("visibility") or "public").lower() == "internal":
+            continue
+        if _is_private_diagnostic_event(event):
+            continue
+        if str(event.get("turn_id") or event.get("run_id") or "") != str(run_id):
+            continue
+        events.append(event)
+        if len(events) >= safe_limit:
+            break
+    return events
+
+
 def get_loop(session_id: str = "default") -> NexusLoop:
     sid = safe_session_id(session_id)
     if sid not in _LOOPS:
-        loop = NexusLoop(root_dir=_PROJECT_ROOT)
+        loop = NexusLoop(root_dir=_PROJECT_ROOT, session_id=sid)
         try:
             loop.load_memory(sid)
         except Exception as e:
@@ -2162,10 +2235,15 @@ async def chat(request: Request):
     profile = chat_request.profile
     model = chat_request.model
     turn_id = chat_request.turn_id
+    task_id = str(data.get("task_id") or "")
     max_tokens = chat_request.max_tokens
     conversation_history = chat_request.messages
     stream = bool(data.get("stream", False))
     canonical_events = bool(data.get("canonical_events", False))
+    try:
+        run_timeout = max(1.0, min(float(data.get("timeout_seconds") or os.environ.get("NEXUS_CHAT_TIMEOUT", "120")), 3600.0))
+    except (TypeError, ValueError):
+        run_timeout = 30.0
 
     try:
         nexus_loop = get_loop(sid)
@@ -2182,6 +2260,16 @@ async def chat(request: Request):
         logger.debug("get_loop reset failed for %s", sid, exc_info=True)
 
     set_active_session(sid, source="cli-api:chat")
+
+    # Keep CLI/API runs on the same task/workflow contract as the GUI route.
+    # Resume context is derived before execution, and completion is recorded
+    # by the route-specific finally blocks below.
+    resume_todo_context = ""
+    try:
+        resume_todo_context = await asyncio.to_thread(start_chat_workflow, sid, prompt, turn_id)
+    except Exception:
+        logger.debug("start_chat_workflow failed for %s", sid, exc_info=True)
+    effective_prompt = build_resume_prompt(prompt, resume_todo_context)
 
     allowed_providers = {
         "openrouter", "qwen", "deepseek", "lm_studio", "anthropic", "openai",
@@ -2209,20 +2297,56 @@ async def chat(request: Request):
 
     async def async_generator():
         previous_sink = nexus_loop.work_event_sink
-        event_queue: asyncio.Queue = asyncio.Queue()
-        chunk_queue: asyncio.Queue = asyncio.Queue()
+        stream_completed = False
+        stream_succeeded = True
+        event_queue: asyncio.Queue = asyncio.Queue(maxsize=_WORK_EVENT_STREAM_QUEUE_SIZE)
+        chunk_queue: asyncio.Queue = asyncio.Queue(maxsize=_CHAT_CHUNK_QUEUE_SIZE)
         owner_loop = asyncio.get_running_loop()
 
+        def enqueue_event(event):
+            # Persistence is authoritative. If a slow client fills the live
+            # queue, drop the oldest live frame; reconnect/replay can recover
+            # every persisted record without unbounded memory growth.
+            try:
+                event_queue.put_nowait(event)
+            except asyncio.QueueFull:
+                dropped = []
+                while True:
+                    try:
+                        dropped.append(event_queue.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+                dropped_sequences = [
+                    _safe_event_sequence(item)
+                    for item in dropped
+                    if isinstance(item, dict) and item.get("sequence")
+                ]
+                # Make overflow observable. The client can use this cursor
+                # to request the durable replay endpoint instead of treating
+                # a bounded-queue drop as a successful live stream.
+                marker = {
+                    "__stream_control__": "replay_required",
+                    "after_sequence": max(0, min(dropped_sequences or [_safe_event_sequence(event, 1)]) - 1),
+                }
+                try:
+                    event_queue.put_nowait(marker)
+                    event_queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    return
+
         def stream_event_sink(payload):
-            # Allocate from the persisted session cursor so reconnects remain
-            # monotonic across streams and concurrent runs.
-            sequence = _next_work_event_sequence(work_events_path(sid))
-            event = CanonicalEvent.from_work_event(dict(payload), sid, sequence).to_dict()
-            _append_work_event(sid, event)
-            owner_loop.call_soon_threadsafe(event_queue.put_nowait, event)
+            # Canonicalize and append under one cross-process critical section;
+            # allocating a cursor before the append leaves a race window.
+            event = append_work_event(sid, dict(payload))
+            owner_loop.call_soon_threadsafe(enqueue_event, event)
             return event
 
         async def pump_run():
+            nonlocal stream_succeeded
+            response_parts: list[str] = []
+            completed_normally = False
+            run_succeeded = True
+            failure_reason = ""
             try:
                 run_kwargs = {
                     "provider": safe_provider,
@@ -2233,26 +2357,69 @@ async def chat(request: Request):
                 }
                 if safe_profile:
                     run_kwargs["profile"] = safe_profile
+                if task_id:
+                    run_kwargs["task_id"] = task_id
+                run_kwargs["deadline_seconds"] = run_timeout
                 async for chunk in nexus_loop.stream_run(
-                    prompt,
+                    effective_prompt,
                     **run_kwargs,
                 ):
+                    if chunk.get("type") == "content":
+                        response_parts.append(str(chunk.get("data") or ""))
+                    if chunk.get("type") == "done" and isinstance(chunk.get("data"), dict):
+                        run_succeeded = bool(chunk["data"].get("success", True))
+                        stream_succeeded = run_succeeded
                     await chunk_queue.put(("chunk", chunk))
+                completed_normally = True
             except asyncio.TimeoutError:
-                await chunk_queue.put(("error", "Response timed out after 30 seconds"))
+                run_succeeded = False
+                failure_reason = f"Response timed out after {run_timeout:.0f} seconds"
+                await chunk_queue.put(("error", failure_reason))
+            except asyncio.CancelledError:
+                run_succeeded = False
+                failure_reason = "Response stream cancelled before completion"
+                raise
             except Exception as exc:
+                run_succeeded = False
+                failure_reason = str(exc)
                 await chunk_queue.put(("error", str(exc)))
             finally:
-                await chunk_queue.put(("done", None))
+                if canonical_events and response_parts and (completed_normally or failure_reason):
+                    stream_event_sink({
+                        "event_id": f"message_{turn_id}",
+                        "event_type": "message.completed" if completed_normally and run_succeeded else "message.failed",
+                        "run_id": turn_id,
+                        "turn_id": turn_id,
+                        "kind": "message",
+                        "title": "Assistant response completed" if completed_normally and run_succeeded else "Assistant response interrupted",
+                        "status": "success" if completed_normally and run_succeeded else "failed",
+                        "payload": {"content": "".join(response_parts)},
+                        "error": failure_reason if not (completed_normally and run_succeeded) else "",
+                        "visibility": "public",
+                    })
 
         if canonical_events:
             nexus_loop.work_event_sink = stream_event_sink
-        producer = asyncio.create_task(pump_run())
+        async def timed_pump():
+            try:
+                await asyncio.wait_for(pump_run(), timeout=run_timeout)
+            except asyncio.TimeoutError:
+                request_abort = getattr(nexus_loop, "request_abort", None)
+                if callable(request_abort):
+                    request_abort(turn_id, "deadline_exceeded")
+                await chunk_queue.put(("error", f"Response timed out after {run_timeout:.0f} seconds"))
+            finally:
+                await chunk_queue.put(("done", None))
+
+        producer = asyncio.create_task(timed_pump())
         try:
             finished = False
             while not finished or not event_queue.empty():
                 if not event_queue.empty():
                     event = event_queue.get_nowait()
+                    if event.get("__stream_control__") == "replay_required":
+                        yield "event: nexus.replay_required\ndata: " + json.dumps({"after_sequence": event["after_sequence"]}) + "\n\n"
+                        continue
                     yield f"event: nexus.event\nid: {event['sequence']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
                     continue
 
@@ -2261,17 +2428,29 @@ async def chat(request: Request):
                 waits = {chunk_wait}
                 if event_wait is not None:
                     waits.add(event_wait)
-                completed, pending = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+                completed, pending = await asyncio.wait(
+                    waits,
+                    timeout=_CHAT_HEARTBEAT_SECONDS,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
                 for task in pending:
                     task.cancel()
 
+                if not completed:
+                    yield ": nexus-heartbeat\n\n"
+                    continue
+
                 if event_wait is not None and event_wait in completed:
                     event = event_wait.result()
-                    yield f"event: nexus.event\nid: {event['sequence']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    if event.get("__stream_control__") == "replay_required":
+                        yield "event: nexus.replay_required\ndata: " + json.dumps({"after_sequence": event["after_sequence"]}) + "\n\n"
+                    else:
+                        yield f"event: nexus.event\nid: {event['sequence']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
                 if chunk_wait in completed:
                     kind, value = chunk_wait.result()
                     if kind == "done":
                         finished = True
+                        stream_completed = True
                     elif kind == "error":
                         safe_err = str(value).replace('\n', ' ').replace('\r', '')
                         yield "event: error\n" + _sse_data(f"[NEXUS_SYSTEM_ERROR]: {safe_err}")
@@ -2285,6 +2464,16 @@ async def chat(request: Request):
             safe_err = str(e).replace('\n', ' ').replace('\r', '')
             yield "event: error\n" + _sse_data(f"[NEXUS_SYSTEM_ERROR]: {safe_err}")
         finally:
+            try:
+                await asyncio.to_thread(
+                    complete_chat_workflow,
+                    sid,
+                    prompt,
+                    turn_id,
+                    "done" if stream_completed and stream_succeeded else "failed",
+                )
+            except Exception:
+                logger.debug("complete_chat_workflow failed for %s", sid, exc_info=True)
             if not producer.done():
                 producer.cancel()
             await asyncio.gather(producer, return_exceptions=True)
@@ -2299,14 +2488,38 @@ async def chat(request: Request):
             "model": safe_model,
             "max_tokens": max_tokens,
             "turn_id": turn_id,
+            "conversation_history": conversation_history,
+            "deadline_seconds": run_timeout,
         }
         if safe_profile:
             run_kwargs["profile"] = safe_profile
+        if task_id:
+            run_kwargs["task_id"] = task_id
         gen = nexus_loop.stream_run(
-            prompt,
+            effective_prompt,
             **run_kwargs,
         )
-        text = await _collect_all(gen)
+        text = ""
+        try:
+            text = await asyncio.wait_for(_collect_all(gen), timeout=run_timeout)
+        except asyncio.TimeoutError:
+            request_abort = getattr(nexus_loop, "request_abort", None)
+            if callable(request_abort):
+                request_abort(turn_id, "deadline_exceeded")
+            if hasattr(gen, "aclose"):
+                await gen.aclose()
+            text = f"[NEXUS_SYSTEM_ERROR]: Response timed out after {run_timeout:.0f} seconds"
+        finally:
+            try:
+                await asyncio.to_thread(
+                    complete_chat_workflow,
+                    sid,
+                    prompt,
+                    turn_id,
+                    "failed" if text.startswith("[NEXUS_SYSTEM_ERROR]") else "done",
+                )
+            except Exception:
+                logger.debug("complete_chat_workflow failed for %s", sid, exc_info=True)
         return {"response": text}
 
 
@@ -2317,8 +2530,20 @@ def cancel_chat(session_id: str, turn_id: str = ""):
     nexus_loop = _LOOPS.get(sid)
     if nexus_loop is None:
         raise HTTPException(status_code=404, detail="Active session not found")
-    nexus_loop.abort()
-    run_id = str(turn_id or getattr(nexus_loop, "_current_turn_id", "") or sid)
+    run_id = str(turn_id or getattr(nexus_loop, "_current_turn_id", "") or "")
+    if not run_id:
+        raise HTTPException(status_code=409, detail="No active run id available")
+    request_abort = getattr(nexus_loop, "request_abort", None)
+    if callable(request_abort):
+        if not request_abort(run_id):
+            raise HTTPException(status_code=409, detail="Requested run is no longer active")
+    else:
+        try:
+            nexus_loop.abort(turn_id=run_id)
+        except TypeError:
+            # Compatibility with legacy loop doubles and adapters whose
+            # abort() method still accepts no keyword arguments.
+            nexus_loop.abort()
     return {
         "status": "cancelled",
         "run_id": run_id,
@@ -2570,8 +2795,8 @@ def list_runs(session_id: str = "", limit: int = 100):
 
 
 @app.get("/api/runs/{session_id}/{run_id}")
-def get_run_context(session_id: str, run_id: str, include_events: bool = True, limit: int = 1000):
-    """Return one durable run context plus public work-event replay."""
+def get_run_context(request: Request, session_id: str, run_id: str, include_events: bool = True, limit: int = 1000):
+    """Return one durable run context plus collapsed or full public events."""
     sid = safe_session_id(session_id)
     context = load_run_context(_RUN_ROOT, sid, run_id)
     if context is None:
@@ -2582,11 +2807,69 @@ def get_run_context(session_id: str, run_id: str, include_events: bool = True, l
         "run": context,
         "work_events": work_event_run_summary(sid, resolved_run_id),
     }
-    if include_events:
+    explicit_full_events = request.query_params.get("include_events", "").lower() == "true"
+    if explicit_full_events:
+        safe_limit = _public_run_event_limit(limit)
+        events = list_public_run_events(sid, resolved_run_id, limit=limit)
+        response["events_mode"] = "complete"
+        response["events_truncated"] = len(events) >= safe_limit
+    elif include_events:
         events = list_work_events(sid, limit=limit, turn_id=resolved_run_id)
-        response["events"] = events
-        response["next_sequence"] = max((int(event.get("sequence") or 0) for event in events), default=0)
+        response["events_mode"] = "collapsed"
+    else:
+        return response
+    response["events"] = events
+    response["next_sequence"] = max((_safe_event_sequence(event) for event in events), default=0)
     return response
+
+
+def _public_work_item(item: Any) -> Dict[str, Any]:
+    """Return a WorkItem without exposing server filesystem details."""
+    payload = dict(item.to_dict())
+    payload.pop("root", None)
+    return payload
+
+
+def _work_item_limit(limit: int) -> int:
+    try:
+        value = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="limit must be an integer") from exc
+    if value < 1 or value > 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+    return value
+
+
+@app.get("/api/work-items")
+def list_work_items_api(session_id: str = "", limit: int = 100):
+    """List durable WorkItems without changing the legacy /api/tasks contract."""
+    sid = safe_session_id(session_id) if session_id else ""
+    if sid:
+        replay_work_item_event_log(
+            root=_RUN_ROOT,
+            session_id=sid,
+            event_log_path=work_events_path(sid),
+        )
+    items = list_work_items(_RUN_ROOT, session_id=sid, limit=_work_item_limit(limit))
+    return {
+        "status": "success",
+        "work_items": [_public_work_item(item) for item in items],
+    }
+
+
+@app.get("/api/work-items/{session_id}/{task_id}")
+def get_work_item_api(session_id: str, task_id: str):
+    """Return one durable WorkItem, including its linked run identity when present."""
+    sid = safe_session_id(session_id)
+    replay_work_item_event_log(
+        root=_RUN_ROOT,
+        session_id=sid,
+        event_log_path=work_events_path(sid),
+    )
+    item = load_work_item(_RUN_ROOT, sid, task_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Work item not found")
+    return {"status": "success", "work_item": _public_work_item(item)}
 
 
 @app.get("/api/work-events")
@@ -2597,9 +2880,26 @@ def get_work_events(request: Request, session_id: str = "default", limit: int = 
             after_sequence = max(after_sequence, int(header_cursor))
         except ValueError:
             raise HTTPException(status_code=400, detail="Last-Event-ID must be an integer sequence")
-    events = list_work_events(session_id, limit=limit, turn_id=turn_id, after_sequence=after_sequence)
-    next_sequence = max((int(event.get("sequence") or 0) for event in events), default=after_sequence)
-    return {"events": events, "after_sequence": after_sequence, "next_sequence": next_sequence}
+    raw_events, _ = _cached_work_events(work_events_path(session_id))
+    retained_sequences = [_safe_event_sequence(event) for event in raw_events if _safe_event_sequence(event) > 0]
+    oldest_sequence = min(retained_sequences, default=0)
+    replay_truncated = bool(after_sequence and oldest_sequence and after_sequence < oldest_sequence - 1)
+    # Cursor clients need every transition after their checkpoint. The normal
+    # read remains lifecycle-collapsed for the GUI timeline.
+    if after_sequence:
+        events = replay_work_events_after(session_id, after_sequence, limit=limit)
+        if turn_id:
+            events = [event for event in events if str(event.get("turn_id") or event.get("run_id") or "") == str(turn_id)]
+    else:
+        events = list_work_events(session_id, limit=limit, turn_id=turn_id, after_sequence=after_sequence)
+    next_sequence = max((_safe_event_sequence(event) for event in events), default=after_sequence)
+    return {
+        "events": events,
+        "after_sequence": after_sequence,
+        "next_sequence": next_sequence,
+        "oldest_sequence": oldest_sequence,
+        "replay_truncated": replay_truncated,
+    }
 
 
 @app.post("/api/work-events/run-command-stream")
@@ -2615,6 +2915,10 @@ async def run_work_command_stream(request: Request):
         raise HTTPException(status_code=413, detail="Command is too large")
     if profile not in {"pwsh", "cmd", "bash", "wsl"}:
         raise HTTPException(status_code=400, detail="Unsupported terminal profile")
+    try:
+        timeout = max(5, min(int(data.get("timeout", 90)), 180))
+    except (TypeError, ValueError):
+        timeout = 90
 
     # Enforce the session's terminal permission policy before touching the
     # sandbox. A restrictive mode (ask/default/allowlist) must block the
@@ -2649,18 +2953,19 @@ async def run_work_command_stream(request: Request):
         try:
             from sandbox.sandbox_manager import SovereignSandbox
             sandbox = SovereignSandbox(_PROJECT_ROOT)
-            async for text in sandbox.stream_execute(command, _PROJECT_ROOT):
+            async for text in sandbox.stream_execute(command, _PROJECT_ROOT, timeout=timeout):
                 output_parts.append(text)
                 yield sse({"type": "chunk", "stream": "stderr" if text.startswith("[SANDBOX_") else "stdout", "text": text})
             output = "".join(output_parts)
             exit_code = sandbox.last_exit_code if sandbox.last_exit_code is not None else 0
             status = "success" if exit_code == 0 else "failed"
+            stderr = output if status == "failed" else ""
             completed = _append_work_event(sid, {
                 **started, "id": started.get("id"), "event_id": started.get("event_id"), "status": status,
-                "stdout": output, "stderr": "", "output": output,
+                "stdout": output, "stderr": stderr, "output": output,
                 "exit_code": exit_code, "completed_at": time.time(),
             })
-            yield sse({"type": "done", "status": status, "event": completed, "output": output, "exit_code": exit_code})
+            yield sse({"type": "done", "status": status, "event": completed, "output": output, "stderr": stderr, "exit_code": exit_code})
         except Exception as exc:
             message = str(exc)
             completed = _append_work_event(sid, {
@@ -2669,7 +2974,7 @@ async def run_work_command_stream(request: Request):
                 "completed_at": time.time(),
             })
             yield sse({"type": "chunk", "stream": "stderr", "text": message})
-            yield sse({"type": "done", "status": "error", "event": completed, "output": message})
+            yield sse({"type": "done", "status": "failed", "event": completed, "output": message, "stderr": message})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

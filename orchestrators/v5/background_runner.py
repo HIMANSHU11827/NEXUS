@@ -83,7 +83,23 @@ class V5BackgroundRunner:
             return None
         tasks = self._v5_runner_tasks()
         tasks.add(task)
-        task.add_done_callback(tasks.discard)
+        def _cleanup_finished(done_task: asyncio.Task) -> None:
+            """Remove the task and any priority/lane metadata it owns."""
+            tasks.discard(done_task)
+            try:
+                by_id = self._v5_runner_task_by_id()
+                meta = self._task_meta()
+                lanes = self._task_lanes()
+                owned_ids = [task_id for task_id, tracked in by_id.items() if tracked is done_task]
+                for task_id in owned_ids:
+                    by_id.pop(task_id, None)
+                    meta.pop(task_id, None)
+                    for lane_tasks in lanes.values():
+                        lane_tasks.discard(task_id)
+            except Exception:
+                logger.debug("[BACKGROUND] task metadata cleanup failed", exc_info=True)
+
+        task.add_done_callback(_cleanup_finished)
         label = name or "task"
         try:
             counters = self._runner_counters()
@@ -222,26 +238,26 @@ class V5BackgroundRunner:
 
     def _task_lanes(self) -> Dict[str, set]:
         """Return the lazy lane map (``lane -> set of task ids``). Never raises."""
-        lanes = getattr(self, "_task_lanes", None)
+        lanes = getattr(self, "_v5_task_lanes_map", None)
         if lanes is None:
             lanes = {}
-            self._task_lanes = lanes
+            self._v5_task_lanes_map = lanes
         return lanes
 
     def _task_meta(self) -> Dict[str, Dict[str, Any]]:
         """Return the lazy per-task meta map (``task_id -> {priority, seq, ...}``)."""
-        meta = getattr(self, "_task_meta", None)
+        meta = getattr(self, "_v5_task_meta_map", None)
         if meta is None:
             meta = {}
-            self._task_meta = meta
+            self._v5_task_meta_map = meta
         return meta
 
     def _v5_runner_task_by_id(self) -> Dict[str, asyncio.Task]:
         """Return the lazy ``task_id -> asyncio.Task`` map. Never raises."""
-        by_id = getattr(self, "_v5_runner_task_by_id", None)
+        by_id = getattr(self, "_v5_runner_task_by_id_map", None)
         if by_id is None:
             by_id = {}
-            self._v5_runner_task_by_id = by_id
+            self._v5_runner_task_by_id_map = by_id
         return by_id
 
     def _v5_idle_lanes(self) -> set:
@@ -328,7 +344,12 @@ class V5BackgroundRunner:
     def _runner_sort_key(self, task: Any) -> Tuple[int, int]:
         """Ordering key for a tracked task: ``(priority, seq)``, lower = sooner."""
         try:
-            task_id = self._v5_runner_task_by_id().get(task, "")
+            # The index is task_id -> asyncio.Task, so resolve the reverse
+            # mapping before looking up priority/sequence metadata.
+            task_id = next(
+                (candidate for candidate, tracked in self._v5_runner_task_by_id().items() if tracked is task),
+                "",
+            )
             meta = self._task_meta().get(task_id, {})
             return (
                 int(meta.get("priority", 0) or 0),

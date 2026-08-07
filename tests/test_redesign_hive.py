@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from nexus.run_control import RunControlRegistry
 from orchestrators.v5.hive import V5Hive, _HIVE_RESULT_MARKER
 
 logger = logging.getLogger("test_redesign_hive")
@@ -38,6 +39,7 @@ class FakeEngine:
         self.cancelled = []
         self.spawned = []
         self.consolidated = []
+        self.consolidate_timeouts = []
         self._consolidate_delay = 0.0
         self._consolidate_result = ""
         self._decompose = [("research X", "RESEARCHER"), ("build Y", "ENGINEER")]
@@ -60,6 +62,7 @@ class FakeEngine:
 
     async def consolidate_hive(self, hive_id, timeout=None, llm_call=None, **kwargs):
         self.consolidated.append(hive_id)
+        self.consolidate_timeouts.append(timeout)
         if self._consolidate_delay:
             await asyncio.sleep(self._consolidate_delay)
         return self._consolidate_result
@@ -123,6 +126,27 @@ async def test_spawn_timeout_uses_default_timeout(monkeypatch, tmp_path):
     assert result is None
     assert "hive_under_test" in engine.cancelled
     assert host._v5_hive_turn_failure["reason"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_hive_timeout_is_capped_by_parent_run_budget(monkeypatch, tmp_path):
+    """Nested hive work must inherit the active run's remaining deadline."""
+    monkeypatch.setenv("NEXUS_HIVE", "1")
+    engine = FakeEngine()
+    engine._consolidate_result = "bounded result"
+    host = _make_host(tmp_path, engine)
+    controls = RunControlRegistry()
+    controls.register("turn_1234", deadline_at=time.monotonic() + 0.2)
+    host._run_controls = controls
+
+    result = await host._maybe_spawn_hive("task", timeout_seconds=30.0)
+
+    assert result == "bounded result"
+    # The engine sees the same bounded value, rather than an independent 30s
+    # timeout that could outlive its parent run.
+    assert engine.consolidated == ["hive_under_test"]
+    assert 0 < engine.consolidate_timeouts[0] < 1.0
+
 
 
 @pytest.mark.asyncio

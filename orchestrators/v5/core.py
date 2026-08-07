@@ -43,7 +43,9 @@ import inspect
 import json
 import logging
 import os
+import time
 import re
+import tempfile
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -62,6 +64,7 @@ from .learning import V5Learning
 from .lifecycle import V5Lifecycle
 from .log import V5Logger
 from .checkpoint import V5Checkpoint
+from nexus.run_control import RunControlRegistry
 from .model import V5ModelCaller
 from .direct_loop import V5DirectModelToolLoop
 from .parallel import V5ParallelExecutor
@@ -171,6 +174,8 @@ class V5LoopState(str, Enum):
     CONSCIOUS = "conscious"
     OUTPUTTING = "outputting"
     COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
     FAILED = "failed"
 
 
@@ -294,7 +299,18 @@ class NexusLoopV5(
 
         # V5 integration: Thread safety
         self._run_guard = threading.Lock()
+        self._session_write_lock = threading.Lock()
         self._abort_flag = asyncio.Event()
+        self._run_controls = RunControlRegistry()
+        # A fresh process cannot own runs persisted by an earlier process.
+        # Retire those orphaned contexts before accepting new work so the
+        # control plane never reports a permanent running task after restart.
+        try:
+            from nexus.run_context import recover_orphaned_runs
+
+            recover_orphaned_runs(root=self.root_dir, session_id=self.session_id)
+        except Exception:
+            self.logger.debug("orphaned run recovery skipped", exc_info=True)
 
         # Per-turn event plumbing
         self._current_turn_id = ""
@@ -592,8 +608,17 @@ class NexusLoopV5(
             path = os.path.join(self.root_dir, "logs", "sessions", f"{self.session_id}.json")
             os.makedirs(os.path.dirname(path), exist_ok=True)
             memory = getattr(self.runtime, "memory", [])
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(memory, f, indent=2)
+            with self._session_write_lock:
+                fd, temp_path = tempfile.mkstemp(prefix=".session-", suffix=".tmp", dir=os.path.dirname(path))
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump(memory, f, indent=2, ensure_ascii=False)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(temp_path, path)
+                finally:
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
         except Exception as e:
             self.logger.warning("save_memory failed: %s", e)
 
@@ -638,8 +663,17 @@ class NexusLoopV5(
         try:
             path = os.path.join(self.root_dir, "logs", "sessions", f"{self.session_id}.json")
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(self.runtime.memory, f, indent=2)
+            with self._session_write_lock:
+                fd, temp_path = tempfile.mkstemp(prefix=".session-", suffix=".tmp", dir=os.path.dirname(path))
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump(self.runtime.memory, f, indent=2, ensure_ascii=False)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(temp_path, path)
+                finally:
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
         except Exception:
             pass
 
@@ -1447,6 +1481,9 @@ class NexusLoopV5(
         """Compatibility reset used by GUI/API before a fresh chat turn."""
         if self.is_running:
             return False
+        # A completed run clears its own abort signal in ``run``/``stream_run``
+        # finally blocks.  Keep reset idempotent for compatibility, but do not
+        # clear a signal while a run is active.
         self._abort_flag.clear()
         self._current_turn_id = ""
         runtime = getattr(self, "runtime", None)
@@ -1462,6 +1499,17 @@ class NexusLoopV5(
         self._last_run_failed = False
         self._last_run_had_tool_execution = False
         self._last_run_verified = False
+        return True
+
+    def request_abort(self, turn_id: str, reason: str = "user_cancelled") -> bool:
+        """Request cancellation for one active or pre-start registered run."""
+        target = str(turn_id or "").strip()
+        if not target:
+            return False
+        control = self._run_controls.get(target)
+        if control is None and target != str(getattr(self, "_current_turn_id", "") or ""):
+            return False
+        self._run_controls.request_cancel(target, reason)
         return True
 
     # ── Main API ────────────────────────────────────────────────────────
@@ -1509,6 +1557,9 @@ class NexusLoopV5(
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
         conversation_history: Optional[List[Dict[str, Any]]] = None,
+        task_id: str = "",
+        deadline_seconds: Optional[float] = None,
+        deadline_at: Optional[float] = None,
     ) -> Any:
         """Run a single turn through the V5 loop. Returns dict (V5) or str (V1 compat)."""
         if not self._run_guard.acquire(blocking=False):
@@ -1543,6 +1594,8 @@ class NexusLoopV5(
                 model=model,
                 max_tokens=max_tokens,
                 conversation_history=conversation_history,
+                task_id=task_id,
+                deadline_seconds=deadline_seconds,
             ):
                 if event.get("type") == "content":
                     response_parts.append(str(event.get("data", "")))
@@ -1574,7 +1627,12 @@ class NexusLoopV5(
                 return response
             return result
         finally:
+            self._run_controls.unregister(getattr(self, "_current_turn_id", ""))
             self._run_guard.release()
+            # Clear only after the generator has fully terminated.  Clearing
+            # at the top of ``_turn_events`` loses a cancellation that arrives
+            # after scheduling but before the generator's first iteration.
+            self._abort_flag.clear()
 
     async def stream_run(
         self,
@@ -1586,6 +1644,9 @@ class NexusLoopV5(
         voice_mode: bool = False,
         turn_id: str = "",
         conversation_history: Optional[List[Dict[str, Any]]] = None,
+        task_id: str = "",
+        deadline_seconds: Optional[float] = None,
+        deadline_at: Optional[float] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Stream V5 loop execution with real-time events.
 
@@ -1607,6 +1668,9 @@ class NexusLoopV5(
         """
         if not self._run_guard.acquire(blocking=False):
             raise RuntimeError("A NEXUS V5 run is already active for this session")
+        deadline_at = deadline_at or (time.monotonic() + float(deadline_seconds) if deadline_seconds else None)
+        if turn_id:
+            self._run_controls.register(turn_id, deadline_at=deadline_at)
 
         done_result: Optional[Dict[str, Any]] = None
         try:
@@ -1620,12 +1684,17 @@ class NexusLoopV5(
                 max_tokens=max_tokens,
                 turn_id=turn_id,
                 conversation_history=conversation_history,
+                task_id=task_id,
+                deadline_seconds=deadline_seconds,
+                deadline_at=deadline_at,
             ):
                 if event.get("type") == "done" and isinstance(event.get("data"), dict):
                     done_result = event["data"]
                 yield event
         finally:
+            self._run_controls.unregister(getattr(self, "_current_turn_id", ""))
             self._run_guard.release()
+            self._abort_flag.clear()
 
         # Post-turn memory persistence, gated on verified tool evidence.  Runs
         # off the event loop in a fresh loop so streaming is never blocked.
@@ -1660,6 +1729,9 @@ class NexusLoopV5(
         max_tokens: Optional[int] = None,
         turn_id: str = "",
         conversation_history: Optional[List[Dict[str, Any]]] = None,
+        task_id: str = "",
+        deadline_seconds: Optional[float] = None,
+        deadline_at: Optional[float] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Shared private turn pipeline used by run() and stream_run().
 
@@ -1668,7 +1740,6 @@ class NexusLoopV5(
         failure events are emitted, and a done event with success=False is
         always yielded so consumers can never hang.
         """
-        self._abort_flag.clear()
         self._stream_events.clear()
 
         # API callers may reset the transient runtime before a new request.
@@ -1706,6 +1777,9 @@ class NexusLoopV5(
         )
         self.runtime.current_turn = turn
         self._current_turn_id = turn.turn_id
+        if deadline_at is None and deadline_seconds:
+            deadline_at = time.monotonic() + float(deadline_seconds)
+        control = self._run_controls.register(turn.turn_id, deadline_at=deadline_at)
 
         # Save the user message before model/tool work starts.  If the process
         # or browser disappears mid-run, refresh can still show the exact turn
@@ -1725,14 +1799,26 @@ class NexusLoopV5(
                 root=self.root_dir,
                 session_id=self.session_id,
                 run_id=turn.turn_id,
+                task_id=task_id,
                 prompt=task_desc,
                 provider=provider,
                 model=model,
                 max_tokens=max_tokens,
                 voice_mode=voice_mode,
+                lease_seconds=900,
             )
         except Exception as exc:
             self.logger.debug("Could not persist run start: %s", exc)
+
+        if task_id:
+            try:
+                from nexus.work_items import load_work_item, persist_work_item
+                item = load_work_item(self.root_dir, self.session_id, task_id)
+                if item is not None:
+                    item.transition("running", run_id=turn.turn_id, reason="run.started")
+                    persist_work_item(item)
+            except Exception as exc:
+                self.logger.debug("Could not persist work-item start: %s", exc)
 
         def finish_run_context(status: str, terminal_event: str, error: str = "") -> None:
             if run_context is None:
@@ -1741,6 +1827,17 @@ class NexusLoopV5(
                 run_context.finish(status, terminal_event, error)
             except Exception as exc:
                 self.logger.debug("Could not persist run finish: %s", exc)
+            if task_id:
+                try:
+                    from nexus.work_items import load_work_item, persist_work_item
+                    item = load_work_item(self.root_dir, self.session_id, task_id)
+                    if item is not None:
+                        target = {"success": "applied", "timed_out": "failed"}.get(status, status)
+                        if target in {"failed", "cancelled", "applied"}:
+                            item.transition(target, run_id=turn.turn_id, reason=error or terminal_event)
+                            persist_work_item(item)
+                except Exception as exc:
+                    self.logger.debug("Could not persist work-item finish: %s", exc)
 
         await self._emit_runtime_event(
             "run.started",
@@ -1748,6 +1845,7 @@ class NexusLoopV5(
             "running",
             event_id=f"run_{turn.turn_id}",
             payload={"input_type": input_type, "voice_mode": voice_mode},
+            task_id=task_id,
         )
 
         mental_state: Dict[str, Any] = {}
@@ -1823,10 +1921,16 @@ class NexusLoopV5(
                 context_summary = str(getattr(perceived, "context_summary", ""))[:10000]
             await self._transition_to(V5LoopState.ACTING)
             self._check_abort()
+            self._check_deadline()
             context_summary = context_summary or ""
             if self._memory_manager is not None and hasattr(self._memory_manager, "prefetch_all"):
                 try:
-                    ctx = await self._memory_manager.prefetch_all(task_desc)
+                    # Perception already fetched the same turn's memory
+                    # context. Reuse that immutable snapshot instead of
+                    # launching the four-way memory fan-out a second time.
+                    ctx = turn.metadata.get("_memory_context")
+                    if ctx is None:
+                        ctx = await self._memory_manager.prefetch_all(task_desc)
                     context_summary = "\n".join(
                         part for part in (
                             getattr(ctx, "session_history", ""),
@@ -1889,6 +1993,12 @@ class NexusLoopV5(
             # leaving them stale makes a later successful turn look failed
             # and makes resume snapshots lose the actual evidence.
             self.runtime.last_result = dict(result)
+            # Arbitration point: a cancel/deadline request may arrive after
+            # the provider/tool loop returns but before terminal persistence.
+            # Re-check here so a late request cannot be overwritten by a
+            # success event or a WorkItem `applied` transition.
+            self._check_abort()
+            self._check_deadline()
             self._last_run_failed = not bool(result.get("success", False))
             verification_state = result.get("verification")
             self._last_run_verified = bool(
@@ -1936,13 +2046,32 @@ class NexusLoopV5(
                 "Run completed" if done["success"] else "Run produced no verified tool success",
                 event_status,
                 event_id=f"run_{turn.turn_id}",
+                task_id=task_id,
             )
             for event in self._yield_pending_events():
                 yield event
             yield {"type": "done", "data": done}
             return
+        except asyncio.TimeoutError:
+            await self._transition_to(V5LoopState.TIMED_OUT)
+            if turn.end_time is None:
+                turn.end_time = datetime.utcnow()
+            finish_run_context("timed_out", "run.timed_out", "deadline exceeded")
+            await self._emit_runtime_event(
+                "run.timed_out", "Run timed out", "failed", event_id=f"run_{turn.turn_id}",
+                task_id=task_id,
+                error="deadline exceeded",
+            )
+            for event in self._yield_pending_events():
+                yield event
+            yield {"type": "done", "data": {
+                "success": False, "error": "deadline exceeded", "response": "",
+                "output": output, "mental_state": mental_state, "turn_id": turn.turn_id,
+                "state": "timed_out",
+            }}
+
         except asyncio.CancelledError:
-            await self._transition_to(V5LoopState.FAILED)
+            await self._transition_to(V5LoopState.CANCELLED)
             if turn.end_time is None:
                 turn.end_time = datetime.utcnow()
             finish_run_context("cancelled", "run.cancelled", "cancelled")
@@ -1958,6 +2087,7 @@ class NexusLoopV5(
                 "Run cancelled",
                 "cancelled",
                 event_id=f"run_{turn.turn_id}",
+                task_id=task_id,
             )
             for event in self._yield_pending_events():
                 yield event
@@ -1970,7 +2100,7 @@ class NexusLoopV5(
                     "output": output,
                     "mental_state": mental_state,
                     "turn_id": turn.turn_id,
-                    "state": V5LoopState.FAILED.value,
+                    "state": V5LoopState.CANCELLED.value,
                 },
             }
 
@@ -1993,6 +2123,7 @@ class NexusLoopV5(
                 "Run failed",
                 "failed",
                 event_id=f"run_{turn.turn_id}",
+                task_id=task_id,
                 error=str(e),
             )
             for event in self._yield_pending_events():
@@ -2094,6 +2225,7 @@ class NexusLoopV5(
         if self._memory_manager is not None and hasattr(self._memory_manager, "prefetch_all"):
             try:
                 ctx = await self._memory_manager.prefetch_all(turn.user_input)
+                turn.metadata["_memory_context"] = ctx
                 memory_parts = [
                     part for part in (
                         getattr(ctx, "session_history", ""),

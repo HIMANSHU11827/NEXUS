@@ -16,6 +16,19 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 
 class V5ModelCaller:
+    def _effective_model_timeout(self, default: float) -> float:
+        control = None
+        registry = getattr(self, "_run_controls", None)
+        current = str(getattr(self, "_current_turn_id", "") or "")
+        if registry is not None and current:
+            control = registry.get(current)
+        remaining = getattr(control, "remaining", None) if control is not None else None
+        if remaining is not None:
+            if remaining <= 0:
+                raise asyncio.TimeoutError("V5 run deadline exceeded")
+            return min(float(default), remaining)
+        return float(default)
+
     """Mixin providing synchronous, safe, and streaming model calls."""
 
     _STRONG_PHASES = frozenset({"plan", "verify"})
@@ -111,6 +124,10 @@ class V5ModelCaller:
     ) -> str:
         """Call the model off the event loop with a hard timeout so a slow or
         hanging provider can never freeze the turn indefinitely."""
+        check_deadline = getattr(self, "_check_deadline", None)
+        if callable(check_deadline):
+            check_deadline()
+        effective_timeout = self._effective_model_timeout(timeout)
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(
@@ -123,9 +140,12 @@ class V5ModelCaller:
                     tools=tools,
                     tool_choice=tool_choice,
                 ),
-                timeout=timeout,
+                timeout=effective_timeout,
             )
         except asyncio.TimeoutError:
+            check_deadline = getattr(self, "_check_deadline", None)
+            if callable(check_deadline):
+                check_deadline()
             self.logger.error("Model call timed out after %.0fs", timeout)
             return ""
         except Exception as e:
@@ -162,18 +182,25 @@ class V5ModelCaller:
 
     async def _safe_model_call_raw(self, messages: List[Dict], *, timeout: float = 180.0, **kwargs: Any) -> Any:
         """Async bounded wrapper for the structured model response."""
+        check_deadline = getattr(self, "_check_deadline", None)
+        if callable(check_deadline):
+            check_deadline()
         hooks = getattr(getattr(self, "runtime", None), "hooks", None)
         trigger = getattr(hooks, "trigger", None)
         if callable(trigger):
             await trigger("pre_llm_call", messages, dict(kwargs))
+        effective_timeout = self._effective_model_timeout(timeout)
         try:
             result = await asyncio.wait_for(
-                asyncio.to_thread(self._call_model_raw, messages, **kwargs), timeout=timeout
+                asyncio.to_thread(self._call_model_raw, messages, **kwargs), timeout=effective_timeout
             )
             if callable(trigger):
                 await trigger("post_llm_call", messages, result)
             return result
         except asyncio.TimeoutError:
+            check_deadline = getattr(self, "_check_deadline", None)
+            if callable(check_deadline):
+                check_deadline()
             self._last_model_error = f"model call timed out after {timeout:.0f}s"
             self.logger.error("Raw model call timed out after %.0fs", timeout)
             if callable(trigger):
@@ -312,8 +339,25 @@ class V5ModelCaller:
 
         try:
             while True:
+                control = None
+                registry = getattr(self, "_run_controls", None)
+                current = str(getattr(self, "_current_turn_id", "") or "")
+                if registry is not None and current:
+                    control = registry.get(current)
+                if control is not None:
+                    if control.cancelled:
+                        raise asyncio.CancelledError(control.reason or "V5 run cancelled")
+                    remaining = control.remaining
+                    if remaining is not None and remaining <= 0:
+                        check_deadline = getattr(self, "_check_deadline", None)
+                        if callable(check_deadline):
+                            check_deadline()
+                        raise asyncio.TimeoutError("V5 run deadline exceeded")
+                    wait_timeout = min(0.2, max(0.01, remaining)) if remaining is not None else 0.2
+                else:
+                    wait_timeout = 0.2
                 try:
-                    kind, payload = await asyncio.to_thread(chunk_queue.get, True, 0.2)
+                    kind, payload = await asyncio.to_thread(chunk_queue.get, True, wait_timeout)
                 except queue.Empty:
                     continue
                 if kind == "chunk":

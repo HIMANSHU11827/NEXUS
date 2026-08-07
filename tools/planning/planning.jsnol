@@ -1,7 +1,7 @@
 {
   "name": "planning",
   "version": "2.0.0",
-  "description": "Create and maintain simple or phased task-specific plans in todo.md",
+  "description": "Create and maintain the canonical task checklist plan in todo.md; task operations use the same file",
   "entry": "scripts/planning.py",
   "class": "PlanningTool",
   "params": {

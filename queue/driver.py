@@ -30,6 +30,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .store import TaskQueue
+from nexus.control_store import ControlStore
 
 log = logging.getLogger("nexus.queue.driver")
 
@@ -63,10 +64,12 @@ class QueueDriver:
         requeue_after: float = DEFAULT_REQUEUE_AFTER,
         db_path: Optional[str] = None,
         mission_runner: Any = None,
+        control_store: Optional[ControlStore] = None,
     ) -> None:
         self.kernel = kernel
         self.root = _resolve_root(kernel)
         self.queue = queue or TaskQueue(db_path=db_path, root=self.root)
+        self.control_store = control_store or ControlStore(self.root)
         self.workers = max(1, int(workers))
         self.idle_sleep = float(idle_sleep)
         self.lease_timeout = int(lease_timeout)
@@ -116,6 +119,10 @@ class QueueDriver:
             kwargs["max_tokens"] = payload["max_tokens"]
 
         meta = payload.get("meta") or {}
+        if meta.get("control_task_id"):
+            kwargs["task_id"] = str(meta["control_task_id"])
+        if meta.get("control_run_id"):
+            kwargs["turn_id"] = str(meta["control_run_id"])
         session_id = str(meta.get("session_id") or task.get("session_id") or "default")
         loop_obj = self._build_loop(session_id=session_id)
 
@@ -147,6 +154,41 @@ class QueueDriver:
             raise RuntimeError(detail)
         summary = last_text or f"completed with {events} events"
         return summary[:MAX_SUMMARY_CHARS]
+
+    def _link_queue_task(self, task: Dict[str, Any], worker_id: str = "queue-worker") -> Dict[str, Any]:
+        """Give a legacy queue record stable workflow identity before dispatch."""
+        payload = task.get("payload") or {}
+        meta = payload.setdefault("meta", {})
+        if not isinstance(meta, dict):
+            meta = payload["meta"] = {}
+        if meta.get("control_task_id") and meta.get("control_run_id"):
+            return meta
+        goal = str(payload.get("task_desc") or "").strip()
+        session_id = str(meta.get("session_id") or "default")
+        durable_task = self.control_store.create_task(goal=goal, session_id=session_id, workspace_id=self.root)
+        plan = self.control_store.create_plan(
+            task_id=durable_task["task_id"], goal=goal, source="legacy_queue",
+            steps=[{
+                "step_id": f"queue_{task.get('id')}", "title": goal[:300],
+                "execution_kind": "queued", "workspace_scope": self.root,
+            }],
+        )
+        meta.update({
+            "control_task_id": durable_task["task_id"], "control_plan_id": plan["plan_id"],
+            "control_step_id": f"queue_{task.get('id')}",
+        })
+        run = self.control_store.start_run(
+            step_id=meta["control_step_id"], worker_id=worker_id,
+            process_id=str(os.getpid()), lease_seconds=self.lease_timeout,
+            idempotency_key=f"queue:{task.get('id')}:{task.get('attempts', 0)}",
+        )
+        meta["control_run_id"] = run["run_id"]
+        meta["control_lease_token"] = run["lease_token"]
+        self.control_store.link_legacy_record(
+            source_type="queue", source_id=str(task.get("id")), task_id=durable_task["task_id"],
+            plan_id=plan["plan_id"], step_id=meta["control_step_id"], run_id=run["run_id"],
+        )
+        return meta
 
     # ------------------------------------------------------------------ #
     # lease renewal heartbeat
@@ -259,6 +301,7 @@ class QueueDriver:
                 self.stats["leased"] += 1
                 self._active += 1
                 try:
+                    control_meta = self._link_queue_task(task, worker_id=worker_id)
                     leased_at = time.time()
                     summary = await self._run_with_heartbeat(
                         task, task_id=task_id, lease_token=lease_token,
@@ -268,6 +311,11 @@ class QueueDriver:
                     if not completed:
                         raise RuntimeError("queue lease lost before completion; result discarded")
                     self.stats["completed"] += 1
+                    self.control_store.complete_run(
+                        run_id=str(control_meta.get("control_run_id") or ""),
+                        lease_token=str(control_meta.get("control_lease_token") or ""),
+                        evidence=[{"kind": "queue_result", "uri": f"queue:{task_id}", "summary": summary}],
+                    )
                     log.info("task %s completed by %s", task_id, worker_id)
                     self._reconcile_mission(task, "success")
                 except asyncio.CancelledError:
@@ -284,6 +332,12 @@ class QueueDriver:
                     self.stats["failed"] += 1
                     log.exception("task %s failed: %s", task_id, exc)
                     self._reconcile_mission(task, "failure", detail=str(exc))
+                    try:
+                        meta = (task.get("payload") or {}).get("meta") or {}
+                        if meta.get("control_run_id"):
+                            self.control_store.fail_run(run_id=str(meta["control_run_id"]), lease_token=str(meta.get("control_lease_token") or ""), failure_code="queue_execution_failed", failure_detail=str(exc))
+                    except Exception:
+                        log.debug("could not close canonical failed run", exc_info=True)
                     try:
                         self.queue.fail(
                             task_id, str(exc), requeue_after=self.requeue_after,

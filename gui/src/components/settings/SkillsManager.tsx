@@ -7,12 +7,11 @@ export function SkillsManager({ items, pending, onToggle }: { items: InventoryIt
   const [activeTab, setActiveTab] = useState<'overview' | 'installed' | 'categories' | 'settings'>('overview')
   const [searchQuery, setSearchQuery] = useState('')
 
-  // Mock statistics for demonstration
   const stats = {
     totalSkills: items.length,
     activeSkills: items.filter(i => i.enabled).length,
     skillCategories: new Set(items.map(i => i.category || 'General')).size,
-    totalExecutions: Math.floor(Math.random() * 5000),
+    totalExecutions: null as number | null,
   }
 
   const categories = [
@@ -86,16 +85,16 @@ export function SkillsManager({ items, pending, onToggle }: { items: InventoryIt
                 <Target size={18} className="text-muted-foreground" />
                 <p className="text-xs font-medium text-muted-foreground">Executions</p>
               </div>
-              <p className="mt-2 text-2xl font-bold">{stats.totalExecutions}</p>
-              <p className="mt-1 text-xs text-muted-foreground">This month</p>
+              <p className="mt-2 text-2xl font-bold">{stats.totalExecutions ?? '—'}</p>
+              <p className="mt-1 text-xs text-muted-foreground">History not reported by the server</p>
             </div>
             <div className="rounded-lg border border-border bg-card p-4">
               <div className="flex items-center gap-2">
                 <Award size={18} className="text-muted-foreground" />
                 <p className="text-xs font-medium text-muted-foreground">Success Rate</p>
               </div>
-              <p className="mt-2 text-2xl font-bold">94.5%</p>
-              <p className="mt-1 text-xs text-muted-foreground">Task completion</p>
+              <p className="mt-2 text-2xl font-bold">—</p>
+              <p className="mt-1 text-xs text-muted-foreground">Not reported by the server</p>
             </div>
           </div>
 

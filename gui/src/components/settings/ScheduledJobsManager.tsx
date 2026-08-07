@@ -60,13 +60,12 @@ export function ScheduledJobsManager({ jobs, onChanged, onError }: { jobs: Inven
     }
   }
 
-  // Mock statistics for demonstration
   const stats = {
     totalJobs: jobs.length,
     activeJobs: jobs.filter(j => j.enabled).length,
-    completedRuns: Math.floor(Math.random() * 100),
-    failedRuns: Math.floor(Math.random() * 10),
-    avgRuntime: '2.3s',
+    completedRuns: null as number | null,
+    failedRuns: null as number | null,
+    avgRuntime: null as string | null,
   }
 
   const scheduleOptions = [
@@ -122,7 +121,7 @@ export function ScheduledJobsManager({ jobs, onChanged, onError }: { jobs: Inven
                 <CheckCircle2 size={18} className="text-muted-foreground" />
                 <p className="text-xs font-medium text-muted-foreground">Completed Runs</p>
               </div>
-              <p className="mt-2 text-2xl font-bold">{stats.completedRuns}</p>
+              <p className="mt-2 text-2xl font-bold">{stats.completedRuns ?? '—'}</p>
               <p className="mt-1 text-xs text-muted-foreground">This month</p>
             </div>
             <div className="rounded-lg border border-border bg-card p-4">
@@ -130,7 +129,7 @@ export function ScheduledJobsManager({ jobs, onChanged, onError }: { jobs: Inven
                 <CircleAlert size={18} className="text-muted-foreground" />
                 <p className="text-xs font-medium text-muted-foreground">Failed Runs</p>
               </div>
-              <p className="mt-2 text-2xl font-bold">{stats.failedRuns}</p>
+              <p className="mt-2 text-2xl font-bold">{stats.failedRuns ?? '—'}</p>
               <p className="mt-1 text-xs text-muted-foreground">This month</p>
             </div>
             <div className="rounded-lg border border-border bg-card p-4">
@@ -138,7 +137,7 @@ export function ScheduledJobsManager({ jobs, onChanged, onError }: { jobs: Inven
                 <RefreshCw size={18} className="text-muted-foreground" />
                 <p className="text-xs font-medium text-muted-foreground">Avg Runtime</p>
               </div>
-              <p className="mt-2 text-2xl font-bold">{stats.avgRuntime}</p>
+              <p className="mt-2 text-2xl font-bold">{stats.avgRuntime ?? '—'}</p>
               <p className="mt-1 text-xs text-muted-foreground">Per job</p>
             </div>
           </div>

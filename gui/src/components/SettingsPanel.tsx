@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   X, Palette, Cpu, Brain, Sparkles, SlidersHorizontal, Info,
   Wrench, Puzzle, Network, UsersRound, ReceiptText, Settings2, Radio, Clock3, Monitor, ShieldCheck, Bell, Keyboard, Mic,
+  Search, RefreshCw, AlertTriangle, ChevronRight,
 } from 'lucide-react'
 import { api, type HiveItem, type InventoryItem, type RuntimeProviderStatus } from '../lib/api'
 import { useStore } from '../lib/store'
@@ -29,26 +30,28 @@ import { LiveData } from './settings/LiveData'
 type Section = 'appearance' | 'workspace' | 'safety' | 'notifications' | 'shortcuts' | 'voice' | 'providers' | 'memory' | 'evolution' | 'config' | 'skills' | 'tools' | 'plugins' | 'mcp' | 'hive' | 'gateway' | 'cron' | 'billing' | 'about'
 type Loaded = Record<string, unknown>
 
-const sections: Array<{ id: Section; label: string; icon: typeof Palette }> = [
-  { id: 'appearance', label: 'Theme & appearance', icon: Palette },
-  { id: 'workspace', label: 'Workspace', icon: Monitor },
-  { id: 'safety', label: 'Safety', icon: ShieldCheck },
-  { id: 'memory', label: 'Memory & context', icon: Brain },
-  { id: 'voice', label: 'Voice', icon: Mic },
-  { id: 'notifications', label: 'Notifications', icon: Bell },
-  { id: 'shortcuts', label: 'Keyboard shortcuts', icon: Keyboard },
-  { id: 'providers', label: 'Providers', icon: Cpu },
-  { id: 'evolution', label: 'Evolution', icon: Sparkles },
-  { id: 'config', label: 'Configuration', icon: Settings2 },
-  { id: 'skills', label: 'Skills', icon: Wrench },
-  { id: 'tools', label: 'Tools', icon: SlidersHorizontal },
-  { id: 'plugins', label: 'Plugins', icon: Puzzle },
-  { id: 'mcp', label: 'MCP', icon: Network },
-  { id: 'hive', label: 'Hive', icon: UsersRound },
-  { id: 'gateway', label: 'Gateway', icon: Radio },
-  { id: 'cron', label: 'Scheduled jobs', icon: Clock3 },
-  { id: 'billing', label: 'Billing', icon: ReceiptText },
-  { id: 'about', label: 'About', icon: Info },
+type SettingsSection = { id: Section; label: string; description: string; icon: typeof Palette; group: string }
+
+const sections: SettingsSection[] = [
+  { id: 'appearance', label: 'Theme & appearance', description: 'Personalize the workspace', icon: Palette, group: 'Personal' },
+  { id: 'notifications', label: 'Notifications', description: 'Alerts and sound', icon: Bell, group: 'Personal' },
+  { id: 'shortcuts', label: 'Keyboard shortcuts', description: 'Quick actions', icon: Keyboard, group: 'Personal' },
+  { id: 'workspace', label: 'Workspace', description: 'Files, indexing, instructions', icon: Monitor, group: 'Workspace' },
+  { id: 'memory', label: 'Memory & context', description: 'Sessions and retrieval', icon: Brain, group: 'Workspace' },
+  { id: 'safety', label: 'Safety', description: 'Permissions and protected paths', icon: ShieldCheck, group: 'Workspace' },
+  { id: 'providers', label: 'Providers', description: 'Models and connections', icon: Cpu, group: 'Runtime' },
+  { id: 'voice', label: 'Voice', description: 'Speech and transcription', icon: Mic, group: 'Runtime' },
+  { id: 'config', label: 'Configuration', description: 'Runtime and session defaults', icon: Settings2, group: 'Runtime' },
+  { id: 'evolution', label: 'Evolution', description: 'Self-improvement status', icon: Sparkles, group: 'Runtime' },
+  { id: 'skills', label: 'Skills', description: 'Installed capabilities', icon: Wrench, group: 'Extensions' },
+  { id: 'tools', label: 'Tools', description: 'Tool registry', icon: SlidersHorizontal, group: 'Extensions' },
+  { id: 'plugins', label: 'Plugins', description: 'Plugin lifecycle', icon: Puzzle, group: 'Extensions' },
+  { id: 'mcp', label: 'MCP', description: 'External tool servers', icon: Network, group: 'Extensions' },
+  { id: 'hive', label: 'Hive', description: 'Multi-agent coordination', icon: UsersRound, group: 'Automation' },
+  { id: 'gateway', label: 'Gateway', description: 'Messaging integrations', icon: Radio, group: 'Automation' },
+  { id: 'cron', label: 'Scheduled jobs', description: 'Recurring work', icon: Clock3, group: 'Automation' },
+  { id: 'billing', label: 'Billing', description: 'Usage and limits', icon: ReceiptText, group: 'System' },
+  { id: 'about', label: 'About', description: 'Version and diagnostics', icon: Info, group: 'System' },
 ]
 
 
@@ -60,7 +63,10 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState('')
   const [theme, setTheme] = useState(() => localStorage.getItem('nexus-theme') || 'light')
   const [pendingToggle, setPendingToggle] = useState('')
+  const [query, setQuery] = useState('')
+  const [refreshNonce, setRefreshNonce] = useState(0)
   const safetyDirtyRef = useRef(false)
+  const dialogRef = useRef<HTMLDivElement>(null)
 
   const navigateTo = (next: Section) => {
     if (active === 'safety' && next !== 'safety' && safetyDirtyRef.current && !window.confirm('You have unsaved Safety changes. Discard them and leave the Safety page?')) return
@@ -75,9 +81,42 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     const saved = localStorage.getItem('nexus-theme') || 'light'
     const themeClass = saved === 'dark' ? 'dark' : saved === 'light' ? '' : `theme-${saved}`
-    document.documentElement.classList.remove('dark', 'theme-grey', 'theme-glass', 'theme-green', 'theme-blue', 'theme-purple')
+    document.documentElement.classList.remove('dark', 'theme-grey', 'theme-glass', 'theme-green', 'theme-blue', 'theme-purple', 'theme-pink', 'theme-red', 'theme-orange')
     if (themeClass) document.documentElement.classList.add(themeClass)
   }, [])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeSettings()
+        return
+      }
+      if (event.key !== 'Tab' || !dialogRef.current) return
+      const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+      if (!focusable.length) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = previousOverflow
+    }
+  })
+
+  useEffect(() => {
+    const first = dialogRef.current?.querySelector<HTMLElement>('input:not([disabled]), button:not([disabled]), select:not([disabled])')
+    first?.focus()
+  }, [active])
 
   useEffect(() => {
     const loaders: Partial<Record<Section, () => Promise<unknown>>> = {
@@ -87,22 +126,39 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
       notifications: api.state, voice: api.voiceStatus, billing: api.billing, about: api.version,
     }
     const load = loaders[active]
-    if (!load || data[active]) return
+    if (!load) return
+    let cancelled = false
     setLoading(true); setError('')
-    load().then(result => setData(current => ({ ...current, [active]: result })))
+    load().then(result => { if (!cancelled) setData(current => ({ ...current, [active]: result })) })
       .catch(err => setError(err instanceof Error ? err.message : 'Could not load this Nexus setting.'))
       .finally(() => setLoading(false))
-  }, [active, data])
+    return () => { cancelled = true }
+  }, [active, refreshNonce])
 
   const toggle = async (kind: string, name: string, enabled: boolean) => {
     setPendingToggle(`${kind}:${name}`); setError('')
     try {
       await api.manage(kind, name, enabled ? 'enable' : 'disable')
       setData(current => { const next = { ...current }; delete next[active]; return next })
+      setRefreshNonce(value => value + 1)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Nexus could not save this setting.')
     } finally { setPendingToggle('') }
   }
+
+  const refreshActive = () => {
+    setError('')
+    setData(current => {
+      const next = { ...current }
+      delete next[active]
+      return next
+    })
+  }
+
+  const filteredSections = sections.filter(section => {
+    const needle = query.trim().toLowerCase()
+    return !needle || `${section.label} ${section.description} ${section.group}`.toLowerCase().includes(needle)
+  })
 
   const content = useMemo(() => {
     if (active === 'workspace') return <WorkspaceSettingsPanel state={(data.workspace as Record<string, unknown> | undefined) || {}} onSaved={() => setData(current => { const next = { ...current }; delete next.workspace; return next })} />
@@ -114,7 +170,7 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
     }} />
     if (active === 'shortcuts') return <KeyboardShortcuts />
     if (loading) return <p className="py-8 text-sm text-muted-foreground" role="status">Loading live Nexus data…</p>
-    if (error) return <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive" role="alert">Could not load this section: {error}</p>
+    if (error) return <div className="rounded-xl border border-destructive/25 bg-destructive/5 p-5" role="alert"><div className="flex items-start gap-3"><AlertTriangle className="mt-0.5 shrink-0 text-destructive" size={18} /><div><p className="text-sm font-semibold text-destructive">Couldn’t load this section</p><p className="mt-1 text-sm text-destructive/80">{error}</p><button type="button" onClick={refreshActive} className="mt-3 inline-flex items-center gap-2 rounded-md border border-destructive/30 bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-secondary"><RefreshCw size={13} /> Try again</button></div></div></div>
     if (active === 'providers') {
       const response = data.providers as { providers?: InventoryItem[]; runtime?: { provider?: string; model?: string }; runtime_status?: RuntimeProviderStatus } | undefined
       const providers = response?.providers || []
@@ -124,28 +180,28 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
       if (loading) {
         return <p className="py-8 text-sm text-muted-foreground" role="status">Loading providers…</p>
       }
-      return providers.length ? <ProviderList providers={providers} pending={pendingToggle.replace('provider:', '')} runtimeStatus={response?.runtime_status} onToggle={(name, enabled) => toggle('provider', name, enabled)} onChanged={() => setData(current => { const next = { ...current }; delete next.providers; return next })} /> : <p className="py-8 text-sm text-muted-foreground">No provider implementations were reported.</p>
+      return providers.length ? <ProviderList providers={providers} pending={pendingToggle.replace('provider:', '')} runtimeStatus={response?.runtime_status} onToggle={(name, enabled) => toggle('provider', name, enabled)} onChanged={() => { setData(current => { const next = { ...current }; delete next.providers; return next }); setRefreshNonce(value => value + 1) }} /> : <p className="py-8 text-sm text-muted-foreground">No provider implementations were reported.</p>
     }
     if (active === 'safety') return <SafetySettings onOpenWorkspace={() => navigateTo('workspace')} onDirtyChange={dirty => { safetyDirtyRef.current = dirty }} />
     if (active === 'memory') return <MemorySettings state={(data.memory as Record<string, unknown> | undefined) || {}} />
-    if (active === 'voice') return <VoiceSettings status={(data.voice as { running?: boolean; mode?: string; phase?: string; transcript_preview?: string; reply_preview?: string } | undefined)} onChanged={() => setData(current => { const next = { ...current }; delete next.voice; return next })} />
+    if (active === 'voice') return <VoiceSettings status={(data.voice as { running?: boolean; mode?: string; phase?: string; transcript_preview?: string; reply_preview?: string } | undefined)} onChanged={() => { setData(current => { const next = { ...current }; delete next.voice; return next }); setRefreshNonce(value => value + 1) }} />
     if (active === 'notifications') return <NotificationSettings />
     if (active === 'skills') return <SkillsManager items={(data.skills as { skills?: InventoryItem[] } | undefined)?.skills || []} pending={pendingToggle.replace('skill:', '')} onToggle={(name, enabled) => toggle('skill', name, enabled)} />
     if (active === 'tools') return <ToolsManager items={(data.tools as { tools?: InventoryItem[] } | undefined)?.tools || []} pending={pendingToggle.replace('tool:', '')} onToggle={(name, enabled) => toggle('tool', name, enabled)} />
     if (active === 'plugins') return <PluginManager items={(data.plugins as { plugins?: InventoryItem[] } | undefined)?.plugins || []} pending={pendingToggle.replace('plugin:', '')} onToggle={(name, enabled) => toggle('plugin', name, enabled)} />
-    if (active === 'mcp') return <McpManager items={(data.mcp as { mcp?: InventoryItem[] } | undefined)?.mcp || []} pending={pendingToggle.replace('mcp:', '')} onToggle={(name, enabled) => toggle('mcp', name, enabled)} onChanged={() => setData(current => { const next = { ...current }; delete next.mcp; return next })} onError={setError} />
-    if (active === 'hive') return <HiveManager response={data.hive as { enabled: boolean; personas: string[]; hives: HiveItem[] } | undefined} pending={pendingToggle === 'hive:hive'} onToggle={enabled => toggle('hive', 'hive', enabled)} onChanged={() => setData(current => { const next = { ...current }; delete next.hive; return next })} onError={setError} />
+    if (active === 'mcp') return <McpManager items={(data.mcp as { mcp?: InventoryItem[] } | undefined)?.mcp || []} pending={pendingToggle.replace('mcp:', '')} onToggle={(name, enabled) => toggle('mcp', name, enabled)} onChanged={() => { setData(current => { const next = { ...current }; delete next.mcp; return next }); setRefreshNonce(value => value + 1) }} onError={setError} />
+    if (active === 'hive') return <HiveManager response={data.hive as { enabled: boolean; personas: string[]; hives: HiveItem[] } | undefined} pending={pendingToggle === 'hive:hive'} onToggle={enabled => toggle('hive', 'hive', enabled)} onChanged={() => { setData(current => { const next = { ...current }; delete next.hive; return next }); setRefreshNonce(value => value + 1) }} onError={setError} />
     if (active === 'evolution') {
       if (loading) return <p className="py-8 text-sm text-muted-foreground" role="status">Loading evolution data…</p>
       if (error) return <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive" role="alert">Could not load evolution: {error}</p>
       const evolution = data.evolution as { enabled?: boolean; version?: string; lifecycle?: InventoryItem[]; forges?: InventoryItem[] } | undefined
       return <EvolutionPanel evolution={evolution} onToggle={toggle} pending={pendingToggle} />
     }
-    if (active === 'config') return <ConfigurationPanel state={(data.config as Record<string, unknown> | undefined) || {}} onSaved={() => setData(current => { const next = { ...current }; delete next.config; return next })} />
+    if (active === 'config') return <ConfigurationPanel state={(data.config as Record<string, unknown> | undefined) || {}} onSaved={() => { setData(current => { const next = { ...current }; delete next.config; return next }); setRefreshNonce(value => value + 1) }} />
     if (active === 'gateway') return <GatewayManager items={(data.gateway as { gateways?: InventoryItem[] } | undefined)?.gateways || []} pending={pendingToggle.replace('gateway:', '')} onToggle={(name: string, enabled: boolean) => toggle('gateway', name, enabled)} />
     if (active === 'cron') {
       const cron = data.cron as { jobs?: InventoryItem[]; status?: string; message?: string } | undefined
-      return <ScheduledJobsManager jobs={cron?.jobs || []} onChanged={() => setData(current => { const next = { ...current }; delete next.cron; return next })} onError={setError} />
+      return <ScheduledJobsManager jobs={cron?.jobs || []} onChanged={() => { setData(current => { const next = { ...current }; delete next.cron; return next }); setRefreshNonce(value => value + 1) }} onError={setError} />
     }
     if (active === 'billing') {
       const billing = data.billing as { tier?: string; message?: string; status?: string } | undefined
@@ -159,25 +215,29 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   }, [active, backendAvailable, data, error, loading, sessions.length, theme])
 
   const activeLabel = sections.find(section => section.id === active)?.label || 'Settings'
-  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/20 p-4 backdrop-blur-[1px]" role="dialog" aria-modal="true" aria-label="Nexus settings">
+  const activeSection = sections.find(section => section.id === active)
+  const groupedSections = [...new Set(filteredSections.map(section => section.group))]
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/25 p-0 backdrop-blur-sm sm:p-4" role="dialog" aria-modal="true" aria-label="Nexus settings" aria-describedby="settings-description">
       <div
-        className="flex overflow-hidden rounded-xl border border-border bg-background shadow-2xl"
+        ref={dialogRef}
+        className="flex h-full w-full overflow-hidden border-border bg-background shadow-2xl sm:h-[min(820px,92vh)] sm:w-[min(1320px,calc(100vw-48px))] sm:rounded-2xl sm:border"
         style={{
-          width: "min(1320px, calc(100vw - 48px))",
           maxWidth: "1320px",
-          height: "min(760px, 88vh)",
-          maxHeight: "88vh",
+          maxHeight: "92vh",
         }}
       >
-      <aside className="flex w-60 shrink-0 flex-col border-r border-border bg-secondary/35 p-3">
-        <div className="mb-4 px-2 pt-1"><p className="text-sm font-semibold">Nexus settings</p><p className="mt-0.5 text-xs text-muted-foreground">Workspace configuration</p></div>
-        <nav className="flex-1 space-y-0.5 overflow-y-auto" aria-label="Settings sections">
-          {sections.map(section => { const Icon = section.icon; return <button key={section.id} onClick={() => navigateTo(section.id)} className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition ${active === section.id ? 'bg-background font-medium text-foreground shadow-sm ring-1 ring-border' : 'text-muted-foreground hover:bg-background/70 hover:text-foreground'}`}><Icon size={16} />{section.label}</button> })}
+      <aside className="hidden w-72 shrink-0 flex-col border-r border-border bg-secondary/25 p-4 md:flex">
+        <div className="mb-4 px-2 pt-1"><p className="text-sm font-semibold">Nexus settings</p><p className="mt-0.5 text-xs text-muted-foreground">Control center for your local agent</p></div>
+        <label className="relative mb-4 block"><Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search settings" aria-label="Search settings" className="h-9 w-full rounded-lg border border-border bg-background pl-9 pr-3 text-sm outline-none placeholder:text-muted-foreground/70 focus:border-ring focus:ring-2 focus:ring-ring/20" /></label>
+        <nav className="flex-1 space-y-5 overflow-y-auto pr-1" aria-label="Settings sections">
+          {groupedSections.map(group => <div key={group}><p className="mb-1.5 px-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/70">{group}</p><div className="space-y-0.5">{filteredSections.filter(section => section.group === group).map(section => { const Icon = section.icon; return <button key={section.id} onClick={() => navigateTo(section.id)} aria-current={active === section.id ? 'page' : undefined} title={section.description} className={`group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition ${active === section.id ? 'bg-background font-medium text-foreground shadow-sm ring-1 ring-border' : 'text-muted-foreground hover:bg-background/70 hover:text-foreground'}`}><Icon size={16} className={active === section.id ? 'text-foreground' : 'text-muted-foreground/80'} /><span className="min-w-0 flex-1 truncate">{section.label}</span>{active === section.id && <ChevronRight size={14} className="text-muted-foreground" />}</button> })}</div></div>)}
+          {!filteredSections.length && <p className="px-2 py-6 text-xs text-muted-foreground">No settings match “{query}”.</p>}
         </nav>
+        <div className="mt-4 flex items-center gap-2 border-t border-border px-2 pt-3 text-xs text-muted-foreground"><span className={`size-2 rounded-full ${backendAvailable ? 'bg-emerald-500' : 'bg-amber-500'}`} />{backendAvailable ? 'Backend connected' : 'Backend unavailable'}</div>
       </aside>
       <section className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center justify-between border-b border-border px-7 py-4"><div><h2 className="text-base font-semibold">{activeLabel}</h2><p className="mt-0.5 text-xs text-muted-foreground">{active === 'appearance' ? 'Preferences saved on this device.' : 'Data reported by your running Nexus server.'}</p></div><button onClick={closeSettings} className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground" aria-label="Close settings"><X size={17} /></button></header>
-        <div className="flex-1 overflow-y-auto px-7 py-6"><div className="mx-auto max-w-4xl">{content}</div></div>
+        <header className="sticky top-0 z-10 border-b border-border bg-background/95 px-4 py-4 backdrop-blur sm:px-7"><div className="flex items-start justify-between gap-4"><div className="min-w-0"><div className="mb-3 flex items-center gap-2 md:hidden"><span className="text-sm font-semibold">Settings</span><span className="text-muted-foreground">/</span><span className="truncate text-sm text-muted-foreground">{activeLabel}</span></div><h2 className="text-lg font-semibold tracking-tight">{activeLabel}</h2><p id="settings-description" className="mt-1 text-sm text-muted-foreground">{activeSection?.description || (active === 'appearance' ? 'Preferences saved on this device.' : 'Live data from your Nexus server.')}</p></div><button type="button" onClick={closeSettings} className="flex size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring" aria-label="Close settings"><X size={18} /></button></div><div className="mt-4 flex items-center gap-2 md:hidden"><Search size={15} className="text-muted-foreground" /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Filter settings" aria-label="Filter settings" className="h-8 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-sm outline-none focus:border-ring" /><select aria-label="Settings section" value={active} onChange={event => navigateTo(event.target.value as Section)} className="h-8 max-w-[46%] rounded-md border border-border bg-background px-2 text-xs">{sections.map(section => <option key={section.id} value={section.id}>{section.label}</option>)}</select></div></header>
+        <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-7 sm:py-7"><div key={`${active}-${refreshNonce}`} className="mx-auto max-w-4xl">{content}</div></div>
       </section>
     </div>
   </div>

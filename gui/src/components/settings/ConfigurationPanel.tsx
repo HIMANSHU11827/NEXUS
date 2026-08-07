@@ -218,12 +218,16 @@ export function ConfigurationPanel({ state, onSaved }: { state: Record<string, u
 
       {activeTab === 'model' && (
         <div className="space-y-4">
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-sm">
+            <p className="font-medium">Model parameter persistence is not exposed by this backend</p>
+            <p className="mt-1 text-muted-foreground">Temperature, max tokens, and custom system prompts are shown by the legacy UI but cannot be saved through the connected runtime yet.</p>
+          </div>
           <div className="grid gap-4 rounded-lg border border-border bg-card p-6 md:grid-cols-2">
-            <label className="grid gap-1.5 text-sm font-medium">Temperature<input type="number" step="0.1" min="0" max="2" value={temperature} onChange={event => setTemperature(event.target.value)} className="h-10 rounded-md border border-border bg-background px-3 text-sm font-normal outline-none focus:border-ring" /></label>
-            <label className="grid gap-1.5 text-sm font-medium">Max tokens<input type="number" min="1" value={maxTokens} onChange={event => setMaxTokens(event.target.value)} className="h-10 rounded-md border border-border bg-background px-3 text-sm font-normal outline-none focus:border-ring" /></label>
+            <label className="grid gap-1.5 text-sm font-medium">Temperature<input disabled type="number" value={temperature} className="h-10 rounded-md border border-border bg-secondary px-3 text-sm font-normal opacity-70" /></label>
+            <label className="grid gap-1.5 text-sm font-medium">Max tokens<input disabled type="number" value={maxTokens} className="h-10 rounded-md border border-border bg-secondary px-3 text-sm font-normal opacity-70" /></label>
           </div>
           <div className="rounded-lg border border-border bg-card p-6">
-            <label className="grid gap-1.5 text-sm font-medium">System prompt<textarea value={systemPrompt} onChange={event => setSystemPrompt(event.target.value)} placeholder="Custom system prompt for the AI assistant..." rows={4} className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm font-normal outline-none focus:border-ring resize-none" /></label>
+            <label className="grid gap-1.5 text-sm font-medium">System prompt<textarea disabled value={systemPrompt} placeholder="Not available through the current runtime API" rows={4} className="w-full rounded-md border border-border bg-secondary px-3 py-2 text-sm font-normal opacity-70 resize-none" /></label>
           </div>
           <div className="rounded-lg border border-border bg-card p-6">
             <label className="flex items-center gap-3">
@@ -238,8 +242,8 @@ export function ConfigurationPanel({ state, onSaved }: { state: Record<string, u
       {activeTab === 'session' && (
         <div className="space-y-4">
           <div className="rounded-lg border border-border bg-card p-6">
-            <label className="grid gap-1.5 text-sm font-medium">Additional directories<input value={additionalDirs} onChange={event => setAdditionalDirs(event.target.value)} placeholder="Comma-separated paths to additional directories" className="h-10 rounded-md border border-border bg-background px-3 text-sm font-normal outline-none focus:border-ring" /></label>
-            <p className="mt-1 text-xs text-muted-foreground">Allow Nexus to access additional directories beyond the workspace root.</p>
+            <label className="grid gap-1.5 text-sm font-medium">Additional directories<input disabled value={additionalDirs} placeholder="Not available through the current runtime API" className="h-10 rounded-md border border-border bg-secondary px-3 text-sm font-normal opacity-70" /></label>
+            <p className="mt-1 text-xs text-muted-foreground">This control is disabled until the backend exposes a safe persistence endpoint.</p>
           </div>
           <div className="rounded-lg border border-border bg-card p-6">
             <p className="text-sm font-medium">Session persistence</p>

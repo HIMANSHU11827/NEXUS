@@ -1,5 +1,6 @@
 import json
 import os
+import queue
 import sys
 import threading
 import time
@@ -108,6 +109,27 @@ def test_checkpoint_create_list_restore_and_delete(tmp_path):
     assert delete_response.status_code == 200
     assert delete_response.json() == {"deleted": True}
     assert gone_response.json()["checkpoints"] == []
+
+
+def test_timed_out_run_unregisters_checkpoint_stream_pusher(tmp_path):
+    import server
+
+    _reset(server, tmp_path)
+
+    class Loop:
+        work_event_sink = None
+
+    out_queue = queue.Queue()
+    _, live_sink = server.bind_live_work_event_sink(Loop(), "checkpoint-session", "run-timeout", out_queue)
+
+    live_sink({"event_type": "run.started", "run_id": "run-timeout", "turn_id": "run-timeout", "kind": "run"})
+    assert "run-timeout" in server._CHECKPOINT_STREAM_PUSHERS
+
+    live_sink({"event_type": "run.timed_out", "run_id": "run-timeout", "turn_id": "run-timeout", "kind": "run"})
+    assert "run-timeout" not in server._CHECKPOINT_STREAM_PUSHERS
+
+    server._emit_checkpoint_created("checkpoint-session", "run-timeout", "run-timeout", {"checkpoint_id": "late"})
+    assert not any(item[0] == "event" and item[1].get("event_type") == "checkpoint.created" for item in list(out_queue.queue))
 
 
 def test_checkpoint_restore_wrong_session_is_404(tmp_path):

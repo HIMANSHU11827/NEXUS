@@ -1090,7 +1090,7 @@ function EventActivity({ events }: { events: TimelineEvent[] }) {
 
 export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => void }) {
   const { addMessage, getActiveSession, activeSessionId, createSession, backendAvailable } = useStore()
-  const { content, events, thinkingText, isThinking, thinkingDone, isProcessing, recoveredActivity, error, send, cancel, reset, pendingApproval, respondApproval } = useStreamChat(activeSessionId)
+  const { content, events, thinkingText, isThinking, thinkingDone, isProcessing, recoveredActivity, replayGap, error, send, cancel, reset, pendingApproval, respondApproval } = useStreamChat(activeSessionId)
   const [input, setInput] = useState('')
   const [isMicListening, setIsMicListening] = useState(false)
   const [isBackendListening, setIsBackendListening] = useState(false)
@@ -1592,6 +1592,12 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
               </div>
             )}
 
+            {replayGap && (
+              <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300" role="status" data-testid="replay-gap-warning">
+                Some older activity is no longer retained. Showing events from sequence {replayGap.oldestSequence} onward; the missing range ends at {Math.max(0, replayGap.oldestSequence - 1)}.
+              </div>
+            )}
+
             {error && (
               <div role="alert" className="flex items-center gap-2 px-3 py-2 rounded-lg bg-destructive/10 border border-destructive/20 text-xs text-destructive/80 mb-3">
                 {error}
@@ -1612,7 +1618,7 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
           />
         ) : null}
         <HivePanel events={events} />
-        <BackgroundTasksPanel events={events} onCancel={cancel} />
+        <BackgroundTasksPanel events={events} sessionId={activeSessionId} onCancel={(runId) => cancel(runId)} />
         <QueuePanel tasks={queuedTasks} onSteer={steerQueuedTask} onRemove={removeQueuedTask} onSave={saveQueuedTask} />
         {voiceMode && <VoiceModeIndicator />}
         {screenStream && <div className="mb-2 flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/5 px-2 py-1.5"><video ref={screenPreviewRef} autoPlay muted playsInline className="h-10 w-16 rounded object-cover" /><span className="min-w-0 flex-1 truncate text-[11px] font-medium text-blue-700 dark:text-blue-300">Screen sharing is active</span><button type="button" onClick={stopScreenShare} className="rounded px-2 py-1 text-[10px] font-medium text-blue-700 hover:bg-blue-500/10 dark:text-blue-300">Stop</button></div>}
@@ -1632,7 +1638,7 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
           />
           <div className="absolute right-2 top-2">
             {isProcessing ? (
-              <button onClick={cancel} aria-label="Stop response" title="Stop response" className="flex size-8 items-center justify-center rounded-sm bg-foreground text-background transition hover:opacity-80"><StopCircle size={15} /></button>
+              <button onClick={() => cancel()} aria-label="Stop response" title="Stop response" className="flex size-8 items-center justify-center rounded-sm bg-foreground text-background transition hover:opacity-80"><StopCircle size={15} /></button>
             ) : (
               <button onClick={handleSend} aria-label="Send message" title="Send message" disabled={!input.trim() || !backendAvailable} className="flex size-8 items-center justify-center rounded-sm bg-foreground text-background transition hover:opacity-80 disabled:opacity-15 disabled:hover:opacity-15"><Send size={14} /></button>
             )}

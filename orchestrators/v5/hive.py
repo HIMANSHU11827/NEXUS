@@ -190,6 +190,28 @@ class V5Hive:
     # SPAWN + CONSOLIDATE (V5: orchestrators/loop.py:3013-3055)
     # ─────────────────────────────────────────────────────────────────────
 
+    def _effective_hive_timeout(self, default: float) -> float:
+        """Cap hive work by the active parent run's remaining budget.
+
+        A hive timeout used to be independent from the parent deadline, so a
+        short-lived run could still spend the full default timeout waiting for
+        sub-agents.  Keep the existing standalone timeout when no run control
+        is active, but make nested work inherit the parent's monotonic budget.
+        """
+        timeout = max(0.001, float(default))
+        registry = getattr(self, "_run_controls", None)
+        turn_id = str(getattr(self, "_current_turn_id", "") or "")
+        control = registry.get(turn_id) if registry is not None and turn_id else None
+        remaining = getattr(control, "remaining", None) if control is not None else None
+        if remaining is not None:
+            if remaining <= 0:
+                check_deadline = getattr(self, "_check_deadline", None)
+                if callable(check_deadline):
+                    check_deadline()
+                raise asyncio.TimeoutError("V5 run deadline exceeded")
+            timeout = min(timeout, float(remaining))
+        return max(0.001, timeout)
+
     async def _maybe_spawn_hive(
         self,
         task_desc: str,
@@ -215,6 +237,7 @@ class V5Hive:
         if timeout_seconds is None:
             timeout_seconds = self._hive_default_timeout()
         try:
+            timeout_seconds = self._effective_hive_timeout(timeout_seconds)
             engine = self._hive_engine()
             if engine is None:
                 return None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 import os
@@ -423,6 +424,9 @@ class V5DirectModelToolLoop:
                 except Exception:
                     snapshot = None
                 context = manager.get_context() if getattr(snapshot, "files_loaded", None) else ""
+                scrubber = getattr(manager, "scrub_context", None)
+                if context and callable(scrubber):
+                    context = scrubber(context)
                 self._project_context = context
                 self._project_context_built = True
             context = getattr(self, "_project_context", "") or ""
@@ -593,6 +597,9 @@ class V5DirectModelToolLoop:
             check_abort = getattr(self, "_check_abort", None)
             if callable(check_abort):
                 check_abort()
+            check_deadline = getattr(self, "_check_deadline", None)
+            if callable(check_deadline):
+                check_deadline()
             await self._direct_loop_state("REFLECTING" if round_index else "ACTING")
             # A failed last-round action has no safe provider continuation:
             # surface its evidence instead of spending another request on a
@@ -755,9 +762,20 @@ class V5DirectModelToolLoop:
             for call_slot, call in enumerate(calls):
                 if callable(check_abort):
                     check_abort()
+                check_deadline = getattr(self, "_check_deadline", None)
+                if callable(check_deadline):
+                    check_deadline()
                 call_id = str(getattr(call, "call_id", "") or "call_v5")
                 try:
-                    content = str(await self._run_tool(call))
+                    registry = getattr(self, "_run_controls", None)
+                    current = str(getattr(self, "_current_turn_id", "") or "")
+                    control = registry.get(current) if registry is not None and current else None
+                    remaining = getattr(control, "remaining", None) if control is not None else None
+                    tool_awaitable = self._run_tool(call)
+                    if remaining is not None:
+                        content = str(await asyncio.wait_for(tool_awaitable, timeout=max(0.001, remaining)))
+                    else:
+                        content = str(await tool_awaitable)
                     self._mark_repaired_actions(actions, call.name, round_index)
                     action = {"tool": call.name, "name": call.name, "params": dict(call.params or {}),
                               "call_id": call_id, "output": content, "success": True,

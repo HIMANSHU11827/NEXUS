@@ -6,12 +6,11 @@ import { Description } from './utils'
 export function PluginManager({ items, pending, onToggle }: { items: InventoryItem[]; pending: string; onToggle: (name: string, enabled: boolean) => void }) {
   const [activeTab, setActiveTab] = useState<'overview' | 'installed' | 'marketplace' | 'settings'>('overview')
 
-  // Mock statistics for demonstration
   const stats = {
     totalPlugins: items.length,
     activePlugins: items.filter(i => i.enabled).length,
     trustedPlugins: items.filter(i => i.trusted).length,
-    totalDownloads: Math.floor(Math.random() * 10000),
+    totalDownloads: null as number | null,
   }
 
   const featuredPlugins = [
@@ -73,7 +72,7 @@ export function PluginManager({ items, pending, onToggle }: { items: InventoryIt
                 <Download size={18} className="text-muted-foreground" />
                 <p className="text-xs font-medium text-muted-foreground">Total Downloads</p>
               </div>
-              <p className="mt-2 text-2xl font-bold">{stats.totalDownloads}</p>
+              <p className="mt-2 text-2xl font-bold">{stats.totalDownloads ?? '—'}</p>
               <p className="mt-1 text-xs text-muted-foreground">All time</p>
             </div>
             <div className="rounded-lg border border-border bg-card p-4">

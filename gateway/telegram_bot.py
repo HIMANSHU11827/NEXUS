@@ -46,7 +46,13 @@ def get_loop() -> NexusLoop:
     return _loop
 
 
-bot = AsyncTeleBot(TELEGRAM_TOKEN) if (TELEGRAM_TOKEN and AsyncTeleBot is not None) else None
+def _valid_telegram_token(value: Optional[str]) -> bool:
+    """Avoid constructing the optional client from setup placeholders."""
+    token = str(value or "").strip()
+    return bool(token and token != "your_telegram_token_here" and ":" in token and not any(ch.isspace() for ch in token))
+
+
+bot = AsyncTeleBot(TELEGRAM_TOKEN) if (_valid_telegram_token(TELEGRAM_TOKEN) and AsyncTeleBot is not None) else None
 
 
 async def send_welcome(message):

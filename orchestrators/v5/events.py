@@ -46,10 +46,16 @@ class V5EventEmitter:
         event_id: str,
         parent_id: Optional[str] = None,
         payload: Optional[Dict[str, Any]] = None,
+        task_id: str = "",
         error: str = "",
         visibility: str = "public",
     ) -> None:
         """Central producer for canonical run/message lifecycle events."""
+        event_payload = dict(payload or {})
+        # Task identity is opt-in so callers that do not associate a run with
+        # a WorkItem retain the historical payload shape exactly.
+        if task_id:
+            event_payload["task_id"] = str(task_id)
         event: Dict[str, Any] = {
             "id": event_id,
             "event_type": event_type,
@@ -60,7 +66,7 @@ class V5EventEmitter:
             "action": title,
             "status": status,
             "parent_id": parent_id,
-            "payload": payload or {},
+            "payload": event_payload,
             "visibility": visibility if visibility in {"public", "internal"} else "internal",
         }
         if error:

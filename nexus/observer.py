@@ -26,17 +26,24 @@ def _read_new(path: Path, offset: int, after_sequence: int) -> tuple[int, int, l
     if size < offset:
         offset = 0
     events: list[dict] = []
-    with path.open("r", encoding="utf-8") as handle:
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
         handle.seek(offset)
         while True:
             line = handle.readline()
             if not line:
                 break
-            offset = handle.tell()
+            line_end = handle.tell()
+            # A writer can be between write() calls, leaving a valid JSON
+            # record without its terminating newline. Keep the offset at the
+            # start of that record so the next poll retries it intact.
+            if not line.endswith("\n"):
+                break
             try:
                 event = json.loads(line)
             except (json.JSONDecodeError, UnicodeDecodeError):
+                offset = line_end
                 continue
+            offset = line_end
             if not isinstance(event, dict):
                 continue
             try:

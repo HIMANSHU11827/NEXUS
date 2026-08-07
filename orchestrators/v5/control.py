@@ -51,7 +51,7 @@ class V5Control:
     # ABORT (V5: orchestrators/loop.py:4148)
     # ─────────────────────────────────────────────────────────────────────
 
-    def abort(self) -> None:
+    def abort(self, turn_id: str = "", reason: str = "user_cancelled") -> None:
         """Signal the loop to stop after the current turn.
 
         Idempotent — setting the flag twice is a no-op.  The core
@@ -59,6 +59,12 @@ class V5Control:
         turn; this method only ever sets it (or creates one if the core
         class did not yet initialize it).
         """
+        registry = getattr(self, "_run_controls", None)
+        target = str(turn_id or getattr(self, "_current_turn_id", "") or "")
+        if registry is not None and target:
+            registry.request_cancel(target, reason)
+            self.logger.info("[ABORT] abort requested for run %s", target)
+            return
         flag = getattr(self, "_abort_flag", None)
         if flag is None:
             flag = asyncio.Event()
@@ -68,6 +74,12 @@ class V5Control:
 
     def _abort_requested(self) -> bool:
         """True when an abort has been requested (defaults to False)."""
+        registry = getattr(self, "_run_controls", None)
+        current = str(getattr(self, "_current_turn_id", "") or "")
+        if registry is not None and current:
+            control = registry.get(current)
+            if control is not None:
+                return control.cancelled
         flag = getattr(self, "_abort_flag", None)
         if flag is None:
             return False
@@ -82,6 +94,14 @@ class V5Control:
         """
         if self._abort_requested():
             raise asyncio.CancelledError("V5 loop abort requested")
+
+    def _check_deadline(self) -> None:
+        """Raise a timeout when the current run's monotonic budget expires."""
+        registry = getattr(self, "_run_controls", None)
+        current = str(getattr(self, "_current_turn_id", "") or "")
+        control = registry.get(current) if registry is not None and current else None
+        if control is not None and control.timed_out:
+            raise asyncio.TimeoutError("V5 run deadline exceeded")
 
     # ─────────────────────────────────────────────────────────────────────
     # POST_TOOL_CALL HOOKS (V5: orchestrators/loop.py:1100-1101)
