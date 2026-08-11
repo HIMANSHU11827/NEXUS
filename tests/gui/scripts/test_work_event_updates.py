@@ -159,15 +159,18 @@ def test_append_work_event_persists_resumable_assistant_completion(tmp_path, mon
     replay = api.replay_work_events_after("assistant-session", 0)
     assert replay[0]["payload"]["content"] == "Recovered final answer"
 def test_canonical_event_registry_covers_required_runtime_families():
-    assert EVENT_STATUSES == {"pending", "running", "success", "failed", "blocked", "skipped", "cancelled"}
+    assert EVENT_STATUSES == {
+        "pending", "running", "success", "failed", "blocked", "skipped", "cancelled", "timed_out",
+    }
     for family in ("run", "conversation", "message", "plan", "phase", "tool", "command", "file", "search", "web", "test", "subagent", "handoff", "memory", "skill"):
         assert any(event_type.startswith(f"{family}.") for event_type in EVENT_TYPES), family
 
 
 def test_gui_loop_structured_event_sink_persists_canonical_events(tmp_path, monkeypatch):
     class FakeLoop:
-        def __init__(self, root_dir):
+        def __init__(self, root_dir, session_id=None):
             self.root_dir = root_dir
+            self.session_id = session_id
             self.work_event_sink = None
 
         def load_memory(self, session_id):
@@ -254,6 +257,12 @@ def test_replay_cursor_reports_retention_gap(tmp_path, monkeypatch):
     response = api.get_work_events(request, "gap-session", limit=20)
     assert response["oldest_sequence"] == 5
     assert response["replay_truncated"] is True
+    assert response["replay_gap"] == {
+        "detected": True,
+        "after_sequence": 1,
+        "oldest_sequence": 5,
+        "missing_until": 4,
+    }
 
 
 def test_cursor_replay_preserves_each_lifecycle_record_after_cursor(tmp_path, monkeypatch):
@@ -623,3 +632,13 @@ def test_gui_event_replay_skips_malformed_sequence_and_invalid_utf8(tmp_path, mo
         handle.write(json.dumps({"id": "valid", "sequence": 7, "status": "success"}).encode() + b"\n")
     assert api.replay_work_events_after("hostile", 0, limit=20)[0]["id"] == "valid"
     assert any(item.get("id") == "valid" for item in api.list_work_events("hostile"))
+
+
+def test_gui_reads_legacy_event_session_alias(tmp_path, monkeypatch):
+    _reset_gui_event_state(monkeypatch, tmp_path)
+    legacy = tmp_path / "team_alpha.jsonl"
+    legacy.write_text(json.dumps({"id": "legacy-event", "sequence": 1, "status": "success"}) + "\n", encoding="utf-8")
+
+    events = api.replay_work_events_after("team/alpha", 0, limit=20)
+
+    assert [event["id"] for event in events] == ["legacy-event"]

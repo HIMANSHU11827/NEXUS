@@ -10,6 +10,8 @@ These tests pin the contract so it cannot silently rot again.
 """
 
 import asyncio
+import sqlite3
+import time
 
 import pytest
 
@@ -151,3 +153,46 @@ def test_approve_route_is_registered_on_the_app():
     paths = {getattr(route, "path", "") for route in server.app.routes}
     assert "/api/approve" in paths
     assert "/api/files/read" in paths
+
+
+def test_persistent_broker_rehydrates_pending_request_and_decision(tmp_path):
+    path = str(tmp_path / "approvals.sqlite3")
+    first = ApprovalBroker(store_path=path, owner_id="process-a")
+    request = first.open("session-restart", "terminal", "echo safe", request_id="approval-stable", timeout_s=5)
+
+    second = ApprovalBroker(store_path=path, owner_id="process-b")
+    pending = second.pending("session-restart")
+    assert [item["request_id"] for item in pending] == [request.request_id]
+    reopened = second.open("session-restart", "terminal", "different", request_id=request.request_id)
+    assert reopened.action == "echo safe"
+    assert second.resolve(request.request_id, "yes") is True
+    assert asyncio.run(second.wait(request.request_id)) == DECISION_ALLOW
+
+
+def test_persistent_waiter_observes_decision_from_another_broker(tmp_path):
+    async def scenario():
+        path = str(tmp_path / "approvals-cross-process.sqlite3")
+        owner = ApprovalBroker(store_path=path, owner_id="runtime-process")
+        surface = ApprovalBroker(store_path=path, owner_id="api-process")
+        request = owner.open("session-cross-process", "terminal", "echo safe", timeout_s=3)
+        waiter = asyncio.create_task(owner.wait(request.request_id))
+        await asyncio.sleep(0.05)
+
+        assert surface.resolve(request.request_id, "yes") is True
+        assert await asyncio.wait_for(waiter, timeout=1.5) == DECISION_ALLOW
+
+    asyncio.run(scenario())
+
+
+def test_persistent_broker_expires_stale_requests_and_never_accepts_late_decision(tmp_path):
+    path = str(tmp_path / "approvals.sqlite3")
+    broker = ApprovalBroker(store_path=path)
+    request = broker.open("stale-session", "terminal", "danger", request_id="approval-stale", timeout_s=5)
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE approval_requests SET created_at=? WHERE request_id=?", (time.time() - 20, request.request_id))
+        connection.commit()
+
+    restarted = ApprovalBroker(store_path=path)
+    assert restarted.pending("stale-session") == []
+    assert restarted.resolve(request.request_id, "yes") is False
+    assert asyncio.run(restarted.wait(request.request_id)) == DECISION_DENY

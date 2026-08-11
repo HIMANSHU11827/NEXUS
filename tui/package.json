@@ -6,9 +6,10 @@
   "scripts": {
     "start": "npx tsx nexus-tui.tsx",
     "build": "tsc --noEmit",
-    "test": "tsx modularization.test.ts && tsx choice-question.test.ts && tsx terminal-markdown.test.ts && tsx startup-session.test.ts && tsx sse-parser.test.ts && tsx live-agent-state.test.ts && tsx tool-call-state.test.ts && tsx v3-smoke.test.ts"
+    "test": "tsx modularization.test.ts && tsx command-registry.test.ts && tsx layout.test.ts && tsx compact-render.test.tsx && tsx welcome-logo.test.tsx && tsx interaction-state.test.ts && tsx question-panel.test.tsx && tsx live-trace.test.ts && tsx live-trace-integration.test.tsx && tsx choice-question.test.ts && tsx terminal-markdown.test.ts && tsx startup-session.test.ts && tsx sse-parser.test.ts && tsx live-agent-state.test.ts && tsx tool-call-state.test.ts && tsx submission-state.test.ts && tsx cancellation-contract.test.ts && tsx v3-smoke.test.ts"
   },
   "dependencies": {
+    "cfonts": "^3.3.1",
     "ink": "^7.0.1",
     "ink-big-text": "^2.0.0",
     "ink-gradient": "^4.0.0",
@@ -28,5 +29,8 @@
     "ai",
     "tui"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "allowScripts": {
+    "esbuild@0.27.7": true
+  }
 }

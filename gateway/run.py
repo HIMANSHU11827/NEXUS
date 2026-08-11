@@ -4,14 +4,16 @@ import logging
 import os
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from typing import Dict, List, Optional
 
 from gateway.base import BasePlatformAdapter, MessageEvent
+from gateway.delivery import DeliveryLedger
 from gateway.platforms import all_adapters, get_adapter
 from gateway.session_ids import gateway_session_id
 from orchestrators import NexusLoop
-from providers.reliability import bounded_tool_retry
+from providers.reliability import bounded_tool_retry, redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -140,10 +142,16 @@ class GatewayRunner:
     Each chat maps to a stable session id visible on TUI and GUI.
     """
 
-    def __init__(self):
+    DELIVERY_LEASE_SECONDS = 60.0
+    DELIVERY_LOOP_INTERVAL_SECONDS = 2.0
+
+    def __init__(self, root: Optional[str] = None, delivery_ledger: Optional[DeliveryLedger] = None):
         self.adapters: Dict[str, BasePlatformAdapter] = {}
         self._loops: Dict[str, NexusLoop] = {}
         self._running = False
+        self._delivery_owner = f"gateway-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        self._delivery_ledger = delivery_ledger or DeliveryLedger(root=root)
+        self._delivery_task = None
 
     @staticmethod
     def session_id_for(event: MessageEvent) -> str:
@@ -160,6 +168,99 @@ class GatewayRunner:
     def add_adapter(self, adapter: BasePlatformAdapter):
         self.adapters[adapter.platform] = adapter
         adapter.set_message_handler(self.handle_message)
+
+    def _enqueue_delivery(self, event: MessageEvent, sequence: int, text: str) -> None:
+        """Persist a response before attempting the external send."""
+        key = f"gateway:{dedupe_key_for_event(event)}:response:{sequence}"
+        self._delivery_ledger.enqueue(
+            idempotency_key=key,
+            platform=str(event.platform),
+            chat_id=str(event.chat_id),
+            text=str(text),
+            reply_to=str(getattr(event, "reply_to_id", "") or ""),
+        )
+
+    async def _drain_deliveries(self, limit: int = 100) -> None:
+        platforms = list(self.adapters)
+        if not platforms:
+            return
+        lease_seconds = max(1.0, float(self.DELIVERY_LEASE_SECONDS))
+        claimed = self._delivery_ledger.claim(
+            self._delivery_owner,
+            limit=limit,
+            platforms=platforms,
+            lease_seconds=lease_seconds,
+        )
+        for item in claimed:
+            adapter = self.adapters.get(str(item.get("platform") or ""))
+            if adapter is None:
+                continue
+            renewal_task = asyncio.create_task(
+                self._renew_delivery_lease(str(item["delivery_id"]), lease_seconds)
+            )
+            try:
+                result = await adapter.send_text(
+                    str(item.get("chat_id") or ""),
+                    str(item.get("text") or ""),
+                    reply_to=str(item.get("reply_to") or "") or None,
+                )
+                if getattr(result, "success", False):
+                    self._delivery_ledger.ack(item["delivery_id"], self._delivery_owner, getattr(result, "message_id", "") or "")
+                else:
+                    self._delivery_ledger.fail(
+                        item["delivery_id"],
+                        self._delivery_owner,
+                        redact_secrets(getattr(result, "error", "send failed") or "send failed"),
+                    )
+            except Exception as exc:
+                self._delivery_ledger.fail(
+                    item["delivery_id"], self._delivery_owner, redact_secrets(exc)
+                )
+            finally:
+                renewal_task.cancel()
+                await asyncio.gather(renewal_task, return_exceptions=True)
+
+    async def _renew_delivery_lease(self, delivery_id: str, lease_seconds: float) -> None:
+        """Keep a slow external send owned until it reaches a terminal result."""
+        interval = max(0.25, min(20.0, lease_seconds / 3.0))
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                if not self._delivery_ledger.renew(
+                    delivery_id,
+                    self._delivery_owner,
+                    lease_seconds=lease_seconds,
+                ):
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("delivery lease renewal failed for %s", delivery_id, exc_info=True)
+
+    async def _delivery_loop(self) -> None:
+        while self._running:
+            try:
+                await self._drain_deliveries()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("gateway delivery drain failed", exc_info=True)
+            await asyncio.sleep(max(0.01, float(self.DELIVERY_LOOP_INTERVAL_SECONDS)))
+
+    def start_delivery_loop(self) -> None:
+        """Start durable outbound delivery without connecting adapters."""
+        if self._delivery_task is not None and not self._delivery_task.done():
+            return
+        self._running = True
+        self._delivery_task = asyncio.create_task(self._delivery_loop())
+
+    async def stop_delivery_loop(self) -> None:
+        """Stop only the durable delivery worker; callers own adapters."""
+        self._running = False
+        if self._delivery_task is not None and not self._delivery_task.done():
+            self._delivery_task.cancel()
+            await asyncio.gather(self._delivery_task, return_exceptions=True)
+        self._delivery_task = None
 
     def register_all(self):
         """Auto-discover and register every platform whose env vars are present."""
@@ -219,6 +320,7 @@ class GatewayRunner:
             set_active_session_id(loop.root, session_id, source=f"gateway:{event.platform}")
             sync_loop_from_disk(loop)
             response_buffer = ""
+            response_sequence = 0
             async for chunk in loop.stream_run(event.text):
                 if isinstance(chunk, dict):
                     if chunk.get("type") != "content":
@@ -235,29 +337,46 @@ class GatewayRunner:
                     continue
                 response_buffer += content
                 if len(response_buffer) > 2000:
-                    await bounded_tool_retry(
-                        adapter.send_text, event.chat_id, response_buffer, retry_policy=2
-                    )
+                    response_sequence += 1
+                    self._enqueue_delivery(event, response_sequence, response_buffer)
                     response_buffer = ""
 
             if response_buffer:
-                await bounded_tool_retry(
-                    adapter.send_text, event.chat_id, response_buffer, retry_policy=2
-                )
+                response_sequence += 1
+                self._enqueue_delivery(event, response_sequence, response_buffer)
+            await self._drain_deliveries()
 
         except Exception as e:
-            logger.error(f"Error in gateway reasoning: {e}")
-            await adapter.send_text(event.chat_id, f"❌ [GATEWAY_ERROR]: {str(e)}")
+            safe_error = redact_secrets(e)
+            logger.error("Error in gateway reasoning: %s", safe_error)
+            self._enqueue_delivery(event, 1, "[GATEWAY_ERROR]: The gateway could not complete this request.")
+            await self._drain_deliveries()
+
+    async def _connect_adapter(self, adapter: BasePlatformAdapter) -> bool:
+        """Connect one adapter without allowing it to kill the gateway."""
+        try:
+            success = bool(await adapter.connect())
+        except Exception as exc:
+            safe_error = redact_secrets(exc)
+            adapter.health = "unavailable"
+            adapter.last_error = safe_error
+            logger.error("Failed to connect %s adapter: %s", adapter.platform, safe_error)
+            return False
+        if success:
+            adapter.health = "healthy"
+            adapter.last_error = None
+            logger.info("Successfully connected %s adapter.", adapter.platform)
+        else:
+            adapter.health = "unavailable"
+            logger.error("Failed to connect %s adapter.", adapter.platform)
+        return success
 
     async def run(self):
         """Start all added adapters."""
         self._running = True
+        self.start_delivery_loop()
         for adapter in self.adapters.values():
-            success = await adapter.connect()
-            if success:
-                logger.info(f"Successfully connected {adapter.platform} adapter.")
-            else:
-                logger.error(f"Failed to connect {adapter.platform} adapter.")
+            await self._connect_adapter(adapter)
 
         # Keep the loop alive
         while self._running:
@@ -265,5 +384,14 @@ class GatewayRunner:
 
     async def stop(self):
         self._running = False
+        await self.stop_delivery_loop()
         for adapter in self.adapters.values():
-            await adapter.disconnect()
+            try:
+                await adapter.disconnect()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to disconnect %s adapter: %s",
+                    adapter.platform,
+                    redact_secrets(exc),
+                    exc_info=True,
+                )

@@ -48,6 +48,7 @@ import re
 import tempfile
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -605,20 +606,13 @@ class NexusLoopV5(
     def save_memory(self) -> None:
         """Persist short-term conversation memory to disk."""
         try:
+            from nexus.session_store import atomic_write_json, session_write_lock
             path = os.path.join(self.root_dir, "logs", "sessions", f"{self.session_id}.json")
             os.makedirs(os.path.dirname(path), exist_ok=True)
             memory = getattr(self.runtime, "memory", [])
             with self._session_write_lock:
-                fd, temp_path = tempfile.mkstemp(prefix=".session-", suffix=".tmp", dir=os.path.dirname(path))
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as f:
-                        json.dump(memory, f, indent=2, ensure_ascii=False)
-                        f.flush()
-                        os.fsync(f.fileno())
-                    os.replace(temp_path, path)
-                finally:
-                    if os.path.exists(temp_path):
-                        os.unlink(temp_path)
+                with session_write_lock(path):
+                    atomic_write_json(path, memory)
         except Exception as e:
             self.logger.warning("save_memory failed: %s", e)
 
@@ -661,21 +655,22 @@ class NexusLoopV5(
     def _write_session_bus(self, _messages=None) -> None:
         """Write session to session_bus for CLI/GUI/Gateway sync."""
         try:
+            from nexus.session_store import atomic_write_json, session_write_lock
             path = os.path.join(self.root_dir, "logs", "sessions", f"{self.session_id}.json")
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with self._session_write_lock:
-                fd, temp_path = tempfile.mkstemp(prefix=".session-", suffix=".tmp", dir=os.path.dirname(path))
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as f:
-                        json.dump(self.runtime.memory, f, indent=2, ensure_ascii=False)
-                        f.flush()
-                        os.fsync(f.fileno())
-                    os.replace(temp_path, path)
-                finally:
-                    if os.path.exists(temp_path):
-                        os.unlink(temp_path)
+                with session_write_lock(path):
+                    atomic_write_json(path, self.runtime.memory)
         except Exception:
             pass
+
+    @staticmethod
+    @contextmanager
+    def _session_bus_interprocess_lock(path: str):
+        """Compatibility adapter for callers that need the session mutex."""
+        from nexus.session_store import session_interprocess_lock
+        with session_interprocess_lock(path):
+            yield
 
     # ── Abort / Reset ───────────────────────────────────────────────────
 
@@ -1330,6 +1325,112 @@ class NexusLoopV5(
     def _start_background_finalization(self, *args):
         pass
 
+    @staticmethod
+    def _bounded_memory_recall(memory_context: Any, max_chars: int = 8000) -> str:
+        """Render every populated memory channel within a fair hard budget.
+
+        A single large session or RAG result must not consume the whole recall
+        envelope and hide later channels such as procedural memory.  Short
+        channels are kept in full; the remaining budget is shared evenly by
+        oversized channels.  The channel order remains stable for predictable
+        prompts and tests.
+        """
+        try:
+            limit = max(0, int(max_chars))
+        except (TypeError, ValueError):
+            limit = 8000
+        if memory_context is None or limit <= 0:
+            return ""
+
+        channels = (
+            ("session_history", "SESSION"),
+            ("rag_context", "RAG"),
+            ("failure_vaccines", "FAILURES"),
+            ("knowledge_context", "KNOWLEDGE"),
+            ("episodic", "EPISODIC"),
+            ("working", "WORKING"),
+            ("semantic", "SEMANTIC"),
+            ("procedural", "PROCEDURAL"),
+        )
+        try:
+            from providers.reliability import redact_secrets
+        except Exception:
+            redact_secrets = None
+        blocks: List[str] = []
+        for attribute, label in channels:
+            value = str(getattr(memory_context, attribute, "") or "").strip()
+            if not value:
+                continue
+            prefix = f"[{label}]"
+            block = value if value.upper().startswith(prefix) else f"{prefix}\n{value}"
+            if redact_secrets is not None:
+                try:
+                    block = redact_secrets(block)
+                except Exception:
+                    pass
+            blocks.append(block)
+
+        if not blocks:
+            return ""
+        separator = "\n\n"
+        if len(separator.join(blocks)) <= limit:
+            return separator.join(blocks)
+
+        content_budget = max(0, limit - len(separator) * (len(blocks) - 1))
+        allocations = [0] * len(blocks)
+        pending = set(range(len(blocks)))
+        remaining = content_budget
+        while pending and remaining > 0:
+            share = max(1, remaining // len(pending))
+            completed = [index for index in pending if len(blocks[index]) <= share]
+            if not completed:
+                for index in sorted(pending):
+                    amount = min(share, remaining)
+                    allocations[index] = amount
+                    remaining -= amount
+                break
+            for index in completed:
+                amount = min(len(blocks[index]), remaining)
+                allocations[index] = amount
+                remaining -= amount
+                pending.remove(index)
+
+        # Integer division can leave a few characters undistributed. Give
+        # them to channels in stable order without exceeding their content.
+        for index, block in enumerate(blocks):
+            if remaining <= 0:
+                break
+            available = len(block) - allocations[index]
+            if available <= 0:
+                continue
+            extra = min(available, remaining)
+            allocations[index] += extra
+            remaining -= extra
+
+        return separator.join(
+            block[: allocations[index]]
+            for index, block in enumerate(blocks)
+            if allocations[index] > 0
+        )[:limit]
+
+    @staticmethod
+    def _merge_memory_context(
+        context_summary: Any,
+        memory_context: Any,
+        max_recall_chars: int = 8000,
+    ) -> str:
+        """Append bounded recall without replacing or duplicating context."""
+        current = str(context_summary or "").strip()
+        recall = NexusLoopV5._bounded_memory_recall(
+            memory_context, max_chars=max_recall_chars
+        )
+        if not recall:
+            return current
+        recall_block = f"[RECALL]\n{recall}"
+        if recall_block in current:
+            return current
+        return f"{current}\n\n{recall_block}".strip() if current else recall_block
+
     def _session_messages(self):
         """Return current conversation messages from runtime memory."""
         return getattr(self.runtime, "memory", [])
@@ -1558,6 +1659,7 @@ class NexusLoopV5(
         max_tokens: Optional[int] = None,
         conversation_history: Optional[List[Dict[str, Any]]] = None,
         task_id: str = "",
+        idempotency_key: str = "",
         deadline_seconds: Optional[float] = None,
         deadline_at: Optional[float] = None,
     ) -> Any:
@@ -1616,6 +1718,16 @@ class NexusLoopV5(
                     )
                 except Exception as e:
                     self.logger.warning(f"Memory sync failed: {e}")
+            # Close the per-turn learning loop: collect tool-failure
+            # and reflection signals into runtime.failures /
+            # runtime.learnings. Isolated so a learning failure can
+            # never break the turn.
+            collect = getattr(self, "_collect_turn_signals", None)
+            if callable(collect):
+                try:
+                    await collect(perceived, result, turn)
+                except Exception:
+                    self.logger.debug("turn learning-signal collection skipped", exc_info=True)
             self._start_background_finalization(
                 user_input, self._session_messages(), bool(result.get("success"))
             )
@@ -1645,6 +1757,7 @@ class NexusLoopV5(
         turn_id: str = "",
         conversation_history: Optional[List[Dict[str, Any]]] = None,
         task_id: str = "",
+        idempotency_key: str = "",
         deadline_seconds: Optional[float] = None,
         deadline_at: Optional[float] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -1685,6 +1798,7 @@ class NexusLoopV5(
                 turn_id=turn_id,
                 conversation_history=conversation_history,
                 task_id=task_id,
+                idempotency_key=idempotency_key,
                 deadline_seconds=deadline_seconds,
                 deadline_at=deadline_at,
             ):
@@ -1730,6 +1844,7 @@ class NexusLoopV5(
         turn_id: str = "",
         conversation_history: Optional[List[Dict[str, Any]]] = None,
         task_id: str = "",
+        idempotency_key: str = "",
         deadline_seconds: Optional[float] = None,
         deadline_at: Optional[float] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -1774,6 +1889,8 @@ class NexusLoopV5(
             session_id=self.session_id,
             user_input=task_desc,
             input_type=input_type,
+            metadata={"idempotency_key": str(idempotency_key or "")}
+            if idempotency_key else {},
         )
         self.runtime.current_turn = turn
         self._current_turn_id = turn.turn_id
@@ -1931,18 +2048,71 @@ class NexusLoopV5(
                     ctx = turn.metadata.get("_memory_context")
                     if ctx is None:
                         ctx = await self._memory_manager.prefetch_all(task_desc)
-                    context_summary = "\n".join(
-                        part for part in (
-                            getattr(ctx, "session_history", ""),
-                            getattr(ctx, "rag_context", ""),
-                            getattr(ctx, "failure_vaccines", ""),
-                            getattr(ctx, "knowledge_context", ""),
-                            getattr(ctx, "episodic", ""),
-                            getattr(ctx, "procedural", ""),
-                        ) if part
-                    )[:10000]
+                    context_summary = self._merge_memory_context(
+                        context_summary, ctx
+                    )
                 except Exception as exc:
                     self.logger.debug("Direct-loop memory prefetch failed: %s", exc)
+
+            # Close the learning read-half: surface collected
+            # failures/reflections so the model can avoid repeating
+            # known-bad actions. Runs EVERY turn (placed outside the
+            # memory-prefetch branch, because perception always
+            # pre-populates turn.metadata["_memory_context"], so a
+            # nested injection would silently never fire). Bounded,
+            # best-effort, never raises.
+            try:
+                learn_digest = ""
+                learn_fn = getattr(self, "learning_signals_digest", None)
+                if callable(learn_fn):
+                    try:
+                        learn_digest = learn_fn()
+                    except Exception:
+                        learn_digest = ""
+                if learn_digest:
+                    context_summary = (
+                        f"{context_summary}\n\n[LEARNING]\n{learn_digest}"
+                    ).strip()
+
+                # Close the self-evolution read-half: the durable
+                # improvement backlog (written by _evolve_self_improve
+                # / _evolve_gap_forge) was write-only -- nothing ever
+                # read it back, so Nexus recorded how to improve but
+                # never applied it. Surface the top pending action(s)
+                # as model-visible context and mark them in_progress so
+                # they are not re-proposed on every future session.
+                # All backlog I/O runs in a worker thread so it never
+                # blocks the event loop (the synchronous open()/os.replace
+                # would otherwise stall SSE streaming and heartbeat tasks).
+                try:
+                    from evolution.backlog import (
+                        pending_actions, mark_action_status
+                    )
+                    pending = await asyncio.to_thread(
+                        pending_actions, self.root_dir
+                    )
+                    surfaced = []
+                    for action in pending[:3]:
+                        label = str(action.get("action") or "").strip()
+                        if not label:
+                            continue
+                        surfaced.append("- " + label[:200])
+                        try:
+                            await asyncio.to_thread(
+                                mark_action_status,
+                                action.get("id"), "in_progress", self.root_dir
+                            )
+                        except Exception:
+                            pass
+                    if surfaced:
+                        evolve_digest = "Pending self-improvement actions (consider applying):\n" + "\n".join(surfaced)
+                        context_summary = (
+                            f"{context_summary}\n\n[SELF-EVOLUTION]\n{evolve_digest}"
+                        ).strip()
+                except Exception:
+                    pass
+            except Exception:
+                pass
             try:
                 skills = self._skills_index_text()
                 if skills:
@@ -2226,19 +2396,9 @@ class NexusLoopV5(
             try:
                 ctx = await self._memory_manager.prefetch_all(turn.user_input)
                 turn.metadata["_memory_context"] = ctx
-                memory_parts = [
-                    part for part in (
-                        getattr(ctx, "session_history", ""),
-                        getattr(ctx, "rag_context", ""),
-                        getattr(ctx, "failure_vaccines", ""),
-                        getattr(ctx, "knowledge_context", ""),
-                    ) if part
-                ]
-                if memory_parts:
-                    recall = "\n".join(memory_parts[:3])
-                    perceived.context_summary = (
-                        f"{perceived.context_summary}\n\n[RECALL]\n{recall}"
-                    )
+                perceived.context_summary = self._merge_memory_context(
+                    perceived.context_summary, ctx
+                )
             except Exception as e:
                 self.logger.debug(f"Memory prefetch failed: {e}")
 

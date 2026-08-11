@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  X, Palette, Cpu, Brain, Sparkles, SlidersHorizontal, Info,
-  Wrench, Puzzle, Network, UsersRound, ReceiptText, Settings2, Radio, Clock3, Monitor, ShieldCheck, Bell, Keyboard, Mic,
+  X, Palette, Sparkles,
   Search, RefreshCw, AlertTriangle, ChevronRight,
 } from 'lucide-react'
-import { api, type HiveItem, type InventoryItem, type RuntimeProviderStatus } from '../lib/api'
+import { api, type HiveItem, type InventoryItem, type ProviderDiagnostics, type RuntimeProviderStatus } from '../lib/api'
 import { useStore } from '../lib/store'
 import WorkspaceSettingsPanel from './WorkspaceSettings'
 import SafetySettings from './SafetySettings'
@@ -26,33 +25,11 @@ import { BillingSettings } from './settings/Billing'
 import { AboutSettings } from './settings/About'
 import { KeyboardShortcuts } from './settings/KeyboardShortcuts'
 import { LiveData } from './settings/LiveData'
+import { settingsSections, type SettingsSectionId as Section } from './settings/settingsRegistry'
+import './settings/settings.css'
 
-type Section = 'appearance' | 'workspace' | 'safety' | 'notifications' | 'shortcuts' | 'voice' | 'providers' | 'memory' | 'evolution' | 'config' | 'skills' | 'tools' | 'plugins' | 'mcp' | 'hive' | 'gateway' | 'cron' | 'billing' | 'about'
 type Loaded = Record<string, unknown>
-
-type SettingsSection = { id: Section; label: string; description: string; icon: typeof Palette; group: string }
-
-const sections: SettingsSection[] = [
-  { id: 'appearance', label: 'Theme & appearance', description: 'Personalize the workspace', icon: Palette, group: 'Personal' },
-  { id: 'notifications', label: 'Notifications', description: 'Alerts and sound', icon: Bell, group: 'Personal' },
-  { id: 'shortcuts', label: 'Keyboard shortcuts', description: 'Quick actions', icon: Keyboard, group: 'Personal' },
-  { id: 'workspace', label: 'Workspace', description: 'Files, indexing, instructions', icon: Monitor, group: 'Workspace' },
-  { id: 'memory', label: 'Memory & context', description: 'Sessions and retrieval', icon: Brain, group: 'Workspace' },
-  { id: 'safety', label: 'Safety', description: 'Permissions and protected paths', icon: ShieldCheck, group: 'Workspace' },
-  { id: 'providers', label: 'Providers', description: 'Models and connections', icon: Cpu, group: 'Runtime' },
-  { id: 'voice', label: 'Voice', description: 'Speech and transcription', icon: Mic, group: 'Runtime' },
-  { id: 'config', label: 'Configuration', description: 'Runtime and session defaults', icon: Settings2, group: 'Runtime' },
-  { id: 'evolution', label: 'Evolution', description: 'Self-improvement status', icon: Sparkles, group: 'Runtime' },
-  { id: 'skills', label: 'Skills', description: 'Installed capabilities', icon: Wrench, group: 'Extensions' },
-  { id: 'tools', label: 'Tools', description: 'Tool registry', icon: SlidersHorizontal, group: 'Extensions' },
-  { id: 'plugins', label: 'Plugins', description: 'Plugin lifecycle', icon: Puzzle, group: 'Extensions' },
-  { id: 'mcp', label: 'MCP', description: 'External tool servers', icon: Network, group: 'Extensions' },
-  { id: 'hive', label: 'Hive', description: 'Multi-agent coordination', icon: UsersRound, group: 'Automation' },
-  { id: 'gateway', label: 'Gateway', description: 'Messaging integrations', icon: Radio, group: 'Automation' },
-  { id: 'cron', label: 'Scheduled jobs', description: 'Recurring work', icon: Clock3, group: 'Automation' },
-  { id: 'billing', label: 'Billing', description: 'Usage and limits', icon: ReceiptText, group: 'System' },
-  { id: 'about', label: 'About', description: 'Version and diagnostics', icon: Info, group: 'System' },
-]
+const sections = settingsSections
 
 
 export default function SettingsPanel({ onClose }: { onClose: () => void }) {
@@ -67,6 +44,7 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [refreshNonce, setRefreshNonce] = useState(0)
   const safetyDirtyRef = useRef(false)
   const dialogRef = useRef<HTMLDivElement>(null)
+  const loadRequestRef = useRef(0)
 
   const navigateTo = (next: Section) => {
     if (active === 'safety' && next !== 'safety' && safetyDirtyRef.current && !window.confirm('You have unsaved Safety changes. Discard them and leave the Safety page?')) return
@@ -127,11 +105,13 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
     }
     const load = loaders[active]
     if (!load) return
+    const requestId = ++loadRequestRef.current
     let cancelled = false
+    const isCurrent = () => !cancelled && requestId === loadRequestRef.current
     setLoading(true); setError('')
-    load().then(result => { if (!cancelled) setData(current => ({ ...current, [active]: result })) })
-      .catch(err => setError(err instanceof Error ? err.message : 'Could not load this Nexus setting.'))
-      .finally(() => setLoading(false))
+    load().then(result => { if (isCurrent()) setData(current => ({ ...current, [active]: result })) })
+      .catch(err => { if (isCurrent()) setError(err instanceof Error ? err.message : 'Could not load this Nexus setting.') })
+      .finally(() => { if (isCurrent()) setLoading(false) })
     return () => { cancelled = true }
   }, [active, refreshNonce])
 
@@ -153,11 +133,12 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
       delete next[active]
       return next
     })
+    setRefreshNonce(value => value + 1)
   }
 
   const filteredSections = sections.filter(section => {
     const needle = query.trim().toLowerCase()
-    return !needle || `${section.label} ${section.description} ${section.group}`.toLowerCase().includes(needle)
+    return !needle || `${section.label} ${section.description} ${section.purpose} ${section.group} ${section.searchTerms.join(' ')}`.toLowerCase().includes(needle)
   })
 
   const content = useMemo(() => {
@@ -172,7 +153,7 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
     if (loading) return <p className="py-8 text-sm text-muted-foreground" role="status">Loading live Nexus data…</p>
     if (error) return <div className="rounded-xl border border-destructive/25 bg-destructive/5 p-5" role="alert"><div className="flex items-start gap-3"><AlertTriangle className="mt-0.5 shrink-0 text-destructive" size={18} /><div><p className="text-sm font-semibold text-destructive">Couldn’t load this section</p><p className="mt-1 text-sm text-destructive/80">{error}</p><button type="button" onClick={refreshActive} className="mt-3 inline-flex items-center gap-2 rounded-md border border-destructive/30 bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-secondary"><RefreshCw size={13} /> Try again</button></div></div></div>
     if (active === 'providers') {
-      const response = data.providers as { providers?: InventoryItem[]; runtime?: { provider?: string; model?: string }; runtime_status?: RuntimeProviderStatus } | undefined
+      const response = data.providers as { providers?: InventoryItem[]; runtime?: { provider?: string; model?: string }; diagnostics?: ProviderDiagnostics; runtime_status?: RuntimeProviderStatus } | undefined
       const providers = response?.providers || []
       if (error) {
         return <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive" role="alert">Could not load providers: {error}</p>
@@ -180,7 +161,7 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
       if (loading) {
         return <p className="py-8 text-sm text-muted-foreground" role="status">Loading providers…</p>
       }
-      return providers.length ? <ProviderList providers={providers} pending={pendingToggle.replace('provider:', '')} runtimeStatus={response?.runtime_status} onToggle={(name, enabled) => toggle('provider', name, enabled)} onChanged={() => { setData(current => { const next = { ...current }; delete next.providers; return next }); setRefreshNonce(value => value + 1) }} /> : <p className="py-8 text-sm text-muted-foreground">No provider implementations were reported.</p>
+      return providers.length ? <ProviderList providers={providers} pending={pendingToggle.replace('provider:', '')} runtimeStatus={response?.runtime_status} diagnostics={response?.diagnostics} onToggle={(name, enabled) => toggle('provider', name, enabled)} onChanged={() => { setData(current => { const next = { ...current }; delete next.providers; return next }); setRefreshNonce(value => value + 1) }} /> : <p className="py-8 text-sm text-muted-foreground">No provider implementations were reported.</p>
     }
     if (active === 'safety') return <SafetySettings onOpenWorkspace={() => navigateTo('workspace')} onDirtyChange={dirty => { safetyDirtyRef.current = dirty }} />
     if (active === 'memory') return <MemorySettings state={(data.memory as Record<string, unknown> | undefined) || {}} />
@@ -209,35 +190,36 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
     }
     if (active === 'about') {
       const version = data.about as { version?: string; service?: string } | undefined
-      return <AboutSettings version={version} backendAvailable={backendAvailable} sessions={sessions} />
+      return <AboutSettings version={version} backendAvailable={backendAvailable} sessions={sessions.length} />
     }
     return <LiveData data={(data[active] as Record<string, unknown> | undefined) || {}} empty={`Nexus did not report ${active} data.`} />
   }, [active, backendAvailable, data, error, loading, sessions.length, theme])
 
   const activeLabel = sections.find(section => section.id === active)?.label || 'Settings'
   const activeSection = sections.find(section => section.id === active)
+  const ActiveIcon = activeSection?.icon || Palette
   const groupedSections = [...new Set(filteredSections.map(section => section.group))]
-  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/25 p-0 backdrop-blur-sm sm:p-4" role="dialog" aria-modal="true" aria-label="Nexus settings" aria-describedby="settings-description">
+  return <div className="settings-overlay fixed inset-0 z-50 flex items-center justify-center p-0 backdrop-blur-sm sm:p-4" role="dialog" aria-modal="true" aria-label="Nexus settings" aria-describedby="settings-description">
       <div
         ref={dialogRef}
-        className="flex h-full w-full overflow-hidden border-border bg-background shadow-2xl sm:h-[min(820px,92vh)] sm:w-[min(1320px,calc(100vw-48px))] sm:rounded-2xl sm:border"
+        className="settings-modal flex h-full w-full overflow-hidden border bg-background shadow-2xl sm:h-[min(820px,92vh)] sm:w-[min(1320px,calc(100vw-48px))] sm:border"
         style={{
           maxWidth: "1320px",
           maxHeight: "92vh",
         }}
       >
-      <aside className="hidden w-72 shrink-0 flex-col border-r border-border bg-secondary/25 p-4 md:flex">
-        <div className="mb-4 px-2 pt-1"><p className="text-sm font-semibold">Nexus settings</p><p className="mt-0.5 text-xs text-muted-foreground">Control center for your local agent</p></div>
+      <aside className="settings-sidebar hidden w-72 shrink-0 flex-col border-r border-border p-4 md:flex">
+        <div className="settings-brand"><span className="settings-brand-mark"><Sparkles size={15} /></span><div><p className="text-sm font-semibold tracking-tight">Nexus settings</p><p className="mt-0.5 text-[11px] text-muted-foreground">Control center for your local agent</p></div></div>
         <label className="relative mb-4 block"><Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search settings" aria-label="Search settings" className="h-9 w-full rounded-lg border border-border bg-background pl-9 pr-3 text-sm outline-none placeholder:text-muted-foreground/70 focus:border-ring focus:ring-2 focus:ring-ring/20" /></label>
         <nav className="flex-1 space-y-5 overflow-y-auto pr-1" aria-label="Settings sections">
-          {groupedSections.map(group => <div key={group}><p className="mb-1.5 px-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/70">{group}</p><div className="space-y-0.5">{filteredSections.filter(section => section.group === group).map(section => { const Icon = section.icon; return <button key={section.id} onClick={() => navigateTo(section.id)} aria-current={active === section.id ? 'page' : undefined} title={section.description} className={`group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition ${active === section.id ? 'bg-background font-medium text-foreground shadow-sm ring-1 ring-border' : 'text-muted-foreground hover:bg-background/70 hover:text-foreground'}`}><Icon size={16} className={active === section.id ? 'text-foreground' : 'text-muted-foreground/80'} /><span className="min-w-0 flex-1 truncate">{section.label}</span>{active === section.id && <ChevronRight size={14} className="text-muted-foreground" />}</button> })}</div></div>)}
+          {groupedSections.map(group => <div key={group}><p className="mb-1.5 px-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/70">{group}</p><div className="space-y-0.5">{filteredSections.filter(section => section.group === group).map(section => { const Icon = section.icon; return <button key={section.id} onClick={() => navigateTo(section.id)} aria-current={active === section.id ? 'page' : undefined} title={`${section.description} · ${section.purpose}`} className={`settings-nav-item group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition ${active === section.id ? 'is-active font-medium text-foreground' : 'text-muted-foreground hover:bg-background/70 hover:text-foreground'}`}><Icon size={16} className={active === section.id ? 'text-primary' : 'text-muted-foreground/80'} /><span className="min-w-0 flex-1 truncate">{section.label}</span>{active === section.id && <ChevronRight size={14} className="text-muted-foreground" />}</button> })}</div></div>)}
           {!filteredSections.length && <p className="px-2 py-6 text-xs text-muted-foreground">No settings match “{query}”.</p>}
         </nav>
-        <div className="mt-4 flex items-center gap-2 border-t border-border px-2 pt-3 text-xs text-muted-foreground"><span className={`size-2 rounded-full ${backendAvailable ? 'bg-emerald-500' : 'bg-amber-500'}`} />{backendAvailable ? 'Backend connected' : 'Backend unavailable'}</div>
+        <div className="mt-4 flex items-center gap-2 border-t border-border px-2 pt-3 text-xs text-muted-foreground"><span className={`size-2 rounded-full ${backendAvailable ? 'bg-emerald-500' : 'bg-amber-500'}`} />{backendAvailable ? 'Backend connected' : 'Backend unavailable'}<span className="ml-auto text-[10px] uppercase tracking-wider text-muted-foreground/60">Local</span></div>
       </aside>
       <section className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-10 border-b border-border bg-background/95 px-4 py-4 backdrop-blur sm:px-7"><div className="flex items-start justify-between gap-4"><div className="min-w-0"><div className="mb-3 flex items-center gap-2 md:hidden"><span className="text-sm font-semibold">Settings</span><span className="text-muted-foreground">/</span><span className="truncate text-sm text-muted-foreground">{activeLabel}</span></div><h2 className="text-lg font-semibold tracking-tight">{activeLabel}</h2><p id="settings-description" className="mt-1 text-sm text-muted-foreground">{activeSection?.description || (active === 'appearance' ? 'Preferences saved on this device.' : 'Live data from your Nexus server.')}</p></div><button type="button" onClick={closeSettings} className="flex size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring" aria-label="Close settings"><X size={18} /></button></div><div className="mt-4 flex items-center gap-2 md:hidden"><Search size={15} className="text-muted-foreground" /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Filter settings" aria-label="Filter settings" className="h-8 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-sm outline-none focus:border-ring" /><select aria-label="Settings section" value={active} onChange={event => navigateTo(event.target.value as Section)} className="h-8 max-w-[46%] rounded-md border border-border bg-background px-2 text-xs">{sections.map(section => <option key={section.id} value={section.id}>{section.label}</option>)}</select></div></header>
-        <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-7 sm:py-7"><div key={`${active}-${refreshNonce}`} className="mx-auto max-w-4xl">{content}</div></div>
+        <header className="settings-header sticky top-0 z-10 px-4 py-4 backdrop-blur sm:px-7"><div className="flex items-start justify-between gap-4"><div className="min-w-0"><div className="mb-3 flex items-center gap-2 md:hidden"><span className="text-sm font-semibold">Settings</span><span className="text-muted-foreground">/</span><span className="truncate text-sm text-muted-foreground">{activeLabel}</span></div><div className="flex items-center gap-3"><span className="hidden size-9 place-items-center rounded-xl bg-primary/10 text-primary sm:grid"><ActiveIcon size={17} /></span><div><div className="flex flex-wrap items-center gap-2"><h2 className="text-lg font-semibold tracking-tight">{activeLabel}</h2>{activeSection?.purpose && <span className="settings-purpose-badge">{activeSection.purpose}</span>}</div><p id="settings-description" className="mt-1 text-sm text-muted-foreground">{activeSection?.description || (active === 'appearance' ? 'Preferences saved on this device.' : 'Live data from your Nexus server.')}</p></div></div></div><button type="button" onClick={closeSettings} className="flex size-9 shrink-0 items-center justify-center rounded-xl text-muted-foreground hover:bg-secondary hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring" aria-label="Close settings"><X size={18} /></button></div><div className="mt-4 flex items-center gap-2 md:hidden"><Search size={15} className="text-muted-foreground" /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Filter settings" aria-label="Filter settings" className="h-8 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-sm outline-none focus:border-ring" /><select aria-label="Settings section" value={active} onChange={event => navigateTo(event.target.value as Section)} className="h-8 max-w-[46%] rounded-md border border-border bg-background px-2 text-xs">{sections.map(section => <option key={section.id} value={section.id}>{section.label}</option>)}</select></div></header>
+        <div className="settings-scroll flex-1 overflow-y-auto px-4 py-5 sm:px-7 sm:py-7"><div key={`${active}-${refreshNonce}`} className="settings-page-frame mx-auto max-w-4xl"><div className={`settings-page settings-page--${active}`}>{content}</div></div></div>
       </section>
     </div>
   </div>

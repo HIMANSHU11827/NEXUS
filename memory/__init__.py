@@ -16,25 +16,43 @@ markers), and ``expire`` (age/hard-cap eviction, verified-facts-exempt).
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import logging
 import math
 import os
+import re
+import sqlite3
+import threading
+import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+
+from nexus.runtime import safe_session_id
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from .continuity import inspect_continuity
+from .continuity import inspect_continuity, _timestamp
+from providers.reliability import redact_secrets
 
 logger = logging.getLogger("nexus.memory")
 
 _REPLAY_FILE_REL = os.path.join(".nexus_v5", "replays.jsonl")
+_MEMORY_EVIDENCE_REL = os.path.join(".nexus_v5", "memory_evidence.jsonl")
+_MEMORY_EVIDENCE_LOCK = threading.Lock()
 _EPISODIC_RECENCY_WINDOW = 86400.0
 _EPISODIC_RECENCY_ALPHA = 0.4
 _EPISODIC_RELEVANCE_BETA = 0.3
 _EPISODIC_IMPORTANCE_GAMMA = 0.3
+
+
+def _sanitize_recalled_text(value: Any) -> str:
+    """Redact credentials at the memory-to-model egress boundary."""
+    try:
+        return redact_secrets(str(value or ""))
+    except Exception:
+        return str(value or "")
 
 
 def _episodic_entry_failed(entry: Any) -> bool:
@@ -81,6 +99,36 @@ def _episodic_score_entry(entry: Any, now: float) -> float:
         return max(0.0, min(1.0, score))
     except Exception:
         return 0.0
+
+
+def _episodic_query_relevance(entry: Any, query: str) -> float:
+    """Return lexical query coverage for an episodic entry (0..1)."""
+    if not isinstance(entry, dict) or not str(query or "").strip():
+        return 0.0
+    query_tokens = {
+        token
+        for token in re.findall(r"[a-z0-9_]+", str(query).lower())
+        if len(token) > 1
+    }
+    if not query_tokens:
+        return 0.0
+    searchable = " ".join(
+        str(entry.get(field) or "")
+        for field in (
+            "input",
+            "output",
+            "error",
+            "failure",
+            "reflection",
+            "root_causes",
+        )
+    ).lower()
+    entry_tokens = {
+        token
+        for token in re.findall(r"[a-z0-9_]+", searchable)
+        if len(token) > 1
+    }
+    return len(query_tokens & entry_tokens) / len(query_tokens)
 
 
 def _tool_evidence_text(
@@ -300,7 +348,7 @@ class MemoryContext:
             parts.append(f"[SEMANTIC]:\n{self.semantic}")
         if self.procedural:
             parts.append(f"[PROCEDURAL]:\n{self.procedural}")
-        return "\n\n".join(parts)
+        return _sanitize_recalled_text("\n\n".join(parts))
 
 
 class MemoryManager:
@@ -321,7 +369,7 @@ class MemoryManager:
     ) -> None:
         self.root = os.path.abspath(root_dir)
         if session_id:
-            self.session_id = session_id
+            self.session_id = safe_session_id(session_id)
         else:
             # Default to the most-recently-modified session file so a fresh process
             # resumes the real conversation instead of inventing a random id that
@@ -352,7 +400,98 @@ class MemoryManager:
         """Pick the most-recently-modified session file so a fresh process resumes
         the real conversation instead of inventing an unresolvable random id."""
         if root:
-            sess_dir = os.path.join(os.path.abspath(root), "logs", "sessions")
+            root = os.path.abspath(root)
+            # Prefer unfinished run-context/checkpoint evidence over a newer
+            # completed transcript.  This is what lets a fresh process resume
+            # the task that was interrupted instead of starting a new chat.
+            candidates = []
+            contexts = os.path.join(root, "logs", "run_contexts")
+            if os.path.isdir(contexts):
+                for session in os.listdir(contexts):
+                    folder = os.path.join(contexts, session)
+                    if not os.path.isdir(folder):
+                        continue
+                    for name in os.listdir(folder):
+                        if not name.endswith(".json"):
+                            continue
+                        try:
+                            with open(os.path.join(folder, name), "r", encoding="utf-8") as handle:
+                                record = json.load(handle)
+                            if str(record.get("status", "")).lower() in {"running", "failed", "error", "cancelled", "canceled", "aborted"}:
+                                candidates.append((float(record.get("updated_at") or record.get("started_at") or 0), session))
+                        except (OSError, ValueError, TypeError):
+                            continue
+            checkpoints = os.path.join(root, ".nexus_v5", "checkpoints")
+            if os.path.isdir(checkpoints):
+                terminal = {"complete", "completed", "done", "success", "succeeded", "finished"}
+                for name in os.listdir(checkpoints):
+                    if not name.endswith(".json"):
+                        continue
+                    path = os.path.join(checkpoints, name)
+                    try:
+                        with open(path, "r", encoding="utf-8") as handle:
+                            record = json.load(handle)
+                        phase = str(record.get("phase") or "").strip().lower()
+                        session = str(record.get("session") or record.get("session_id") or "").strip()
+                        if session and phase not in terminal:
+                            candidates.append((float(record.get("ts") or os.path.getmtime(path)), session))
+                    except (OSError, ValueError, TypeError):
+                        continue
+            queue_db = os.path.join(root, ".nexus_queue.db")
+            if os.path.exists(queue_db):
+                try:
+                    conn = sqlite3.connect(queue_db)
+                    rows = conn.execute("SELECT payload, updated_at FROM tasks WHERE state IN ('queued','leased','retrying','failed')").fetchall()
+                    conn.close()
+                    for payload_text, updated_at in rows:
+                        payload = json.loads(payload_text or "{}")
+                        meta = payload.get("meta") if isinstance(payload, dict) else {}
+                        session = str((meta or {}).get("session_id") or "").strip()
+                        if session:
+                            candidates.append((float(updated_at or 0), session))
+                except (OSError, sqlite3.Error, ValueError, TypeError):
+                    pass
+            if candidates:
+                return max(candidates, key=lambda item: item[0])[1]
+
+            queue_db = os.path.join(root, ".nexus_queue.db")
+            if os.path.isfile(queue_db):
+                try:
+                    connection = sqlite3.connect(queue_db)
+                    rows = connection.execute(
+                        "SELECT payload, updated_at FROM tasks WHERE state IN ('queued','leased','retrying') ORDER BY updated_at DESC"
+                    ).fetchall()
+                    connection.close()
+                    for payload_text, updated_at in rows:
+                        payload = json.loads(payload_text or "{}")
+                        meta = payload.get("meta") if isinstance(payload, dict) else {}
+                        session = str((meta or {}).get("session_id") or "").strip()
+                        if session:
+                            candidates.append((_timestamp(updated_at), session))
+                except (OSError, sqlite3.Error, ValueError, TypeError):
+                    pass
+            if candidates:
+                return max(candidates, key=lambda item: item[0])[1]
+
+            checkpoint_dir = os.path.join(root, ".nexus_v5", "checkpoints")
+            if os.path.isdir(checkpoint_dir):
+                for name in os.listdir(checkpoint_dir):
+                    if not name.endswith(".json"):
+                        continue
+                    path = os.path.join(checkpoint_dir, name)
+                    try:
+                        with open(path, "r", encoding="utf-8") as handle:
+                            record = json.load(handle)
+                        phase = str(record.get("phase") or "").lower()
+                        session = str(record.get("session") or "").strip()
+                        if session and phase not in {"complete", "completed", "done", "success", "succeeded", "finished"}:
+                            candidates.append((_timestamp(record.get("ts"), os.path.getmtime(path)), session))
+                    except (OSError, ValueError, TypeError):
+                        continue
+            if candidates:
+                return max(candidates, key=lambda item: item[0])[1]
+
+            sess_dir = os.path.join(root, "logs", "sessions")
             if os.path.isdir(sess_dir):
                 try:
                     files = [
@@ -400,7 +539,10 @@ class MemoryManager:
         ctx.knowledge_context = results[3] if not isinstance(results[3], Exception) else ""
 
         try:
-            await asyncio.to_thread(self._prefetch_episodic)
+            await asyncio.to_thread(
+                self._prefetch_episodic, user_message=user_message
+            )
+            await asyncio.to_thread(self._prefetch_procedural, user_message)
             ctx.episodic = self._in_memory.get("episodic", "")
             ctx.working = self._in_memory.get("working", "")
             ctx.semantic = self._in_memory.get("semantic", "")
@@ -417,6 +559,7 @@ class MemoryManager:
         verified_actions: Optional[List[Dict[str, Any]]] = None,
         tool_results: Optional[List[Dict[str, Any]]] = None,
         verified: Optional[bool] = None,
+        provenance: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Post-turn: persist memory and extract verified learnings.
 
@@ -449,6 +592,7 @@ class MemoryManager:
                 actions,
                 list(tool_results or []),
                 verified,
+                dict(provenance or {}),
             ),
         ]
 
@@ -471,6 +615,65 @@ class MemoryManager:
             pass
 
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _persist_memory_evidence(
+        self,
+        tool_results: List[Dict[str, Any]],
+        provenance: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        """Persist redacted, deduplicated provenance for verified tool facts."""
+        if not tool_results:
+            return []
+        base = {
+            key: _sanitize_recalled_text(value)[:500]
+            for key, value in (provenance or {}).items()
+            if key in {"session_id", "turn_id", "task_id", "provider_run_evidence_path", "provider", "profile", "model"}
+        }
+        path = os.path.join(self.root, _MEMORY_EVIDENCE_REL)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        records: List[Dict[str, Any]] = []
+        ids: List[str] = []
+        with _MEMORY_EVIDENCE_LOCK:
+            existing = set()
+            if os.path.isfile(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as stream:
+                        for line in stream:
+                            try:
+                                item = json.loads(line)
+                                if item.get("memory_id"):
+                                    existing.add(str(item["memory_id"]))
+                            except Exception:
+                                continue
+                except OSError:
+                    pass
+            for result in tool_results:
+                if not isinstance(result, dict):
+                    continue
+                tool = _sanitize_recalled_text(result.get("tool") or result.get("name") or "tool")[:120]
+                call_id = _sanitize_recalled_text(result.get("call_id") or "")[:160]
+                summary = _sanitize_recalled_text(_tool_evidence_text([result], limit=300))
+                digest_input = json.dumps({**base, "tool": tool, "call_id": call_id, "summary": summary}, sort_keys=True)
+                memory_id = "mem-" + hashlib.sha256(digest_input.encode("utf-8")).hexdigest()[:20]
+                ids.append(memory_id)
+                if memory_id in existing:
+                    continue
+                record = {
+                    "memory_id": memory_id,
+                    "created_at": time.time(),
+                    "provenance": base,
+                    "tool": tool,
+                    "call_id": call_id,
+                    "verified": bool(result.get("verified", result.get("success", False))),
+                    "summary": summary,
+                    "result_digest": hashlib.sha256(summary.encode("utf-8")).hexdigest(),
+                }
+                records.append(record)
+            if records:
+                with open(path, "a", encoding="utf-8") as stream:
+                    for record in records:
+                        stream.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        return ids
 
     def shutdown(self, timeout: int = 5) -> None:
         """Shutdown thread pool — drain in-flight work."""
@@ -679,31 +882,36 @@ class MemoryManager:
             return
         try:
             path = os.path.join(self.root, "logs", "sessions", f"{self.session_id}.json")
-            # Always merge with the on-disk history first so we never clobber the
-            # loop's own session file (it also writes this same path via
-            # _write_session_bus). Only merge entries we don't already hold.
-            if os.path.exists(path):
-                try:
-                    with open(path, "r", encoding="utf-8") as fh:
-                        existing = json.load(fh)
-                    if isinstance(existing, list):
-                        have = {
-                            (m.get("role"), m.get("content"))
-                            for m in self._memory
-                            if isinstance(m, dict)
-                        }
-                        for m in existing:
-                            if isinstance(m, dict) and (m.get("role"), m.get("content")) not in have:
-                                self._memory.append(m)
-                except Exception:
-                    pass
-            if user_message:
-                self._memory.append({"role": "user", "content": user_message})
-            if response:
-                self._memory.append({"role": "assistant", "content": response, "verified": verified})
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(self._memory, f, indent=2)
+            # Serialize writers and replace atomically.  A direct ``open(...,
+            # 'w')`` can leave a truncated session after a crash and concurrent
+            # MemoryManager instances can otherwise overwrite each other's
+            # merged history.
+            from nexus.session_store import atomic_write_json, session_write_lock
+            with session_write_lock(path):
+                # Hold the lock across read/merge/write.  Locking only the
+                # final replace still permits two processes to read the same
+                # old snapshot and lose one turn.
+                if os.path.exists(path):
+                    try:
+                        with open(path, "r", encoding="utf-8") as fh:
+                            existing = json.load(fh)
+                        if isinstance(existing, list):
+                            have = {
+                                (m.get("role"), m.get("content"))
+                                for m in self._memory
+                                if isinstance(m, dict)
+                            }
+                            for m in existing:
+                                if isinstance(m, dict) and (m.get("role"), m.get("content")) not in have:
+                                    self._memory.append(m)
+                    except Exception:
+                        logger.debug("session merge failed for %s", self.session_id, exc_info=True)
+                if user_message:
+                    self._memory.append({"role": "user", "content": user_message})
+                if response:
+                    self._memory.append({"role": "assistant", "content": response, "verified": verified})
+                atomic_write_json(path, self._memory)
         except Exception as e:
             logger.error(f"sync_session failed: {e}")
 
@@ -761,14 +969,18 @@ class MemoryManager:
 
     # ─── Episodic memory ─────────────────────────────────────────────
 
-    def _prefetch_episodic(self, limit: int = 5) -> List[Dict[str, Any]]:
-        """Load the top ``limit`` replay entries by episodic score.
+    def _prefetch_episodic(
+        self, limit: int = 5, user_message: str = ""
+    ) -> List[Dict[str, Any]]:
+        """Load the top ``limit`` replay entries relevant to *user_message*.
 
         Reads ``<root>/.nexus_v5/replays.jsonl`` (written by the V5 loop's
-        turn replay), scores entries with recency/importance/relevance
-        weights, stores a text digest in the ``episodic`` in-memory slot
-        (surfaced by ``summary()``) and returns the digest list. Never
-        raises; [] on any failure.
+        turn replay). Query coverage is the primary ranking key when a user
+        message is supplied; the existing recency/importance score breaks
+        ties. Without a query, the historical score-only ordering is kept.
+        Stores a text digest in the ``episodic`` in-memory slot (surfaced by
+        ``summary()``) and returns the digest list. Never raises; [] on any
+        failure.
         """
         digests: List[Dict[str, Any]] = []
         try:
@@ -788,11 +1000,22 @@ class MemoryManager:
                     if isinstance(parsed, dict):
                         entries.append(parsed)
             now = time.time()
-            scored = sorted(
-                entries,
-                key=lambda entry: _episodic_score_entry(entry, now),
-                reverse=True,
-            )
+            query = str(user_message or "").strip()
+            if query:
+                scored = sorted(
+                    entries,
+                    key=lambda entry: (
+                        _episodic_query_relevance(entry, query),
+                        _episodic_score_entry(entry, now),
+                    ),
+                    reverse=True,
+                )
+            else:
+                scored = sorted(
+                    entries,
+                    key=lambda entry: _episodic_score_entry(entry, now),
+                    reverse=True,
+                )
             for entry in scored[: max(0, int(limit))]:
                 digests.append({
                     "score": round(_episodic_score_entry(entry, now), 4),
@@ -812,6 +1035,38 @@ class MemoryManager:
             logger.warning("memory/__init__.py _prefetch_episodic: suppressed error: %s", e)
         return digests
 
+    # ─── Procedural memory (skills) ──────────────────────────────────
+
+    def _prefetch_procedural(self, user_message: str = "", limit: int = 3) -> str:
+        """Rank the durable skill corpus against *user_message*.
+
+        Skills (written by evolution/skill_forge and shipped under
+        ``skills/``) are NEXUS's procedural memory. ``MemoryContext.procedural``
+        is already consumed by the V5 turn pipeline, but nothing populated it,
+        so the corpus was write-only. This fills the ``procedural`` in-memory
+        slot with a bounded digest of the top-ranked skills. Never raises;
+        returns "" on any failure.
+        """
+        try:
+            from skills.engine import NexusSkillEngine
+
+            engine = NexusSkillEngine(self.root)
+            selected = engine.select_skills(user_message or "", limit=limit) or []
+            lines = []
+            for skill in selected[: max(0, int(limit))]:
+                name = str(getattr(skill, "name", "") or getattr(skill, "id", "")).strip()
+                if not name:
+                    continue
+                desc = str(getattr(skill, "description", "") or "").strip()
+                lines.append(f"- {name}: {desc[:200]}" if desc else f"- {name}")
+            digest = "\n".join(lines)[:2000]
+            if digest:
+                self._in_memory["procedural"] = digest
+            return digest
+        except Exception:
+            logger.debug("_prefetch_procedural: suppressed error", exc_info=True)
+            return ""
+
     # ─── .opencode/memory/ sync ──────────────────────────────────────
 
     def _sync_opencode_memory(
@@ -821,6 +1076,7 @@ class MemoryManager:
         verified_actions: Optional[List[Dict[str, Any]]] = None,
         tool_results: Optional[List[Dict[str, Any]]] = None,
         verified: bool = False,
+        provenance: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Sync verified tool learnings to .opencode/memory/ files (cross-session).
 
@@ -831,6 +1087,7 @@ class MemoryManager:
         if not verified or not tool_results:
             return
         try:
+            memory_ids = self._persist_memory_evidence(tool_results, provenance)
             learned_path = os.path.join(self._opencode_memory_dir, "learned.md")
             if not os.path.isfile(learned_path):
                 return
@@ -838,7 +1095,16 @@ class MemoryManager:
             summary = _tool_evidence_text(tool_results, limit=300)
             if not summary:
                 return
-            entry = f"- {time.strftime('%Y-%m-%d %H:%M')}: {summary}\n"
+            refs = f" [{', '.join(memory_ids)}]" if memory_ids else ""
+            if refs:
+                try:
+                    with open(learned_path, "r", encoding="utf-8") as f:
+                        existing_text = f.read()
+                    if any(memory_id in existing_text for memory_id in memory_ids):
+                        return
+                except OSError:
+                    pass
+            entry = f"- {time.strftime('%Y-%m-%d %H:%M')}: {summary}{refs}\n"
             with open(learned_path, "a", encoding="utf-8") as f:
                 f.write(entry)
         except Exception as e:

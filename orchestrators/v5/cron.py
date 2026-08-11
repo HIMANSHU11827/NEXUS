@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from typing import Any, Dict, List, Optional
+
+from providers.reliability import redact_secrets
 
 
 logger = logging.getLogger(__name__)
@@ -46,7 +49,12 @@ class V5Cron:
         try:
             from tasks.scheduler import NexusTaskScheduler
 
-            scheduler = NexusTaskScheduler(self._cron_runner)
+            scheduler = NexusTaskScheduler(
+                self._cron_runner,
+                state_path=os.path.join(
+                    str(getattr(self, "root_dir", ".")), ".nexus_v5", "scheduled_tasks.json"
+                ),
+            )
             self._v5_cron_scheduler = scheduler
             return scheduler
         except Exception as e:
@@ -104,10 +112,14 @@ class V5Cron:
         the policy is recorded here and consulted at run time
         (``_cron_runner`` wraps the run in ``asyncio.wait_for``). Never raises.
         """
-        policy = getattr(self, "_task_policy", None)
+        # The backing attribute must NOT be named ``_task_policy``: that is
+        # this method itself, so ``getattr`` would return the bound method and
+        # every caller would operate on a non-dict (silently failing both
+        # ``_schedule_task_priority`` and ``_cron_runner``).
+        policy = getattr(self, "_v5_task_policy_map", None)
         if policy is None:
             policy = {}
-            self._task_policy = policy
+            self._v5_task_policy_map = policy
         return policy
 
     def _schedule_task_priority(
@@ -174,9 +186,9 @@ class V5Cron:
                     asyncio.run(run_coro)
                     self._cron_record_result(lifecycle, task_id, None)
                 except Exception as e:
-                    self._cron_record_result(lifecycle, task_id, None, str(e))
+                    self._cron_record_result(lifecycle, task_id, None, redact_secrets(e)[:4000])
         except Exception as e:
-            self._cron_record_result(lifecycle, task_id, None, str(e))
+            self._cron_record_result(lifecycle, task_id, None, redact_secrets(e)[:4000])
 
     def _cron_record_result(
         self,
@@ -194,7 +206,7 @@ class V5Cron:
             if lifecycle is None:
                 return
             if error:
-                lifecycle.fail_task(task_id, error)
+                lifecycle.fail_task(task_id, redact_secrets(error)[:4000])
                 return
             if future is not None:
                 if future.cancelled():
@@ -205,7 +217,7 @@ class V5Cron:
                 except Exception as e:
                     exc = e
                 if exc is not None:
-                    lifecycle.fail_task(task_id, str(exc))
+                    lifecycle.fail_task(task_id, redact_secrets(exc)[:4000])
                     return
             lifecycle.complete_task(task_id)
         except Exception:

@@ -9,10 +9,11 @@ import time
 from pathlib import Path
 from typing import TextIO
 
+from nexus.runtime import safe_session_id
+
 
 def _safe_session_id(value: str) -> str:
-    cleaned = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in value.strip())
-    return (cleaned or "default")[:120]
+    return safe_session_id(value)
 
 
 def event_path(project_root: str, session_id: str) -> Path:

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import builtins
+import logging
+
 import numpy as np
 import pytest
 
@@ -23,6 +26,37 @@ def make_router() -> NATE_Route:
     for name, desc in TOOLS:
         r.register_tool(name, desc)
     return r
+
+
+def test_missing_faiss_warning_is_process_wide_once(caplog, monkeypatch):
+    """The optional FAISS fallback must not spam startup/import callers."""
+    previous = getattr(NATE_Route, "_faiss_warned", None)
+    had_previous = hasattr(NATE_Route, "_faiss_warned")
+    monkeypatch.delattr(NATE_Route, "_faiss_warned", raising=False)
+
+    real_import = builtins.__import__
+
+    def block_faiss(name, *args, **kwargs):
+        if name == "faiss":
+            raise ImportError("test: FAISS unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", block_faiss)
+    routers = []
+    with caplog.at_level(logging.WARNING, logger="intelligence.nate.adaptive_schema"):
+        for index in range(19):
+            router = NATE_Route()
+            router.register_tool(f"tool_{index}", "test tool")
+            routers.append(router)
+
+    warnings = [record for record in caplog.records if "FAISS not installed" in record.message]
+    assert len(warnings) == 1
+    assert all(router._index is None for router in routers)
+
+    if had_previous:
+        NATE_Route._faiss_warned = previous
+    else:
+        delattr(NATE_Route, "_faiss_warned")
 
 
 # ── Routing quality ──────────────────────────────────────────────────────────

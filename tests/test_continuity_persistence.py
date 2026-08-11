@@ -110,6 +110,24 @@ def test_run_context_reader_uses_safe_session_directory(tmp_path):
     assert snapshot.task == "Continue the migration"
 
 
+def test_run_context_reader_falls_back_to_legacy_session_directory(tmp_path):
+    legacy_dir = tmp_path / "logs" / "run_contexts" / "team_alpha"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "legacy.json").write_text(json.dumps({
+        "run_id": "legacy",
+        "session_id": "team/alpha",
+        "status": "failed",
+        "prompt_preview": "Resume the legacy task",
+        "updated_at": 10,
+        "started_at": 9,
+    }), encoding="utf-8")
+
+    snapshot = inspect_continuity(str(tmp_path), "team/alpha")
+
+    assert snapshot.available is True
+    assert snapshot.task == "Resume the legacy task"
+
+
 def test_v5_grounding_injects_persisted_continuity(tmp_path):
     context = start_run_context(
         root=str(tmp_path), session_id="s1", run_id="r1", prompt="Fix the parser",

@@ -33,7 +33,8 @@ const helpers = read('helpers.ts');
 t('helpers.ts exists and is non-empty', helpers.length > 1000);
 t('helpers.ts exports adaptCanonicalEvent', helpers.includes('export const adaptCanonicalEvent'));
 t('helpers.ts exports withActivityIdentity', helpers.includes('export const withActivityIdentity'));
-t('helpers.ts exports COMMANDS', helpers.includes('export const COMMANDS'));
+t('helpers.ts consumes the server command registry', helpers.includes('export const normalizeCommandRegistry'));
+t('helpers.ts has no hard-coded command catalog', !helpers.includes('export const COMMANDS = ['));
 
 // Extracted view modules
 const chatView = read('chat-view.tsx');
@@ -47,6 +48,9 @@ t('task-list.tsx uses taskStateGlyph', taskList.includes('taskStateGlyph'));
 const banner = read('banner.tsx');
 t('banner.tsx exports NexusBanner', banner.includes('export const NexusBanner'));
 t('banner.tsx exports WorkingStatus', banner.includes('export const WorkingStatus'));
+
+const welcomeLogo = read('welcome-logo.tsx');
+t('welcome-logo.tsx exports NexusWelcomeLogo', welcomeLogo.includes('export const NexusWelcomeLogo'));
 
 const commandPalette = read('command-palette.tsx');
 t('command-palette.tsx exports CommandPalette', commandPalette.includes('export const CommandPalette'));
@@ -62,6 +66,9 @@ t('workspace-panel.tsx exports NexusWorkspacePanel', workspacePanel.includes('ex
 t('nexus-tui.tsx imports from helpers.js', monolith.includes("from './helpers.js'"));
 t('nexus-tui.tsx imports from chat-view.js', monolith.includes("from './chat-view.js'"));
 t('nexus-tui.tsx imports from banner.js', monolith.includes("from './banner.js'"));
+t('nexus-tui.tsx imports the welcome logo', monolith.includes("from './welcome-logo.js'"));
+t('nexus-tui.tsx loads commands from the server registry', monolith.includes('`${API_BASE}/commands`'));
+t('nexus-tui.tsx delegates registered fallbacks to shared execution', monolith.includes("postJson('/command'"));
 t('nexus-tui.tsx no longer defines ChatLineView', !monolith.includes('const ChatLineView = React.memo'));
 t('nexus-tui.tsx no longer defines NexusWorkspacePanel', !monolith.includes('const NexusWorkspacePanel = React.memo'));
 

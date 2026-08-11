@@ -5,6 +5,8 @@ from typing import Dict, Iterator, List, Optional
 
 from providers.base import NexusBaseProvider
 
+logger = logging.getLogger(__name__)
+
 
 class CohereProvider(NexusBaseProvider):
     """
@@ -56,7 +58,7 @@ class CohereProvider(NexusBaseProvider):
         # NOT OpenAI-style tools — forwarding raw OpenAI tools would 422, so the
         # request payload is left untouched. Response-side tool_calls are parsed below.
         try:
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=30)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=self.request_timeout(kwargs, 30))
             if response.status_code == 200:
                 data = response.json()
                 native_tools = (data.get("message", {}) or {}).get("tool_calls") or []
@@ -70,6 +72,7 @@ class CohereProvider(NexusBaseProvider):
             return f"Error: Failed to reach Cohere. {str(e)}"
 
     def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
+        response = None
         if messages:
             chat_history = [{"role": m["role"].upper(), "message": m["content"]} for m in messages[:-1]]
             message = messages[-1]["content"]
@@ -86,7 +89,7 @@ class CohereProvider(NexusBaseProvider):
         }
         try:
             # Cohere streaming endpoint is the same but with stream=True
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=30)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=self.request_timeout(kwargs, 30))
             if response.status_code == 200:
                 for line in response.iter_lines():
                     if line:
@@ -99,3 +102,9 @@ class CohereProvider(NexusBaseProvider):
                 yield f"Error: {response.status_code}. {response.text}"
         except Exception as e:
             yield f"Error in Cohere stream: {str(e)}"
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    logger.debug("Cohere stream response cleanup failed", exc_info=True)

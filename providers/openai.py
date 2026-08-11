@@ -58,7 +58,7 @@ class OpenAIProvider(NexusBaseProvider):
             payload["max_tokens"] = kwargs["max_tokens"]
         self._add_tool_payload(payload, kwargs)
         try:
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=60)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=self.request_timeout(kwargs, 60))
             if response.status_code == 200:
                 message = response.json()["choices"][0].get("message", {})
                 native_tools = message.get("tool_calls") or []
@@ -77,8 +77,9 @@ class OpenAIProvider(NexusBaseProvider):
         if kwargs.get("max_tokens") is not None:
             payload["max_tokens"] = kwargs["max_tokens"]
         self._add_tool_payload(payload, kwargs)
+        response = None
         try:
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=120)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=self.request_timeout(kwargs, 120))
             if response.status_code == 200:
                 streamed_tool_calls = {}
                 for line in response.iter_lines():
@@ -108,6 +109,12 @@ class OpenAIProvider(NexusBaseProvider):
                 yield f"Error: {response.status_code}. {response.text}"
         except Exception as e:
             yield f"Error in OpenAI stream: {str(e)}"
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    logger.debug("OpenAI stream response cleanup failed", exc_info=True)
 
 if __name__ == "__main__":
     p = OpenAIProvider()

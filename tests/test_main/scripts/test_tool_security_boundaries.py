@@ -261,6 +261,25 @@ def test_mcp_client_start_failure_returns_false():
     assert client._running is False
 
 
+def test_mcp_client_serializes_concurrent_start_attempts():
+    from concurrent.futures import ThreadPoolExecutor
+
+    client = MCPClient("server executable", [])
+    process = MagicMock()
+    process.poll.return_value = None
+    process.stdout.readline.return_value = ""
+    process.stderr.readline.return_value = ""
+
+    with patch("mcp.client.scripts.client.subprocess.Popen", return_value=process) as popen, patch.object(
+        client, "call", return_value={"serverInfo": {"name": "ok"}}
+    ):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _ignored: client.start(), (1, 2)))
+
+    assert results == [True, True]
+    popen.assert_called_once()
+
+
 @pytest.mark.parametrize("command,args", [("", []), ("bad\x00cmd", []), ("ok", ["bad\x00arg"])])
 def test_mcp_client_rejects_malformed_process_arguments(command, args):
     with pytest.raises(ValueError):
@@ -378,7 +397,7 @@ def test_skill_master_active_prompt_honors_disabled_skill_config(tmp_path):
     (enabled / "SKILL.md").write_text("---\nid: enabled\nname: enabled\n---\nENABLED_PROMPT", encoding="utf-8")
     (disabled / "SKILL.md").write_text("---\nid: disabled\nname: disabled\n---\nDISABLED_PROMPT", encoding="utf-8")
     (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "nexus_config.yaml").write_text(
+    (tmp_path / "config" / "settings.yml").write_text(
         "disabled_skills:\n  - disabled\n",
         encoding="utf-8",
     )
@@ -401,7 +420,7 @@ def test_skill_master_active_prompt_honors_inactive_custom_skill_config(tmp_path
     skill_root.mkdir(parents=True)
     (skill_root / "SKILL.md").write_text("---\nid: reviewer\nname: reviewer\n---\nREVIEW_PROMPT", encoding="utf-8")
     (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "nexus_config.yaml").write_text(
+    (tmp_path / "config" / "settings.yml").write_text(
         "custom_skill_configs:\n  reviewer:\n    active: false\n",
         encoding="utf-8",
     )

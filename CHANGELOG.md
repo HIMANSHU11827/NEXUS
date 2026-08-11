@@ -5,6 +5,30 @@ All notable changes to NEXUS AI are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-08-05
+
+### Added
+- Gateway expanded to 21 platform adapters (BlueBubbles, DingTalk, Discord, Email, Feishu, Google Chat, IRC, LINE, Matrix, Mattermost, Meta, QQBot, Signal, Slack, SMS, Teams, Telegram, WeCom, Weixin, WhatsApp, Yuanbao) with webhook server, HMAC fail-closed verification, and supervised lifecycle (`GatewaySupervisor`)
+- V5 direct model/tool loop completed — tool-call extraction, permission policies (PAORR), planning gates, work items, background runner (see `LOOP_RESEARCH_REPORT.md`)
+- Evolution subsystems rebuilt from stubs: `researcher`, `omni_kernel`, `ensemble`, `hyper_kernel` — now functional and tested
+- `tools/reasoning` upgraded to v3.0.0 — real LLM-backed HyperReasoningEngine (planner + critic + verifier, uncertainty estimation)
+- `tools/system` — `disk` and `process` actions implemented
+- `tools/planning` rebuilt — single truthful `todo.md` plan with stable task IDs and work-item sync
+- TUI v3.0 "activity-rich" redesign — activity cards, hive panel, command palette, status bar, 133 slash commands
+
+### Changed
+- Kernel now registers 20 lazy-loaded subsystems (was 19)
+- Skills tree updated to vendored Hermes Agent skill set — 69 SKILL.md files across 14 categories
+- Docs overhaul: all `read.md` files updated to match current code (tools, mcp, tui, gui, utils, memory, skills, hive, prompts, kernel, nexus, bin, voice)
+- All tool docs corrected to reflect actual behavior (`task`, `knowledge`, `code_search`, `modifying`, `git_ops`, `web_search`, `terminal`)
+- 13 unimplemented tool stubs documented honestly as `unavailable` (e.g. `live_news_tool`, `workspace_path_guard`)
+
+### Fixed
+- `mcp/tool/read.md` — incorrect `tool.call(...)` example replaced with `await tool.execute(...)`
+- `tests/read.md` — broken code fence and wrong directory references fixed
+- `tests/core/core.md` — rewritten to describe the actual tests
+- Tool docs no longer advertise nonexistent features (`knowledge delete`, `code_search struct`, `task blocked` status)
+
 ## [2.0.0] - 2026-07-30
 
 ### Added

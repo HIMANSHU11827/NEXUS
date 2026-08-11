@@ -24,10 +24,10 @@ t('activityColor("hive") returns string', typeof activityColor('hive') === 'stri
 t('activityColor("error") returns string', typeof activityColor('error') === 'string');
 t('activityColor("unknown") returns textDim', activityColor('unknown') === theme.textDim);
 
-// Activity glyphs
-t('activityGlyph("tool") = 🔧', activityGlyph('tool') === '🔧');
-t('activityGlyph("hive") = 🐝', activityGlyph('hive') === '🐝');
-t('activityGlyph("unknown") = •', activityGlyph('unknown') === '•');
+// Terminal-safe activity glyphs remain single-cell in Windows Terminal.
+t('activityGlyph("tool") = >', activityGlyph('tool') === '>');
+t('activityGlyph("hive") = H', activityGlyph('hive') === 'H');
+t('activityGlyph("unknown") = >', activityGlyph('unknown') === '>');
 
 // Status
 t('statusColor("running") returns running color', statusColor('running') === theme.statusRunning);

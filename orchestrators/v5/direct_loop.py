@@ -7,7 +7,11 @@ import json
 import hashlib
 import os
 import re
+from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
+
+from providers.reliability import redact_secrets
+from .token_usage import estimate_messages_tokens, normalize_usage
 
 # Tool results larger than this are archived to a session file and replaced
 # in the model transcript by a short preview. Keep the archive path under
@@ -29,7 +33,9 @@ _LEGACY_SYSTEM_PROMPT = (
     "never claim an action without a real tool result. Skills are guidance "
     "only, not executable tools; do not call a skill name as a function. "
     "Use an actual registered tool, and verify any external CLI exists "
-    "before saying it ran."
+    "before saying it ran. On Windows, terminal uses cmd.exe by default: use "
+    "& or && instead of an unquoted semicolon, avoid Unix-only head/tail, "
+    "and choose shell='powershell' explicitly when PowerShell syntax is needed."
 )
 
 # Per-process prompt-engine cache keyed on root_dir so successive turns never
@@ -68,6 +74,40 @@ class V5DirectModelToolLoop:
 
     direct_loop_max_rounds = 8
     repair_attempt_budget = 3
+    # Closed loop-detection budget: how many times the identical
+    # (tool, params) signature may be executed inside one turn before the
+    # loop stops spending provider requests on a non-progressing strategy.
+    repeat_call_budget = 3
+
+    @staticmethod
+    def _call_signature(name: Any, params: Any) -> str:
+        """Stable identity for one (tool, arguments) action.
+
+        Used only for stagnation detection; never for routing. Falls back to
+        ``repr`` so an unserializable parameter cannot raise inside the loop.
+        """
+        try:
+            encoded = json.dumps(params or {}, sort_keys=True, ensure_ascii=False, default=str)
+        except Exception:
+            encoded = repr(params)
+        return f"{str(name or '')}:{encoded}"
+
+    def _stagnation_response(self, name: str, count: int, actions: List[Dict[str, Any]]) -> str:
+        """Truthful terminal text for a detected non-progressing repeat loop."""
+        summary = getattr(self, "_repair_exhausted_response", None)
+        detail = ""
+        if callable(summary):
+            try:
+                detail = str(summary(actions) or "")
+            except Exception:
+                detail = ""
+        message = (
+            f"I stopped because the same `{name}` call with identical arguments "
+            f"was executed {count} times without changing the outcome. Repeating "
+            "it again would not make progress, so no further provider requests "
+            "were spent. Change the approach, the arguments, or the tool to continue."
+        )
+        return f"{message}\n\n{detail}".strip()
 
     async def _direct_loop_state(self, state_name: str) -> None:
         """Publish loop phases without adding a second planner or router."""
@@ -81,12 +121,111 @@ class V5DirectModelToolLoop:
             # UI/checkpoint telemetry must never fail a valid turn.
             return
 
+    async def _emit_tool_progress(self, call: Any, phase: str, outcome: str = "") -> None:
+        """Publish a short, safe status update around one real tool action.
+
+        These are execution summaries, not model reasoning. They make the
+        live chat read as an ordered transcript: status, one tool card, status,
+        next tool card, and finally the model's answer.
+        """
+        emitter = getattr(self, "_emit_runtime_event", None)
+        if not callable(emitter):
+            return
+        name = str(getattr(call, "name", "tool") or "tool")
+        params = dict(getattr(call, "params", {}) or {})
+        try:
+            kind = self._work_kind_for_call(name, params)
+            action = self._work_action_for_call(kind, name, params)
+        except Exception:
+            action = "Use tool"
+        label = action[:1].lower() + action[1:]
+        if phase == "started":
+            note = f"I’m starting the {label}."
+            next_action = "execute"
+        elif outcome == "success":
+            note = f"The {label} completed. I’m reviewing the result before continuing."
+            next_action = "continue"
+        else:
+            note = f"The {label} failed. I’m checking the error before deciding whether to retry."
+            next_action = "retry_or_stop"
+        turn_id = str(getattr(self, "_current_turn_id", "") or getattr(self, "session_id", "run"))
+        call_id = str(getattr(call, "call_id", "tool") or "tool")
+        event_id = f"progress_{turn_id}_{call_id}_{phase}"
+        try:
+            await emitter(
+                "assistant.progress",
+                note,
+                "running",
+                event_id=event_id,
+                parent_id=f"run_{turn_id}",
+                payload={
+                    "note": note,
+                    "text": note,
+                    "phase": "tool_result" if phase != "started" else "tool_start",
+                    "tool": name,
+                    "outcome": outcome or "starting",
+                    "next_action": next_action,
+                },
+            )
+        except Exception:
+            # Progress telemetry must never change whether the real tool runs.
+            return
+
+    async def _emit_tool_batch_progress(self, actions: List[Dict[str, Any]]) -> None:
+        """Summarize a completed sequence while keeping action cards separate."""
+        if not actions:
+            return
+        emitter = getattr(self, "_emit_runtime_event", None)
+        if not callable(emitter):
+            return
+        labels: List[str] = []
+        for action in actions:
+            name = str(action.get("name") or action.get("tool") or "tool")
+            try:
+                params = dict(action.get("params") or {})
+                kind = self._work_kind_for_call(name, params)
+                label = self._work_action_for_call(kind, name, params)
+            except Exception:
+                label = "Use tool"
+            if label not in labels:
+                labels.append(label)
+        subject = ", ".join(label.lower() for label in labels)
+        failed = any(not bool(action.get("success")) for action in actions)
+        note = (
+            f"The {subject} {'failed' if failed else 'completed'}. "
+            f"I’m reviewing the {'error' if failed else 'combined results'} before continuing."
+        )
+        turn_id = str(getattr(self, "_current_turn_id", "") or getattr(self, "session_id", "run"))
+        call_ids = "_".join(str(action.get("call_id") or "tool") for action in actions)
+        try:
+            await emitter(
+                "assistant.progress",
+                note,
+                "running",
+                event_id=f"progress_{turn_id}_batch_{call_ids}",
+                parent_id=f"run_{turn_id}",
+                payload={
+                    "note": note,
+                    "text": note,
+                    "phase": "tool_batch_result",
+                    "tools": [str(action.get("name") or action.get("tool") or "tool") for action in actions],
+                    "outcome": "failed" if failed else "success",
+                    "next_action": "retry_or_stop" if failed else "continue",
+                },
+            )
+        except Exception:
+            return
+
     @staticmethod
     def _verification_payload(actions: List[Dict[str, Any]], calls_executed: int,
                               response: str, protocol_error: str = "") -> Dict[str, Any]:
         """Build a truthful verdict from the direct loop's real evidence."""
-        failed = [item for item in actions if not bool(item.get("success")) and not item.get("repaired")]
-        verified = sum(1 for item in actions if bool(item.get("success")) or item.get("repaired"))
+        failed = [item for item in actions
+                  if str(item.get("status") or "failed") != "skipped"
+                  and not bool(item.get("success")) and not item.get("repaired")]
+        verified = sum(1 for item in actions
+                       if str(item.get("status") or "") != "skipped"
+                       and (bool(item.get("success")) or item.get("repaired")))
         ok = bool(response.strip()) and not protocol_error and not failed
         return {
             "success": ok,
@@ -210,7 +349,36 @@ class V5DirectModelToolLoop:
         except (TypeError, ValueError):
             configured_limit = 0
         limit = max(0, int(top_k or configured_limit or 0))
-        return schemas[:limit] if limit else schemas
+        if not limit:
+            return schemas
+        # Feed tool-health back into selection (close the "tool health -> but no
+        # routing influence" loop). When the registry has outcome telemetry we order
+        # candidates by a success-rate signal BEFORE the deterministic transport cap,
+        # so a small-context local model meets the healthiest tools first. A cap always
+        # truncates SOME tools (that is its job); the ordering only changes WHICH ones
+        # survive, never the set available to an uncapped request, and the model still
+        # makes the final pick (registry remains authoritative).
+        #
+        # A single transient failure on a low-sample tool must not permanently bury it:
+        # smooth the observed rate toward neutral (Laplace / pseudo-count) so one bad
+        # call is outweighed by later successes as they accrue, while sustained
+        # failures still rank low. Unobserved tools stay at 0.0 (neutral) and tie-break
+        # by their original alphabetical order via Python's stable sort.
+        registry = getattr(self, "tool_registry", None)
+        if registry is not None and callable(getattr(registry, "get_tool_stats", None)):
+            try:
+                def _health_key(schema):
+                    name = str((schema.get("function") or {}).get("name", ""))
+                    stats = registry.get_tool_stats(name)
+                    if not stats or not stats.get("total_calls"):
+                        return 0.0
+                    rate = float(stats.get("success_rate", 0) or 0) / 100.0
+                    latency_penalty = min(0.2, (float(stats.get("avg_latency_ms", 0) or 0) / 1000.0) * 0.02)
+                    return round(rate - latency_penalty, 4)
+                schemas = sorted(schemas, key=_health_key, reverse=True)
+            except Exception:
+                pass
+        return schemas[:limit]
 
     @staticmethod
     def _bounded_model_messages(messages: List[Dict[str, Any]], provider: str | None) -> List[Dict[str, Any]]:
@@ -242,6 +410,34 @@ class V5DirectModelToolLoop:
             tail.append(item)
             used += cost
         tail.reverse()
+        # Never send a tool result without the assistant tool call that
+        # introduced it. OpenAI-compatible APIs validate this envelope and
+        # reject an orphaned ``tool`` message. If the matching assistant call
+        # is outside the retained tail, restore it; if it cannot be found,
+        # discard the orphan rather than emitting an invalid transcript.
+        while tail and tail[0].get("role") == "tool":
+            orphan = tail[0]
+            tool_call_id = str(orphan.get("tool_call_id") or "")
+            match_index = next(
+                (
+                    index for index, candidate in enumerate(messages)
+                    if candidate.get("role") == "assistant"
+                    and any(
+                        str(call.get("id") or "") == tool_call_id
+                        for call in (candidate.get("tool_calls") or [])
+                        if isinstance(call, dict)
+                    )
+                ),
+                None,
+            )
+            if match_index is None:
+                tail.pop(0)
+                continue
+            assistant = messages[match_index]
+            tail.insert(0, assistant)
+            # Keep the pair even if its rough size is larger than the local
+            # budget; the result is already bounded before this function.
+            break
         return system + tail
 
     @staticmethod
@@ -355,6 +551,15 @@ class V5DirectModelToolLoop:
                     f"showing first {TOOL_RESULT_PREVIEW_CHARS} chars]\n{preview}")
         except Exception:
             return content
+
+    @classmethod
+    async def _bounded_tool_result_async(cls, content: str, tool_name: str,
+                                         turn_id: str, call_slot: int,
+                                         root_dir: str = "") -> str:
+        """Bound and archive a tool result without blocking the event loop."""
+        return await asyncio.to_thread(
+            cls._bounded_tool_result, content, tool_name, turn_id, call_slot, root_dir
+        )
 
     @classmethod
     def _compact_oldest_half(cls, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -588,12 +793,29 @@ class V5DirectModelToolLoop:
         calls_executed = 0
         actions: List[Dict[str, Any]] = []
         unavailable_retries: Dict[Tuple[str, str], int] = {}
+        # Closed loop-detection state: how many times each identical
+        # (tool, params) signature has actually been executed this turn.
+        repeat_counts: Dict[str, int] = {}
         repair_attempts = 0
+        hive_repair_applied = False
+        replan_applied = False
+        init_ledger = getattr(self, "_init_task_ledger", None)
+        if callable(init_ledger):
+            init_ledger()
         self._last_run_had_tool_execution = False
         last_text = ""
         self._stamp_recent_messages(messages)
-        for round_index in range(bound + 1):
-            finalization_round = round_index >= bound
+        # Reserve one finalization turn, but allow a failed action at the
+        # boundary to receive a model-driven repair turn first. Without this
+        # extra recovery window, the loop could report failure immediately
+        # after the last tool round even though repair budget remained.
+        for round_index in range(bound + self.repair_attempt_budget + 1):
+            recovery_pending = bool(
+                actions and not actions[-1].get("success")
+                and not actions[-1].get("repaired")
+                and repair_attempts < self.repair_attempt_budget
+            )
+            finalization_round = round_index >= bound and not recovery_pending
             check_abort = getattr(self, "_check_abort", None)
             if callable(check_abort):
                 check_abort()
@@ -601,6 +823,55 @@ class V5DirectModelToolLoop:
             if callable(check_deadline):
                 check_deadline()
             await self._direct_loop_state("REFLECTING" if round_index else "ACTING")
+            # The direct loop already owns bounded tool repair. In active Hive
+            # mode, add at most one independent stall replan as model-visible
+            # guidance; never execute the proposal blindly.
+            if not replan_applied and not finalization_round:
+                active_mode = getattr(self, "_active_mode_enabled", None)
+                replan = getattr(self, "_hive_replan_on_stall", None)
+                if callable(active_mode) and callable(replan):
+                    try:
+                        if active_mode():
+                            proposed = await replan(
+                                SimpleNamespace(original_input=task_desc)
+                            )
+                            if isinstance(proposed, list) and proposed:
+                                bounded_proposal = [
+                                    step for step in proposed[:8]
+                                    if isinstance(step, dict)
+                                    and str(step.get("description") or "").strip()
+                                ]
+                                if bounded_proposal:
+                                    replan_applied = True
+                                    messages.append({
+                                        "role": "system",
+                                        "content": (
+                                            "HIVE REPLAN PROPOSAL: prior attempts stalled. "
+                                            "Inspect this alternative plan, validate every "
+                                            "tool and parameter, and execute only justified "
+                                            "steps. Do not claim completion without evidence.\n"
+                                            + json.dumps(
+                                                bounded_proposal,
+                                                ensure_ascii=False,
+                                                default=str,
+                                            )[:6000]
+                                        ),
+                                    })
+                                    self._stamp_recent_messages(messages)
+                    except Exception as exc:
+                        self.logger.debug("Hive stall replan unavailable: %s", exc)
+            budget_exceeded = getattr(self, "_budget_exceeded", None)
+            if callable(budget_exceeded) and budget_exceeded():
+                response = "The run budget was reached before another provider request."
+                verification = self._verification_payload(
+                    actions, calls_executed, response, "run budget exceeded"
+                )
+                return {
+                    "success": False, "response": response, "actions": actions,
+                    "tool_rounds": round_index, "calls_executed": calls_executed,
+                    "messages": messages, "verification": verification,
+                    "error": "run budget exceeded",
+                }
             # A failed last-round action has no safe provider continuation:
             # surface its evidence instead of spending another request on a
             # model that may repeat the same invalid call.
@@ -643,6 +914,11 @@ class V5DirectModelToolLoop:
             # this as a hard provider failure; the call returns the retried
             # result when it succeeds and the original error otherwise.
             raw = await self._prompt_too_long_retry(request_messages, model_kwargs)
+            budget_tick = getattr(self, "_budget_tick", None)
+            if callable(budget_tick):
+                usage = normalize_usage(raw)
+                input_tokens = usage.input_tokens or estimate_messages_tokens(request_messages)
+                budget_tick(tokens=input_tokens + usage.output_tokens)
             text, calls = self._model_turn_parts(raw)
             # Some OpenAI-compatible gateways accept the first tool catalogue
             # but reject a later request after tool results expand the
@@ -757,8 +1033,16 @@ class V5DirectModelToolLoop:
             messages.append(assistant_message)
             self._stamp_recent_messages(messages)
             persist_direct = getattr(self, "_persist_direct_message", None)
+            persist_direct_async = getattr(self, "_persist_direct_message_async", None)
             if callable(persist_direct):
-                persist_direct(assistant_message, str(getattr(self, "_current_turn_id", "") or ""))
+                if callable(persist_direct_async):
+                    await persist_direct_async(
+                        assistant_message,
+                        str(getattr(self, "_current_turn_id", "") or ""),
+                    )
+                else:
+                    persist_direct(assistant_message, str(getattr(self, "_current_turn_id", "") or ""))
+            batch_outcomes: List[Dict[str, Any]] = []
             for call_slot, call in enumerate(calls):
                 if callable(check_abort):
                     check_abort()
@@ -766,6 +1050,7 @@ class V5DirectModelToolLoop:
                 if callable(check_deadline):
                     check_deadline()
                 call_id = str(getattr(call, "call_id", "") or "call_v5")
+                await self._emit_tool_progress(call, "started")
                 try:
                     registry = getattr(self, "_run_controls", None)
                     current = str(getattr(self, "_current_turn_id", "") or "")
@@ -773,15 +1058,21 @@ class V5DirectModelToolLoop:
                     remaining = getattr(control, "remaining", None) if control is not None else None
                     tool_awaitable = self._run_tool(call)
                     if remaining is not None:
-                        content = str(await asyncio.wait_for(tool_awaitable, timeout=max(0.001, remaining)))
+                        content = redact_secrets(
+                            await asyncio.wait_for(tool_awaitable, timeout=max(0.001, remaining))
+                        )
                     else:
-                        content = str(await tool_awaitable)
+                        content = redact_secrets(await tool_awaitable)
                     self._mark_repaired_actions(actions, call.name, round_index)
                     action = {"tool": call.name, "name": call.name, "params": dict(call.params or {}),
                               "call_id": call_id, "output": content, "success": True,
-                              "status": "completed", "model_round": round_index}
+                              "status": "completed", "model_round": round_index,
+                              "exit_code": getattr(self, "_last_tool_exit_code", None)}
                 except Exception as exc:
-                    content = f"Error: {exc}"
+                    # Tool exceptions become model-visible observations and
+                    # durable action evidence.  Keep them bounded and redact
+                    # credential-shaped material before either boundary.
+                    content = f"Error: {redact_secrets(exc)[:4000]}"
                     failure_signature = hashlib.sha256(
                         f"{call.name}:{json.dumps(call.params or {}, sort_keys=True, ensure_ascii=False)}:{content}".encode(
                             "utf-8", errors="replace"
@@ -790,6 +1081,7 @@ class V5DirectModelToolLoop:
                     action = {"tool": call.name, "name": call.name, "params": dict(call.params or {}),
                               "call_id": call_id, "output": "", "error": content,
                               "success": False, "status": "failed", "model_round": round_index,
+                              "exit_code": getattr(self, "_last_tool_exit_code", None),
                               "failure_signature": failure_signature,
                               "retryable": not self._is_unavailable_tool_error(content)}
                     signature = (str(call.name), json.dumps(call.params or {}, sort_keys=True,
@@ -797,21 +1089,100 @@ class V5DirectModelToolLoop:
                     if self._is_unavailable_tool_error(content):
                         unavailable_retries[signature] = unavailable_retries.get(signature, 0) + 1
                 actions.append(action)
+                batch_outcomes.append(action)
+                record_ledger = getattr(self, "_ledger_record", None)
+                if callable(record_ledger):
+                    record_ledger(action, bool(action.get("success")))
                 # Oversized or empty tool results are bounded before entering
                 # the model transcript; the durable full result (if any) is
                 # archived on disk for a future ``continue``.
-                bounded_content = self._bounded_tool_result(
+                bounded_content = await self._bounded_tool_result_async(
                     content, str(call.name), str(getattr(self, "_current_turn_id", "") or ""),
                     call_slot, str(getattr(self, "root_dir", "") or ""),
                 )
+                if action.get("success"):
+                    # Keep durable action evidence bounded in the same way as
+                    # the model transcript. Oversized full output remains in
+                    # the sanitized archive referenced by bounded_content.
+                    action["output"] = bounded_content
                 tool_message = {"role": "tool", "name": call.name,
                                 "tool_call_id": call_id, "content": bounded_content}
                 messages.append(tool_message)
                 self._stamp_recent_messages(messages)
                 if callable(persist_direct):
-                    persist_direct(tool_message, str(getattr(self, "_current_turn_id", "") or ""))
+                    if callable(persist_direct_async):
+                        await persist_direct_async(
+                            tool_message,
+                            str(getattr(self, "_current_turn_id", "") or ""),
+                        )
+                    else:
+                        persist_direct(tool_message, str(getattr(self, "_current_turn_id", "") or ""))
                 calls_executed += 1
                 await self._direct_loop_state("OBSERVING")
+                # CLOSED LOOP DETECTION: an identical (tool, params) call that
+                # has now run `repeat_call_budget` times is not making progress.
+                # Stop here instead of spending more provider requests on it.
+                # Failed actions are governed by the repair budget below;
+                # this detector owns the harder case of a call that keeps
+                # *succeeding* with the same result while nothing advances.
+                # Identity includes the OBSERVATION, not just the request:
+                # a legitimate poll/wait-until-ready workflow repeats the same
+                # call but sees the result change, and must not be stopped.
+                # Only a call whose result is also unchanged is stagnation.
+                repeat_key = self._call_signature(
+                    call.name, {"params": call.params, "observation": content}
+                )
+                repeat_counts[repeat_key] = repeat_counts.get(repeat_key, 0) + 1
+                repeat_seen = repeat_counts[repeat_key]
+                if action["success"] and repeat_seen >= max(2, int(self.repeat_call_budget)):
+                    stagnation_response = self._stagnation_response(
+                        str(call.name), repeat_seen, actions
+                    )
+                    # The provider requires one tool result for every tool
+                    # call in the assistant batch. Record explicit skipped
+                    # results for the remainder so the persisted transcript
+                    # stays a valid envelope for the next request/resume.
+                    for skipped_slot, skipped in enumerate(calls[call_slot + 1:], start=call_slot + 1):
+                        skipped_id = str(getattr(skipped, "call_id", "") or f"call_v5_r{round_index}_n{skipped_slot}")
+                        skipped_content = (
+                            "Skipped: the turn stopped because an earlier call in "
+                            "this batch repeated without making progress."
+                        )
+                        skipped_action = {
+                            "tool": skipped.name, "name": skipped.name,
+                            "params": dict(skipped.params or {}), "call_id": skipped_id,
+                            "output": "", "error": skipped_content, "success": False,
+                            "status": "skipped", "model_round": round_index,
+                        }
+                        actions.append(skipped_action)
+                        batch_outcomes.append(skipped_action)
+                        messages.append({"role": "tool", "name": skipped.name,
+                                         "tool_call_id": skipped_id, "content": skipped_content})
+                        self._stamp_recent_messages(messages)
+                        if callable(persist_direct):
+                            if callable(persist_direct_async):
+                                await persist_direct_async(
+                                    messages[-1],
+                                    str(getattr(self, "_current_turn_id", "") or ""),
+                                )
+                            else:
+                                persist_direct(messages[-1], str(getattr(self, "_current_turn_id", "") or ""))
+                        calls_executed += 1
+                    await self._emit_tool_batch_progress(batch_outcomes)
+                    return {
+                        "success": False, "response": stagnation_response,
+                        "actions": actions, "tool_rounds": round_index + 1,
+                        "calls_executed": calls_executed, "messages": messages,
+                        "verification": self._verification_payload(
+                            actions, calls_executed, stagnation_response,
+                            "repeated identical tool call made no progress",
+                        ),
+                        "stagnation": {
+                            "tool": str(call.name), "repeats": repeat_seen,
+                            "signature": repeat_key[:200],
+                        },
+                        "error": "repeated identical tool call made no progress",
+                    }
                 if not action["success"]:
                     repair_attempts += 1
                     failure_observation = {
@@ -827,28 +1198,63 @@ class V5DirectModelToolLoop:
                     messages.append({
                         "role": "system",
                         "content": (
-                            "REPAIR REQUIRED: the previous tool call failed. Diagnose the "
-                            "failure from the tool result, then choose a corrected tool "
-                            "or corrected parameters. Do not repeat the identical call "
-                            "unless you have a concrete reason it will now succeed. "
-                            "The next model turn must choose retry, an alternative, or stop. "
+                        "REPAIR REQUIRED: the previous tool call failed. Diagnose the "
+                        "failure from the tool result, then choose a corrected tool "
+                        "or corrected parameters. Do not repeat the identical call "
+                        "unless you have a concrete reason it will now succeed. "
+                        "The next model turn must choose retry, an alternative relevant "
+                        "tool/provider, or stop. Never claim success without a verified "
+                        "tool result. "
                             f"Structured failure observation: {json.dumps(failure_observation, ensure_ascii=False)}"
                         ),
                     })
                     if repair_attempts >= self.repair_attempt_budget:
-                        response = self._repair_exhausted_response(actions)
-                        return {"success": False, "response": response, "actions": actions,
-                                "tool_rounds": round_index + 1,
-                                "calls_executed": calls_executed, "messages": messages,
-                                "verification": self._verification_payload(
-                                    actions, calls_executed, response, "repair attempts exhausted"
-                                ),
-                                "error": "repair attempts exhausted"}
+                        hive_escalated = False
+                        active_mode = getattr(self, "_active_mode_enabled", None)
+                        hive_repair = getattr(self, "_hive_self_repair", None)
+                        if not hive_repair_applied and callable(active_mode) and callable(hive_repair):
+                            try:
+                                if active_mode():
+                                    proposal = await hive_repair(
+                                        {"success": False, "actions": actions[-8:]},
+                                        SimpleNamespace(original_input=task_desc),
+                                    )
+                                    if isinstance(proposal, list) and proposal:
+                                        hive_repair_applied = True
+                                        hive_escalated = True
+                                        messages.append({
+                                            "role": "system",
+                                            "content": (
+                                                "HIVE REPAIR PROPOSAL: native repair attempts "
+                                                "were exhausted. Inspect this reviewed proposal, "
+                                                "then make one corrected tool decision if justified. "
+                                                "Do not claim success without fresh evidence.\n"
+                                                + json.dumps(
+                                                    proposal[:8],
+                                                    ensure_ascii=False,
+                                                    default=str,
+                                                )[:6000]
+                                            ),
+                                        })
+                                        self._stamp_recent_messages(messages)
+                            except Exception as exc:
+                                self.logger.debug("Hive self-repair escalation unavailable: %s", exc)
+                        if not hive_escalated:
+                            response = self._repair_exhausted_response(actions)
+                            await self._emit_tool_batch_progress(batch_outcomes)
+                            return {"success": False, "response": response, "actions": actions,
+                                    "tool_rounds": round_index + 1,
+                                    "calls_executed": calls_executed, "messages": messages,
+                                    "verification": self._verification_payload(
+                                        actions, calls_executed, response, "repair attempts exhausted"
+                                    ),
+                                    "error": "repair attempts exhausted"}
                 if not action["success"] and self._is_unavailable_tool_error(content):
                     signature = (str(call.name), json.dumps(call.params or {}, sort_keys=True,
                                                             ensure_ascii=False))
                     if unavailable_retries.get(signature, 0) >= 2:
                         response = self._unavailable_tool_response(call.name, content)
+                        await self._emit_tool_batch_progress(batch_outcomes)
                         return {"success": False, "response": response, "actions": actions,
                                 "tool_rounds": round_index + 1,
                                 "calls_executed": calls_executed, "messages": messages,
@@ -856,14 +1262,36 @@ class V5DirectModelToolLoop:
                                     actions, calls_executed, response, "repeated unavailable tool request"
                                 ),
                                 "error": "repeated unavailable tool request"}
-                # A model response is a proposal, not a pre-authorized
-                # batch. Once one call fails, stop executing the remaining
-                # calls from that same response so the model can observe the
-                # failure and decide whether to retry, choose an alternative,
-                # or stop. This prevents cascading bash/tool errors and makes
-                # every recovery decision model-driven on the next round.
                 if not action["success"]:
+                    # The provider requires one tool result for every tool
+                    # call in an assistant batch.  We still stop side effects
+                    # after the first failure, but record explicit skipped
+                    # results so the next request is a valid transcript.
+                    for skipped_slot, skipped in enumerate(calls[call_slot + 1:], start=call_slot + 1):
+                        skipped_id = str(getattr(skipped, "call_id", "") or f"call_v5_r{round_index}_n{skipped_slot}")
+                        skipped_content = "Skipped because an earlier tool call in this batch failed."
+                        skipped_action = {
+                            "tool": skipped.name, "name": skipped.name,
+                            "params": dict(skipped.params or {}), "call_id": skipped_id,
+                            "output": "", "error": skipped_content, "success": False,
+                            "status": "skipped", "model_round": round_index,
+                        }
+                        actions.append(skipped_action)
+                        batch_outcomes.append(skipped_action)
+                        messages.append({"role": "tool", "name": skipped.name,
+                                         "tool_call_id": skipped_id, "content": skipped_content})
+                        self._stamp_recent_messages(messages)
+                        if callable(persist_direct):
+                            if callable(persist_direct_async):
+                                await persist_direct_async(
+                                    messages[-1],
+                                    str(getattr(self, "_current_turn_id", "") or ""),
+                                )
+                            else:
+                                persist_direct(messages[-1], str(getattr(self, "_current_turn_id", "") or ""))
+                        calls_executed += 1
                     break
+            await self._emit_tool_batch_progress(batch_outcomes)
             self._last_run_had_tool_execution = True
             await self._direct_loop_state("REFLECTING")
         response, protocol_error = self._safe_terminal_response(

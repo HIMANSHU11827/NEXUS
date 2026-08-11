@@ -11,6 +11,7 @@ sys.path.insert(0, str(project_root))
 
 from orchestrators.v5.core import NexusLoopV5
 from orchestrators.v5.tools import _TextToolCall
+from tools.nexus_tools.base_tool import ToolResult
 
 
 class _FakeAssessment:
@@ -108,6 +109,96 @@ def test_lint_source_missing_file_passes(loop):
     assert err == ""
 
 
+def test_lint_source_fails_closed_when_validator_errors(loop, tmp_path, monkeypatch):
+    path = tmp_path / "validator.py"
+    path.write_text("value = 1\n", encoding="utf-8")
+
+    def broken_run(*args, **kwargs):
+        raise OSError("compiler unavailable")
+
+    monkeypatch.setattr("orchestrators.v5.tools.subprocess.run", broken_run)
+    ok, err = loop._lint_source(str(path))
+    assert ok is False
+    assert "compiler unavailable" in err
+
+
+def test_run_tool_rejects_and_rolls_back_invalid_post_write_edit(loop, tmp_path):
+    path = tmp_path / "edited.py"
+    original = "value = 1\n"
+    path.write_text(original, encoding="utf-8")
+
+    class Registry:
+        def get(self, name):
+            return object()
+
+        async def stream_execute(self, name, **params):
+            path.write_text("def broken(:\n", encoding="utf-8")
+            yield ToolResult(success=True, output="modified")
+
+    loop.tool_registry = Registry()
+    loop._audit_tool_call = lambda call: _approved()
+
+    async def run():
+        return await loop._run_tool(_call("modifying", {"path": str(path)}))
+
+    async def _approved():
+        return True
+
+    with pytest.raises(RuntimeError, match="post-write lint"):
+        asyncio.run(run())
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_edit_lint_and_snapshot_do_not_block_event_loop(loop, tmp_path, monkeypatch):
+    path = tmp_path / "edited.py"
+    path.write_text("value = 1\n", encoding="utf-8")
+    original_run = __import__("orchestrators.v5.tools", fromlist=["subprocess"]).subprocess.run
+
+    def slow_run(*args, **kwargs):
+        import time
+
+        time.sleep(0.08)
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr("orchestrators.v5.tools.subprocess.run", slow_run)
+
+    class Registry:
+        def get(self, name):
+            return object()
+
+        async def stream_execute(self, name, **params):
+            path.write_text("value = 2\n", encoding="utf-8")
+            yield ToolResult(success=True, output="modified")
+
+    loop.tool_registry = Registry()
+
+    async def _approved():
+        return True
+
+    loop._audit_tool_call = lambda call: _approved()
+
+    async def run_with_heartbeat():
+        ticks = 0
+
+        async def heartbeat():
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        heartbeat_task = asyncio.create_task(heartbeat())
+        try:
+            result = await loop._run_tool(_call("modifying", {"path": str(path)}))
+        finally:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+        return result, ticks
+
+    result, ticks = asyncio.run(run_with_heartbeat())
+    assert result == "modified"
+    assert ticks >= 8
+
+
 def test_read_windowed_slice_and_header(loop, tmp_path):
     path = tmp_path / "big.txt"
     path.write_text("".join(f"line {i}\n" for i in range(1, 151)), encoding="utf-8")
@@ -137,11 +228,33 @@ def test_execute_code_action_disabled(loop, monkeypatch):
     assert result == "Error: code-action mode disabled"
 
 
-def test_execute_code_action_env_enabled_run(loop, monkeypatch, tmp_path):
+def test_execute_code_action_requires_sandbox(loop, monkeypatch, tmp_path):
     monkeypatch.setenv("NEXUS_CODE_ACTION", "1")
     loop._code_action_enabled = False
     loop.runtime.sandbox = None
     result = asyncio.run(
         loop._execute_code_action("print('hello-from-code-action')", workdir=str(tmp_path))
     )
-    assert "hello-from-code-action" in result
+    assert result == "Error: code-action requires an active sandbox"
+
+
+def test_execute_code_action_sanitizes_turn_path_and_runs(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEXUS_CODE_ACTION", "1")
+
+    class Sandbox:
+        last_exit_code = 0
+
+        async def stream_execute(self, command, **_kwargs):
+            assert "code_action_escape.py" in command
+            yield "ok"
+
+    loop = NexusLoopV5(str(tmp_path))
+    loop.runtime.sandbox = Sandbox()
+    loop._current_turn_id = "../../escape"
+
+    result = asyncio.run(loop._execute_code_action("print('ok')"))
+
+    assert result == "ok"
+    expected = tmp_path / ".nexus_v5" / "tmp" / "code_action_escape.py"
+    assert expected.read_text(encoding="utf-8") == "print('ok')"
+    assert not (tmp_path.parent / "escape.py").exists()

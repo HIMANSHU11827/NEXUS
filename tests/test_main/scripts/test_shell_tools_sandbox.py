@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 import pytest
@@ -63,3 +64,96 @@ async def test_shell_tools_forward_timeout_to_sandbox(tmp_path, monkeypatch, too
 
     assert result.success is True
     assert calls == [{"command": "npm test", "workdir": str(tmp_path), "timeout": 7}]
+
+
+@pytest.mark.asyncio
+async def test_terminal_fails_closed_when_sandbox_does_not_report_exit_code(tmp_path, monkeypatch):
+    class MissingExitSandbox:
+        last_exit_code = None
+
+        def __init__(self, root_dir):
+            self.root_dir = root_dir
+
+        async def stream_execute(self, command, workdir=None, timeout=None, shell=None):
+            yield "completed output"
+
+    monkeypatch.setattr(terminal_module, "SovereignSandbox", MissingExitSandbox)
+    result = await TerminalTool(root_dir=str(tmp_path)).execute("npm test")
+    assert result.success is False
+
+
+@pytest.mark.asyncio
+async def test_sandbox_reaps_child_when_stream_is_cancelled(tmp_path, monkeypatch):
+    from sandbox.sandbox_manager import SandboxTier, SovereignSandbox
+
+    class BlockingStdout:
+        async def read(self, _size):
+            await asyncio.Event().wait()
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = BlockingStdout()
+            self.returncode = None
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self):
+            return self.returncode
+
+    process = FakeProcess()
+
+    async def fake_create_subprocess_shell(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setattr("sandbox.sandbox_manager.asyncio.create_subprocess_shell", fake_create_subprocess_shell)
+    sandbox = SovereignSandbox(str(tmp_path))
+    sandbox.tier = SandboxTier.NORMAL
+
+    stream = sandbox.stream_execute("echo never-finishes")
+    pending = asyncio.create_task(stream.__anext__())
+    await asyncio.sleep(0.02)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    await stream.aclose()
+
+    assert process.killed is True
+    assert process.returncode == -9
+
+
+@pytest.mark.asyncio
+async def test_sandbox_launches_host_process_with_descendant_boundary(tmp_path, monkeypatch):
+    from sandbox.sandbox_manager import SandboxTier, SovereignSandbox
+
+    calls = []
+
+    class ImmediateStdout:
+        async def read(self, _size):
+            return b""
+
+    class FinishedProcess:
+        pid = 4242
+        returncode = 0
+        stdout = ImmediateStdout()
+
+        async def wait(self):
+            return self.returncode
+
+    async def fake_create_subprocess_shell(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FinishedProcess()
+
+    monkeypatch.setattr("sandbox.sandbox_manager.asyncio.create_subprocess_shell", fake_create_subprocess_shell)
+    sandbox = SovereignSandbox(str(tmp_path))
+    sandbox.tier = SandboxTier.NORMAL
+
+    assert "".join([chunk async for chunk in sandbox.stream_execute("echo safe")]) == ""
+    assert calls
+    kwargs = calls[0][1]
+    if os.name == "nt":
+        assert kwargs["creationflags"]
+    else:
+        assert kwargs["start_new_session"] is True

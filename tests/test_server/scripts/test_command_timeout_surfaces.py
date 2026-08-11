@@ -30,8 +30,8 @@ def test_server_command_stream_forwards_timeout_and_matches_failed_status(monkey
             def __init__(self, root_dir):
                 self.root_dir = root_dir
 
-            async def stream_execute(self, command, workdir=None, timeout=None):
-                calls.append(timeout)
+            async def stream_execute(self, command, workdir=None, timeout=None, shell=None):
+                calls.append((timeout, shell))
                 yield "[SANDBOX_TIMEOUT]: Execution exceeded 7 seconds."
 
         monkeypatch.setattr("sandbox.sandbox_manager.SovereignSandbox", FakeSandbox)
@@ -42,7 +42,7 @@ def test_server_command_stream_forwards_timeout_and_matches_failed_status(monkey
             )
 
         assert response.status_code == 200
-        assert calls == [7]
+        assert calls == [(7, "powershell")]
         assert '"status": "failed"' in response.text
         assert '"stderr": "[SANDBOX_TIMEOUT]' in response.text
         assert '"type": "done", "status": "failed"' in response.text

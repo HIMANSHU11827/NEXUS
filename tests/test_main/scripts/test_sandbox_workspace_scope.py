@@ -20,6 +20,69 @@ def test_simple_sandbox_allows_workspace_command(tmp_path):
     assert "inside ok" in output
 
 
+def test_windows_null_device_redirect_is_not_treated_as_workspace_escape():
+    if os.name != "nt":
+        pytest.skip("Windows device normalization is only applicable on Windows")
+
+    command = 'curl -s -o /dev/null -w "HTTP %{http_code}" https://example.com'
+    normalized = SovereignSandbox._normalize_host_command(command)
+
+    assert "-o NUL" in normalized
+    assert "/dev/null" not in normalized
+
+
+def test_windows_cmd_reports_unquoted_semicolon_and_unix_filters(monkeypatch):
+    monkeypatch.setattr("sandbox.sandbox_manager.os.name", "nt")
+
+    error = SovereignSandbox._windows_cmd_compatibility_error(
+        "git status; git diff | head -20"
+    )
+
+    assert error is not None
+    assert "cmd.exe" in error
+    assert "unquoted ';'" in error
+    assert "head" in error
+    assert "shell='powershell'" in error
+
+
+def test_windows_cmd_blocks_common_unix_read_commands_before_spawn(monkeypatch, tmp_path):
+    monkeypatch.setattr("sandbox.sandbox_manager.os.name", "nt")
+    sandbox = SovereignSandbox(str(tmp_path))
+    sandbox.tier = SandboxTier.NORMAL
+
+    output = sandbox.execute("cat README.md | grep Nexus")
+
+    assert output.startswith("[EXECUTION_ERROR]: Windows cmd.exe compatibility:")
+    assert "'cat'" in output
+    assert "'grep'" in output
+    assert "shell='powershell'" in output
+    assert sandbox.last_exit_code == -1
+
+
+def test_windows_cmd_compatibility_check_preserves_quoted_literals(monkeypatch):
+    monkeypatch.setattr("sandbox.sandbox_manager.os.name", "nt")
+
+    command = 'python -c "print(\'; head\')"'
+
+    assert SovereignSandbox._windows_cmd_compatibility_error(command) is None
+
+
+def test_windows_explicit_powershell_allows_powershell_syntax(monkeypatch):
+    monkeypatch.setattr("sandbox.sandbox_manager.os.name", "nt")
+
+    assert SovereignSandbox._windows_cmd_compatibility_error(
+        "Get-ChildItem; Get-Content file.txt | Select-Object -First 20",
+        shell="powershell",
+    ) is None
+
+
+def test_windows_shell_profiles_do_not_silently_become_cmd(monkeypatch):
+    monkeypatch.setattr("sandbox.sandbox_manager.os.name", "nt")
+
+    assert SovereignSandbox._requested_shell("bash") == "bash"
+    assert SovereignSandbox._requested_shell("wsl") == "wsl"
+
+
 def test_invalid_sandbox_tier_falls_back_to_normal(tmp_path, monkeypatch):
     monkeypatch.setenv("NEXUS_SANDBOX_TIER", "definitely-not-a-tier")
 

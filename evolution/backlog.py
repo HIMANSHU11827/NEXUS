@@ -18,8 +18,11 @@ __version__ = "1.0.0"
 import json
 import logging
 import os
+import sqlite3
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -28,6 +31,8 @@ BACKLOG_RELPATH = os.path.join("logs", "improvements", "action_backlog.jsonl")
 
 _STATUS_PENDING = "pending"
 _VALID_STATUSES = {"pending", "in_progress", "done", "rejected"}
+_LOCAL_LOCKS: Dict[str, threading.RLock] = {}
+_LOCAL_LOCKS_GUARD = threading.Lock()
 
 
 def _repo_root(root: Optional[str] = None) -> str:
@@ -46,6 +51,32 @@ def backlog_path(root: Optional[str] = None) -> str:
     except ImportError:
         pass
     return path
+
+
+def _local_lock(path: str) -> threading.RLock:
+    with _LOCAL_LOCKS_GUARD:
+        return _LOCAL_LOCKS.setdefault(path, threading.RLock())
+
+
+@contextmanager
+def _backlog_lock(path: str):
+    """Serialize JSONL mutations within a process and across processes."""
+    lock = _local_lock(path)
+    with lock:
+        lock_path = path + ".lock.sqlite3"
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        connection = sqlite3.connect(lock_path, timeout=30.0, isolation_level=None)
+        try:
+            connection.execute("CREATE TABLE IF NOT EXISTS mutex (id INTEGER PRIMARY KEY CHECK (id = 1))")
+            connection.execute("INSERT OR IGNORE INTO mutex(id) VALUES (1)")
+            connection.execute("BEGIN IMMEDIATE")
+            yield
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
 
 def _normalize(action: Any) -> Dict[str, Any]:
@@ -77,8 +108,11 @@ def queue_improvement_action(action_dict: Any, root: Optional[str] = None) -> Op
             return None
         path = backlog_path(root)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        with _backlog_lock(path):
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
         return entry
     except Exception:
         logger.warning("evolution.backlog.queue_improvement_action: suppressed error", exc_info=True)
@@ -135,26 +169,33 @@ def mark_action_status(action_id: str, status: str, root: Optional[str] = None) 
     if not os.path.exists(path):
         return False
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            lines = [ln for ln in f if ln.strip()]
-        updated = False
-        out = []
-        for ln in lines:
-            try:
-                item = json.loads(ln)
-            except Exception:
-                out.append(ln)
-                continue
-            if item.get("id") == action_id:
-                item["status"] = status
-                item["resolved_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-                updated = True
-            out.append(json.dumps(item, ensure_ascii=False) + "\n")
-        if updated:
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.writelines(out)
-            os.replace(tmp, path)
+        with _backlog_lock(path):
+            with open(path, "r", encoding="utf-8") as f:
+                lines = [ln for ln in f if ln.strip()]
+            updated = False
+            out = []
+            for ln in lines:
+                try:
+                    item = json.loads(ln)
+                except Exception:
+                    out.append(ln)
+                    continue
+                if item.get("id") == action_id:
+                    item["status"] = status
+                    item["resolved_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                    updated = True
+                out.append(json.dumps(item, ensure_ascii=False) + "\n")
+            if updated:
+                tmp = f"{path}.{uuid.uuid4().hex}.tmp"
+                try:
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        f.writelines(out)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(tmp, path)
+                finally:
+                    if os.path.exists(tmp):
+                        os.unlink(tmp)
         return updated
     except Exception:
         logger.warning("evolution.backlog.mark_action_status: suppressed error", exc_info=True)

@@ -1,5 +1,7 @@
 import logging
 import os
+import signal
+import subprocess
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Iterator, List, Optional
@@ -21,6 +23,12 @@ class NexusBaseProvider(ABC):
         self.api_key = ""
         self.headers = {}
         self.session = requests.Session()
+        # NEXUS providers use their configured endpoint directly. Inheriting
+        # a stale machine-wide HTTP(S)_PROXY/ALL_PROXY setting can route cloud
+        # calls through a dead localhost proxy and produce misleading local
+        # provider errors. Proxy use remains opt-in via an explicit session or
+        # provider implementation rather than an ambient process variable.
+        self.session.trust_env = False
         self.thinking = False
         
         # ⚡ Load from Config
@@ -50,6 +58,67 @@ class NexusBaseProvider(ABC):
 
     def configure_thinking(self, enabled: bool):
         self.thinking = enabled
+
+    @staticmethod
+    def request_timeout(kwargs: Optional[Dict[str, Any]], default: float) -> float:
+        """Return a bounded per-request transport timeout.
+
+        Router/V5 callers may provide a run-budget deadline through ``timeout``.
+        Invalid or non-positive values fall back to the adapter default so a
+        malformed model hint cannot disable transport protection.
+        """
+        try:
+            value = float((kwargs or {}).get("timeout", default))
+        except (TypeError, ValueError):
+            value = float(default)
+        if value <= 0:
+            value = float(default)
+        return max(0.001, value)
+
+    @staticmethod
+    def process_group_kwargs() -> Dict[str, Any]:
+        """Return subprocess options that give the provider tree ownership."""
+        if os.name == "nt":
+            return {
+                "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200),
+            }
+        return {"start_new_session": True}
+
+    @staticmethod
+    def terminate_process_tree(process: Any, *, wait_timeout: float = 5.0) -> None:
+        """Terminate and reap a CLI process and its owned descendants."""
+        if process is None:
+            return
+        try:
+            running = process.poll() is None
+        except Exception:
+            running = True
+        if running:
+            pid = getattr(process, "pid", None)
+            tree_stopped = False
+            try:
+                if pid and os.name == "nt":
+                    killer = subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        capture_output=True,
+                        timeout=wait_timeout,
+                        check=False,
+                    )
+                    tree_stopped = killer.returncode == 0
+                elif pid:
+                    os.killpg(os.getpgid(int(pid)), signal.SIGKILL)
+                    tree_stopped = True
+            except (OSError, subprocess.SubprocessError, ValueError):
+                logger.debug("provider process-tree termination unavailable", exc_info=True)
+            if not tree_stopped:
+                try:
+                    process.kill()
+                except (OSError, ProcessLookupError):
+                    pass
+        try:
+            process.wait(timeout=wait_timeout)
+        except (OSError, subprocess.SubprocessError, ProcessLookupError):
+            logger.debug("provider process reap failed", exc_info=True)
 
     def reload_credentials(self, api_key: Optional[str] = None) -> bool:
         """Re-resolve the provider credential and rebuild auth headers.

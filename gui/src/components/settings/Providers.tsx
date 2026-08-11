@@ -1,6 +1,6 @@
 import { useState, useEffect, type FormEvent } from 'react'
 import { CheckCircle2, CircleAlert } from 'lucide-react'
-import { api, type InventoryItem, type RuntimeProviderStatus } from '../../lib/api'
+import { api, type InventoryItem, type ProviderDiagnostics, type RuntimeProviderStatus } from '../../lib/api'
 import { labelFor, Description } from './utils'
 
 type ProviderProfileItem = { name: string; model?: string; endpoint?: string; active?: boolean; is_default?: boolean; has_credentials?: boolean }
@@ -135,7 +135,7 @@ function ProviderRow({ provider, pending, onToggle, onChanged, openRequested }: 
   </div>
 }
 
-export function ProviderList({ providers, pending, runtimeStatus, onToggle, onChanged }: { providers: InventoryItem[]; pending: string; runtimeStatus?: RuntimeProviderStatus; onToggle: (name: string, enabled: boolean) => void; onChanged: () => void }) {
+export function ProviderList({ providers, pending, runtimeStatus, diagnostics, onToggle, onChanged }: { providers: InventoryItem[]; pending: string; runtimeStatus?: RuntimeProviderStatus; diagnostics?: ProviderDiagnostics; onToggle: (name: string, enabled: boolean) => void; onChanged: () => void }) {
   const [addingCustom, setAddingCustom] = useState(false)
   const [customName, setCustomName] = useState('')
   const [customId, setCustomId] = useState('')
@@ -158,14 +158,20 @@ export function ProviderList({ providers, pending, runtimeStatus, onToggle, onCh
     finally { setCreatingCustom(false) }
   }
   const reachability = runtimeStatus?.provider_status
+  const recentAttempt = diagnostics?.attempts?.slice(-1)[0]
+  const fallbackCount = diagnostics?.fallback_attempts || 0
   const runtimeLabel = runtimeStatus?.health === 'degraded' ? 'Degraded' : reachability?.reachable === true ? 'Reachable' : reachability?.reachable === false ? 'Unavailable' : 'Configured'
   const runtimeTone = runtimeStatus?.health === 'degraded' || reachability?.reachable === false ? 'border-amber-300 bg-amber-50 text-amber-900' : 'border-emerald-300 bg-emerald-50 text-emerald-900'
+  const active = diagnostics?.active
+  const cooldowns = diagnostics?.cooldowns || []
+  const lastFailure = diagnostics?.last_failure
   return <div className="space-y-6">
     <section className={`rounded-lg border p-4 ${runtimeTone}`} role="status">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div><h3 className="text-sm font-semibold">Active runtime</h3><p className="mt-1 text-xs">Provider: {runtimeStatus?.provider || 'unknown'} · Model: {runtimeStatus?.model || 'unknown'}</p><p className="mt-1 text-xs opacity-80">{reachability?.reason === 'remote_probe_deferred' ? 'Remote reachability is checked when a request runs.' : reachability?.endpoint || 'The backend did not report an endpoint.'}</p></div>
+        <div><h3 className="text-sm font-semibold">Active runtime</h3><p className="mt-1 text-xs">Provider: {active?.provider || runtimeStatus?.provider || 'unknown'} · Profile: {active?.profile || 'default'} · Model: {active?.model || runtimeStatus?.model || 'unknown'}</p><p className="mt-1 text-xs opacity-80">{reachability?.reason === 'remote_probe_deferred' ? 'Remote reachability is checked when a request runs.' : reachability?.endpoint || 'The backend did not report an endpoint.'}</p><p className="mt-1 text-xs opacity-80">Fallback attempts in the current runtime: {diagnostics?.fallback_attempts || 0}</p>{lastFailure && <p className="mt-1 text-xs" role="status">Last failure: {lastFailure.provider || 'provider'}{lastFailure.profile ? `/${lastFailure.profile}` : ''} · {lastFailure.failure_class || 'unknown'}{lastFailure.reason ? ` · ${lastFailure.reason}` : ''}</p>}{cooldowns.length > 0 && <div className="mt-2 text-xs"><p className="font-medium">Cooling down</p><ul className="mt-1 space-y-0.5">{cooldowns.slice(0, 5).map(item => <li key={`${item.provider}-${item.profile}`}>{item.provider}/{item.profile}: {Math.ceil(item.cooldown_seconds || 0)}s{item.reason ? ` · ${item.reason}` : ''}</li>)}</ul></div>}</div>
         <span className="rounded-full border border-current/20 px-2 py-1 text-xs font-medium">{runtimeLabel}</span>
       </div>
+      {recentAttempt && <p className="mt-2 text-xs opacity-80">Last route: {recentAttempt.provider_id || 'unknown'} · {recentAttempt.status || 'unknown'}{fallbackCount > 0 ? ` · ${fallbackCount} fallback${fallbackCount === 1 ? '' : 's'}` : ''}{recentAttempt.reason ? ` · ${recentAttempt.reason}` : ''}</p>}
     </section>
     <section className="rounded-lg border border-border bg-card p-4">
       <div className="flex flex-wrap items-end justify-between gap-3"><div><h3 className="text-sm font-semibold">Add custom provider</h3><p className="mt-1 text-xs text-muted-foreground">Create a new OpenAI-compatible API or local provider. This does not select from the installed provider list.</p></div><button type="button" onClick={() => setAddingCustom(value => !value)} className="rounded-md bg-foreground px-3 py-1.5 text-xs font-medium text-background">{addingCustom ? 'Close' : 'Add provider'}</button></div>

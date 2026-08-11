@@ -6,6 +6,7 @@ import React from 'react';
 import {Box, Text} from 'ink';
 import {renderTerminalMarkdown} from './terminal-markdown.js';
 import {InlineActivity} from './inline-activity.js';
+import {TRANSCRIPT_SURFACE_BG} from './theme.js';
 import {
     CHAT_ACTIVITY_KINDS,
     activityGlyph,
@@ -16,6 +17,7 @@ import {
     cleanVisibleAssistantText,
     voicePhaseLabel,
     voicePhaseColor,
+    CLAUDE_SPINNER_FRAMES,
     type ChatLine,
     type Message,
     type ActivityItem,
@@ -38,19 +40,34 @@ const wrapPlainLine = (line: string, width: number) => {
     return rows;
 };
 
-const phaseThoughtText = (phase: WorkingPhase, prompt: string) => {
-    const normalized = prompt.toLowerCase();
-    if (normalized.includes('news') || normalized.includes('latest') || normalized.includes('today') || normalized.includes('current')) {
-        return 'Need verify this with current information before answering. I am preparing the right search/query path instead of guessing.';
-    }
-    if (normalized.includes('code') || normalized.includes('build') || normalized.includes('create') || normalized.includes('game') || normalized.includes('fix')) {
-        return 'Need turn this request into a concrete change. I am identifying the likely files, tools, and checks before editing.';
-    }
-    if (phase === 'querying' || phase === 'streaming') {
-        return 'Reading the request and waiting for the next visible model or tool event.';
-    }
-    return 'Working out the next visible step from the current request.';
+const phaseThoughtText = (phase: WorkingPhase) => {
+    const labels: Partial<Record<WorkingPhase, string>> = {
+        querying: 'Sending your request to the selected provider.',
+        streaming: 'Receiving the assistant response.',
+        tool: 'Waiting for a tool result.',
+        hive: 'Waiting for active subagents.',
+        verifying: 'Waiting for verification results.'
+    };
+    return labels[phase] || 'Waiting for the next confirmed agent event.';
 };
+
+export const activityIdsFromChatLines = (lines: ChatLine[]): string[] =>
+    [...new Set(lines.map(line => line.activityId).filter((id): id is string => Boolean(id)))];
+
+export const nextActivityFocus = (
+    ids: string[],
+    currentId: string | null,
+    backwards = false
+): string | null => {
+    if (ids.length === 0) return null;
+    const currentIndex = currentId ? ids.indexOf(currentId) : -1;
+    if (currentIndex < 0) return backwards ? ids[ids.length - 1] : ids[0];
+    const delta = backwards ? -1 : 1;
+    return ids[(currentIndex + delta + ids.length) % ids.length];
+};
+
+export const toggleActivityExpansion = (currentId: string | null, activityId: string): string | null =>
+    currentId === activityId ? null : activityId;
 
 export const buildThinkingRows = (
     width: number,
@@ -62,7 +79,7 @@ export const buildThinkingRows = (
     const rows: ChatLine[] = [];
     const duration = startedAt ? formatDurationMs(Date.now() - startedAt) : '';
     const active = ['thinking', 'querying', 'streaming', 'tool'].includes(phase);
-    const spinner = active ? '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'[Math.abs(frame) % 10] : '';
+    const spinner = active ? CLAUDE_SPINNER_FRAMES[Math.abs(frame) % CLAUDE_SPINNER_FRAMES.length] : '';
     const appendWrapped = (key: string, content: string, color = 'grey', prefix = '  ', prefixColor = 'grey') => {
         const contentWidth = Math.max(1, width - prefix.length);
         let first = true;
@@ -83,7 +100,7 @@ export const buildThinkingRows = (
 
     rows.push({
         key: 'thinking-detail-header',
-        text: `${spinner ? `${spinner} ` : ''}Thought:${duration ? ` ${duration}` : ''}`,
+        text: `${spinner ? `${spinner} ` : ''}Run status:${duration ? ` ${duration}` : ''}`,
         color: 'yellowBright',
         prefix: '+ ',
         prefixColor: 'yellowBright',
@@ -91,7 +108,7 @@ export const buildThinkingRows = (
         bold: true
     });
     rows.push({key: 'thinking-detail-gap-1', text: '', color: 'grey'});
-    appendWrapped('summary', phaseThoughtText(phase, prompt), 'grey');
+    appendWrapped('summary', phaseThoughtText(phase), 'grey');
 
     return rows.slice(0, 12);
 };
@@ -145,17 +162,18 @@ export const HistoryItem = ({
 };
 
 export const activityDetailBoxRows = (activity: ActivityItem, width: number, showSources: boolean): string[] => {
-    const boxWidth = Math.max(24, Math.min(width, 74));
-    const innerWidth = Math.max(10, boxWidth - 4);
+    const innerWidth = Math.max(10, width - 4);
     const rows: string[] = [];
     const push = (value = '') => {
         for (const line of wrapPlainLine(value, innerWidth)) {
-            rows.push(`│ ${line.padEnd(innerWidth, ' ')} │`);
+            rows.push(line);
         }
     };
     const duration = formatDurationMs(activity.durationMs);
-    const header = `${activity.logo || activityGlyph(activity.kind)} ${activity.toolName || activity.kind} · ${activity.status}${duration ? ` · ${duration}` : ''}`;
-    rows.push(`┌${'─'.repeat(boxWidth - 2)}┐`);
+    const header = `${activity.toolName || activity.kind}${duration ? ` · ${duration}` : ''}`;
+    // Expanded details use the same filled transcript surface as user and
+    // Nexus messages. Blank edge rows provide breathing room without a box.
+    push('');
     push(header);
     const summary = activity.summary && activity.summary !== activity.toolName ? activity.summary : '';
     if (summary) push(summary);
@@ -196,7 +214,7 @@ export const activityDetailBoxRows = (activity: ActivityItem, width: number, sho
         push('sources');
         for (const source of activity.sources.slice(0, 5)) push(source);
     }
-    rows.push(`└${'─'.repeat(boxWidth - 2)}┘`);
+    push('');
     return rows;
 };
 
@@ -209,7 +227,7 @@ export const buildChatLines = (
     showActivitySources: boolean
 ): ChatLine[] => {
     const rows: ChatLine[] = [];
-    let previousActivitySignature = '';
+    const activityById = new Map(activityItems.map(activity => [activity.id, activity]));
     const appendGap = (key: string) => {
         if (rows.length > 0 && rows[rows.length - 1].text !== '') {
             rows.push({key, text: '', color: 'grey'});
@@ -248,29 +266,45 @@ export const buildChatLines = (
         if (msg.role === 'assistant' && msg.content.trim().length === 0) return;
 
         if (msg.role === 'user') {
-            previousActivitySignature = '';
             appendGap(`before-user-${index}`);
-            appendWrapped(`user-${index}`, msg.content, 'white', 'You > ', 'blueBright');
+            const start = rows.length;
+            appendWrapped(`user-${index}`, msg.content, 'white', '› ', 'grey');
+            for (let rowIndex = start; rowIndex < rows.length; rowIndex += 1) {
+                rows[rowIndex].backgroundColor = TRANSCRIPT_SURFACE_BG;
+            }
+            appendGap(`after-user-${index}`);
             return;
         }
 
         if (msg.role === 'activity') {
-            const activity = msg.activityId
-                ? activityItems.find(item => item.id === msg.activityId)
-                : undefined;
+            const activity = msg.activityId ? activityById.get(msg.activityId) : undefined;
             if (!activity || !CHAT_ACTIVITY_KINDS.has(activity.kind)) return;
-            const activitySignature = `${activity.toolName || activity.kind} ${activity.summary || activity.title}`;
-            if (activitySignature === previousActivitySignature) return;
-            previousActivitySignature = activitySignature;
             // v3: push ActivityCard via ChatLine.activity
             rows.push({
                 key: `activity-${index}`,
                 text: '',
                 color: 'grey',
                 activityId: activity.id,
-                activity
+                activity,
+                focused: focusedActivityId === activity.id,
+                expanded: expandedActivityId === activity.id
             });
-            if (expandedActivityId === activity.id) {
+            if (activity.kind === 'plan' && activity.detail && expandedActivityId === activity.id) {
+                const planDetails = ['', ...String(activity.detail).split('\n').slice(0, 6), ''];
+                for (const [detailIndex, detail] of planDetails.entries()) {
+                    rows.push({
+                        key: `activity-plan-${index}-${detailIndex}`,
+                        text: detail,
+                        color: 'grey',
+                        prefix: '  ',
+                        prefixColor: 'grey',
+                        reservePrefix: true,
+                        activityId: activity.id,
+                        backgroundColor: TRANSCRIPT_SURFACE_BG
+                    });
+                }
+            }
+            if (expandedActivityId === activity.id && activity.kind !== 'plan') {
                 for (const [detailIndex, line] of activityDetailBoxRows(activity, width, showActivitySources).entries()) {
                     rows.push({
                         key: `activity-detail-${index}-${detailIndex}`,
@@ -279,7 +313,8 @@ export const buildChatLines = (
                         prefix: '  ',
                         prefixColor: activity.logoColor || 'grey30',
                         reservePrefix: true,
-                        activityId: activity.id
+                        activityId: activity.id,
+                        backgroundColor: TRANSCRIPT_SURFACE_BG
                     });
                 }
             }
@@ -287,21 +322,19 @@ export const buildChatLines = (
         }
 
         if (msg.role === 'command') {
-            previousActivitySignature = '';
             appendWrapped(`command-${index}`, msg.content, 'grey', '◆ ', 'cyan');
             appendGap(`after-command-${index}`);
             return;
         }
 
         if (msg.role === 'system') {
-            previousActivitySignature = '';
             appendWrapped(`system-${index}`, msg.content, 'red', '! ', 'red');
             appendGap(`after-system-${index}`);
             return;
         }
 
-        previousActivitySignature = '';
         appendGap(`before-assistant-${index}`);
+        const assistantStart = rows.length;
         appendWrapped(
             `assistant-${index}`,
             renderTerminalMarkdown(
@@ -312,6 +345,12 @@ export const buildChatLines = (
             'Nexus > ',
             'magentaBright'
         );
+        // Use the same full-width message surface for both sides of the
+        // conversation. The role prefix remains inside the panel; live tool
+        // rows deliberately keep their compact activity treatment.
+        for (let rowIndex = assistantStart; rowIndex < rows.length; rowIndex += 1) {
+            rows[rowIndex].backgroundColor = TRANSCRIPT_SURFACE_BG;
+        }
         appendGap(`after-assistant-${index}`);
     });
 
@@ -390,13 +429,13 @@ export const ChatLineView = React.memo(({line, width, frame}: {line: ChatLine; w
         const act = line.activity as any;
         return (
             <Box width={width} marginBottom={0}>
-                <InlineActivity activity={act} width={width} frame={frame} />
+                <InlineActivity activity={act} width={width} frame={frame} focused={line.focused} expanded={line.expanded} />
             </Box>
         );
     }
 
     return (
-        <Box width={width}>
+        <Box width={width} backgroundColor={line.backgroundColor}>
             {line.reservePrefix && (
                 <Box width={prefixWidth} flexShrink={0}>
                     <Text bold color={line.prefixColor}>{line.prefix || '  '}</Text>

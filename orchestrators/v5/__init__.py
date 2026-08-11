@@ -36,6 +36,12 @@ from .planning import V5Planner
 from .response import V5ResponseBuilder
 from .parallel import V5ParallelExecutor
 from .verification import V5Verifier
+from .programmatic_verify import (
+    ProgrammaticVerificationResult,
+    VerificationCommandFact,
+    run_programmatic_verification,
+)
+from .verification_recipes import VerificationRecipe, detect_verification_recipe
 from .retry import V5RetryPolicy
 from .learning import V5Learning
 from .hive import V5Hive

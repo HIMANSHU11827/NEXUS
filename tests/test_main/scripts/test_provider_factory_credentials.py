@@ -55,6 +55,8 @@ def test_provider_yml_literal_key_wins_over_environment_and_profile(monkeypatch)
 
     assert provider.api_key == "yaml-key"
     assert provider.headers["Authorization"] == "Bearer yaml-key"
+    assert provider._credential_id == "config:deepseek"
+    assert "yaml-key" not in provider._credential_id
 
 
 def test_provider_yml_env_reference_is_supported(monkeypatch):
@@ -68,6 +70,45 @@ def test_provider_yml_env_reference_is_supported(monkeypatch):
 
     assert provider.api_key == "expanded-key"
     assert provider.headers["Authorization"] == "Bearer expanded-key"
+    assert provider._credential_id == "env:deepseek"
+    assert "expanded-key" not in provider._credential_id
+
+
+def test_named_profile_credential_identity_is_opaque(monkeypatch):
+    provider_factory = object.__new__(NexusProviderFactory)
+    provider_factory.loader = _Loader({"model": "test-model"})
+    provider_factory._load_provider_instance = lambda _name: _Provider()
+    monkeypatch.setattr(factory_module, "_resolve_api_key", lambda *_args: "profile-secret")
+
+    provider = provider_factory.get_provider_by_name("cloud", "deepseek", profile="backup")
+
+    assert provider.api_key == "profile-secret"
+    assert provider._credential_id == "profile:deepseek:backup"
+    assert provider._credential_source == "profile"
+    assert "profile-secret" not in provider._credential_id
+
+
+def test_named_profile_acquires_exclusive_runtime_lease(monkeypatch, tmp_path):
+    from providers.profiles import ProviderProfile, ProviderProfileStore
+
+    store = ProviderProfileStore(tmp_path / "profiles.json")
+    store.add_profile(ProviderProfile(
+        name="backup", provider="deepseek", type="api_key", api_key="profile-secret",
+    ))
+    provider_factory = object.__new__(NexusProviderFactory)
+    provider_factory.loader = _Loader({"model": "test-model"})
+    provider_factory._load_provider_instance = lambda _name: _Provider()
+    monkeypatch.setattr(factory_module, "_resolve_api_key", lambda *_args: "profile-secret")
+    monkeypatch.setattr("providers.profiles.load_profile_store", lambda: ProviderProfileStore(tmp_path / "profiles.json"))
+
+    provider = provider_factory.get_provider_by_name("cloud", "deepseek", profile="backup")
+
+    assert provider is not None
+    assert provider._profile_lease is not None
+    assert ProviderProfileStore(tmp_path / "profiles.json").acquire_lease(
+        "deepseek", "backup", owner_id="other", ttl_seconds=10,
+    ) is None
+    assert provider._profile_store.release_lease(provider._profile_lease) is True
 
 
 def test_provider_initialization_failure_does_not_silently_switch_provider():

@@ -162,6 +162,19 @@ class TestCompaction:
         assert out == msgs
         assert dropped == 0
 
+    def test_enforces_budget_even_when_every_non_system_message_is_recent(self):
+        msgs = [
+            {"role": "system", "content": "system guidance " * 20},
+            {"role": "user", "content": "recent request " * 20},
+        ]
+        original = [dict(message) for message in msgs]
+
+        out, _dropped = compact_messages(msgs, budget_tokens=70, keep_recent=6)
+
+        assert inspect(out)["est_tokens"] <= 70
+        assert msgs == original
+        assert any("system context truncated" in str(m.get("content")) for m in out)
+
     def test_merges_oldest_non_system_into_one_summary(self):
         msgs = [
             {"role": "user", "content": "u0"},
@@ -180,6 +193,22 @@ class TestCompaction:
         assert len(summaries) == 1
         assert "user: u0" in summaries[0]["content"] and "assistant: a5" in summaries[0]["content"]
         assert out[0]["role"] == "system"
+
+    def test_preserves_critical_lines_from_older_context(self):
+        msgs = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "Objective: repair the queue"},
+            {"role": "assistant", "content": "Decision: keep the lease bounded"},
+            {"role": "user", "content": "A very long investigation " * 20 + " unresolved: provider fallback"},
+            {"role": "assistant", "content": "newest response"},
+        ]
+
+        out, _dropped = compact_messages(msgs, budget_tokens=100000, keep_recent=1)
+        summary = "\n".join(str(message.get("content") or "") for message in out if message.get("role") == "system")
+
+        assert "Objective: repair the queue" in summary
+        assert "Decision: keep the lease bounded" in summary
+        assert "unresolved: provider fallback" in summary
 
     def test_never_splits_tool_call_from_result(self):
         # Tool window straddles the recent cutoff: without the cutoff push the

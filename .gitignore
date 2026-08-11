@@ -26,6 +26,46 @@ replay_pid*.log
 *.pfx
 .oauth_store.json
 .nexus/
+
+# Local NEXUS runtime state, checkpoints, and generated evidence
+.nexus_v5/
+.nexus_v5_meta_learning.json
+.cache/
+context_archive/
+*.lock.sqlite
+*.lock.sqlite3
+lifecycle/skill_lifecycle_state.json
+knowledge/store.json
+
+# Local test and agent scratch directories
+.tmp/
+.audit_pytest_*/
+.codex_*/
+.gateway_specialist_pytest_elevated/
+.pytest*/
+.release_pytest_*/
+.supervisor_pytest_tmp/
+event-summary-test-temp-*/
+memory-audit-pytest-*/
+release*-temp*/
+release_test_tmp*/
+run-evidence-test-temp/
+tmp*/
+
+# External research clones are references, not NEXUS source
+external/
+references/
+
+# Local diagnostic output
+FAILED
+response.txt
+subtasks-response.json
+hello_world.py
+tui/out.txt
+tui/warn.txt
+tui/_repro-app.tsx
+tui/repro-dup-key.mts
+tui/artifacts/
 .opencode/
 logs/
 workspace/

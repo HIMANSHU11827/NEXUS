@@ -49,7 +49,10 @@ class OpenCodeCLIProvider(NexusBaseProvider):
     @staticmethod
     def _clean_output(output: str) -> str:
         clean = _ANSI_RE.sub("", output or "").strip()
-        lines = [line for line in clean.splitlines() if not line.strip().startswith("> plan ·")]
+        # OpenCode has emitted both a correctly decoded middle dot and the
+        # historical mojibake form in its terminal footer. Match the stable
+        # footer prefix instead of depending on the separator encoding.
+        lines = [line for line in clean.splitlines() if not line.strip().startswith("> plan ")]
         return "\n".join(lines).strip()
 
     def generate(self, prompt: str = "", system_prompt: str = "",
@@ -57,27 +60,36 @@ class OpenCodeCLIProvider(NexusBaseProvider):
         if not self._cli_path:
             return "Error: OpenCode CLI is not installed."
         full_prompt = self._build_prompt(prompt, system_prompt, messages)
-        timeout = int(kwargs.get("timeout") or os.environ.get("NEXUS_OPENCODE_TIMEOUT", "180"))
+        timeout = self.request_timeout(
+            kwargs, float(os.environ.get("NEXUS_OPENCODE_TIMEOUT", "180"))
+        )
+        process = None
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 [self._cli_path, "run", "--agent", "plan", "--pure", full_prompt],
                 cwd=os.getcwd(),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout,
                 env=os.environ.copy(),
+                **self.process_group_kwargs(),
             )
-            output = self._clean_output(result.stdout)
-            if result.returncode != 0:
-                error = self._clean_output(result.stderr) or f"exit code {result.returncode}"
+            stdout, stderr = process.communicate(timeout=timeout)
+            output = self._clean_output(stdout)
+            if process.returncode != 0:
+                error = self._clean_output(stderr) or f"exit code {process.returncode}"
                 return f"Error: OpenCode CLI failed: {error}"
             return output or "Error: OpenCode CLI returned an empty response."
         except subprocess.TimeoutExpired:
-            return f"Error: OpenCode CLI timed out after {timeout}s."
+            self.terminate_process_tree(process)
+            return f"Error: OpenCode CLI timed out after {timeout:g}s."
         except Exception as exc:
             return f"Error: OpenCode CLI failed: {exc}"
+        finally:
+            if process is not None and process.poll() is None:
+                self.terminate_process_tree(process)
 
     def stream_generate(self, prompt: str = "", system_prompt: str = "",
                         messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:

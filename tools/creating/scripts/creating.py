@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 __version__ = "2.0.0"
+import asyncio
 import os
 
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
@@ -11,6 +12,10 @@ class CreatingTool(BaseTool):
     description = "Create a new file with content"
 
     async def execute(self, path: str, content: str = "", **kwargs) -> ToolResult:
+        """Create a file without blocking the event loop on filesystem I/O."""
+        return await asyncio.to_thread(self._execute_sync, path, content, **kwargs)
+
+    def _execute_sync(self, path: str, content: str = "", **kwargs) -> ToolResult:
         try:
             full = os.path.normpath(os.path.join(self.root_dir, path)) if self.root_dir and not os.path.isabs(path) else os.path.normpath(path)
             if self.root_dir and os.path.commonpath([os.path.abspath(self.root_dir), full]) != os.path.abspath(self.root_dir):

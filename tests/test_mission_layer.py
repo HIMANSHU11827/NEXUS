@@ -86,6 +86,106 @@ def test_reconcile_success_completes_milestone(tmp_path, mission_root):
     assert r.status == "active"
 
 
+def test_late_failure_cannot_reopen_completed_milestone(tmp_path, mission_root):
+    runner = make_runner(mission_root, tmp_path)
+    m = runner.create_mission("Build once", milestones=["Artifact"])
+    runner.advance()
+    milestone = runner.store.get(m.id).milestones[0]
+    task = {
+        "id": milestone.last_queued_task_id,
+        "payload": {
+            "meta": {
+                "mission": m.id,
+                "milestone": 0,
+                "revision": "r0",
+            }
+        },
+    }
+
+    completed = runner.reconcile(task, "success", detail="worker completed")
+    result = runner.reconcile(task, "failure", detail="late duplicate failure")
+
+    assert completed.status == "completed"
+    assert result.status == "completed"
+    assert result.milestones[0].status == "done"
+    assert result.milestones[0].replans == 0
+    assert result.milestones[0].last_error == ""
+
+
+def test_completion_verifier_rejects_queue_success_and_replans(tmp_path, mission_root):
+    calls = []
+
+    def verifier(context):
+        calls.append(context)
+        return {"verified": False, "reason": "artifact missing"}
+
+    q = __import__("queue.store", fromlist=["TaskQueue"]).TaskQueue(
+        db_path=str(tmp_path / "queue.db"), root=str(tmp_path)
+    )
+    runner = MissionRunner(
+        queue=q,
+        root=str(tmp_path),
+        store=MissionStore(root=mission_root),
+        completion_verifier=verifier,
+    )
+    m = runner.create_mission("Build verified artifact", milestones=["Artifact"])
+    runner.advance()
+    task = {"payload": {"meta": {"mission": m.id, "milestone": 0}}}
+
+    result = runner.reconcile(task, "success", detail="worker returned ok")
+
+    assert calls and calls[0]["summary"] == "worker returned ok"
+    assert result.milestones[0].status == "queued"
+    assert result.milestones[0].replans == 1
+    assert result.milestones[0].verification["verified"] is False
+    assert "artifact missing" in result.milestones[0].verification["reason"]
+
+
+def test_completion_verifier_accepts_only_explicit_true(tmp_path, mission_root):
+    q = __import__("queue.store", fromlist=["TaskQueue"]).TaskQueue(
+        db_path=str(tmp_path / "queue.db"), root=str(tmp_path)
+    )
+    runner = MissionRunner(
+        queue=q,
+        root=str(tmp_path),
+        store=MissionStore(root=mission_root),
+        completion_verifier=lambda context: {"verified": True, "reason": "tests pass"},
+    )
+    m = runner.create_mission("Build accepted artifact", milestones=["Artifact"])
+    runner.advance()
+    task = {"payload": {"meta": {"mission": m.id, "milestone": 0}}}
+
+    result = runner.reconcile(task, "success", detail="worker returned ok")
+
+    assert result.status == "completed"
+    assert result.milestones[0].status == "done"
+    assert result.milestones[0].verification["reason"] == "tests pass"
+
+
+def test_completion_verifier_exception_fails_closed(tmp_path, mission_root):
+    q = __import__("queue.store", fromlist=["TaskQueue"]).TaskQueue(
+        db_path=str(tmp_path / "queue.db"), root=str(tmp_path)
+    )
+
+    def verifier(context):
+        raise RuntimeError("validator unavailable")
+
+    runner = MissionRunner(
+        queue=q,
+        root=str(tmp_path),
+        store=MissionStore(root=mission_root),
+        completion_verifier=verifier,
+    )
+    m = runner.create_mission("Build safely", milestones=["Artifact"], max_replans=0)
+    runner.advance()
+    task = {"payload": {"meta": {"mission": m.id, "milestone": 0}}}
+
+    result = runner.reconcile(task, "success")
+
+    assert result.milestones[0].status == "blocked"
+    assert "validator unavailable" in result.milestones[0].verification["reason"]
+
+
 def test_reconcile_failure_replans_then_blocks(tmp_path, mission_root):
     runner = make_runner(mission_root, tmp_path)
     m = runner.create_mission("Build GTA5", milestones=["Engine"], max_replans=2)

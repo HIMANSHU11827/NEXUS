@@ -64,6 +64,34 @@ def test_paorr_never_simulates_missing_execution():
     assert "Completed" not in action.output
 
 
+def test_semantic_completion_evaluator_can_reject_aligned_but_wrong_result():
+    async def reject(_evidence):
+        return {"aligned": False, "reason": "completed the wrong objective"}
+
+    verifier = V5Verifier()
+    result = {
+        "success": True,
+        "response": "done",
+        "plan": {"steps": [{"description": "repair queue"}]},
+        "actions": [{"success": True, "output": "queue repaired"}],
+        "verification": {"success": True, "evidence_ok": True},
+    }
+    verified = asyncio.run(verifier._semantic_verify_result(result, "repair queue", reject))
+    assert verified["success"] is False
+    assert verified["error"] == "semantic_completion_verification_failed"
+    assert verified["semantic_verification"]["aligned"] is False
+
+
+def test_semantic_completion_evaluator_invalid_result_fails_closed():
+    verifier = V5Verifier()
+    result = {"success": True, "response": "done", "actions": []}
+    verified = asyncio.run(
+        verifier._semantic_verify_result(result, "goal", lambda _evidence: {"unknown": True})
+    )
+    assert verified["success"] is False
+    assert "invalid verdict" in verified["semantic_verification"]["reason"]
+
+
 def test_paorr_plan_emits_failed_terminal_status_after_action_failure():
     updates = []
 

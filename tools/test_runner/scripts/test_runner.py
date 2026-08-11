@@ -63,7 +63,7 @@ class TestRunnerTool(BaseTool):
             output = "".join(chunks).strip()
             exit_code = sandbox.last_exit_code
             return ToolResult(
-                success=(exit_code in (None, 0)) and "[SANDBOX_BLOCK]" not in output and "[SANDBOX_TIMEOUT]" not in output,
+                success=(exit_code == 0) and "[SANDBOX_BLOCK]" not in output and "[SANDBOX_TIMEOUT]" not in output,
                 output=output,
                 metadata={"exit_code": exit_code, "command": cmd, "workdir": str(root), "timeout": timeout},
             )

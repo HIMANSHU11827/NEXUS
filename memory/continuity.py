@@ -8,6 +8,8 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List
 
+from nexus.runtime import safe_session_id
+
 _UNFINISHED = {"running", "failed", "error", "cancelled", "canceled", "aborted"}
 _TERMINAL_CHECKPOINT_PHASES = {
     "complete", "completed", "done", "success", "succeeded", "finished",
@@ -70,17 +72,32 @@ def _safe_component(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", str(value or "").strip())[:120] or "default"
 
 
+def _session_aliases(value: str) -> set[str]:
+    """Return canonical and legacy directory names for one session ID."""
+    raw = str(value or "default")
+    return {safe_session_id(raw), _safe_component(raw)}
+
+
+def _timestamp(value: Any, default: float = 0.0) -> float:
+    """Parse durable timestamps without allowing one bad record to hide work."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _run_contexts(root: str, session_id: str) -> List[Dict[str, Any]]:
-    folder = os.path.join(root, "logs", "run_contexts", _safe_component(session_id))
     rows = []
-    if not os.path.isdir(folder):
-        return rows
-    for name in os.listdir(folder):
-        if name.endswith(".json"):
-            value = _load(os.path.join(folder, name))
-            if isinstance(value, dict):
-                rows.append(value)
-    return sorted(rows, key=lambda row: float(row.get("updated_at") or row.get("started_at") or 0), reverse=True)
+    for alias in _session_aliases(session_id):
+        folder = os.path.join(root, "logs", "run_contexts", alias)
+        if not os.path.isdir(folder):
+            continue
+        for name in os.listdir(folder):
+            if name.endswith(".json"):
+                value = _load(os.path.join(folder, name))
+                if isinstance(value, dict):
+                    rows.append(value)
+    return sorted(rows, key=lambda row: _timestamp(row.get("updated_at") or row.get("started_at")), reverse=True)
 
 
 def _latest_checkpoint(root: str, session_id: str) -> Dict[str, Any]:
@@ -93,13 +110,17 @@ def _latest_checkpoint(root: str, session_id: str) -> Dict[str, Any]:
             continue
         path = os.path.join(folder, name)
         value = _load(path)
-        if isinstance(value, dict) and _safe_component(str(value.get("session") or "")) == _safe_component(session_id):
-            candidates.append((float(value.get("ts") or os.path.getmtime(path)), path, value))
+        if isinstance(value, dict) and (
+            _session_aliases(str(value.get("session") or ""))
+            & _session_aliases(session_id)
+        ):
+            phase = str(value.get("phase") or "").strip().lower()
+            if phase in _TERMINAL_CHECKPOINT_PHASES:
+                continue
+            candidates.append((_timestamp(value.get("ts"), os.path.getmtime(path)), path, value))
     if not candidates:
         return {}
     _, path, value = max(candidates, key=lambda row: row[0])
-    if str(value.get("phase") or "").strip().lower() in _TERMINAL_CHECKPOINT_PHASES:
-        return {}
     result = dict(value)
     result["file"] = path
     return result
@@ -121,19 +142,20 @@ def _todo(root: str) -> Dict[str, str]:
 def inspect_continuity(root: str, session_id: str = "default", queue: Any = None) -> ContinuitySnapshot:
     """Return only unfinished work backed by a durable record."""
     root = os.path.abspath(root)
-    session_id = str(session_id or "default")
-    runs = _run_contexts(root, session_id)
+    requested_session_id = str(session_id or "default")
+    session_id = safe_session_id(requested_session_id)
+    runs = _run_contexts(root, requested_session_id)
     if runs:
         # Only the newest run is authoritative. An old failure must not
         # resurrect itself after a newer successful conversation turn.
         run = runs[0]
         status = _text(run.get("status")).lower()
         if status in _UNFINISHED:
-            checkpoint = _latest_checkpoint(root, session_id)
+            checkpoint = _latest_checkpoint(root, requested_session_id)
             return ContinuitySnapshot(True, session_id, _text(run.get("prompt_preview"), 500), status,
                                       _text(run.get("error")), _text(run.get("run_id")), "run_context",
                                       _text(checkpoint.get("file")), "", "logs/run_contexts")
-    checkpoint = _latest_checkpoint(root, session_id)
+    checkpoint = _latest_checkpoint(root, requested_session_id)
     if checkpoint:
         task = _text(checkpoint.get("context_summary") or checkpoint.get("plan"), 500)
         if task:

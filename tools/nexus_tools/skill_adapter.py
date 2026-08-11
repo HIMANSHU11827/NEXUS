@@ -20,7 +20,7 @@ import re
 from typing import Any, Dict, Optional
 
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
-from tools.nexus_tools.result import STATUS_OK, ToolCallResult
+from tools.nexus_tools.result import STATUS_ERROR, STATUS_OK, ToolCallResult, classify_error
 
 logger = logging.getLogger(__name__)
 
@@ -205,9 +205,10 @@ class SkillExecutor(BaseTool):
         except Exception as exc:
             return ToolCallResult(
                 name=self.name,
-                status=STATUS_OK,
-                output=f"[SKILL: {self.name}]\n{self.skill_prompt}",
-                metadata={"error": str(exc)},
+                status=STATUS_ERROR,
+                error=str(exc) or type(exc).__name__,
+                error_info=classify_error(exc),
+                metadata={"skill_name": self.name, "execution_failed": True},
             )
 
     def is_read_only(self, params=None) -> bool:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 __version__ = "2.0.0"
+import asyncio
 import logging
 import os
 import re
@@ -17,6 +18,12 @@ class CodeSearchTool(BaseTool):
     description = "Search code with glob, regex, and structure analysis"
 
     async def execute(self, pattern: str, path: str = ".", include: Optional[str] = None, mode: str = "grep", **kwargs) -> ToolResult:
+        """Run the bounded filesystem scan without blocking the event loop."""
+        return await asyncio.to_thread(
+            self._execute_sync, pattern, path, include, mode, **kwargs
+        )
+
+    def _execute_sync(self, pattern: str, path: str = ".", include: Optional[str] = None, mode: str = "grep", **kwargs) -> ToolResult:
         try:
             root = Path(self.root_dir).resolve() if self.root_dir else Path.cwd().resolve()
             search_path = (root / path).resolve()

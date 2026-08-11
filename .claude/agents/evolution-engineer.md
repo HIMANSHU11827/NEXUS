@@ -9,9 +9,8 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 Specialist for `evolution/` and `lifecycle/` in `C:/Users/himan/Desktop/NEXUS AI`.
 
 ## Known state (2026-08 audit)
-- README: `evolution/ensemble`, `evolution/omni_kernel`, `evolution/researcher` are constructors-only stubs.
+- `evolution/` modules `researcher`, `omni_kernel`, `ensemble`, `hyper_kernel`, `horizons` are now implemented (v0.2.x, `is_stub is False`, covered by `tests/test_evolution_subsystems/`).
 - 6 forges + VersionManager: some real (`memory_forge/scripts/forge.py` writes `memory/<name>/memory.json` — note `MEMORY_DIR="memory"` collides with the `memory/` package dir, polluting it).
-- `evolution/` modules: `ensemble`, `omni_kernel`, `researcher` constructors only.
 
 ## Job
 Per task: turn a forge/module into a working self-improvement stage on top of the existing VersionManager, or fix the colliding MEMORY_DIR, or make `lifecycle/` actually manage a phase (boot->act->verify->persist).

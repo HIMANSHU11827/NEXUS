@@ -86,7 +86,7 @@ class AzureOpenAIProvider(NexusBaseProvider):
             payload["max_tokens"] = kwargs["max_tokens"]
         self._add_tool_payload(payload, kwargs)
         try:
-            response = self.session.post(target_url, json=payload, headers=self.headers, timeout=30)
+            response = self.session.post(target_url, json=payload, headers=self.headers, timeout=self.request_timeout(kwargs, 30))
             if response.status_code == 200:
                 data = response.json()
                 message = data["choices"][0].get("message", {})
@@ -101,6 +101,7 @@ class AzureOpenAIProvider(NexusBaseProvider):
             return f"Error: Failed to reach Azure. {str(e)}"
 
     def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
+        response = None
         if not self.validate_api_key():
             raise RuntimeError("azure_openai: missing or invalid API key")
         target_url = self._build_url()
@@ -110,7 +111,7 @@ class AzureOpenAIProvider(NexusBaseProvider):
             payload["max_tokens"] = kwargs["max_tokens"]
         self._add_tool_payload(payload, kwargs)
         try:
-            response = self.session.post(target_url, json=payload, headers=self.headers, stream=True, timeout=30)
+            response = self.session.post(target_url, json=payload, headers=self.headers, stream=True, timeout=self.request_timeout(kwargs, 30))
             if response.status_code == 200:
                 streamed_tool_calls = {}
                 for line in response.iter_lines(chunk_size=1):
@@ -141,3 +142,9 @@ class AzureOpenAIProvider(NexusBaseProvider):
                 yield f"Error: {response.status_code}"
         except Exception as e:
             yield f"Error: {e}"
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    logger.debug("Azure OpenAI stream response cleanup failed", exc_info=True)

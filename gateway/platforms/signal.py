@@ -47,9 +47,9 @@ class SignalAdapter(BasePlatformAdapter):
             return False
 
     async def disconnect(self):
-        if self._poll_task:
-            self._poll_task.cancel()
-            self._poll_task = None
+        poll_task = self._poll_task
+        self._poll_task = None
+        await self._cancel_task(poll_task)
         if self._client:
             await self._client.aclose()
             self._client = None

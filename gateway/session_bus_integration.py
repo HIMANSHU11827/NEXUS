@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from gateway.session_ids import gateway_session_id
+from nexus.runtime import safe_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class GatewaySessionManager:
         return key
 
     def get_session(self, session_id: str) -> Optional[dict]:
+        session_id = safe_session_id(session_id)
         if session_id in self._cache:
             return self._cache[session_id]
         path = self._sessions_dir / f"{session_id}.json"
@@ -56,12 +58,14 @@ class GatewaySessionManager:
         return list(self._cache.keys())
 
     def disconnect_session(self, session_id: str):
+        session_id = safe_session_id(session_id)
         self._cache.pop(session_id, None)
         path = self._sessions_dir / f"{session_id}.json"
         if path.exists():
             path.unlink()
 
     def get_session_paths(self, session_id: str) -> dict:
+        session_id = safe_session_id(session_id)
         return {
             "memory": str(self._sessions_dir / f"{session_id}.json"),
             "work_events": str(self._sessions_dir / f"{session_id}_events.json"),

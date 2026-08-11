@@ -1,7 +1,9 @@
 import logging
 import os
+import inspect
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from providers.reliability import (
     CircuitBreakerRegistry,
@@ -16,6 +18,7 @@ from providers.reliability import (
     redact_secrets,
 )
 from providers.model_capabilities import ModelCapabilityRegistry
+from providers.attempts import ProviderAttemptRecorder
 
 logger = logging.getLogger("NEXUS_ROUTER")
 
@@ -39,7 +42,9 @@ class ModelRouter:
         self.factory = NexusProviderFactory()
         self.provider = self.factory.get_provider()
         from providers.health import ProviderHealthRegistry
-        self.health = ProviderHealthRegistry()
+        health_root = getattr(self.kernel, "root", None) or getattr(self.kernel, "root_dir", None)
+        health_path = os.path.join(str(health_root), ".nexus", "provider_health.sqlite3") if health_root else None
+        self.health = ProviderHealthRegistry(store_path=health_path)
         from providers.health import ProviderCapabilityRegistry
         self.capabilities = ProviderCapabilityRegistry()
 
@@ -55,6 +60,7 @@ class ModelRouter:
         self._breakers = CircuitBreakerRegistry.from_config(reliability_cfg.get("circuit_breaker"))
         self._model_capabilities = ModelCapabilityRegistry.from_loader(getattr(self.factory, "loader", None))
         self.last_failure: Optional[Classification] = None
+        self.attempts = ProviderAttemptRecorder()
 
         from cognition.intent_engine import IntentEngine
         self.intent_engine = IntentEngine(self)
@@ -129,8 +135,19 @@ class ModelRouter:
         
         # Use the IntentEngine for high-fidelity classification
         from cognition.intent_engine import NexusIntent
-        intent = self.intent_engine.classify(last_input)
-        
+        classified = self.intent_engine.classify(last_input)
+        # IntentEngine historically returned a mapping; accept enum/string
+        # values too so partial restores and custom engines remain compatible.
+        if isinstance(classified, dict):
+            intent = classified.get("intent", NexusIntent.CHAT.value)
+        else:
+            intent = classified
+        if isinstance(intent, str):
+            try:
+                intent = NexusIntent(intent.lower())
+            except ValueError:
+                intent = NexusIntent.CHAT
+
         if intent in [NexusIntent.MISSION, NexusIntent.VISION]:
             return "EXTREME"
         if intent in [NexusIntent.DIAGNOSTIC, NexusIntent.COGNITION]:
@@ -182,7 +199,11 @@ class ModelRouter:
 
         use_heavy = self._should_use_heavy_brain(messages)
         
-        if not use_heavy and self._local_brain_enabled():
+        # An explicit provider/model selection is authoritative. The local
+        # brain is an automatic optimization only; allowing it to run first
+        # silently reroutes cloud requests (for example DeepSeek) to LM Studio
+        # and makes the selected provider appear unavailable.
+        if not requested_provider and not use_heavy and self._local_brain_enabled():
             try:
                 self.total_local_calls += 1
                 # [SOVEREIGN_FIX]: Preserve system context for local brain
@@ -207,11 +228,34 @@ class ModelRouter:
             try:
                 self.total_cloud_calls += 1
                 return self._invoke(request_provider, provider_id, messages, **kwargs)
-            except Exception as e:
+            except Exception as primary_error:
+                error = primary_error
+                classification = (
+                    primary_error.classification
+                    if isinstance(primary_error, ProviderCallError)
+                    else classify_failure(primary_error)
+                )
+                # A pre-request context failure is safe to retry once with a
+                # call/result-safe compacted transcript. This prevents the
+                # fallback mesh from repeating the same oversized request.
+                if classification.failure_class is FailureClass.CONTEXT_OVERFLOW:
+                    compacted = self._compact_after_context_overflow(
+                        messages, request_provider, kwargs
+                    )
+                    if compacted != messages:
+                        try:
+                            return self._invoke(request_provider, provider_id, compacted, **kwargs)
+                        except Exception as compact_error:
+                            error = compact_error
                 logger.warning(
                     "Primary brain (%s) failed: %s",
-                    type(self.provider).__name__, redact_secrets(e),
+                    type(self.provider).__name__, redact_secrets(error),
                 )
+                # An explicit provider selection is authoritative. Falling
+                # through to an unrelated local provider hides the real
+                # credential/configuration problem from the user.
+                if requested_provider:
+                    raise error
                 return self._generate_with_fallbacks(messages, fallback_mesh, **kwargs)
 
         return self._generate_with_fallbacks(messages, fallback_mesh, **kwargs)
@@ -227,6 +271,25 @@ class ModelRouter:
             or getattr(provider, "provider_name", "")
             or type(provider).__name__
         )
+
+    @staticmethod
+    def _provider_credentials_usable(provider: Any, provider_id: str = "") -> bool:
+        """Allow keyless loopback providers while keeping remote auth fail-closed."""
+        endpoint = str(getattr(provider, "endpoint", "") or "")
+        try:
+            hostname = urlparse(endpoint).hostname
+        except ValueError:
+            hostname = None
+        local = hostname in {"localhost", "127.0.0.1", "::1"} or str(provider_id).lower() in {"ollama", "lm_studio", "lm-studio"}
+        if local:
+            return True
+        validator = getattr(provider, "validate_api_key", None)
+        if not callable(validator):
+            return True
+        try:
+            return bool(validator())
+        except Exception:
+            return False
 
     @staticmethod
     def _pop_routing_prefs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -262,21 +325,154 @@ class ModelRouter:
             logger.info("model '%s' has no tool support; tools stripped from request", model)
         return adjusted
 
+    @staticmethod
+    def _supported_provider_kwargs(provider: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Filter kwargs before reliability wraps Python argument errors.
+
+        ``call_with_reliability`` converts adapter exceptions into
+        ``ProviderCallError``, so an outer ``except TypeError`` cannot recover
+        from an unsupported keyword. Adapters declaring ``**kwargs`` are left
+        untouched; uninspectable third-party callables use the normal failure
+        path.
+        """
+        try:
+            signature = inspect.signature(provider.generate)
+        except (TypeError, ValueError):
+            return dict(kwargs)
+        parameters = signature.parameters.values()
+        if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+            return dict(kwargs)
+        accepted = {
+            parameter.name
+            for parameter in parameters
+            if parameter.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        }
+        return {key: value for key, value in kwargs.items() if key in accepted}
+
+    @staticmethod
+    def _release_profile_lease(provider: Any) -> None:
+        """Release a factory-acquired profile lease after a request attempt.
+
+        Providers are often cached by the factory/router, so relying on object
+        destruction would retain an exclusive profile claim long after the
+        request finished.  Clear the attached token even when release itself
+        fails, allowing the next request to resolve a fresh lease safely.
+        """
+        lease = getattr(provider, "_profile_lease", None)
+        store = getattr(provider, "_profile_store", None)
+        if lease is None or store is None:
+            return
+        try:
+            store.release_lease(lease)
+        except Exception:
+            logger.debug("provider profile lease release failed", exc_info=True)
+        finally:
+            try:
+                delattr(provider, "_profile_lease")
+            except AttributeError:
+                pass
+            try:
+                delattr(provider, "_profile_store")
+            except AttributeError:
+                pass
+
+    @staticmethod
+    def _renew_profile_lease(provider: Any, *, renew_before_seconds: float = 30.0) -> bool:
+        """Keep an attached profile lease alive while a stream is producing.
+
+        Profile leases are intentionally expiring for crash recovery.  A long
+        response must nevertheless renew its ownership before expiry, or a
+        second worker can claim the same credential while the first request is
+        still using it.  Providers without a real lease (including test/local
+        adapters) remain unaffected.
+        """
+        lease = getattr(provider, "_profile_lease", None)
+        store = getattr(provider, "_profile_store", None)
+        renew = getattr(store, "renew_lease", None)
+        if lease is None or store is None or not callable(renew):
+            return True
+        try:
+            expires_at = float(getattr(lease, "expires_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            expires_at = 0.0
+        if expires_at and expires_at - time.time() > float(renew_before_seconds):
+            return True
+        try:
+            renewed = renew(lease, ttl_seconds=60.0)
+        except Exception:
+            logger.warning("provider profile lease renewal failed", exc_info=True)
+            return False
+        if renewed is None:
+            logger.warning("provider profile lease was lost during streaming")
+            return False
+        try:
+            provider._profile_lease = renewed
+        except Exception:
+            logger.debug("provider profile lease token could not be updated", exc_info=True)
+            return False
+        return True
+
+    def _leased_stream(self, provider: Any, iterator: Any):
+        """Forward a provider iterator while releasing its lease on close.
+
+        ``stream_generate`` is a generator API, so callers may stop after a
+        partial response and close it without reaching the router's normal
+        terminal branch.  The ``finally`` here covers completion, provider
+        exceptions, and explicit generator finalization.
+        """
+        try:
+            for chunk in iterator:
+                if not self._renew_profile_lease(provider):
+                    raise RuntimeError("provider profile lease lost during streaming")
+                yield chunk
+        finally:
+            self._release_profile_lease(provider)
+
     def _invoke(self, provider: Any, provider_id: str, messages: List[Dict[str, str]],
                 streaming: bool = False, **kwargs) -> str:
         """Single provider call guarded by retry/backoff + circuit breaker."""
-        if hasattr(provider, "validate_api_key") and not provider.validate_api_key():
+        attempt_started = time.time()
+        self.attempts.record(
+            provider_id,
+            credential_id=getattr(provider, "_credential_id", ""),
+            profile=kwargs.get("profile", ""),
+            model=kwargs.get("model") or getattr(provider, "model", ""),
+            status="started",
+        )
+        if not self._provider_credentials_usable(provider, provider_id):
             classification = classify_failure(body="missing or invalid api key")
             self.last_failure = classification
             self.health.mark_failure(provider_id, classification.failure_class.value)
+            self.attempts.record(provider_id, credential_id=getattr(provider, "_credential_id", ""), status="failed", classification=classification,
+                                 reason=classification.message,
+                                 duration_ms=(time.time() - attempt_started) * 1000)
+            # Credential validation happens before the retry wrapper, so this
+            # early terminal path must release a factory-acquired profile lease
+            # explicitly rather than waiting for its TTL to expire.
+            self._release_profile_lease(provider)
             raise ProviderCallError(classification, provider_id)
 
-        call_kwargs = self._apply_model_limits(provider, kwargs)
+        call_kwargs = self._supported_provider_kwargs(
+            provider, self._apply_model_limits(provider, kwargs)
+        )
         start = time.time()
 
         def _on_failure(classification: Classification, attempt: int) -> None:
             self.last_failure = classification
             self.health.mark_failure(provider_id, classification.failure_class.value)
+            self.attempts.record(
+                provider_id,
+                credential_id=getattr(provider, "_credential_id", ""),
+                profile=kwargs.get("profile", ""),
+                model=kwargs.get("model") or getattr(provider, "model", ""),
+                attempt=attempt,
+                status="failed",
+                classification=classification,
+                reason=classification.message,
+            )
 
         try:
             result = call_with_reliability(
@@ -300,7 +496,17 @@ class ModelRouter:
                 on_attempt_failure=_on_failure,
                 **kwargs,
             )
+        finally:
+            self._release_profile_lease(provider)
         self.health.mark_success(provider_id, (time.time() - start) * 1000)
+        self.attempts.record(
+            provider_id,
+            credential_id=getattr(provider, "_credential_id", ""),
+            profile=kwargs.get("profile", ""),
+            model=kwargs.get("model") or getattr(provider, "model", ""),
+            status="success",
+            duration_ms=(time.time() - attempt_started) * 1000,
+        )
         return result
 
     def _fallback_mesh(self, messages: Optional[List[Dict[str, str]]] = None, *, streaming: bool = False, active_provider: Any = None, prefs: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -369,6 +575,37 @@ class ModelRouter:
         lowered = result.strip().lower()
         return lowered.startswith("error:") or lowered.startswith("error in ") or lowered.startswith("[provider_error]")
 
+    @staticmethod
+    def _compact_after_context_overflow(
+        messages: List[Dict[str, str]], provider: Any, kwargs: Dict[str, Any]
+    ) -> List[Dict[str, str]]:
+        """Compact one overflow retry without splitting tool call/result pairs."""
+        try:
+            from context import compact_messages, inspect
+
+            current_tokens = int(inspect(messages).get("est_tokens", 0) or 0)
+            advertised = (
+                getattr(provider, "max_context", 0)
+                or getattr(provider, "context_window", 0)
+                or getattr(provider, "max_context_tokens", 0)
+            )
+            output_tokens = int(kwargs.get("max_tokens", 0) or 0)
+            if advertised:
+                target = int(advertised) - max(0, output_tokens)
+            else:
+                # An overflow response without metadata still gets a bounded
+                # reduction; avoid an unbounded retry or a same-size replay.
+                target = int(current_tokens * 0.70)
+            target = max(256, target)
+            compacted, dropped = compact_messages(
+                messages, budget_tokens=target, keep_recent=4
+            )
+            if dropped and inspect(compacted).get("est_tokens", 0) < current_tokens:
+                return compacted
+        except Exception:
+            logger.debug("context-overflow compaction retry unavailable", exc_info=True)
+        return messages
+
     def _generate_with_fallbacks(self, messages: List[Dict[str, str]], fallback_mesh: List[str], **kwargs) -> str:
         last_error = "No responsive brain found in mesh."
         for fallback_id in fallback_mesh:
@@ -377,6 +614,7 @@ class ModelRouter:
                 continue
             try:
                 logger.info("🔄 [MESH_RECOVERY]: Attempting fallback to %s...", fallback_id)
+                self.attempts.record(fallback_id, status="fallback", reason="mesh recovery")
                 fallback_provider = self.factory.get_provider_by_id(fallback_id)
                 if not fallback_provider:
                     continue
@@ -397,6 +635,11 @@ class ModelRouter:
                 self.health.mark_failure(fallback_id, classification.failure_class.value)
                 last_error = redact_secrets(classification.message) or classification.failure_class.value
         return f"Error: {last_error}"
+
+    def provider_attempts(self) -> List[Dict[str, Any]]:
+        """Return bounded, redacted provider-attempt diagnostics."""
+        recorder = getattr(self, "attempts", None)
+        return recorder.snapshot() if recorder is not None else []
 
     def breaker_status(self) -> Dict[str, Any]:
         """Circuit breaker snapshot for diagnostics/telemetry."""
@@ -426,71 +669,124 @@ class ModelRouter:
 
         if request_provider:
             self.total_cloud_calls += 1
-            emitted_any = False
             primary_id = self._provider_id(request_provider)
             breaker = self.breakers.get(primary_id)
-            try:
-                start = time.time()
-                breaker.before_call()
-                if hasattr(request_provider, "validate_api_key") and not request_provider.validate_api_key():
-                    raise RuntimeError("provider rejected credentials: missing or invalid api key")
-                stream_kwargs = self._apply_model_limits(request_provider, kwargs)
-                if hasattr(request_provider, "stream_generate"):
-                    for chunk in request_provider.stream_generate(messages=messages, **stream_kwargs):
-                        if self._looks_like_provider_error(chunk):
-                            raise RuntimeError(str(chunk))
+            stream_kwargs = self._apply_model_limits(request_provider, kwargs)
+            retry_policy = getattr(self, "retry_policy", RetryPolicy(max_attempts=1))
+            max_attempts = max(1, int(getattr(retry_policy, "max_attempts", 1)))
+            emitted_any = False
+            last_error = "provider stream failed"
+            stream_messages = messages
+            overflow_compacted = False
+            # Permit one additional attempt only when the first overflow was
+            # actually compacted; normal retry budgets remain unchanged.
+            for attempt in range(1, max_attempts + 2):
+                if attempt > max_attempts and not overflow_compacted:
+                    break
+                emitted_any = False
+                try:
+                    start = time.time()
+                    breaker.before_call()
+                    if not self._provider_credentials_usable(request_provider, primary_id):
+                        raise RuntimeError("provider rejected credentials: missing or invalid api key")
+                    if hasattr(request_provider, "stream_generate"):
+                        for chunk in self._leased_stream(
+                            request_provider,
+                            request_provider.stream_generate(messages=stream_messages, **stream_kwargs),
+                        ):
+                            if self._looks_like_provider_error(chunk):
+                                raise RuntimeError(str(chunk))
+                            emitted_any = True
+                            yield chunk
+                    else:
+                        result = request_provider.generate(messages=stream_messages, **stream_kwargs)
+                        if self._looks_like_provider_error(result):
+                            raise RuntimeError(str(result))
                         emitted_any = True
-                        yield chunk
-                else:
-                    result = request_provider.generate(messages=messages, **stream_kwargs)
-                    if self._looks_like_provider_error(result):
-                        raise RuntimeError(str(result))
-                    emitted_any = True
-                    yield result
-                breaker.record_success()
-                self.health.mark_success(primary_id, (time.time() - start) * 1000)
-            except Exception as e:
-                provider_id = primary_id
-                classification = (
-                    e.classification if isinstance(e, ProviderCallError) else classify_failure(e)
-                )
-                if not isinstance(e, CircuitOpenError):
-                    breaker.record_failure()
-                self.last_failure = classification
-                self.health.mark_failure(provider_id, classification.failure_class.value)
-                last_error = redact_secrets(classification.message) or classification.failure_class.value
-                # Once bytes from a provider have reached the caller, switching
-                # providers would splice two unrelated answers into one stream.
-                if emitted_any:
-                    yield f"[PROVIDER_ERROR]: {last_error}"
+                        yield result
+                    breaker.record_success()
+                    self.health.mark_success(primary_id, (time.time() - start) * 1000)
+                    self._release_profile_lease(request_provider)
                     return
-                for fallback_id in self._fallback_mesh(messages=messages, streaming=True, active_provider=request_provider, prefs=routing_prefs):
+                except Exception as e:
+                    provider_id = primary_id
+                    classification = (
+                        e.classification if isinstance(e, ProviderCallError) else classify_failure(e)
+                    )
+                    if not isinstance(e, CircuitOpenError):
+                        breaker.record_failure()
+                    self.last_failure = classification
+                    self.health.mark_failure(provider_id, classification.failure_class.value)
+                    last_error = redact_secrets(classification.message) or classification.failure_class.value
+                    # Once bytes from a provider have reached the caller,
+                    # switching providers would splice two unrelated answers
+                    # into one stream. Explicit provider selection is also
+                    # authoritative and must not silently reroute.
+                    if emitted_any or requested_provider:
+                        self._release_profile_lease(request_provider)
+                        yield f"[PROVIDER_ERROR]: {last_error}"
+                        return
+                    if classification.failure_class is FailureClass.CONTEXT_OVERFLOW and not overflow_compacted:
+                        compacted = self._compact_after_context_overflow(
+                            stream_messages, request_provider, kwargs
+                        )
+                        if compacted != stream_messages:
+                            stream_messages = compacted
+                            overflow_compacted = True
+                            continue
+                    if isinstance(e, CircuitOpenError) or not classification.retryable or attempt >= max_attempts:
+                        break
+                    delay = retry_policy.compute_delay(attempt, classification.retry_after)
+                    if delay > 0:
+                        time.sleep(delay)
+
+            # No primary output was emitted and the bounded retry policy is
+            # exhausted. Continue into the existing provider fallback mesh.
+            self._release_profile_lease(request_provider)
+            if not requested_provider:
+                for fallback_id in self._fallback_mesh(messages=stream_messages, streaming=True, active_provider=request_provider, prefs=routing_prefs):
                     fallback_emitted = False
                     fb_breaker = self.breakers.get(fallback_id)
                     if not fb_breaker.allows():
                         continue
+                    fallback_provider = None
                     try:
                         fb_breaker.before_call()
                         fallback_provider = self.factory.get_provider_by_id(fallback_id)
-                        if fallback_provider and fallback_provider.validate_api_key():
+                        if fallback_provider and not self._provider_credentials_usable(
+                            fallback_provider, fallback_id
+                        ):
+                            # Factory resolution may acquire an exclusive
+                            # profile lease before credentials are validated.
+                            # Skipping this provider must release that lease;
+                            # otherwise every failed stream fallback can pin a
+                            # credential until its TTL expires.
+                            self._release_profile_lease(fallback_provider)
+                            continue
+                        if fallback_provider:
                             start = time.time()
                             fb_kwargs = self._apply_model_limits(fallback_provider, kwargs)
                             if hasattr(fallback_provider, "stream_generate"):
-                                for chunk in fallback_provider.stream_generate(messages=messages, **fb_kwargs):
+                                for chunk in self._leased_stream(
+                                    fallback_provider,
+                                    fallback_provider.stream_generate(messages=stream_messages, **fb_kwargs),
+                                ):
                                     if self._looks_like_provider_error(chunk):
                                         raise RuntimeError(str(chunk))
                                     fallback_emitted = True
                                     yield chunk
                             else:
-                                result = fallback_provider.generate(messages=messages, **fb_kwargs)
+                                result = fallback_provider.generate(messages=stream_messages, **fb_kwargs)
                                 if self._looks_like_provider_error(result):
                                     raise RuntimeError(str(result))
                                 fallback_emitted = True
                                 yield result
                             fb_breaker.record_success()
                             self.health.mark_success(fallback_id, (time.time() - start) * 1000)
+                            self._release_profile_lease(fallback_provider)
                             return
                     except Exception as fallback_error:
+                        self._release_profile_lease(fallback_provider)
                         fb_classification = (
                             fallback_error.classification
                             if isinstance(fallback_error, ProviderCallError)

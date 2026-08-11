@@ -75,6 +75,7 @@ class UniversalProvider(NexusBaseProvider):
             return f"Error: Failed to reach Universal Endpoint {self.endpoint}. {str(e)}"
 
     def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
+        response = None
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {
             "model": self.model,
@@ -84,7 +85,7 @@ class UniversalProvider(NexusBaseProvider):
         }
         try:
             self.headers["Authorization"] = f"Bearer {self.api_key}"
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=120)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=self.request_timeout(kwargs, 120))
 
             if response.status_code == 200:
                 streamed_tool_calls = {}
@@ -115,3 +116,9 @@ class UniversalProvider(NexusBaseProvider):
                 yield f"Error: {response.status_code}. {response.text}"
         except Exception as e:
             yield f"Error in Universal stream: {str(e)}"
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    logger.debug("Universal stream response cleanup failed", exc_info=True)

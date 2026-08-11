@@ -14,11 +14,13 @@ import shutil
 import socket
 import sqlite3
 import threading
+import tempfile
 import time
 import uuid
 import urllib.parse
 from contextlib import asynccontextmanager, contextmanager
 from collections import deque
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -32,15 +34,18 @@ load_dotenv(os.path.join(_ENV_PROJECT_ROOT, ".env"), override=False)
 load_dotenv(os.path.join(_ENV_PROJECT_ROOT, "config", ".env"), override=False)
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 
 from nexus.events import CanonicalEvent
 from nexus.run_context import list_run_contexts, load_run_context
+from nexus.session_store import atomic_write_json, session_write_lock
 from nexus.work_items import (
     list_work_items,
     load_work_item,
     project_work_item_event,
+    record_work_item_projection_failure,
     replay_work_item_event_log,
+    pending_work_item_projection_failures,
 )
 from nexus.control_plane import project_plan_event
 from nexus.runtime import (
@@ -51,6 +56,7 @@ from nexus.runtime import (
 )
 from nexus.task_workflow import complete_task_workflow, start_task_workflow
 from orchestrators import NexusLoop
+from providers.reliability import redact_secrets
 
 try:
     import yaml
@@ -101,6 +107,12 @@ _CHAT_CHUNK_QUEUE_SIZE = max(16, int(os.environ.get("NEXUS_CHAT_CHUNK_QUEUE_SIZE
 _CHAT_HEARTBEAT_SECONDS = max(5.0, float(os.environ.get("NEXUS_CHAT_HEARTBEAT_SECONDS", "15")))
 
 
+def _public_api_failure(operation: str, exc: Exception) -> str:
+    """Record a redacted diagnostic and return a stable client-safe message."""
+    logger.warning("%s failed: %s", operation, redact_secrets(exc))
+    return f"{operation} unavailable"
+
+
 @contextmanager
 def _interprocess_event_lock(path: str):
     """Lock one session's event stream across server worker processes."""
@@ -119,15 +131,18 @@ def _interprocess_event_lock(path: str):
             connection.close()
 _THREAD_LOCAL = threading.local()
 _TASKS_PATH = os.path.join(_ROOT, "logs", "tasks.json")
-_CONFIG_PATH = os.path.join(_PROJECT_ROOT, "config", "nexus_config.yaml")
+_TASKS_PERSIST_LOCK = threading.RLock()
+_CONFIG_PATH = os.path.join(_PROJECT_ROOT, "config", "settings.yml")
+_CONFIG_MUTATION_LOCK = threading.RLock()
 _MCP_SERVERS_PATH = os.path.join(_PROJECT_ROOT, "config", "mcp_servers.json")
 _CLAUDE_SETTINGS_PATH = os.path.join(_PROJECT_ROOT, ".claude", "settings.json")
+_CLAUDE_SETTINGS_LOCK = threading.RLock()
 _RUNTIME_SETTINGS = {
     "model": "",
     "provider": "",
     "profile": "",
     "mode": "auto",
-    "sandbox_tier": "no_sandbox",
+    "sandbox_tier": "normal",
     "permission_allowlist": [],
     "agent": "",
     "goal": "",
@@ -201,6 +216,16 @@ def _load_hive_manifest() -> None:
 _load_hive_manifest()
 
 
+def _nonnegative_env_int(name: str, default: int = 0) -> int:
+    """Parse an optional bounded integer without making startup fragile."""
+    raw = os.getenv(name, str(default))
+    try:
+        return max(0, int(raw or default))
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid integer environment setting %s=%r", name, raw)
+        return max(0, int(default))
+
+
 def _get_hive_engine():
     """Return the process-wide Hive engine used by API-created Hives."""
     global _HIVE_ENGINE
@@ -213,6 +238,7 @@ def _get_hive_engine():
         engine = NexusHiveEngine(
             _PROJECT_ROOT,
             tool_registry=ToolRegistry(_PROJECT_ROOT),
+            max_total_steps=_nonnegative_env_int("NEXUS_HIVE_MAX_TOTAL_STEPS"),
         )
 
         def sink(event):
@@ -223,6 +249,36 @@ def _get_hive_engine():
                 _append_work_event("default", event)
             except Exception:
                 logger.debug("Could not persist Hive work event", exc_info=True)
+            # Keep the durable Hive index aligned with the event stream.  The
+            # index is intentionally only a compact projection; the event log
+            # remains the source of truth for detailed transcripts.
+            hive_id = str(event.get("hive_id") or "")
+            agent_id = str(event.get("related_subagent") or "")
+            if hive_id or agent_id:
+                changed = False
+                with _HIVES_LOCK:
+                    for current_id, summary in _HIVES.items():
+                        if hive_id and current_id != hive_id:
+                            continue
+                        for agent in summary.get("agents", []):
+                            if agent_id and str(agent.get("id") or "") != agent_id:
+                                continue
+                            status = str(event.get("status") or "").lower()
+                            if status:
+                                agent["status"] = status
+                                changed = True
+                        statuses = {str(a.get("status") or "").lower() for a in summary.get("agents", [])}
+                        if statuses and statuses.issubset({"success", "failed", "cancelled", "canceled", "error"}):
+                            summary["status"] = "success" if statuses == {"success"} else (
+                                "cancelled" if statuses.issubset({"cancelled", "canceled"}) else "failed"
+                            )
+                            summary["completed_at"] = time.time()
+                            changed = True
+                if changed:
+                    try:
+                        _persist_hive_manifest()
+                    except Exception:
+                        logger.debug("Could not persist Hive event projection", exc_info=True)
 
         engine.set_sink(sink)
         _HIVE_ENGINE = engine
@@ -231,6 +287,118 @@ def _get_hive_engine():
 # ── Cron/Scheduler runtime state ───────────────────────────────────────────────
 _CRON_JOBS: Dict[str, Dict[str, Any]] = {}
 _CRON_JOBS_LOCK = threading.Lock()
+_CRON_QUEUE = None
+_CRON_TICK_TASK = None
+_QUEUE_DRIVER = None
+_QUEUE_DRIVER_TASK = None
+_QUEUE_DRIVER_STOPPING = False
+_HIVE_SUPERVISOR_TASK = None
+
+
+def _get_cron_queue():
+    """Return the project-scoped durable queue used by server cron."""
+    global _CRON_QUEUE
+    if _CRON_QUEUE is None:
+        from queue.store import TaskQueue
+        _CRON_QUEUE = TaskQueue(root=_PROJECT_ROOT)
+    return _CRON_QUEUE
+
+
+async def _cron_tick_loop() -> None:
+    """Materialize due cron slots; QueueDriver owns actual execution."""
+    while True:
+        try:
+            created = _get_cron_queue().enqueue_due_cron_runs()
+            if created:
+                logger.info("cron materialized %s due run(s)", len(created))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("cron tick failed", exc_info=True)
+        await asyncio.sleep(1.0)
+
+
+async def _queue_driver_supervisor() -> None:
+    """Keep the embedded durable worker alive when the API owns it.
+
+    The API remains useful without this optional worker (for horizontally
+    scaled deployments that run a separate ``python -m nexus --autonomous``),
+    but a single-process deployment must not silently stop consuming its
+    durable queue after a worker-level failure.
+    """
+    global _QUEUE_DRIVER
+    from queue.driver import QueueDriver
+    from queue.alerts import dispatch_incident
+    from queue.status import clear_incident, read_incident, record_crash
+
+    max_restarts = max(1, int(os.environ.get("NEXUS_QUEUE_MAX_RESTARTS", "5")))
+    crash_window = max(1.0, float(os.environ.get("NEXUS_QUEUE_CRASH_WINDOW", "300")))
+    if os.environ.get("NEXUS_QUEUE_CLEAR_QUARANTINE", "false").lower() in {"1", "true", "yes", "on"}:
+        clear_incident(_PROJECT_ROOT)
+    else:
+        existing_incident = read_incident(_PROJECT_ROOT)
+        if existing_incident.get("quarantined"):
+            alert = await asyncio.to_thread(dispatch_incident, _PROJECT_ROOT, existing_incident)
+            logger.error(
+                "embedded queue worker is quarantined after repeated crashes; operator clearance required (alert=%s)",
+                alert.get("status"),
+            )
+            return
+
+    async def record_failure(error: str) -> bool:
+        incident = record_crash(
+            _PROJECT_ROOT, error, max_restarts=max_restarts,
+            window_seconds=crash_window,
+        )
+        if incident.get("quarantined"):
+            alert = await asyncio.to_thread(dispatch_incident, _PROJECT_ROOT, incident)
+            logger.error(
+                "embedded queue worker quarantined after %s failures in %.0fs (alert=%s)",
+                incident.get("failure_count"), crash_window, alert.get("status"),
+            )
+            return True
+        return False
+
+    backoff = 1.0
+    while not _QUEUE_DRIVER_STOPPING:
+        try:
+            driver = QueueDriver(
+                root=_PROJECT_ROOT,
+                workers=max(1, int(os.environ.get("NEXUS_QUEUE_WORKERS", "1"))),
+                execution_timeout=float(os.environ.get("NEXUS_QUEUE_EXECUTION_TIMEOUT", "3600")),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("embedded queue driver could not initialize; restarting in %.1fs", backoff)
+            if await record_failure(str(exc)):
+                return
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2.0, 30.0)
+            continue
+        _QUEUE_DRIVER = driver
+        try:
+            await driver.run()
+            if _QUEUE_DRIVER_STOPPING:
+                return
+            logger.error("embedded queue driver exited; restarting in %.1fs", backoff)
+            if await record_failure("queue driver exited unexpectedly"):
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("embedded queue driver crashed; restarting in %.1fs", backoff)
+            if await record_failure(str(exc)):
+                return
+        finally:
+            if _QUEUE_DRIVER_STOPPING:
+                await driver.shutdown(
+                    drain_timeout=max(0.0, float(os.environ.get("NEXUS_QUEUE_DRAIN_TIMEOUT", "30")))
+                )
+        if _QUEUE_DRIVER_STOPPING:
+            return
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2.0, 30.0)
 
 # ── Workspace checkpoints ────────────────────────────────────────────────────
 # Per-message restore points: a snapshot of the workspace taken right before a
@@ -257,11 +425,127 @@ _CHECKPOINT_RESTORE_LOCKS_LOCK = threading.Lock()
 _CHECKPOINT_STREAM_PUSHERS: Dict[str, Any] = {}
 _CHECKPOINT_STREAM_PUSHERS_LOCK = threading.Lock()
 
+
+def _validate_public_deployment() -> None:
+    """Fail closed when the operator explicitly marks this as public.
+
+    Local development keeps its convenient defaults, but a process intended
+    for internet exposure must not start with anonymous auth, unrestricted
+    execution, or a localhost-only CORS policy.
+    """
+    enabled = os.environ.get("NEXUS_PUBLIC_DEPLOYMENT", "false").lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return
+    errors = []
+    from authentication import OAUTH_PROVIDERS
+
+    token = os.environ.get("NEXUS_DASHBOARD_TOKEN", "").strip()
+    if not token and not OAUTH_PROVIDERS:
+        errors.append("NEXUS_DASHBOARD_TOKEN or OAuth credentials are required")
+    elif token and len(token) < 32:
+        errors.append("NEXUS_DASHBOARD_TOKEN must be at least 32 characters")
+    if len(os.environ.get("NEXUS_SESSION_SECRET", "").strip()) < 32:
+        errors.append("NEXUS_SESSION_SECRET must be configured with at least 32 characters")
+    if os.environ.get("NEXUS_ALLOW_LOCAL_ANON", "false").lower() == "true":
+        errors.append("NEXUS_ALLOW_LOCAL_ANON must be false")
+    if os.environ.get("NEXUS_SANDBOX_TIER", "normal").strip().lower() not in {"normal", "docker"}:
+        errors.append("NEXUS_SANDBOX_TIER must be normal or docker")
+    origins = [item.strip() for item in os.environ.get("NEXUS_CORS_ORIGINS", "").split(",") if item.strip()]
+    if (
+        not origins
+        or any(
+            item == "*"
+            or not item.lower().startswith("https://")
+            or "localhost" in item
+            or "127.0.0.1" in item
+            for item in origins
+        )
+    ):
+        errors.append("NEXUS_CORS_ORIGINS must contain only HTTPS production origins")
+    if errors:
+        raise RuntimeError("Public deployment validation failed: " + "; ".join(errors))
+
+
+async def _auto_resume_interrupted_hives() -> List[str]:
+    """Resume interrupted Hive work once during an opted-in server boot.
+
+    Auto-resume is opt-in because replaying an agent task can repeat an
+    external side effect. Only manifests explicitly marked ``resume_required``
+    (created by crash recovery) are eligible, and ``resume_hive`` already
+    filters terminal agents and creates a new linked Hive identity.
+    """
+    with _HIVES_LOCK:
+        candidates = [
+            str(hive_id) for hive_id, summary in _HIVES.items()
+            if summary.get("resume_required")
+            and str(summary.get("status") or "").lower() in {"interrupted", "failed"}
+        ]
+    resumed: List[str] = []
+    for hive_id in candidates:
+        try:
+            result = await resume_hive(hive_id)
+            new_id = str((result.get("hive") or {}).get("id") or "")
+            if new_id:
+                resumed.append(new_id)
+        except HTTPException as exc:
+            logger.warning("Hive %s was not auto-resumed (%s)", hive_id, exc.detail)
+        except Exception:
+            logger.exception("Hive %s auto-resume failed", hive_id)
+    return resumed
+
+
+async def _hive_supervisor_loop() -> None:
+    """Continuously replace Hive agents that stop heartbeating."""
+    interval = max(2.0, float(os.environ.get("NEXUS_HIVE_SUPERVISOR_INTERVAL", "15")))
+    stale_after = max(interval * 2.0, float(os.environ.get("NEXUS_HIVE_STALE_AFTER", "120")))
+    while True:
+        try:
+            engine = _get_hive_engine()
+            await engine.recover_stuck_agents(stale_after=stale_after)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Hive supervisor iteration failed")
+        await asyncio.sleep(interval)
+
+
 @asynccontextmanager
 async def _app_lifespan(_app: FastAPI):
     """Join response-detached learning tasks before asyncio tears down."""
+    global _CRON_TICK_TASK, _QUEUE_DRIVER, _QUEUE_DRIVER_TASK, _QUEUE_DRIVER_STOPPING, _HIVE_SUPERVISOR_TASK
+    _validate_public_deployment()
     _warm_workspace_summary()
+    if os.environ.get("NEXUS_HIVE_AUTO_RESUME", "false").lower() in {"1", "true", "yes", "on"}:
+        await _auto_resume_interrupted_hives()
+    _QUEUE_DRIVER_STOPPING = False
+    _CRON_TICK_TASK = asyncio.create_task(_cron_tick_loop())
+    if os.environ.get("NEXUS_EMBED_QUEUE_DRIVER", "false").lower() in {"1", "true", "yes", "on"}:
+        _QUEUE_DRIVER_TASK = asyncio.create_task(_queue_driver_supervisor())
+    if os.environ.get("NEXUS_HIVE_STUCK_RECOVERY", "true").lower() in {"1", "true", "yes", "on"}:
+        _HIVE_SUPERVISOR_TASK = asyncio.create_task(_hive_supervisor_loop())
     yield
+    _QUEUE_DRIVER_STOPPING = True
+    if _QUEUE_DRIVER is not None:
+        _QUEUE_DRIVER.stop()
+    if _QUEUE_DRIVER_TASK is not None and not _QUEUE_DRIVER_TASK.done():
+        try:
+            await asyncio.wait_for(
+                _QUEUE_DRIVER_TASK,
+                timeout=max(1.0, float(os.environ.get("NEXUS_QUEUE_DRAIN_TIMEOUT", "30"))) + 5.0,
+            )
+        except asyncio.TimeoutError:
+            _QUEUE_DRIVER_TASK.cancel()
+            await asyncio.gather(_QUEUE_DRIVER_TASK, return_exceptions=True)
+    _QUEUE_DRIVER_TASK = None
+    _QUEUE_DRIVER = None
+    if _HIVE_SUPERVISOR_TASK is not None and not _HIVE_SUPERVISOR_TASK.done():
+        _HIVE_SUPERVISOR_TASK.cancel()
+        await asyncio.gather(_HIVE_SUPERVISOR_TASK, return_exceptions=True)
+    _HIVE_SUPERVISOR_TASK = None
+    if _CRON_TICK_TASK is not None and not _CRON_TICK_TASK.done():
+        _CRON_TICK_TASK.cancel()
+        await asyncio.gather(_CRON_TICK_TASK, return_exceptions=True)
+    _CRON_TICK_TASK = None
     await _drain_loop_finalizers(tuple(_LOOPS.values()))
 
 
@@ -357,12 +641,35 @@ _WINDOWS_RESERVED = frozenset({"con", "prn", "aux", "nul", "com1", "com2", "com3
     "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"})
 
 _AUTH_SKIP_PATHS = frozenset({
-    "/api/health", "/api/files/list", "/api/auth/login", "/api/auth/callback",
+    "/api/health", "/api/auth/login", "/api/auth/callback",
     "/api/auth/token", "/api/logout", "/api/auth/status",
-    "/api/state", "/api/version",
-    "/docs", "/openapi.json", "/redoc",
-    "/api/features",
+    "/api/version",
 })
+
+_RATE_BUCKETS: Dict[str, List[float]] = {}
+_RATE_BUCKETS_LOCK = threading.Lock()
+try:
+    _RATE_WINDOW_SECONDS = max(1.0, float(os.environ.get("NEXUS_RATE_WINDOW_SECONDS", "60")))
+except (TypeError, ValueError):
+    _RATE_WINDOW_SECONDS = 60.0
+try:
+    _RATE_LIMIT = max(10, int(os.environ.get("NEXUS_RATE_LIMIT", "120")))
+except (TypeError, ValueError):
+    _RATE_LIMIT = 120
+
+
+def _server_rate_limited(client: str) -> bool:
+    """Apply a bounded per-peer request limit before expensive routes run.
+
+    This is a process-local guardrail; public deployments should still place
+    a shared limiter at the reverse proxy/load-balancer boundary.
+    """
+    now = time.time()
+    with _RATE_BUCKETS_LOCK:
+        bucket = [stamp for stamp in _RATE_BUCKETS.get(client, []) if now - stamp < _RATE_WINDOW_SECONDS]
+        bucket.append(now)
+        _RATE_BUCKETS[client] = bucket
+        return len(bucket) > _RATE_LIMIT
 
 if os.environ.get("NEXUS_PUBLIC_OPENAI_COMPAT", "false").lower() == "true":
     _AUTH_SKIP_PATHS = frozenset((*_AUTH_SKIP_PATHS, "/v1/models", "/v1/chat/completions"))
@@ -371,7 +678,14 @@ if os.environ.get("NEXUS_PUBLIC_OPENAI_COMPAT", "false").lower() == "true":
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
-    if path in _AUTH_SKIP_PATHS or path.startswith(("/docs/", "/openapi/", "/redoc/")):
+    client = request.client.host if request.client else "unknown"
+    if path != "/api/health" and _server_rate_limited(client):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded"},
+            headers={"Retry-After": str(int(_RATE_WINDOW_SECONDS))},
+        )
+    if path in _AUTH_SKIP_PATHS:
         return await call_next(request)
 
     # NEXUS_ALLOW_LOCAL_ANON is an explicit opt-in used by local/test clients
@@ -497,9 +811,13 @@ async def auth_logout(request: Request):
 async def global_exception_handler(request: Request, exc: Exception):
     if isinstance(exc, HTTPException):
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    # Never reflect arbitrary exception text to API clients.  Provider errors,
+    # paths, command lines, and credentials can all be embedded in it.  Keep a
+    # redacted diagnostic in server logs while returning a stable contract.
+    logger.warning("Unhandled API exception: %s", redact_secrets(exc), exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={"detail": f"Internal server error: {str(exc)}" if str(exc) else "Internal server error"}
+        content={"detail": "Internal server error"}
     )
 
 
@@ -633,6 +951,23 @@ def _cached_work_events(path: str) -> Tuple[List[Dict[str, Any]], int]:
     return events, count
 
 
+def _session_work_event_paths(session_id: str) -> List[str]:
+    """Return canonical plus pre-normalization event-log paths for reads."""
+    canonical = work_events_path(session_id)
+    raw = str(session_id or "default")
+    legacy_name = re.sub(r"[^A-Za-z0-9_.-]", "_", raw.strip())[:120] or "default"
+    legacy = os.path.abspath(os.path.join(_WORK_EVENTS_DIR, f"{legacy_name}.jsonl"))
+    return [canonical] if legacy == canonical or not os.path.isfile(legacy) else [canonical, legacy]
+
+
+def _session_work_events(session_id: str) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    for path in _session_work_event_paths(session_id):
+        events.extend(_cached_work_events(path)[0])
+    events.sort(key=lambda event: (_safe_event_sequence(event), str(event.get("created_at") or "")))
+    return events
+
+
 def _invalidate_work_event_cache(path: str) -> None:
     with _WORK_EVENT_CACHE_LOCK:
         _WORK_EVENT_CACHE.pop(path, None)
@@ -662,42 +997,79 @@ def _compact_work_event_log_if_needed(path: str) -> None:
     _invalidate_work_event_cache(path)
 
 
+def _is_sensitive_workspace_path(path: str) -> bool:
+    """Identify files that must never be returned by a remote file API."""
+    root = os.path.realpath(os.path.abspath(_PROJECT_ROOT))
+    candidate = os.path.realpath(os.path.abspath(path))
+    try:
+        relative = os.path.relpath(candidate, root).replace("\\", "/")
+    except (ValueError, OSError):
+        return True
+    parts = [part.lower() for part in relative.split("/")]
+    name = parts[-1] if parts else ""
+    return (
+        name == ".env"
+        or name.startswith(".env.")
+        or name.endswith((".pem", ".key"))
+        or ".ssh" in parts
+        or "credential" in name
+        or "secret" in name
+    )
+
+
 def safe_workspace_read_path(raw_path: str) -> str:
     value = str(raw_path or "").strip().strip('"').strip("'")
     if not value:
         raise HTTPException(status_code=400, detail="Path is required")
     if not os.path.isabs(value):
         value = os.path.join(_PROJECT_ROOT, value)
-    path = os.path.abspath(value)
-    root = os.path.abspath(_PROJECT_ROOT)
+    root = os.path.realpath(os.path.abspath(_PROJECT_ROOT))
+    path = os.path.realpath(os.path.abspath(value))
     if os.path.commonpath([root, path]) != root:
         raise HTTPException(status_code=400, detail="Path is outside the NEXUS workspace")
     if not os.path.exists(path) or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not found")
+    if _is_sensitive_workspace_path(path):
+        raise HTTPException(status_code=403, detail="Sensitive files cannot be read through the API")
     return path
 
 
 def write_workspace_todo_plan(content: str) -> str:
     """Persist the visible agent plan as a real workspace file (atomic)."""
+    from tools.planning.scripts.planning import plan_transaction
+
     workspace_dir = os.path.join(_PROJECT_ROOT, "workspace")
     os.makedirs(workspace_dir, exist_ok=True)
     todo_path = os.path.abspath(os.path.join(workspace_dir, "todo.md"))
     if os.path.commonpath([os.path.abspath(workspace_dir), todo_path]) != os.path.abspath(workspace_dir):
         raise HTTPException(status_code=400, detail="Invalid todo path")
-    temp_path = f"{todo_path}.{uuid.uuid4().hex[:8]}.tmp"
-    with open(temp_path, "w", encoding="utf-8") as f:
-        f.write(content)
-    os.replace(temp_path, todo_path)
+    with plan_transaction(_PROJECT_ROOT):
+        temp_path = f"{todo_path}.{uuid.uuid4().hex[:8]}.tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, todo_path)
+        finally:
+            try:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+            except OSError:
+                pass
     return os.path.relpath(todo_path, _PROJECT_ROOT)
 
 
 
 # ── Plan / todo workflow (ported from the canonical gui.api implementation) ──
 def clear_workspace_todo_plan() -> None:
+    from tools.planning.scripts.planning import plan_transaction
+
     try:
-        todo_path = os.path.abspath(os.path.join(_PROJECT_ROOT, "workspace", "todo.md"))
-        if os.path.exists(todo_path):
-            os.remove(todo_path)
+        with plan_transaction(_PROJECT_ROOT):
+            todo_path = os.path.abspath(os.path.join(_PROJECT_ROOT, "workspace", "todo.md"))
+            if os.path.exists(todo_path):
+                os.remove(todo_path)
     except Exception:
         pass
 
@@ -868,6 +1240,29 @@ def refresh_provider_runtime() -> str:
     except Exception:
         logger.warning("Provider runtime refresh failed", exc_info=True)
         return "openrouter"
+
+
+def configured_provider_defaults() -> tuple[str, str]:
+    """Return the configured provider/model without treating ``auto`` as one.
+
+    TUI clients intentionally send an empty or ``auto`` selection until a user
+    picks an override. The server must resolve that state through provider.yml
+    rather than letting the model router choose an unrelated fallback.
+    """
+    try:
+        from config.config_loader import NexusConfigLoader
+        loader = NexusConfigLoader()
+        provider_cfg = loader.get("provider", {})
+        if not isinstance(provider_cfg, dict):
+            return "", ""
+        provider_name = str(provider_cfg.get("default_provider") or "").strip().lower()
+        providers = provider_cfg.get("providers", {})
+        provider_data = providers.get(provider_name, {}) if isinstance(providers, dict) else {}
+        model = str(provider_data.get("model") or "").strip() if isinstance(provider_data, dict) else ""
+        return provider_name, model
+    except Exception:
+        logger.debug("Configured provider defaults unavailable", exc_info=True)
+        return "", ""
 
 
 def update_todo_file_and_states(session_id: str, new_event: Dict[str, Any], turn_id: str = "") -> List[Dict[str, Any]]:
@@ -1178,13 +1573,35 @@ def append_work_event(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any
     if hasattr(_THREAD_LOCAL, "appended_events"):
         _THREAD_LOCAL.appended_events.append(event)
 
+    # Keep the durable verifier ledger aligned with API-originated file
+    # mutations as well as V5 tool events. Reads never invalidate a verdict.
+    if event.get("kind") == "file" and str(event.get("status") or "").lower() in {
+        "completed", "success", "done"
+    }:
+        action_text = str(event.get("action") or "").lower()
+        if any(token in action_text for token in ("edit", "create", "write", "delete", "remove", "update")):
+            try:
+                from orchestrators.v5.verification_state import VerifierStateStore
+
+                state_path = Path(_PROJECT_ROOT) / ".nexus_v5" / "verifier_state.json"
+                VerifierStateStore(state_path).mark_stale(
+                    event["conversation_id"], _PROJECT_ROOT, [event.get("path") or target]
+                )
+            except Exception:
+                logger.debug("Could not invalidate verifier state for file event", exc_info=True)
+
     # Project only the persisted canonical/public event.  The projector is
     # deliberately append-free, so this cannot recursively write events.
     try:
         project_work_item_event(root=_RUN_ROOT, session_id=event["conversation_id"], event=event)
         project_plan_event(root=_RUN_ROOT, session_id=event["conversation_id"], event=event)
-    except Exception:
+    except Exception as exc:
         logger.debug("Could not project work event onto WorkItem", exc_info=True)
+        record_work_item_projection_failure(
+            event_log_path=work_events_path(event["conversation_id"]),
+            event=event,
+            error=exc,
+        )
         
     if event.get("kind") not in ("todo", "planning_artifact") and event.get("role") != "planning_artifact":
         try:
@@ -1244,7 +1661,7 @@ def replay_work_events_after(session_id: str, after_sequence: int, limit: int = 
     """Replay the append-only canonical log without lifecycle-state dedupe."""
     events: List[Dict[str, Any]] = []
     path = work_events_path(session_id)
-    raw_events, _ = _cached_work_events(path)
+    raw_events = _session_work_events(session_id)
     for event in raw_events:
         if str(event.get("visibility", "")).lower() == "internal":
             continue
@@ -1337,8 +1754,13 @@ def _append_work_event(session_id: str, event: Dict[str, Any]) -> Dict[str, Any]
     try:
         project_work_item_event(root=_RUN_ROOT, session_id=sid, event=payload)
         project_plan_event(root=_RUN_ROOT, session_id=sid, event=payload)
-    except Exception:
+    except Exception as exc:
         logger.debug("Could not project legacy work event onto WorkItem", exc_info=True)
+        record_work_item_projection_failure(
+            event_log_path=work_events_path(sid),
+            event=payload,
+            error=exc,
+        )
     _maybe_trigger_checkpoint(sid, payload)
     return payload
 
@@ -1376,7 +1798,7 @@ def list_work_events(session_id: str, limit: int = 200, turn_id: str = "", after
     repeated polling does not rescan the whole log.
     """
     path = work_events_path(session_id)
-    raw_events, _ = _cached_work_events(path)
+    raw_events = _session_work_events(session_id)
 
     order: List[str] = []
     latest: Dict[str, Dict[str, Any]] = {}
@@ -1422,7 +1844,10 @@ def work_event_run_summary(session_id: str, run_id: str) -> Dict[str, Any]:
         except (TypeError, ValueError):
             pass
         event_type = str(event.get("event_type") or event.get("type") or "")
-        if event_type.startswith("run.") and status in {"success", "failed", "cancelled"}:
+        if event_type.startswith("run.") and (
+            status in {"success", "failed", "cancelled", "canceled", "timed_out", "error"}
+            or event_type == "run.timed_out"
+        ):
             terminal_event = event_type
     return {
         "event_count": len(events),
@@ -1446,7 +1871,7 @@ def _public_run_event_limit(limit: int) -> int:
 def list_public_run_events(session_id: str, run_id: str, limit: int = 1000) -> List[Dict[str, Any]]:
     """Return bounded append-only public events for one run without collapsing ids."""
     safe_limit = _public_run_event_limit(limit)
-    raw_events, _ = _cached_work_events(work_events_path(session_id))
+    raw_events = _session_work_events(session_id)
     events: List[Dict[str, Any]] = []
     for event in raw_events:
         if str(event.get("visibility") or "public").lower() == "internal":
@@ -1546,7 +1971,7 @@ def apply_runtime_settings(loop: NexusLoop) -> None:
     provider = str(_RUNTIME_SETTINGS.get("provider") or "").strip()
     profile = str(_RUNTIME_SETTINGS.get("profile") or "").strip()
     mode = _normalize_permission_mode(str(_RUNTIME_SETTINGS.get("mode") or "auto"))
-    sandbox_tier = _normalize_sandbox_tier(str(_RUNTIME_SETTINGS.get("sandbox_tier") or "no_sandbox"))
+    sandbox_tier = _normalize_sandbox_tier(str(_RUNTIME_SETTINGS.get("sandbox_tier") or "normal"))
     agent = str(_RUNTIME_SETTINGS.get("agent") or "").strip()
     goal = str(_RUNTIME_SETTINGS.get("goal") or "").strip()
     additional_dirs = _RUNTIME_SETTINGS.get("additional_dirs") or []
@@ -1669,23 +2094,35 @@ def apply_runtime_to_all_loops() -> None:
 def _clear_session_files(session_id: str) -> bool:
     path = session_file_path(session_id)
     meta_path = session_file_path(session_id, ".meta")
-    existed = os.path.exists(path) or os.path.exists(meta_path) or session_id in _LOOPS
 
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump([], f)
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump({"title": "New Chat"}, f)
-
-    if session_id in _LOOPS:
-        loop = _LOOPS[session_id]
-        loop.memory = []
-        try:
-            loop.save_memory()
-        except Exception:
-            logger.warning("server:364 _clear_session_files: suppressed error", exc_info=True)
-            pass
+    # Coordinate with V5/MemoryManager writers across API workers.  Persist
+    # the cleared transcript while holding the same lock used by normal saves;
+    # updating the cached loop afterwards avoids a nested lock acquisition.
+    with session_write_lock(path):
+        existed = os.path.exists(path) or os.path.exists(meta_path) or session_id in _LOOPS
+        atomic_write_json(path, [])
+        atomic_write_json(meta_path, {"title": "New Chat"})
+        if session_id in _LOOPS:
+            _LOOPS[session_id].memory = []
 
     return existed
+
+
+def _delete_session_files(session_id: str) -> bool:
+    """Delete one non-default session under the shared persistence lock."""
+    path = session_file_path(session_id)
+    meta_path = session_file_path(session_id, ".meta")
+    with session_write_lock(path):
+        existed = os.path.exists(path) or os.path.exists(meta_path) or session_id in _LOOPS
+        if not existed:
+            return False
+        for candidate in (path, meta_path):
+            try:
+                os.remove(candidate)
+            except FileNotFoundError:
+                pass
+        _LOOPS.pop(session_id, None)
+        return True
 
 
 def _require_yaml():
@@ -1700,17 +2137,46 @@ def _load_nexus_config() -> Dict[str, Any]:
     with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
-        raise HTTPException(status_code=500, detail="nexus_config.yaml must contain a mapping")
+        raise HTTPException(status_code=500, detail="settings.yml must contain a mapping")
     return data
 
 
 def _save_nexus_config(config: Dict[str, Any]) -> None:
     _require_yaml()
-    os.makedirs(os.path.dirname(_CONFIG_PATH), exist_ok=True)
-    tmp_path = f"{_CONFIG_PATH}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True, width=100)
-    os.replace(tmp_path, _CONFIG_PATH)
+    directory = os.path.dirname(_CONFIG_PATH)
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".settings-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True, width=100)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, _CONFIG_PATH)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def _mutate_nexus_config_sync(mutator):
+    """Reload, mutate, and persist settings as one cross-process transaction."""
+    with _CONFIG_MUTATION_LOCK, _interprocess_event_lock(_CONFIG_PATH):
+        config = _load_nexus_config()
+        result = mutator(config)
+        _save_nexus_config(config)
+        return result
+
+
+def _create_mcp_config_sync(name: str, entry: Dict[str, Any]) -> None:
+    """Update both MCP configuration stores under one settings transaction."""
+    with _CONFIG_MUTATION_LOCK, _interprocess_event_lock(_CONFIG_PATH):
+        config = _load_nexus_config()
+        servers = config.setdefault("mcp_servers", {})
+        if not isinstance(servers, dict):
+            servers = {}
+            config["mcp_servers"] = servers
+        servers[name] = entry
+        _save_nexus_config(config)
+        _sync_mcp_servers_file(config)
 
 
 def _sync_mcp_servers_file(config: Dict[str, Any]) -> None:
@@ -1752,7 +2218,7 @@ def _load_runtime_preferences() -> None:
         if "permission_mode" in runtime:
             _RUNTIME_SETTINGS["mode"] = _normalize_permission_mode(str(runtime.get("permission_mode") or "auto"))
         if "sandbox_tier" in runtime:
-            _RUNTIME_SETTINGS["sandbox_tier"] = _normalize_sandbox_tier(str(runtime.get("sandbox_tier") or "no_sandbox"))
+            _RUNTIME_SETTINGS["sandbox_tier"] = _normalize_sandbox_tier(str(runtime.get("sandbox_tier") or "normal"))
             os.environ["NEXUS_SANDBOX_TIER"] = str(_RUNTIME_SETTINGS["sandbox_tier"])
         if "thinking" in runtime:
             _RUNTIME_SETTINGS["thinking"] = bool(runtime.get("thinking", True))
@@ -1777,23 +2243,24 @@ def _load_runtime_preferences() -> None:
 
 def _save_runtime_preferences() -> None:
     try:
-        config = _load_nexus_config()
-        runtime = config.setdefault("runtime", {})
-        if not isinstance(runtime, dict):
-            runtime = {}
-            config["runtime"] = runtime
-        runtime["permission_mode"] = _normalize_permission_mode(_RUNTIME_SETTINGS.get("mode") or "auto")
-        runtime["permission_allowlist"] = _RUNTIME_SETTINGS.get("permission_allowlist") or []
-        runtime["sandbox_tier"] = _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier") or "no_sandbox")
-        runtime["thinking"] = bool(_RUNTIME_SETTINGS.get("thinking", True))
-        runtime["model"] = str(_RUNTIME_SETTINGS.get("model") or "").strip()
-        runtime["provider"] = str(_RUNTIME_SETTINGS.get("provider") or "").strip()
-        runtime["profile"] = str(_RUNTIME_SETTINGS.get("profile") or "").strip()
-        runtime["additional_dirs"] = _RUNTIME_SETTINGS.get("additional_dirs") or []
-        workspace_root = str(_RUNTIME_SETTINGS.get("workspace_root") or "").strip()
-        if workspace_root:
-            runtime["workspace_root"] = workspace_root
-        _save_nexus_config(config)
+        def mutate(config):
+            runtime = config.setdefault("runtime", {})
+            if not isinstance(runtime, dict):
+                runtime = {}
+                config["runtime"] = runtime
+            runtime["permission_mode"] = _normalize_permission_mode(_RUNTIME_SETTINGS.get("mode") or "auto")
+            runtime["permission_allowlist"] = list(_RUNTIME_SETTINGS.get("permission_allowlist") or [])
+            runtime["sandbox_tier"] = _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier") or "normal")
+            runtime["thinking"] = bool(_RUNTIME_SETTINGS.get("thinking", True))
+            runtime["model"] = str(_RUNTIME_SETTINGS.get("model") or "").strip()
+            runtime["provider"] = str(_RUNTIME_SETTINGS.get("provider") or "").strip()
+            runtime["profile"] = str(_RUNTIME_SETTINGS.get("profile") or "").strip()
+            runtime["additional_dirs"] = list(_RUNTIME_SETTINGS.get("additional_dirs") or [])
+            workspace_root = str(_RUNTIME_SETTINGS.get("workspace_root") or "").strip()
+            if workspace_root:
+                runtime["workspace_root"] = workspace_root
+
+        _mutate_nexus_config_sync(mutate)
     except Exception:
         logger.warning("save_runtime_preferences: failed", exc_info=True)
 
@@ -1815,11 +2282,27 @@ def _load_claude_settings(strict: bool = False) -> Dict[str, Any]:
 
 
 def _save_claude_settings(settings: Dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(_CLAUDE_SETTINGS_PATH), exist_ok=True)
-    tmp_path = f"{_CLAUDE_SETTINGS_PATH}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(settings, f, indent=2)
-    os.replace(tmp_path, _CLAUDE_SETTINGS_PATH)
+    directory = os.path.dirname(_CLAUDE_SETTINGS_PATH)
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".claude-settings-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, _CLAUDE_SETTINGS_PATH)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def _mutate_claude_settings_sync(mutator) -> Any:
+    """Reload and persist Claude plugin settings under one cross-process lock."""
+    with _CLAUDE_SETTINGS_LOCK, _interprocess_event_lock(_CLAUDE_SETTINGS_PATH):
+        settings = _load_claude_settings(strict=True)
+        result = mutator(settings)
+        _save_claude_settings(settings)
+        return result
 
 
 def _runtime_features(config: Dict[str, Any]) -> Dict[str, bool]:
@@ -1927,11 +2410,19 @@ def _load_tasks() -> Dict[str, dict]:
 
 
 def _save_tasks(tasks: Dict[str, dict]) -> None:
-    os.makedirs(os.path.dirname(_TASKS_PATH), exist_ok=True)
-    tmp = f"{_TASKS_PATH}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(tasks, f, indent=2)
-    os.replace(tmp, _TASKS_PATH)
+    with _TASKS_PERSIST_LOCK, _interprocess_event_lock(_TASKS_PATH):
+        directory = os.path.dirname(_TASKS_PATH)
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".tasks-", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(tasks, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, _TASKS_PATH)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
 
 
 def _clear_runtime(reason: str) -> Dict[str, Any]:
@@ -2086,9 +2577,245 @@ def _provider_reachability(provider_name: str) -> Dict[str, Any]:
         logger.debug("Provider reachability check failed: %s", exc)
         return {"name": name, "configured": True, "reachable": None, "reason": "probe_failed"}
 
+
+def _provider_runtime_diagnostics() -> Dict[str, Any]:
+    """Return bounded, secret-free provider routing diagnostics.
+
+    Provider credentials and raw exceptions never cross this boundary.  The
+    router already records classified attempts, while the profile store owns
+    cooldown state; this helper only projects those two sources for status
+    consumers.  It is deliberately best-effort because status must remain
+    available when a provider subsystem is unavailable.
+    """
+    attempts: List[Dict[str, Any]] = []
+    latest = list(_LOOPS.values())[-1] if _LOOPS else None
+    routers: List[Any] = []
+    try:
+        brain = getattr(latest, "brain", None)
+        if brain is not None:
+            routers.extend([brain, getattr(brain, "base_router", None)])
+    except Exception:
+        pass
+    seen_routers = set()
+    for router in routers:
+        if router is None or id(router) in seen_routers:
+            continue
+        seen_routers.add(id(router))
+        try:
+            getter = getattr(router, "provider_attempts", None)
+            if callable(getter):
+                value = getter()
+                if isinstance(value, list):
+                    try:
+                        from providers.reliability import redact_secrets
+                    except Exception:
+                        redact_secrets = lambda value: str(value or "")
+                    for item in value:
+                        if not isinstance(item, dict):
+                            continue
+                        # Whitelist the public schema; never pass through
+                        # credential IDs or arbitrary provider payload fields.
+                        attempts.append({
+                            "provider_id": str(item.get("provider_id") or "")[:80],
+                            "profile": str(item.get("profile") or "")[:80],
+                            "model": str(item.get("model") or "")[:160],
+                            "attempt": max(1, int(item.get("attempt") or 1)),
+                            "status": str(item.get("status") or "")[:32],
+                            "failure_class": str(item.get("failure_class") or "")[:64],
+                            "strategy": str(item.get("strategy") or "")[:64],
+                            "reason": redact_secrets(str(item.get("reason") or ""))[:240],
+                            "duration_ms": round(max(0.0, float(item.get("duration_ms") or 0.0)), 3),
+                            "timestamp": item.get("timestamp"),
+                        })
+        except Exception:
+            logger.debug("Provider attempt diagnostics unavailable", exc_info=True)
+
+    # The recorder is bounded, but cap the API projection independently so a
+    # future router implementation cannot accidentally make status payloads
+    # unbounded.
+    attempts = attempts[-32:]
+    last_failure = None
+    for item in reversed(attempts):
+        if str(item.get("status") or "").lower() in {"failed", "error"}:
+            last_failure = {
+                "provider": str(item.get("provider_id") or "")[:80],
+                "profile": str(item.get("profile") or "")[:80],
+                "model": str(item.get("model") or "")[:160],
+                "failure_class": str(item.get("failure_class") or "")[:64],
+                "strategy": str(item.get("strategy") or "")[:64],
+                "reason": str(item.get("reason") or "")[:240],
+                "timestamp": item.get("timestamp"),
+            }
+            break
+
+    selected = None
+    for item in reversed(attempts):
+        if str(item.get("status") or "").lower() in {"success", "succeeded", "completed"}:
+            selected = {
+                "provider": str(item.get("provider_id") or "")[:80],
+                "profile": str(item.get("profile") or "")[:80],
+                "model": str(item.get("model") or "")[:160],
+            }
+            break
+    if selected is None:
+        selected = {
+            "provider": str(_RUNTIME_SETTINGS.get("provider") or "")[:80],
+            "profile": str(_RUNTIME_SETTINGS.get("profile") or "")[:80],
+            "model": str(_RUNTIME_SETTINGS.get("model") or "")[:160],
+        }
+
+    cooldowns: List[Dict[str, Any]] = []
+    try:
+        from providers.profiles import load_profile_store
+        now = time.time()
+        store = load_profile_store()
+        for profile in store.list_profiles():
+            remaining = max(0.0, float(getattr(profile, "cooldown_until", 0.0) or 0.0) - now)
+            if remaining <= 0 and not getattr(profile, "cooldown_reason", ""):
+                continue
+            cooldowns.append({
+                "provider": str(getattr(profile, "provider", ""))[:80],
+                "profile": str(getattr(profile, "name", ""))[:80],
+                "active": bool(getattr(profile, "active", True)),
+                "enabled": bool(getattr(profile, "enabled", True)),
+                "cooldown_seconds": round(remaining, 1),
+                "reason": str(getattr(profile, "cooldown_reason", "") or "")[:64],
+                "error_count": max(0, int(getattr(profile, "error_count", 0) or 0)),
+            })
+    except Exception:
+        logger.debug("Provider cooldown diagnostics unavailable", exc_info=True)
+
+    return {
+        "active": selected,
+        "attempts": attempts,
+        "fallback_attempts": max(0, len(attempts) - 1),
+        "cooldowns": cooldowns[:64],
+        "last_failure": last_failure,
+    }
+
+def _lifecycle_persistence_health() -> Dict[str, Any]:
+    """Project lifecycle durability health into the public health response."""
+    try:
+        from lifecycle import get_component_supervisor
+
+        stats = get_component_supervisor().get_stats()
+        value = stats.get("persistence") if isinstance(stats, dict) else None
+        if isinstance(value, dict):
+            return {
+                "available": bool(value.get("available", True)),
+                "operation": str(value.get("operation", "none"))[:32],
+                "error": str(value.get("error", ""))[:500],
+                "updated_at": value.get("updated_at", 0.0),
+            }
+    except Exception as exc:
+        logger.debug("Lifecycle persistence health unavailable", exc_info=True)
+        return {"available": False, "operation": "health", "error": redact_secrets(exc)[:500], "updated_at": time.time()}
+    return {"available": True, "operation": "none", "error": "", "updated_at": 0.0}
+
+
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "nexus-api"}
+    embedded = os.environ.get("NEXUS_EMBED_QUEUE_DRIVER", "false").lower() in {"1", "true", "yes", "on"}
+    worker_running = bool(_QUEUE_DRIVER_TASK is not None and not _QUEUE_DRIVER_TASK.done())
+    if embedded and not worker_running:
+        # A server that advertises an embedded worker while that worker is
+        # absent is not ready to receive unattended work.  Supervisors can
+        # restart the process instead of routing tasks into a black hole.
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail="embedded queue worker is not ready")
+    return {
+        "status": "ok",
+        "service": "nexus-api",
+        "queue_worker": "running" if worker_running else "external",
+        "lifecycle_persistence": _lifecycle_persistence_health(),
+    }
+
+
+@app.get("/api/metrics")
+def runtime_metrics():
+    """Return bounded, restart-safe runtime metrics for operators."""
+    from queue.status import default_status_path, read_incident, read_status
+
+    status_path = default_status_path(_PROJECT_ROOT)
+    queue_status = read_status(status_path)
+    supervisor_incident = _read_optional_runtime_json(
+        os.path.join(_PROJECT_ROOT, ".nexus", "supervisor_incident.json")
+    )
+    with _HIVES_LOCK:
+        hive_statuses = [str(item.get("status") or "unknown").lower() for item in _HIVES.values()]
+    embedded = os.environ.get("NEXUS_EMBED_QUEUE_DRIVER", "false").lower() in {"1", "true", "yes", "on"}
+    return {
+        "status": "success",
+        "service": "nexus-api",
+        "timestamp": time.time(),
+        "queue": {
+            "mode": "embedded" if embedded else "external",
+            "worker_task": "running" if _QUEUE_DRIVER_TASK is not None and not _QUEUE_DRIVER_TASK.done() else "stopped",
+            "runtime": queue_status,
+            "incident": read_incident(_PROJECT_ROOT),
+        },
+        "supervisor": {"incident": supervisor_incident},
+        "hives": {
+            "total": len(hive_statuses),
+            "running": sum(status == "running" for status in hive_statuses),
+            "interrupted": sum(status == "interrupted" for status in hive_statuses),
+            "failed": sum(status == "failed" for status in hive_statuses),
+        },
+    }
+
+
+def _read_optional_runtime_json(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else {}
+    except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {}
+
+
+def _prometheus_number(value: Any) -> str:
+    return "1" if bool(value) else "0"
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def prometheus_metrics():
+    """Expose bounded Prometheus text metrics for standard supervisors."""
+    payload = runtime_metrics()
+    queue = payload.get("queue") or {}
+    runtime = queue.get("runtime") or {}
+    queue_incident = queue.get("incident") or {}
+    supervisor_incident = (payload.get("supervisor") or {}).get("incident") or {}
+    hives = payload.get("hives") or {}
+    lines = [
+        "# HELP nexus_up Nexus API process is serving metrics.",
+        "# TYPE nexus_up gauge",
+        "nexus_up 1",
+        "# HELP nexus_queue_worker_running Embedded queue worker readiness.",
+        "# TYPE nexus_queue_worker_running gauge",
+        f"nexus_queue_worker_running {_prometheus_number(queue.get('worker_task') == 'running')}",
+        "# HELP nexus_queue_runtime_healthy Queue runtime heartbeat is healthy.",
+        "# TYPE nexus_queue_runtime_healthy gauge",
+        f"nexus_queue_runtime_healthy {_prometheus_number(runtime.get('healthy'))}",
+        "# HELP nexus_queue_quarantined Queue worker is quarantined.",
+        "# TYPE nexus_queue_quarantined gauge",
+        f"nexus_queue_quarantined {_prometheus_number(queue_incident.get('quarantined'))}",
+        "# HELP nexus_supervisor_quarantined Outer supervisor is quarantined.",
+        "# TYPE nexus_supervisor_quarantined gauge",
+        f"nexus_supervisor_quarantined {_prometheus_number(supervisor_incident.get('state') == 'quarantined')}",
+        "# HELP nexus_hives_total Known Hive count.",
+        "# TYPE nexus_hives_total gauge",
+        f"nexus_hives_total {int(hives.get('total', 0) or 0)}",
+        "# HELP nexus_hives_running Running Hive count.",
+        "# TYPE nexus_hives_running gauge",
+        f"nexus_hives_running {int(hives.get('running', 0) or 0)}",
+        "# HELP nexus_hives_interrupted Interrupted Hive count.",
+        "# TYPE nexus_hives_interrupted gauge",
+        f"nexus_hives_interrupted {int(hives.get('interrupted', 0) or 0)}",
+        "# HELP nexus_hives_failed Failed Hive count.",
+        "# TYPE nexus_hives_failed gauge",
+        f"nexus_hives_failed {int(hives.get('failed', 0) or 0)}",
+    ]
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
 
 @app.get("/api/state")
@@ -2152,7 +2879,7 @@ def create_session():
         set_active_session(new_id, source="cli-api:new")
         return {"id": new_id, "title": "New Chat"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create session: {str(e)}")
+        raise HTTPException(status_code=500, detail=_public_api_failure("Session creation", e))
 
 
 @app.post("/api/sessions/load")
@@ -2170,7 +2897,7 @@ async def load_session(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to load session: {str(e)}")
+        raise HTTPException(status_code=500, detail=_public_api_failure("Session loading", e))
 
 
 @app.delete("/api/sessions/{session_id}")
@@ -2180,16 +2907,8 @@ def delete_session(session_id: str):
         if not _clear_session_files(sid):
             raise HTTPException(status_code=404, detail="Default session not found")
         return {"status": "success", "id": sid, "cleared": True}
-    path = session_file_path(sid)
-    meta_path = session_file_path(sid, ".meta")
-    if not os.path.exists(path) and sid not in _LOOPS:
+    if not _delete_session_files(sid):
         return {"status": "error", "id": sid, "deleted": False}
-    if os.path.exists(path):
-        os.remove(path)
-    if os.path.exists(meta_path):
-        os.remove(meta_path)
-    if sid in _LOOPS:
-        del _LOOPS[sid]
     return {"status": "success", "id": sid, "deleted": True}
 
 
@@ -2201,10 +2920,18 @@ async def rename_session(request: Request):
     path = session_file_path(sid)
     if os.path.exists(path):
         meta_path = session_file_path(sid, ".meta")
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump({"title": new_title}, f)
+        await asyncio.to_thread(_write_session_title_sync, meta_path, new_title)
         return {"status": "success"}
     return {"status": "error"}
+
+
+def _write_session_title_sync(meta_path: str, title: str) -> None:
+    """Persist session metadata atomically outside the async request loop."""
+    directory = os.path.dirname(meta_path) or "."
+    os.makedirs(directory, exist_ok=True)
+    session_path = os.path.join(directory, f"{os.path.basename(meta_path)[:-5]}.json")
+    with session_write_lock(session_path):
+        atomic_write_json(meta_path, {"title": title})
 
 
 _SENTINEL = object()
@@ -2248,7 +2975,7 @@ async def chat(request: Request):
     try:
         nexus_loop = get_loop(sid)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to initialize session: {str(e)}")
+        raise HTTPException(status_code=500, detail=_public_api_failure("Session initialization", e))
     if bool(getattr(nexus_loop, "is_running", False)):
         raise HTTPException(status_code=409, detail="A run is already active for this session")
 
@@ -2271,15 +2998,62 @@ async def chat(request: Request):
         logger.debug("start_chat_workflow failed for %s", sid, exc_info=True)
     effective_prompt = build_resume_prompt(prompt, resume_todo_context)
 
+    configured_provider, configured_model = configured_provider_defaults()
+    requested_provider = provider if provider and provider != "auto" else configured_provider
+    requested_model = model if model and model.lower() != "auto" else configured_model
     allowed_providers = {
         "openrouter", "qwen", "deepseek", "lm_studio", "anthropic", "openai",
         "gemini", "google_gemini", "groq", "ollama", "llama_cpp", "mistral",
         "cohere", "perplexity", "together", "huggingface", "sambanova",
         "fireworks", "xai", "commandcode", "nvidia"
     }
-    safe_provider = provider if provider in allowed_providers else None
-    safe_model = model or getattr(nexus_loop, "model", "")
+    safe_model = requested_model or getattr(nexus_loop, "model", "")
+    if str(safe_model).lower() == "auto":
+        safe_model = configured_model
+    # The GUI persists the selected model independently from the provider.
+    # Recover the provider from well-known model prefixes so a stale/early
+    # model-picker state cannot silently route DeepSeek to LM Studio.
+    model_provider = {
+        "deepseek-chat": "deepseek",
+        "deepseek-reasoner": "deepseek",
+        "grok-": "grok",
+        "nvidia/": "openrouter",
+        "llama3": "ollama",
+        "qwen3.5-": "lm_studio",
+    }
+    inferred_provider = next(
+        (candidate for prefix, candidate in model_provider.items() if safe_model == prefix or safe_model.startswith(prefix)),
+        None,
+    )
+    # A model-specific mapping wins over a stale/default provider value from
+    # the client. The GUI historically sent `deepseek-chat` while the server
+    # session still carried `lm_studio`, which caused valid cloud requests to
+    # be sent to localhost:1234.
+    safe_provider = inferred_provider or (requested_provider if requested_provider in allowed_providers else None)
     safe_profile = profile or getattr(nexus_loop, "profile_override", "") or None
+
+    # Fail before entering the provider mesh when an explicitly selected cloud
+    # provider has no usable credential. Otherwise the router can fall through
+    # to an unrelated local provider and hide the actionable root cause.
+    # Only perform provider readiness validation for a real Nexus loop.  This
+    # keeps the transport contract usable for injected/test loop adapters,
+    # while real loops still fail fast with an actionable configuration error.
+    if safe_provider and safe_provider not in {"lm_studio", "ollama", "llama_cpp"} and hasattr(nexus_loop, "brain"):
+        try:
+            from providers.factory import NexusProviderFactory
+            selected_provider = NexusProviderFactory().get_provider_by_name(
+                "cloud", safe_provider, profile=safe_profile
+            )
+            if selected_provider is not None and not selected_provider.validate_api_key():
+                key_name = f"{safe_provider.upper()}_API_KEY"
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Provider '{safe_provider}' is not configured. Set {key_name} in the environment or configure it in Settings → Providers.",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            logger.debug("Provider readiness check skipped for %s", safe_provider, exc_info=True)
 
     async def _collect_all(gen):
         parts = []
@@ -2373,14 +3147,17 @@ async def chat(request: Request):
                 completed_normally = True
             except asyncio.TimeoutError:
                 run_succeeded = False
+                stream_succeeded = False
                 failure_reason = f"Response timed out after {run_timeout:.0f} seconds"
                 await chunk_queue.put(("error", failure_reason))
             except asyncio.CancelledError:
                 run_succeeded = False
+                stream_succeeded = False
                 failure_reason = "Response stream cancelled before completion"
                 raise
             except Exception as exc:
                 run_succeeded = False
+                stream_succeeded = False
                 failure_reason = str(exc)
                 await chunk_queue.put(("error", str(exc)))
             finally:
@@ -2401,9 +3178,16 @@ async def chat(request: Request):
         if canonical_events:
             nexus_loop.work_event_sink = stream_event_sink
         async def timed_pump():
+            nonlocal stream_succeeded
             try:
                 await asyncio.wait_for(pump_run(), timeout=run_timeout)
             except asyncio.TimeoutError:
+                # ``wait_for`` cancels the inner generator before its local
+                # exception state can reach the consumer. Propagate the
+                # terminal failure explicitly so the route cannot persist a
+                # timed-out stream as a successful run merely because the
+                # producer emits its ordinary cleanup marker below.
+                stream_succeeded = False
                 request_abort = getattr(nexus_loop, "request_abort", None)
                 if callable(request_abort):
                     request_abort(turn_id, "deadline_exceeded")
@@ -2474,6 +3258,13 @@ async def chat(request: Request):
                 )
             except Exception:
                 logger.debug("complete_chat_workflow failed for %s", sid, exc_info=True)
+            if not stream_completed:
+                request_abort = getattr(nexus_loop, "request_abort", None)
+                if callable(request_abort):
+                    try:
+                        request_abort(turn_id, "client_disconnect")
+                    except Exception:
+                        logger.debug("chat disconnect abort failed for %s", sid, exc_info=True)
             if not producer.done():
                 producer.cancel()
             await asyncio.gather(producer, return_exceptions=True)
@@ -2602,7 +3393,7 @@ async def list_models():
 
 @app.get("/models/saved")
 @app.get("/api/models/saved")
-async def list_saved_models():
+def _list_saved_models_sync():
     """Return provider-configured models in the shape used by the GUI picker.
 
     The GUI calls this endpoint during ``MainChat`` mount.  Keep this separate
@@ -2642,6 +3433,12 @@ async def list_saved_models():
     except Exception:
         logger.warning("server: saved model listing failed", exc_info=True)
     return {"models": models}
+
+
+@app.get("/models/saved")
+@app.get("/api/models/saved")
+async def list_saved_models():
+    return await asyncio.to_thread(_list_saved_models_sync)
 
 
 @app.post("/v1/chat/completions")
@@ -2703,7 +3500,7 @@ async def openai_chat(request: Request):
     try:
         nexus_loop = get_loop(sid)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Session init failed: {e}")
+        raise HTTPException(status_code=500, detail=_public_api_failure("OpenAI session initialization", e))
 
     request_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -2737,7 +3534,7 @@ async def openai_chat(request: Request):
             yield f"data: {json.dumps(done)}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield f"data: {json.dumps({'error': _public_api_failure('OpenAI streaming', e)})}\n\n"
 
     if stream:
         return StreamingResponse(_stream_openai(), media_type="text/event-stream")
@@ -2776,7 +3573,7 @@ def get_history(session_id: str = "default"):
         loop.sync_memory()
         return _sanitize_history_messages(loop.memory, safe_session_id(session_id))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
+        raise HTTPException(status_code=500, detail=_public_api_failure("History retrieval", e))
 
 
 @app.get("/api/runs")
@@ -2854,6 +3651,9 @@ def list_work_items_api(session_id: str = "", limit: int = 100):
     return {
         "status": "success",
         "work_items": [_public_work_item(item) for item in items],
+        "projection_failures": pending_work_item_projection_failures(
+            event_log_path=work_events_path(sid)
+        ),
     }
 
 
@@ -2869,7 +3669,13 @@ def get_work_item_api(session_id: str, task_id: str):
     item = load_work_item(_RUN_ROOT, sid, task_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Work item not found")
-    return {"status": "success", "work_item": _public_work_item(item)}
+    return {
+        "status": "success",
+        "work_item": _public_work_item(item),
+        "projection_failures": pending_work_item_projection_failures(
+            event_log_path=work_events_path(sid)
+        ),
+    }
 
 
 @app.get("/api/work-events")
@@ -2880,7 +3686,7 @@ def get_work_events(request: Request, session_id: str = "default", limit: int = 
             after_sequence = max(after_sequence, int(header_cursor))
         except ValueError:
             raise HTTPException(status_code=400, detail="Last-Event-ID must be an integer sequence")
-    raw_events, _ = _cached_work_events(work_events_path(session_id))
+    raw_events = _session_work_events(session_id)
     retained_sequences = [_safe_event_sequence(event) for event in raw_events if _safe_event_sequence(event) > 0]
     oldest_sequence = min(retained_sequences, default=0)
     replay_truncated = bool(after_sequence and oldest_sequence and after_sequence < oldest_sequence - 1)
@@ -2893,12 +3699,19 @@ def get_work_events(request: Request, session_id: str = "default", limit: int = 
     else:
         events = list_work_events(session_id, limit=limit, turn_id=turn_id, after_sequence=after_sequence)
     next_sequence = max((_safe_event_sequence(event) for event in events), default=after_sequence)
+    replay_gap = {
+        "detected": replay_truncated,
+        "after_sequence": after_sequence,
+        "oldest_sequence": oldest_sequence,
+        "missing_until": max(0, oldest_sequence - 1) if replay_truncated else 0,
+    }
     return {
         "events": events,
         "after_sequence": after_sequence,
         "next_sequence": next_sequence,
         "oldest_sequence": oldest_sequence,
         "replay_truncated": replay_truncated,
+        "replay_gap": replay_gap,
     }
 
 
@@ -2953,7 +3766,16 @@ async def run_work_command_stream(request: Request):
         try:
             from sandbox.sandbox_manager import SovereignSandbox
             sandbox = SovereignSandbox(_PROJECT_ROOT)
-            async for text in sandbox.stream_execute(command, _PROJECT_ROOT, timeout=timeout):
+            stream_kwargs = {"timeout": timeout}
+            if profile == "pwsh":
+                stream_kwargs["shell"] = "powershell"
+            elif profile == "cmd":
+                stream_kwargs["shell"] = "cmd"
+            elif profile == "bash":
+                stream_kwargs["shell"] = "bash"
+            elif profile == "wsl":
+                stream_kwargs["shell"] = "wsl"
+            async for text in sandbox.stream_execute(command, _PROJECT_ROOT, **stream_kwargs):
                 output_parts.append(text)
                 yield sse({"type": "chunk", "stream": "stderr" if text.startswith("[SANDBOX_") else "stdout", "text": text})
             output = "".join(output_parts)
@@ -3067,7 +3889,89 @@ def list_tools():
                 })
         return {"tools": tools}
     except Exception as e:
-        return {"tools": list(config_tools.values()), "error": str(e)}
+        return {
+            "tools": list(config_tools.values()),
+            "error": _public_api_failure("Tool inventory", e),
+        }
+
+
+@app.post("/api/verification/run")
+async def run_programmatic_verification(request: Request):
+    """Run an explicit, sandboxed verification recipe and return durable facts."""
+    try:
+        data = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Verification request must be an object")
+    auto_recipe = str(data.get("recipe") or "").strip().lower() == "auto"
+    commands = data.get("commands")
+    if not auto_recipe and (not isinstance(commands, list) or not commands or len(commands) > 32):
+        raise HTTPException(status_code=400, detail="commands must be a non-empty list of at most 32 items")
+    for check in commands or []:
+        if isinstance(check, str):
+            if not check.strip():
+                raise HTTPException(status_code=400, detail="commands must contain non-empty strings")
+        elif isinstance(check, dict):
+            if not isinstance(check.get("command"), str) or not check["command"].strip():
+                raise HTTPException(status_code=400, detail="verification checks require a non-empty command")
+            if check.get("phase") is not None and not isinstance(check.get("phase"), str):
+                raise HTTPException(status_code=400, detail="verification phase must be a string")
+        else:
+            raise HTTPException(status_code=400, detail="commands must contain strings or check objects")
+    raw_root = str(data.get("root") or _PROJECT_ROOT).strip()
+    target = Path(raw_root).expanduser()
+    if not target.is_absolute():
+        target = Path(_PROJECT_ROOT) / target
+    try:
+        target = target.resolve(strict=False)
+        project_root = Path(_PROJECT_ROOT).resolve(strict=False)
+        target.relative_to(project_root)
+    except (OSError, RuntimeError, ValueError):
+        raise HTTPException(status_code=403, detail="verification root must be inside the Nexus workspace")
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail="verification root is not a directory")
+    try:
+        timeout = max(1.0, min(float(data.get("timeout", 600.0)), 3600.0))
+        total_timeout = max(1.0, min(float(data.get("total_timeout", timeout)), 3600.0))
+        readiness_timeout = max(0.1, min(float(data.get("readiness_timeout", 10.0)), 60.0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="timeouts must be numeric and within their allowed bounds")
+    from orchestrators.v5.programmatic_verify import (
+        run_detected_verification, run_programmatic_verification as run_verify,
+    )
+
+    if auto_recipe:
+        result = await run_detected_verification(
+            target, session_id=str(data.get("session_id") or "default"),
+            timeout=timeout, total_timeout=total_timeout,
+            stop_on_failure=bool(data.get("stop_on_failure", True)),
+        )
+    else:
+        result = await run_verify(
+            target, commands, session_id=str(data.get("session_id") or "default"),
+            timeout=timeout, total_timeout=total_timeout,
+            readiness_url=data.get("readiness_url"), readiness_timeout=readiness_timeout,
+            stop_on_failure=bool(data.get("stop_on_failure", True)),
+        )
+    return result.to_dict()
+
+
+@app.get("/api/verification/recipe")
+def get_verification_recipe(root: str = ""):
+    """Detect a read-only verification recipe for a workspace path."""
+    target = Path(root or _PROJECT_ROOT).expanduser()
+    if not target.is_absolute():
+        target = Path(_PROJECT_ROOT) / target
+    try:
+        target = target.resolve(strict=False)
+        target.relative_to(Path(_PROJECT_ROOT).resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        raise HTTPException(status_code=403, detail="recipe root must be inside the Nexus workspace")
+    from orchestrators.v5.verification_recipes import detect_verification_recipe
+
+    recipe = detect_verification_recipe(target)
+    return {"recipe": recipe.to_dict() if recipe else None, "root": str(target)}
 
 
 @app.get("/api/agents")
@@ -3146,7 +4050,7 @@ def list_plugins():
 
 @app.get("/api/mcp")
 def list_mcp():
-    """List MCP servers from nexus_config.yaml."""
+    """List MCP servers from settings.yml."""
     return {"mcp": _config_summary()["mcp"]}
 
 
@@ -3170,11 +4074,6 @@ async def create_mcp(request: Request):
         args = [part.strip() for part in args.splitlines() if part.strip()]
     if not isinstance(args, list):
         raise HTTPException(status_code=400, detail="MCP args must be a list or newline-separated string")
-    config = _load_nexus_config()
-    servers = config.setdefault("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-        config["mcp_servers"] = servers
     entry = {
         "command": command,
         "args": [str(part) for part in args],
@@ -3184,9 +4083,7 @@ async def create_mcp(request: Request):
     for field in ("env", "working_dir"):
         if body.get(field) is not None:
             entry[field] = body[field]
-    servers[name] = entry
-    _save_nexus_config(config)
-    _sync_mcp_servers_file(config)
+    await asyncio.to_thread(_create_mcp_config_sync, name, entry)
     _clear_runtime("mcp config changed")
     return {"status": "success", "id": name, "mcp": entry}
 
@@ -3224,6 +4121,11 @@ def list_hives():
                 if live is not None:
                     item["status"] = live.status
             statuses = {str(item.get("status") or "").lower() for item in agents}
+            partial = bool(
+                "success" in statuses
+                and statuses.intersection({"failed", "cancelled", "canceled", "error"})
+            )
+            hive_data["partial"] = partial
             terminal = {"success", "failed", "cancelled", "canceled", "error"}
             if statuses and statuses.issubset(terminal):
                 if statuses == {"success"}:
@@ -3235,6 +4137,7 @@ def list_hives():
             hives_list.append({
                 "id": hive_id,
                 "status": hive_data.get("status", "unknown"),
+                "partial": partial,
                 "agents": agents,
             })
     _persist_hive_manifest()
@@ -3281,19 +4184,28 @@ async def create_hive(request: Request):
         logger.warning(f"Hive engine spawn failed: {e}", exc_info=True)
         raise HTTPException(status_code=503, detail=f"Hive could not start: {e}")
 
+    agent_summaries = [
+        {
+            "id": agent.agent_id,
+            "task": agent.task,
+            "persona": agent.persona,
+            "status": agent.status,
+        }
+        for agent in spawned
+    ]
+    terminal_statuses = {"success", "failed", "cancelled", "canceled", "error"}
+    observed_statuses = {str(agent.get("status") or "").lower() for agent in agent_summaries}
+    hive_status = "running"
+    if observed_statuses and observed_statuses.issubset(terminal_statuses):
+        hive_status = "success" if observed_statuses == {"success"} else (
+            "cancelled" if observed_statuses.issubset({"cancelled", "canceled"}) else "failed"
+        )
+
     with _HIVES_LOCK:
         _HIVES[hive_id] = {
             "id": hive_id,
-            "status": "running",
-            "agents": [
-                {
-                    "id": agent.agent_id,
-                    "task": agent.task,
-                    "persona": agent.persona,
-                    "status": agent.status,
-                }
-                for agent in spawned
-            ],
+            "status": hive_status,
+            "agents": agent_summaries,
             "created_at": time.time(),
         }
     _persist_hive_manifest()
@@ -3302,7 +4214,7 @@ async def create_hive(request: Request):
         "status": "success",
         "hive": {
             "id": hive_id,
-            "status": "running",
+            "status": hive_status,
             "agents": _HIVES[hive_id]["agents"]
         }
     }
@@ -3332,28 +4244,86 @@ async def cancel_hive(hive_id: str):
     return {"status": "success"}
 
 
+@app.post("/api/hives/{hive_id}/pause")
+async def pause_hive(hive_id: str):
+    """Pause a running Hive at the next safe model/tool boundary."""
+    with _HIVES_LOCK:
+        summary = _HIVES.get(hive_id)
+        if summary is None:
+            raise HTTPException(status_code=404, detail=f"Hive {hive_id} not found")
+        if str(summary.get("status") or "").lower() != "running":
+            raise HTTPException(status_code=409, detail="Hive is not running")
+    try:
+        await _get_hive_engine().pause_hive(hive_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    with _HIVES_LOCK:
+        _HIVES[hive_id]["status"] = "paused"
+        _HIVES[hive_id]["paused_at"] = time.time()
+    _persist_hive_manifest()
+    return {"status": "success", "hive": _HIVES[hive_id]}
+
+
 @app.post("/api/hives/{hive_id}/resume")
 async def resume_hive(hive_id: str):
-    """Re-spawn the saved tasks from an interrupted/failed Hive."""
+    """Resume a paused Hive in place or re-spawn interrupted work after restart."""
     with _HIVES_LOCK:
         previous = _HIVES.get(hive_id)
         if previous is None:
             raise HTTPException(status_code=404, detail=f"Hive {hive_id} not found")
         if previous.get("status") == "running":
             raise HTTPException(status_code=409, detail="Hive is already running")
-        tasks = [
-            (str(agent.get("task") or ""), str(agent.get("persona") or "WORKER"))
-            for agent in previous.get("agents", [])
+        resumable_agents = [
+            agent for agent in previous.get("agents", [])
             if isinstance(agent, dict)
             and str(agent.get("task") or "").strip()
-            and str(agent.get("status") or "pending").lower() in {"pending", "running", "interrupted"}
+            and str(agent.get("status") or "pending").lower() in {"pending", "running", "paused", "interrupted"}
         ]
+        tasks = [
+            (str(agent.get("task") or ""), str(agent.get("persona") or "WORKER"))
+            for agent in resumable_agents
+        ]
+        agent_ids = [str(agent.get("id") or "") for agent in resumable_agents]
+        paused_in_place = str(_HIVES[hive_id].get("status") or "").lower() == "paused"
+        engine = _get_hive_engine() if paused_in_place else None
+        paused_in_place = paused_in_place and hive_id in getattr(engine, "_hives", {})
+    if paused_in_place:
+        try:
+            await engine.resume_hive(hive_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        with _HIVES_LOCK:
+            _HIVES[hive_id]["status"] = "running"
+            _HIVES[hive_id].pop("paused_at", None)
+        _persist_hive_manifest()
+        return {"status": "success", "hive": _HIVES[hive_id]}
     if not tasks:
         raise HTTPException(status_code=400, detail="Hive has no resumable tasks")
 
     try:
         hive_engine = _get_hive_engine()
-        new_id, spawned = await hive_engine.spawn_hive(tasks, parent_run_id=hive_id)
+        # Keep resume compatible with lightweight engine doubles and older
+        # integrations while using stable IDs whenever the engine supports
+        # checkpoint hydration.  Do not catch arbitrary TypeError from inside
+        # spawn_hive: a real implementation error must remain visible.
+        spawn_hive = hive_engine.spawn_hive
+        try:
+            spawn_parameters = inspect.signature(spawn_hive).parameters
+        except (TypeError, ValueError):
+            spawn_parameters = {}
+        accepts_agent_ids = (
+            "agent_ids" in spawn_parameters
+            or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in spawn_parameters.values()
+            )
+        )
+        if accepts_agent_ids:
+            new_id, spawned = await spawn_hive(
+                tasks, parent_run_id=hive_id, agent_ids=agent_ids
+            )
+        else:
+            new_id, spawned = await spawn_hive(tasks, parent_run_id=hive_id)
     except Exception as e:
         logger.warning("Hive %s resume failed: %s", hive_id, e, exc_info=True)
         raise HTTPException(status_code=503, detail=f"Hive could not resume: {e}")
@@ -3405,17 +4375,11 @@ def list_gateways():
 
 @app.get("/api/cron/jobs")
 def list_cron_jobs():
-    """List scheduled cron jobs."""
-    with _CRON_JOBS_LOCK:
-        jobs = []
-        for job_id, job_data in _CRON_JOBS.items():
-            jobs.append({
-                "id": job_id,
-                "name": job_data.get("name", ""),
-                "enabled": job_data.get("enabled", True),
-                "description": f"Interval: {job_data.get('interval_minutes', 0)} minutes"
-            })
-        return {"jobs": jobs, "status": "ok"}
+    """List durable cron definitions and their next execution time."""
+    jobs = _get_cron_queue().list_cron_jobs()
+    for job in jobs:
+        job["description"] = f"Interval: {job.get('interval_minutes', 0)} minutes"
+    return {"jobs": jobs, "status": "ok"}
 
 
 @app.post("/api/cron/jobs")
@@ -3439,17 +4403,10 @@ async def create_cron_job(request: Request):
         raise HTTPException(status_code=400, detail="interval_minutes must be a positive integer")
 
     job_id = f"cron_{uuid.uuid4().hex[:8]}"
-    with _CRON_JOBS_LOCK:
-        _CRON_JOBS[job_id] = {
-            "id": job_id,
-            "name": name,
-            "prompt": prompt,
-            "interval_minutes": interval_minutes,
-            "enabled": enabled,
-            "created_at": time.time()
-        }
-
-    return {"status": "success", "job": {"id": job_id, "name": name, "enabled": enabled}}
+    job = _get_cron_queue().create_cron_job(
+        job_id, name, prompt, interval_minutes, enabled=bool(enabled), next_run_at=time.time()
+    )
+    return {"status": "success", "job": job}
 
 
 # ── Voice API endpoints ────────────────────────────────────────────────────────
@@ -3467,9 +4424,29 @@ def _get_voice_assistant(session_id: str = "default"):
                 _VOICE_ASSISTANT[session_id] = VoiceAssistant(session_id=session_id)
                 _VOICE_ASSISTANT[session_id].warmup()
             except Exception as e:
-                logger.error(f"Failed to create VoiceAssistant: {e}")
-                raise HTTPException(status_code=500, detail=f"Voice system not available: {str(e)}")
+                logger.error("Failed to create VoiceAssistant: %s", redact_secrets(e), exc_info=True)
+                raise HTTPException(status_code=500, detail="Voice system unavailable") from e
         return _VOICE_ASSISTANT[session_id]
+
+
+def _voice_failure(operation: str, exc: Exception) -> str:
+    """Log a diagnostic safely and return a stable public voice error."""
+    logger.error("Voice %s failed: %s", operation, redact_secrets(exc), exc_info=True)
+    return f"Voice {operation} unavailable"
+
+
+def _persist_voice_settings(values: Dict[str, Any]) -> None:
+    """Persist only supported voice settings through the serialized config API."""
+    from config.config_loader import NexusConfigLoader
+
+    loader = NexusConfigLoader()
+    current = loader.get("voice", {})
+    voice_config = dict(current) if isinstance(current, dict) else {}
+    for key in ("auto_speak", "voice_name", "whisper_language", "volume", "speech_speed"):
+        if key in values:
+            voice_config[key] = values[key]
+    loader.set("voice", voice_config)
+    loader.save()
 
 
 @app.get("/api/voice/status")
@@ -3489,7 +4466,7 @@ def voice_status(session_id: str = "default"):
     except HTTPException:
         raise
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _voice_failure("status", e)}
 
 
 @app.post("/api/voice/listen/start")
@@ -3509,7 +4486,7 @@ async def voice_listen_start(request: Request):
             assistant.start_continuous_listening()
         return {"status": "ok", "listening": True, "continuous": continuous}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to start listening: {str(e)}")
+        raise HTTPException(status_code=500, detail=_voice_failure("listening start", e)) from e
 
 
 @app.post("/api/voice/listen/stop")
@@ -3520,7 +4497,7 @@ def voice_listen_stop(session_id: str = "default"):
         assistant.stop_continuous_listening()
         return {"status": "ok", "listening": False}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to stop listening: {str(e)}")
+        raise HTTPException(status_code=500, detail=_voice_failure("listening stop", e)) from e
 
 
 @app.post("/api/voice/transcribe")
@@ -3539,7 +4516,7 @@ async def voice_transcribe(request: Request):
         text = assistant.listen_once(continuous=continuous)
         return {"status": "ok", "text": text}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=_voice_failure("transcription", e)) from e
 
 
 @app.post("/api/voice/speak")
@@ -3562,7 +4539,7 @@ async def voice_speak(request: Request):
         success = assistant.speak(text, blocking=blocking)
         return {"status": "ok", "spoken": success}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=_voice_failure("speech", e)) from e
 
 
 @app.post("/api/voice/speak/stop")
@@ -3573,7 +4550,7 @@ def voice_speak_stop(session_id: str = "default"):
         assistant.stop_speaking()
         return {"status": "ok"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to stop speech: {str(e)}")
+        raise HTTPException(status_code=500, detail=_voice_failure("speech stop", e)) from e
 
 
 @app.get("/api/voice/voices")
@@ -3583,7 +4560,7 @@ def voice_voices():
         from voice.pipeline import VoiceAssistant
         return {"status": "ok", "voices": VoiceAssistant.get_available_voices(None)}
     except Exception as e:
-        return {"status": "error", "message": str(e), "voices": []}
+        return {"status": "error", "message": _voice_failure("voice listing", e), "voices": []}
 
 
 @app.get("/api/voice/languages")
@@ -3593,7 +4570,7 @@ def voice_languages():
         from voice.pipeline import VoiceAssistant
         return {"status": "ok", "languages": VoiceAssistant.get_available_languages(None)}
     except Exception as e:
-        return {"status": "error", "message": str(e), "languages": []}
+        return {"status": "error", "message": _voice_failure("language listing", e), "languages": []}
 
 
 @app.get("/api/voice/history")
@@ -3604,7 +4581,7 @@ def voice_history(session_id: str = "default", limit: int = 10):
         history = assistant.get_transcription_history(limit)
         return {"status": "ok", "history": history}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
+        raise HTTPException(status_code=500, detail=_voice_failure("history", e)) from e
 
 
 @app.post("/api/voice/settings")
@@ -3630,6 +4607,8 @@ async def voice_settings(request: Request):
             assistant.settings.volume = body["volume"]
         if "speech_speed" in body:
             assistant.settings.speech_speed = body["speech_speed"]
+
+        await asyncio.to_thread(_persist_voice_settings, body)
         
         return {"status": "ok", "settings": {
             "auto_speak": assistant.settings.auto_speak,
@@ -3639,7 +4618,7 @@ async def voice_settings(request: Request):
             "speech_speed": assistant.settings.speech_speed,
         }}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update settings: {str(e)}")
+        raise HTTPException(status_code=500, detail=_voice_failure("settings update", e)) from e
 
 
 @app.get("/api/voice/stream")
@@ -3675,7 +4654,7 @@ async def voice_stream(request: Request):
                     yield f": keepalive\n\n"
                     
                 except Exception as e:
-                    yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                    yield f"data: {json.dumps({'type': 'error', 'message': _voice_failure('stream', e)})}\n\n"
                     break
                     
         finally:
@@ -3705,39 +4684,37 @@ async def update_cron_job(job_id: str, request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    with _CRON_JOBS_LOCK:
-        if job_id not in _CRON_JOBS:
-            raise HTTPException(status_code=404, detail=f"Cron job {job_id} not found")
-
-        if "enabled" in body:
-            _CRON_JOBS[job_id]["enabled"] = bool(body["enabled"])
-        if "interval_minutes" in body:
-            interval = body["interval_minutes"]
-            if not isinstance(interval, int) or interval <= 0:
-                raise HTTPException(status_code=400, detail="interval_minutes must be a positive integer")
-            _CRON_JOBS[job_id]["interval_minutes"] = interval
-
-        return {"status": "success", "job": {"id": job_id, "enabled": _CRON_JOBS[job_id].get("enabled", True)}}
+    if "interval_minutes" in body:
+        interval = body["interval_minutes"]
+        if not isinstance(interval, int) or interval <= 0:
+            raise HTTPException(status_code=400, detail="interval_minutes must be a positive integer")
+    job = _get_cron_queue().update_cron_job(
+        job_id,
+        enabled=body.get("enabled") if "enabled" in body else None,
+        interval_minutes=body.get("interval_minutes") if "interval_minutes" in body else None,
+        name=body.get("name") if "name" in body else None,
+        prompt=body.get("prompt") if "prompt" in body else None,
+    )
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Cron job {job_id} not found")
+    return {"status": "success", "job": job}
 
 
 @app.post("/api/cron/jobs/{job_id}/run")
 def run_cron_job(job_id: str):
     """Manually trigger a cron job."""
-    with _CRON_JOBS_LOCK:
-        if job_id not in _CRON_JOBS:
-            raise HTTPException(status_code=404, detail=f"Cron job {job_id} not found")
-    # For now, just acknowledge - actual execution would require scheduler integration
-    return {"status": "success"}
+    run = _get_cron_queue().enqueue_cron_run(job_id, trigger="manual")
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Cron job {job_id} not found")
+    return {"status": "accepted", **run}
 
 
 @app.delete("/api/cron/jobs/{job_id}")
 def delete_cron_job(job_id: str):
-    """Delete a cron job."""
-    with _CRON_JOBS_LOCK:
-        if job_id not in _CRON_JOBS:
-            raise HTTPException(status_code=404, detail=f"Cron job {job_id} not found")
-        del _CRON_JOBS[job_id]
-    return {"status": "success"}
+    """Disable a cron job while preserving historical runs."""
+    if not _get_cron_queue().delete_cron_job(job_id):
+        raise HTTPException(status_code=404, detail=f"Cron job {job_id} not found")
+    return {"status": "success", "enabled": False}
 
 
 @app.get("/api/billing/status")
@@ -3778,18 +4755,24 @@ def list_provider_config():
         if p["id"].lower() in active_providers_from_kernel:
             p["active"] = True
 
+    diagnostics = _provider_runtime_diagnostics()
     return {
         "providers": providers,
         "runtime": {
             "provider": _RUNTIME_SETTINGS.get("provider") or "",
             "model": _RUNTIME_SETTINGS.get("model") or "",
-        }
+            "profile": _RUNTIME_SETTINGS.get("profile") or "",
+        },
+        "diagnostics": diagnostics,
+        # Keep the explicit name available to status-oriented clients while
+        # retaining the concise ``diagnostics`` field used by the settings UI.
+        "provider_diagnostics": diagnostics,
     }
 
 
 @app.get("/api/features")
 def list_features():
-    """List runtime feature flags from nexus_config.yaml."""
+    """List runtime feature flags from settings.yml."""
     return {"features": _config_summary()["features"]}
 
 
@@ -3910,8 +4893,14 @@ def get_config_file(path: str):
     
     if not os.path.exists(full_path):
         raise HTTPException(status_code=404, detail="File not found")
+    if _is_sensitive_workspace_path(full_path):
+        raise HTTPException(status_code=403, detail="Sensitive files cannot be read through the API")
     
-    if not os.path.abspath(full_path).startswith(os.path.abspath(project_root)):
+    try:
+        within_root = os.path.commonpath((os.path.realpath(full_path), os.path.realpath(project_root))) == os.path.realpath(project_root)
+    except ValueError:
+        within_root = False
+    if not within_root:
         raise HTTPException(status_code=403, detail="Access denied")
     
     try:
@@ -3924,7 +4913,7 @@ def get_config_file(path: str):
             "size": os.path.getsize(full_path)
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not read file: {str(e)}")
+        raise HTTPException(status_code=500, detail=_public_api_failure("Workspace file read", e))
 
 
 @app.post("/api/approve")
@@ -3960,7 +4949,7 @@ def list_pending_approvals(session_id: str = ""):
 
 
 @app.get("/api/files/read")
-def read_workspace_file(path: str = ""):
+def read_workspace_file(path: str = "", format: str = ""):
     """Stream a single workspace file for the GUI file explorer / download.
 
     The frontend (FileExplorer.tsx, lib/api.ts) has always linked to this
@@ -3968,12 +4957,246 @@ def read_workspace_file(path: str = ""):
     Path containment is enforced by safe_workspace_read_path().
     """
     resolved = safe_workspace_read_path(path)
+    if str(format).lower() in {"json", "text"}:
+        try:
+            with open(resolved, "r", encoding="utf-8") as handle:
+                content = handle.read()
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=415, detail="File is not UTF-8 text")
+        return {"path": path, "content": content}
     from fastapi.responses import FileResponse
     return FileResponse(
         resolved,
         filename=os.path.basename(resolved),
         media_type="application/octet-stream",
     )
+
+
+def _safe_workspace_mutation_path(raw_path: str, *, must_exist: bool = False) -> str:
+    """Resolve a GUI file-operation path without following it outside the workspace."""
+    value = str(raw_path or "").strip().strip('"').strip("'")
+    if not value:
+        raise HTTPException(status_code=400, detail="Path is required")
+    candidate = value if os.path.isabs(value) else os.path.join(_PROJECT_ROOT, value)
+    root = os.path.realpath(os.path.abspath(_PROJECT_ROOT))
+    path = os.path.realpath(os.path.abspath(candidate))
+    try:
+        inside = os.path.commonpath([root, path]) == root
+    except ValueError:
+        inside = False
+    if not inside or path == root:
+        raise HTTPException(status_code=403, detail="Path is outside the NEXUS workspace")
+    if must_exist and not os.path.lexists(path):
+        raise HTTPException(status_code=404, detail="Path not found")
+    return path
+
+
+async def _file_json(request: Request) -> Dict[str, Any]:
+    try:
+        data = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    return data
+
+
+def _invalidate_verifier_after_file_mutation(session_id: Any, *paths: Any) -> None:
+    """Mark workspace verifier state stale after an API-side mutation."""
+    try:
+        from orchestrators.v5.verification_state import VerifierStateStore
+
+        state_path = Path(_PROJECT_ROOT) / ".nexus_v5" / "verifier_state.json"
+        VerifierStateStore(state_path).mark_stale(
+            safe_session_id(str(session_id or "default")), _PROJECT_ROOT, paths
+        )
+    except Exception:
+        logger.debug("Could not invalidate verifier state after file mutation", exc_info=True)
+
+
+def _write_workspace_file_sync(path: str, content: str) -> None:
+    if os.path.exists(path) and os.path.isdir(path):
+        raise HTTPException(status_code=400, detail="Cannot write a directory")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+
+
+def _create_workspace_file_sync(path: str, kind: str) -> None:
+    if os.path.lexists(path):
+        raise HTTPException(status_code=409, detail="Path already exists")
+    os.makedirs(path if kind == "folder" else os.path.dirname(path), exist_ok=True)
+    if kind == "file":
+        with open(path, "x", encoding="utf-8"):
+            pass
+
+
+def _rename_workspace_file_sync(source: str, target: str) -> None:
+    if os.path.lexists(target):
+        raise HTTPException(status_code=409, detail="Destination already exists")
+    os.replace(source, target)
+
+
+def _delete_workspace_file_sync(path: str) -> None:
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    else:
+        os.remove(path)
+
+
+def _move_workspace_file_sync(source: str, destination: str) -> str:
+    if os.path.isdir(destination):
+        destination = os.path.join(destination, os.path.basename(source))
+    if os.path.lexists(destination):
+        raise HTTPException(status_code=409, detail="Destination already exists")
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    shutil.move(source, destination)
+    return destination
+
+
+def _zip_workspace_file_sync(source: str, target: str) -> None:
+    import zipfile
+
+    if os.path.lexists(target):
+        raise HTTPException(status_code=409, detail="Archive already exists")
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        if os.path.isdir(source):
+            for directory, _, files in os.walk(source):
+                for filename in files:
+                    full = os.path.join(directory, filename)
+                    archive.write(full, os.path.relpath(full, os.path.dirname(source)))
+        else:
+            archive.write(source, os.path.basename(source))
+
+
+def _unzip_workspace_file_sync(source: str, destination: str) -> None:
+    import zipfile
+
+    if not zipfile.is_zipfile(source):
+        raise HTTPException(status_code=400, detail="Source is not a ZIP archive")
+    os.makedirs(destination, exist_ok=True)
+    root = os.path.realpath(destination)
+    with zipfile.ZipFile(source) as archive:
+        for member in archive.infolist():
+            target = os.path.realpath(os.path.join(destination, member.filename))
+            if os.path.commonpath([root, target]) != root:
+                raise HTTPException(status_code=400, detail="Archive contains an unsafe path")
+        archive.extractall(destination)
+
+
+def _list_workspace_files_sync(
+    target: str, project_root: str, display_path: str = "."
+) -> List[Dict[str, Any]]:
+    try:
+        entries = sorted(os.listdir(target))
+    except PermissionError:
+        raise HTTPException(status_code=403, detail=f"Permission denied: {display_path}")
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=_public_api_failure("Workspace directory listing", exc),
+        )
+
+    files = []
+    for name in entries:
+        if name.lower() in _WINDOWS_RESERVED or name.endswith("."):
+            continue
+        full_path = os.path.join(target, name)
+        try:
+            rel_path = os.path.relpath(full_path, project_root).replace("\\", "/")
+        except ValueError:
+            rel_path = name
+        files.append({
+            "name": name,
+            "path": rel_path,
+            "isDirectory": os.path.isdir(full_path),
+            "children": [],
+        })
+    return files
+
+
+@app.post("/api/files/write")
+async def write_workspace_file(request: Request):
+    data = await _file_json(request)
+    path = _safe_workspace_mutation_path(data.get("path"))
+    content = data.get("content", "")
+    if not isinstance(content, str):
+        raise HTTPException(status_code=400, detail="content must be text")
+    await asyncio.to_thread(_write_workspace_file_sync, path, content)
+    _invalidate_verifier_after_file_mutation(data.get("session_id"), path)
+    return {"status": "ok", "path": os.path.relpath(path, _PROJECT_ROOT).replace("\\", "/")}
+
+
+@app.post("/api/files/create")
+async def create_workspace_file(request: Request):
+    data = await _file_json(request)
+    path = _safe_workspace_mutation_path(data.get("path"))
+    kind = str(data.get("type") or "file").lower()
+    if kind not in {"file", "folder"}:
+        raise HTTPException(status_code=400, detail="type must be file or folder")
+    await asyncio.to_thread(_create_workspace_file_sync, path, kind)
+    _invalidate_verifier_after_file_mutation(data.get("session_id"), path)
+    return {"status": "ok", "path": os.path.relpath(path, _PROJECT_ROOT).replace("\\", "/")}
+
+
+@app.post("/api/files/rename")
+async def rename_workspace_file(request: Request):
+    data = await _file_json(request)
+    source = _safe_workspace_mutation_path(data.get("path"), must_exist=True)
+    name = os.path.basename(str(data.get("name") or "").strip())
+    if not name or name in {".", ".."} or name != str(data.get("name") or "").strip():
+        raise HTTPException(status_code=400, detail="name must be a single path component")
+    target = _safe_workspace_mutation_path(os.path.join(os.path.dirname(source), name))
+    await asyncio.to_thread(_rename_workspace_file_sync, source, target)
+    _invalidate_verifier_after_file_mutation(data.get("session_id"), source, target)
+    return {"status": "ok", "path": os.path.relpath(target, _PROJECT_ROOT).replace("\\", "/")}
+
+
+@app.post("/api/files/delete")
+async def delete_workspace_file(request: Request):
+    data = await _file_json(request)
+    path = _safe_workspace_mutation_path(data.get("path"), must_exist=True)
+    await asyncio.to_thread(_delete_workspace_file_sync, path)
+    _invalidate_verifier_after_file_mutation(data.get("session_id"), path)
+    return {"status": "ok"}
+
+
+@app.post("/api/files/move")
+async def move_workspace_file(request: Request):
+    data = await _file_json(request)
+    source = _safe_workspace_mutation_path(data.get("source"), must_exist=True)
+    destination = _safe_workspace_mutation_path(data.get("dest"))
+    destination = await asyncio.to_thread(_move_workspace_file_sync, source, destination)
+    _invalidate_verifier_after_file_mutation(data.get("session_id"), source, destination)
+    return {"status": "ok", "path": os.path.relpath(destination, _PROJECT_ROOT).replace("\\", "/")}
+
+
+@app.post("/api/files/zip")
+async def zip_workspace_file(request: Request):
+    data = await _file_json(request)
+    source = _safe_workspace_mutation_path(data.get("source"), must_exist=True)
+    target = _safe_workspace_mutation_path(source + ".zip")
+    await asyncio.to_thread(_zip_workspace_file_sync, source, target)
+    _invalidate_verifier_after_file_mutation(data.get("session_id"), target)
+    return {"status": "ok", "path": os.path.relpath(target, _PROJECT_ROOT).replace("\\", "/")}
+
+
+@app.post("/api/files/unzip")
+async def unzip_workspace_file(request: Request):
+    data = await _file_json(request)
+    source = _safe_workspace_mutation_path(data.get("source"), must_exist=True)
+    destination = _safe_workspace_mutation_path(os.path.splitext(source)[0])
+    await asyncio.to_thread(_unzip_workspace_file_sync, source, destination)
+    _invalidate_verifier_after_file_mutation(data.get("session_id"), destination)
+    return {"status": "ok", "path": os.path.relpath(destination, _PROJECT_ROOT).replace("\\", "/")}
 
 
 @app.post("/api/files/list")
@@ -3986,8 +5209,9 @@ async def list_files(request: Request):
 
     relative_path = str(data.get("path", ".")).strip()
 
-    target = os.path.abspath(os.path.join(_PROJECT_ROOT, relative_path))
-    if os.path.commonpath([_PROJECT_ROOT, target]) != _PROJECT_ROOT:
+    project_root_real = os.path.realpath(os.path.abspath(_PROJECT_ROOT))
+    target = os.path.realpath(os.path.abspath(os.path.join(project_root_real, relative_path)))
+    if os.path.commonpath([project_root_real, target]) != project_root_real:
         raise HTTPException(status_code=403, detail="Path is outside project root")
 
     if not os.path.exists(target):
@@ -3996,28 +5220,9 @@ async def list_files(request: Request):
     if not os.path.isdir(target):
         raise HTTPException(status_code=400, detail=f"Path is not a directory: {relative_path}")
 
-    try:
-        entries = sorted(os.listdir(target))
-    except PermissionError:
-        raise HTTPException(status_code=403, detail=f"Permission denied: {relative_path}")
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read directory: {str(e)}")
-
-    files = []
-    for name in entries:
-        if name.lower() in _WINDOWS_RESERVED or name.endswith("."):
-            continue
-        full_path = os.path.join(target, name)
-        try:
-            rel_path = os.path.relpath(full_path, _PROJECT_ROOT).replace("\\", "/")
-        except ValueError:
-            rel_path = name
-        files.append({
-            "name": name,
-            "path": rel_path,
-            "isDirectory": os.path.isdir(full_path),
-            "children": [],
-        })
+    files = await asyncio.to_thread(
+        _list_workspace_files_sync, target, _PROJECT_ROOT, relative_path
+    )
 
     return {"files": files}
 
@@ -4463,6 +5668,13 @@ def delete_checkpoint_endpoint(checkpoint_id: str, session_id: str = ""):
     return {"deleted": True}
 
 
+def _persist_manage_config_sync(config: Dict[str, Any], sync_mcp: bool = False) -> None:
+    """Persist one management mutation in a worker thread, preserving order."""
+    _save_nexus_config(config)
+    if sync_mcp:
+        _sync_mcp_servers_file(config)
+
+
 @app.post("/api/manage")
 async def manage_runtime(request: Request):
     """Real config-backed management for tools, skills, MCP, plugins, providers, and runtime features."""
@@ -4535,19 +5747,19 @@ async def manage_runtime(request: Request):
                 "model": "",
                 "provider": "",
                 "mode": "auto",
-                "sandbox_tier": "no_sandbox",
+                "sandbox_tier": "normal",
                 "permission_allowlist": [],
                 "agent": "",
                 "goal": "",
                 "additional_dirs": [],
                 "workspace_root": "",
             })
-            _save_runtime_preferences()
+            await asyncio.to_thread(_save_runtime_preferences)
             reset = _clear_runtime("reset requested")
             return {"status": "success", "target": target_type or "runtime", **reset}
         if target_type == "tasks":
             _TASKS.clear()
-            _save_tasks(_TASKS)
+            await asyncio.to_thread(_save_tasks, _TASKS)
             return {"status": "success", "target": "tasks", "cleared": True}
         raise HTTPException(status_code=400, detail=f"Reset not supported for {target_type}")
 
@@ -4557,7 +5769,7 @@ async def manage_runtime(request: Request):
     if not target_type or not name:
         raise HTTPException(status_code=400, detail="type and name are required")
 
-    config = _load_nexus_config()
+    config = await asyncio.to_thread(_load_nexus_config)
 
     if target_type in {"tool", "tools"}:
         configs = config.setdefault("custom_tool_configs", {})
@@ -4578,7 +5790,7 @@ async def manage_runtime(request: Request):
                 raise HTTPException(status_code=400, detail="tool set requires object value")
         else:
             raise HTTPException(status_code=400, detail=f"{action} not supported for tools")
-        _save_nexus_config(config)
+        await asyncio.to_thread(_persist_manage_config_sync, config)
         _clear_runtime("tool config changed")
         return {"status": "success", "type": "tool", "name": name, "enabled": name not in config.get("disabled_tools", []) and bool(entry.get("active", True))}
 
@@ -4601,7 +5813,7 @@ async def manage_runtime(request: Request):
                 raise HTTPException(status_code=400, detail="skill set requires object value")
         else:
             raise HTTPException(status_code=400, detail=f"{action} not supported for skills")
-        _save_nexus_config(config)
+        await asyncio.to_thread(_persist_manage_config_sync, config)
         _clear_runtime("skill config changed")
         return {"status": "success", "type": "skill", "name": name, "enabled": name not in config.get("disabled_skills", []) and bool(entry.get("active", True))}
 
@@ -4624,27 +5836,28 @@ async def manage_runtime(request: Request):
             servers.pop(name, None)
         else:
             raise HTTPException(status_code=400, detail=f"{action} not supported for MCP")
-        _save_nexus_config(config)
-        _sync_mcp_servers_file(config)
+        await asyncio.to_thread(_persist_manage_config_sync, config, True)
         _clear_runtime("mcp config changed")
         return {"status": "success", "type": "mcp", "name": name, "active": bool(entry.get("active", False)) if action != "remove" else False}
 
     if target_type in {"plugin", "plugins"}:
-        settings = _load_claude_settings(strict=True)
-        enabled = settings.setdefault("enabledPlugins", {})
-        if not isinstance(enabled, dict):
-            enabled = {}
-            settings["enabledPlugins"] = enabled
-        if action == "enable":
-            enabled[name] = True
-        elif action == "disable":
-            enabled[name] = False
-        elif action == "remove":
-            enabled.pop(name, None)
-        else:
-            raise HTTPException(status_code=400, detail=f"{action} not supported for plugins")
-        _save_claude_settings(settings)
-        return {"status": "success", "type": "plugin", "name": name, "enabled": bool(enabled.get(name, False))}
+        def mutate_plugin_settings(settings):
+            enabled = settings.setdefault("enabledPlugins", {})
+            if not isinstance(enabled, dict):
+                enabled = {}
+                settings["enabledPlugins"] = enabled
+            if action == "enable":
+                enabled[name] = True
+            elif action == "disable":
+                enabled[name] = False
+            elif action == "remove":
+                enabled.pop(name, None)
+            else:
+                raise HTTPException(status_code=400, detail=f"{action} not supported for plugins")
+            return bool(enabled.get(name, False))
+
+        enabled = await asyncio.to_thread(_mutate_claude_settings_sync, mutate_plugin_settings)
+        return {"status": "success", "type": "plugin", "name": name, "enabled": enabled}
 
     if target_type in {"provider", "providers"}:
         entry = _provider_entry(config, name)
@@ -4671,7 +5884,7 @@ async def manage_runtime(request: Request):
                 raise HTTPException(status_code=400, detail="provider set/add requires object value")
         else:
             raise HTTPException(status_code=400, detail=f"{action} not supported for providers")
-        _save_nexus_config(config)
+        await asyncio.to_thread(_persist_manage_config_sync, config)
         apply_runtime_to_all_loops()
         return {"status": "success", "type": "provider", "name": name, "active": bool(entry.get("active", False)), "model": entry.get("model", "")}
 
@@ -4684,7 +5897,7 @@ async def manage_runtime(request: Request):
             features[feature_name] = False
         else:
             raise HTTPException(status_code=400, detail=f"{action} not supported for features")
-        _save_nexus_config(config)
+        await asyncio.to_thread(_persist_manage_config_sync, config)
         _clear_runtime("feature config changed")
         return {"status": "success", "type": "feature", "name": feature_name, "enabled": bool(features[feature_name])}
 
@@ -4692,7 +5905,7 @@ async def manage_runtime(request: Request):
         if action != "set":
             raise HTTPException(status_code=400, detail="config supports only set")
         _set_dotted(config, name, value)
-        _save_nexus_config(config)
+        await asyncio.to_thread(_persist_manage_config_sync, config)
         _clear_runtime("config changed")
         return {"status": "success", "type": "config", "path": name, "value": _parse_config_value(value)}
 
@@ -4706,7 +5919,7 @@ async def manage_runtime(request: Request):
                 raise HTTPException(status_code=400, detail="additional_dirs must be a list of paths")
             cleaned = [str(item).strip() for item in value if str(item).strip()]
             _RUNTIME_SETTINGS["additional_dirs"] = cleaned
-            _save_runtime_preferences()
+            await asyncio.to_thread(_save_runtime_preferences)
             apply_runtime_to_all_loops()
             _record_workspace_activity("directory_set", f"{len(cleaned)} additional director{'' if len(cleaned) == 1 else 'ies'} configured", status="ok")
             return {"status": "success", "type": "runtime", "name": "additional_dirs", "value": cleaned}
@@ -4719,7 +5932,7 @@ async def manage_runtime(request: Request):
                 _RUNTIME_SETTINGS["workspace_root"] = validated.get("path", target)
             else:
                 _RUNTIME_SETTINGS["workspace_root"] = ""
-            _save_runtime_preferences()
+            await asyncio.to_thread(_save_runtime_preferences)
             _record_workspace_activity("root_changed", _RUNTIME_SETTINGS["workspace_root"] or "unset", status="ok")
             return {"status": "success", "type": "runtime", "name": "workspace_root", "value": _RUNTIME_SETTINGS["workspace_root"]}
         raise HTTPException(status_code=400, detail=f"runtime set does not support: {name}")
@@ -4757,7 +5970,7 @@ async def create_task(request: Request):
         "created_at": time.time(),
     }
     _TASKS[tid] = task
-    _save_tasks(_TASKS)
+    await asyncio.to_thread(_save_tasks, _TASKS)
     return {"status": "created", "task": task}
 
 
@@ -4771,7 +5984,7 @@ async def update_task(task_id: str, request: Request):
         _TASKS[task_id]["status"] = data["status"]
     if "subject" in data:
         _TASKS[task_id]["subject"] = str(data["subject"])[:120]
-    _save_tasks(_TASKS)
+    await asyncio.to_thread(_save_tasks, _TASKS)
     return {"status": "updated", "task": _TASKS[task_id]}
 
 
@@ -4791,15 +6004,16 @@ def get_status():
     except Exception:
         real_agent_count = 0
 
-    provider_name = _RUNTIME_SETTINGS.get("provider") or getattr(active_provider, "provider_name", "") or "auto"
+    configured_provider, configured_model = configured_provider_defaults()
+    provider_name = _RUNTIME_SETTINGS.get("provider") or getattr(active_provider, "provider_name", "") or configured_provider or "auto"
     provider_status = _provider_reachability(provider_name)
     status = {
-        "model": _RUNTIME_SETTINGS.get("model") or getattr(active_provider, "model", "") or "auto",
+        "model": _RUNTIME_SETTINGS.get("model") or getattr(active_provider, "model", "") or configured_model or "auto",
         "mode": _normalize_permission_mode(_RUNTIME_SETTINGS.get("mode") or "auto"),
         "provider": provider_name,
         "agent": _RUNTIME_SETTINGS.get("agent") or "",
         "goal": _RUNTIME_SETTINGS.get("goal") or "",
-        "sandbox_tier": _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier", "no_sandbox")),
+        "sandbox_tier": _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier", "normal")),
         "permission_modes": ["auto", "all", "allowlist", "ask"],
         "permission_allowlist": _RUNTIME_SETTINGS.get("permission_allowlist") or [],
         "thinking": bool(_RUNTIME_SETTINGS.get("thinking", True)),
@@ -4809,6 +6023,7 @@ def get_status():
         # running API with a stopped local model is degraded, not healthy.
         "health": "degraded" if provider_status.get("configured") and not provider_status.get("reachable") else "ok",
         "provider_status": provider_status,
+        "provider_diagnostics": _provider_runtime_diagnostics(),
         "uptime": 0,
         "session_count": len(_LOOPS),
         "agent_count": real_agent_count,
@@ -4827,8 +6042,7 @@ def get_memory_statistics():
         stats = memory.get_statistics()
         return {"status": "success", "statistics": stats}
     except Exception as e:
-        logger.warning("Memory statistics failed", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _public_api_failure("Memory statistics", e)}
 
 
 @app.post("/api/memory/search")
@@ -4848,8 +6062,7 @@ async def search_memory(request: Request):
         
         return {"status": "success", "results": results, "count": len(results)}
     except Exception as e:
-        logger.warning("Memory search failed", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _public_api_failure("Memory search", e)}
 
 
 @app.post("/api/memory/export")
@@ -4865,8 +6078,7 @@ async def export_memory(request: Request):
         
         return {"status": "success", "format": format, "data": exported}
     except Exception as e:
-        logger.warning("Memory export failed", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _public_api_failure("Memory export", e)}
 
 
 @app.post("/api/memory/import")
@@ -4889,8 +6101,7 @@ async def import_memory(request: Request):
         else:
             return {"status": "error", "message": "Memory import failed"}
     except Exception as e:
-        logger.warning("Memory import failed", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _public_api_failure("Memory import", e)}
 
 
 @app.post("/api/memory/clear")
@@ -4906,8 +6117,7 @@ async def clear_memory(request: Request):
         
         return {"status": "success", "message": f"Cleared {memory_type} memory"}
     except Exception as e:
-        logger.warning("Memory clear failed", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _public_api_failure("Memory clear", e)}
 
 
 @app.get("/api/memory/sessions")
@@ -4933,8 +6143,7 @@ def list_memory_sessions():
         sessions.sort(key=lambda x: x["modified"], reverse=True)
         return {"status": "success", "sessions": sessions, "count": len(sessions)}
     except Exception as e:
-        logger.warning("List memory sessions failed", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _public_api_failure("Memory session listing", e)}
 
 
 @app.post("/api/mode")
@@ -4947,7 +6156,7 @@ async def set_mode(request: Request):
         raise HTTPException(status_code=400, detail=f"Invalid mode. Choose from: {', '.join(allowed)}")
     _RUNTIME_SETTINGS["mode"] = mode
     apply_runtime_to_all_loops()
-    _save_runtime_preferences()
+    await asyncio.to_thread(_save_runtime_preferences)
     try:
         from safety.safety_store import sync_permission_from_legacy
         sync_permission_from_legacy(mode)
@@ -5002,7 +6211,7 @@ async def set_permissions(request: Request):
     _RUNTIME_SETTINGS["permission_allowlist"] = allowlist
 
     apply_runtime_to_all_loops()
-    _save_runtime_preferences()
+    await asyncio.to_thread(_save_runtime_preferences)
     try:
         from safety.safety_store import sync_permission_from_legacy
         sync_permission_from_legacy(mode)
@@ -5050,7 +6259,7 @@ async def set_model(request: Request):
         _RUNTIME_SETTINGS["profile"] = profile
     _RUNTIME_SETTINGS["model"] = model
     apply_runtime_to_all_loops()
-    _save_runtime_preferences()
+    await asyncio.to_thread(_save_runtime_preferences)
     return {"status": "success", "model": model, "provider": _RUNTIME_SETTINGS.get("provider", ""), "profile": _RUNTIME_SETTINGS.get("profile", "")}
 
 
@@ -5074,6 +6283,23 @@ async def set_agent(request: Request):
     _RUNTIME_SETTINGS["agent"] = agent
     apply_runtime_to_all_loops()
     return {"status": "success", "agent": agent}
+
+
+@app.get("/api/commands")
+def list_commands():
+    """Expose the central command registry to every client UI."""
+    from nexus.commands import get_registry
+
+    commands = []
+    for command in get_registry().list():
+        commands.append({
+            "name": f"/{command.name}",
+            "description": command.description,
+            "category": command.category,
+            "args": dict(command.args),
+            "aliases": [f"/{alias.lstrip('/')}" for alias in command.aliases],
+        })
+    return {"commands": commands}
 
 
 @app.post("/api/command")
@@ -5143,7 +6369,7 @@ def get_sandbox():
     """Return the current sandbox tier."""
     return {
         "status": "success",
-        "tier": _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier", "no_sandbox")),
+        "tier": _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier", "normal")),
         "available": ["no_sandbox", "normal", "docker"],
         "labels": {"no_sandbox": "none", "normal": "simple", "docker": "docker"},
     }
@@ -5160,7 +6386,7 @@ async def set_sandbox(request: Request):
     _RUNTIME_SETTINGS["sandbox_tier"] = tier
     os.environ["NEXUS_SANDBOX_TIER"] = tier
     apply_runtime_to_all_loops()
-    _save_runtime_preferences()
+    await asyncio.to_thread(_save_runtime_preferences)
     try:
         from safety.safety_store import sync_sandbox_from_legacy
         sync_sandbox_from_legacy(tier)
@@ -5181,7 +6407,7 @@ async def set_thinking(request: Request):
     data = await request.json()
     enabled = bool(data.get("enabled", True))
     _RUNTIME_SETTINGS["thinking"] = enabled
-    _save_runtime_preferences()
+    await asyncio.to_thread(_save_runtime_preferences)
     return {"status": "success", "thinking": enabled}
 
 
@@ -5213,7 +6439,7 @@ async def safety_summary():
         return summary()
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: summary failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
 
 
 @app.get("/api/safety/settings")
@@ -5224,7 +6450,7 @@ async def safety_settings():
         return get_state(refresh=True)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: settings failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
 
 
 @app.get("/api/safety/meta")
@@ -5281,7 +6507,7 @@ async def safety_save(request: Request):
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: save failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid settings"])))
     if result.get("permission_changed") or result.get("sandbox_changed"):
@@ -5305,7 +6531,7 @@ async def safety_reset(request: Request):
         result = reset()
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: reset failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
     _safety_apply_runtime()
     result["workspace"] = _workspace_root
     return result
@@ -5321,7 +6547,7 @@ async def safety_set_permission_mode(request: Request):
         result = set_permission_mode(mode)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: set permission mode failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid mode"])))
     _safety_apply_runtime()
@@ -5338,7 +6564,7 @@ async def safety_set_sandbox_mode(request: Request):
         result = set_sandbox_mode(mode)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: set sandbox mode failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid mode"])))
     _safety_apply_runtime()
@@ -5353,7 +6579,7 @@ async def safety_protected_paths():
         return {"paths": state.get("protected_paths", []), "mandatory": state.get("mandatory_protected_paths", [])}
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: protected paths failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
 
 
 @app.post("/api/safety/protected-paths")
@@ -5364,7 +6590,7 @@ async def safety_add_protected_path(request: Request):
         result = add_protected_path(data or {})
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: add protected path failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid protected path"])))
     return result
@@ -5381,7 +6607,7 @@ async def safety_update_protected_path(request: Request):
         result = update_protected_path(pattern, data or {})
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: update protected path failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid protected path"])))
     return result
@@ -5398,7 +6624,7 @@ async def safety_remove_protected_path(request: Request):
         result = remove_protected_path(pattern)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: remove protected path failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid protected path"])))
     return result
@@ -5415,7 +6641,7 @@ async def safety_test_path(request: Request):
         return test_path(path)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: test path failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
 
 
 @app.post("/api/safety/protected-paths/reset")
@@ -5429,7 +6655,7 @@ async def safety_reset_protected_paths(request: Request):
         return reset_protected_paths()
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: reset protected paths failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
 
 
 @app.get("/api/safety/temp-permissions")
@@ -5439,7 +6665,7 @@ async def safety_temp_permissions():
         return {"permissions": list_temp_permissions()}
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: temp permissions failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
 
 
 @app.post("/api/safety/temp-permissions")
@@ -5450,7 +6676,7 @@ async def safety_add_temp_permission(request: Request):
         result = add_temp_permission(data or {})
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: add temp permission failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid temp permission"])))
     return result
@@ -5467,7 +6693,7 @@ async def safety_revoke_temp_permission(request: Request):
         return revoke_temp_permission(permission_id)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: revoke temp permission failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
 
 
 @app.post("/api/safety/temp-permissions/extend")
@@ -5482,7 +6708,7 @@ async def safety_extend_temp_permission(request: Request):
         result = extend_temp_permission(permission_id, seconds)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: extend temp permission failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid temp permission"])))
     return result
@@ -5499,7 +6725,7 @@ async def safety_convert_temp_permission(request: Request):
         result = convert_temp_permission(permission_id)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: convert temp permission failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid temp permission"])))
     return result
@@ -5512,7 +6738,7 @@ async def safety_approvals():
         return {"approvals": list_approvals()}
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: approvals failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
 
 
 @app.post("/api/safety/approvals/revoke")
@@ -5526,7 +6752,7 @@ async def safety_revoke_approval(request: Request):
         result = revoke_approval(approval_id)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: revoke approval failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid approval"])))
     return result
@@ -5543,7 +6769,7 @@ async def safety_clear_approvals(request: Request):
         return clear_expired_approvals()
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: clear approvals failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
 
 
 @app.get("/api/safety/events")
@@ -5553,7 +6779,7 @@ async def safety_events():
         return {"events": list_events(limit=200)}
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: events failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
 
 
 @app.get("/api/safety/diagnostics")
@@ -5563,7 +6789,7 @@ async def safety_diagnostics():
         return run_diagnostics()
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: diagnostics failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
 
 
 @app.get("/api/safety/presets")
@@ -5573,7 +6799,7 @@ async def safety_presets():
         return {"presets": list_presets()}
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: presets failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
 
 
 @app.post("/api/safety/presets/apply")
@@ -5587,7 +6813,7 @@ async def safety_apply_preset(request: Request):
         result = apply_preset(preset_id)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: apply preset failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="Safety store is unavailable: %s" % exc)
+        raise HTTPException(status_code=503, detail="Safety store is unavailable")
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid preset"])))
     if preset_id != "custom" and result.get("changes"):
@@ -5612,6 +6838,17 @@ async def add_working_dir(request: Request):
     return {"status": "success", "path": target, "additional_dirs": dirs}
 
 
+def _open_path_sync(target: str) -> None:
+    """Launch the local file manager without touching async request state."""
+    import subprocess
+    if os.name == "nt":
+        os.startfile(target)
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", target])
+    else:
+        subprocess.Popen(["xdg-open", target])
+
+
 @app.post("/api/open")
 async def open_path(request: Request):
     """Open a file or folder in the OS file manager (best-effort, local only)."""
@@ -5619,15 +6856,14 @@ async def open_path(request: Request):
     raw_path = str(data.get("path", "")).strip()
     if not raw_path:
         raise HTTPException(status_code=400, detail="path is required")
-    target = os.path.abspath(raw_path)
-    import subprocess
+    target = os.path.realpath(os.path.abspath(raw_path))
+    project_root_real = os.path.realpath(os.path.abspath(_PROJECT_ROOT))
+    if os.path.commonpath([project_root_real, target]) != project_root_real:
+        raise HTTPException(status_code=403, detail="Opening paths outside the project is not allowed")
+    if not os.path.exists(target):
+        raise HTTPException(status_code=404, detail="Path not found")
     try:
-        if os.name == "nt":
-            os.startfile(target)
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", target])
-        else:
-            subprocess.Popen(["xdg-open", target])
+        await asyncio.to_thread(_open_path_sync, target)
         return {"status": "success", "path": target}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Could not open path: {exc}")
@@ -5635,40 +6871,39 @@ async def open_path(request: Request):
 
 @app.post("/api/run")
 async def execute_bash_command(request: Request):
-    """Run a bash command (read-only or safe only)."""
+    """Run a command through the canonical risk scorer and sandbox."""
     data = await request.json()
     command = str(data.get("command", "")).strip()
     if not command:
         raise HTTPException(status_code=400, detail="No command provided")
 
-    # Reject dangerous commands (uses word-boundary checks)
-    lowered = command.lower()
-    if re.search(r'\bsudo\b', lowered) or (re.search(r'\brm\b', lowered) and '-rf' in lowered):
-        raise HTTPException(status_code=403, detail="Dangerous command blocked")
-    for d in ("mkfs", "dd if=", "> /dev", ":(){"):
-        if d in lowered:
-            raise HTTPException(status_code=403, detail=f"Dangerous command blocked: {d}")
-
-    import subprocess
+    from sandbox.risk import CommandRiskScorer
+    from sandbox.sandbox_manager import SovereignSandbox
+    assessment = CommandRiskScorer().assess(command)
+    if (
+        os.environ.get("NEXUS_ALLOW_DANGEROUS_SHELL", "false").lower() != "true"
+        and assessment
+        and assessment.blocked
+    ):
+        raise HTTPException(status_code=403, detail=f"Command blocked by risk policy: {assessment.summary()}")
     try:
-        result = subprocess.run(
-            command if os.name == "nt" else ["sh", "-c", command],
-            shell=(os.name == "nt"),
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=_PROJECT_ROOT
-        )
+        root = _workspace_root()
+        sandbox = SovereignSandbox(root)
+        output = await asyncio.to_thread(sandbox.execute, command, root)
+        returncode = sandbox.last_exit_code if sandbox.last_exit_code is not None else 0
         return {
             "command": command,
-            "returncode": result.returncode,
-            "output": result.stdout[:5000],
-            "error": result.stderr[:2000] if result.stderr else None
+            "returncode": returncode,
+            "output": output[:5000],
+            "error": None if returncode == 0 else output[:2000],
         }
-    except subprocess.TimeoutExpired:
-        return {"command": command, "returncode": -1, "output": "", "error": "Command timed out after 30s"}
     except Exception as e:
-        return {"command": command, "returncode": -1, "output": "", "error": str(e)}
+        return {
+            "command": command,
+            "returncode": -1,
+            "output": "",
+            "error": _public_api_failure("Sandbox command execution", e),
+        }
 
 
 @app.get("/api/files")
@@ -5785,10 +7020,10 @@ def _ensure_workspace_summary_refresh(root: str) -> None:
 def _workspace_root() -> str:
     configured = str(_RUNTIME_SETTINGS.get("workspace_root") or "").strip()
     if configured:
-        return configured
+        return os.path.realpath(os.path.abspath(configured))
     # Default to workspace/ subfolder if it exists, otherwise project root
     workspace_dir = os.path.join(_PROJECT_ROOT, "workspace")
-    return workspace_dir if os.path.isdir(workspace_dir) else _PROJECT_ROOT
+    return os.path.realpath(workspace_dir if os.path.isdir(workspace_dir) else _PROJECT_ROOT)
 
 
 def _canonical_workspace_path(raw: str) -> str:
@@ -5797,7 +7032,10 @@ def _canonical_workspace_path(raw: str) -> str:
         raise HTTPException(status_code=400, detail="Path is required")
     if not os.path.isabs(raw):
         raw = os.path.join(_workspace_root(), raw)
-    raw = os.path.abspath(os.path.normpath(raw))
+    # Canonicalize existing symlinks/junctions before any containment check.
+    # ``abspath`` alone is insufficient on Windows, where a junction can
+    # redirect a seemingly-in-root path to another volume.
+    raw = os.path.realpath(os.path.abspath(os.path.normpath(raw)))
     if os.name == "nt":
         is_drive = len(raw) >= 2 and raw[0].isalpha() and raw[1] == ":"
         is_unc = raw.startswith("\\\\")
@@ -5808,8 +7046,8 @@ def _canonical_workspace_path(raw: str) -> str:
 
 def _is_within(parent: str, child: str) -> bool:
     try:
-        parent_norm = os.path.normcase(os.path.abspath(parent))
-        child_norm = os.path.normcase(os.path.abspath(child))
+        parent_norm = os.path.normcase(os.path.realpath(os.path.abspath(parent)))
+        child_norm = os.path.normcase(os.path.realpath(os.path.abspath(child)))
         return os.path.commonpath([parent_norm, child_norm]) == parent_norm
     except Exception:
         return False
@@ -6532,20 +7770,23 @@ async def workspace_protected_add(request: Request):
         raise HTTPException(status_code=400, detail="pattern is required")
     if policy not in {"deny", "warn", "allow"}:
         raise HTTPException(status_code=400, detail="policy must be deny, warn, or allow")
-    config = _load_nexus_config()
-    ws = config.setdefault("workspace", {})
-    if not isinstance(ws, dict):
-        ws = {}
-        config["workspace"] = ws
-    paths = ws.setdefault("protected_paths", [])
-    if not isinstance(paths, list):
-        paths = []
-        ws["protected_paths"] = paths
-    for entry in paths:
-        if isinstance(entry, dict) and entry.get("pattern") == pattern:
-            raise HTTPException(status_code=409, detail="That protected path already exists")
-    paths.append({"pattern": pattern, "reason": reason, "policy": policy})
-    _save_nexus_config(config)
+    def mutate(config):
+        ws = config.setdefault("workspace", {})
+        if not isinstance(ws, dict):
+            ws = {}
+            config["workspace"] = ws
+        paths = ws.setdefault("protected_paths", [])
+        if not isinstance(paths, list):
+            paths = []
+            ws["protected_paths"] = paths
+        if any(isinstance(entry, dict) and entry.get("pattern") == pattern for entry in paths):
+            return False
+        paths.append({"pattern": pattern, "reason": reason, "policy": policy})
+        return True
+
+    added = await asyncio.to_thread(_mutate_nexus_config_sync, mutate)
+    if not added:
+        raise HTTPException(status_code=409, detail="That protected path already exists")
     _invalidate_workspace_summary_cache()
     _record_workspace_activity("protected_added", f"Protected path added: {pattern}", status="ok")
     return {"status": "success"}
@@ -6556,16 +7797,20 @@ async def workspace_protected_remove(request: Request):
     pattern = str(request.query_params.get("pattern", "")).strip()
     if not pattern:
         raise HTTPException(status_code=400, detail="pattern is required")
-    config = _load_nexus_config()
-    ws = config.setdefault("workspace", {})
-    paths = ws.get("protected_paths") if isinstance(ws, dict) else None
-    if not isinstance(paths, list):
+    def mutate(config):
+        ws = config.get("workspace") if isinstance(config, dict) else None
+        paths = ws.get("protected_paths") if isinstance(ws, dict) else None
+        if not isinstance(paths, list):
+            return False
+        remaining = [p for p in paths if not (isinstance(p, dict) and p.get("pattern") == pattern)]
+        if len(remaining) == len(paths):
+            return False
+        ws["protected_paths"] = remaining
+        return True
+
+    removed = await asyncio.to_thread(_mutate_nexus_config_sync, mutate)
+    if not removed:
         return {"status": "success", "removed": False}
-    remaining = [p for p in paths if not (isinstance(p, dict) and p.get("pattern") == pattern)]
-    if len(remaining) == len(paths):
-        return {"status": "success", "removed": False}
-    ws["protected_paths"] = remaining
-    _save_nexus_config(config)
     _invalidate_workspace_summary_cache()
     _record_workspace_activity("protected_removed", f"Protected path removed: {pattern}", status="ok")
     return {"status": "success", "removed": True}
@@ -6574,6 +7819,38 @@ async def workspace_protected_remove(request: Request):
 @app.get("/api/workspace/storage")
 def workspace_storage():
     return {"status": "success", **_storage_stats()}
+
+
+def _clear_workspace_storage_sync(root: str, target: str) -> int:
+    """Clear only the server-owned workspace storage target."""
+    if target == "sessions":
+        path = os.path.join(root, "logs", "sessions")
+        preserved = {"session_index.json"}
+    elif target == "index":
+        path = os.path.join(root, "knowledge", "_rag_index.json")
+        preserved = set()
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+                return 1
+            except OSError as exc:
+                raise RuntimeError(f"Could not clear index: {exc}") from exc
+        return 0
+    else:
+        path = {"temp": os.path.join(root, "tmp"), "cache": os.path.join(root, ".cache")}.get(target, "")
+        preserved = set()
+    if not path or not os.path.isdir(path):
+        return 0
+    count = 0
+    for name in os.listdir(path):
+        full = os.path.join(path, name)
+        try:
+            if os.path.isfile(full) and name not in preserved:
+                os.remove(full)
+                count += 1
+        except OSError:
+            continue
+    return count
 
 
 @app.post("/api/workspace/storage/clear")
@@ -6587,43 +7864,20 @@ async def workspace_storage_clear(request: Request):
         "cache": os.path.join(root, ".cache"),
     }
     if target == "sessions":
-        sessions_dir = os.path.join(root, "logs", "sessions")
-        count = 0
-        if os.path.isdir(sessions_dir):
-            for name in os.listdir(sessions_dir):
-                full = os.path.join(sessions_dir, name)
-                try:
-                    if os.path.isfile(full) and name != "session_index.json":
-                        os.remove(full)
-                        count += 1
-                except OSError:
-                    continue
+        count = await asyncio.to_thread(_clear_workspace_storage_sync, root, target)
         _record_workspace_activity("cache_cleared", f"Cleared {count} inactive session file(s)", status="ok")
         return {"status": "success", "removed": count, "note": "Project source files were not touched."}
     if target == "index":
         try:
-            rag_index = os.path.join(root, "knowledge", "_rag_index.json")
-            removed = 0
-            if os.path.isfile(rag_index):
-                os.remove(rag_index)
-                removed += 1
+            removed = await asyncio.to_thread(_clear_workspace_storage_sync, root, target)
             _record_workspace_activity("index_cleared", "Index cleared", status="ok")
             return {"status": "success", "removed": removed, "note": "Project source files were not touched."}
-        except OSError as exc:
+        except RuntimeError as exc:
             raise HTTPException(status_code=500, detail=f"Could not clear index: {exc}")
     path = removable.get(target)
     if not path:
         raise HTTPException(status_code=400, detail="target must be temp, cache, sessions, or index")
-    count = 0
-    if os.path.isdir(path):
-        for name in os.listdir(path):
-            full = os.path.join(path, name)
-            try:
-                if os.path.isfile(full):
-                    os.remove(full)
-                    count += 1
-            except OSError:
-                continue
+    count = await asyncio.to_thread(_clear_workspace_storage_sync, root, target)
     _record_workspace_activity("cache_cleared", f"Cleared {count} file(s) from {target}", status="ok")
     return {"status": "success", "removed": count, "note": "Project source files were not touched."}
 
@@ -6648,14 +7902,15 @@ def workspace_instructions_get():
 async def workspace_instructions_save(request: Request):
     data = await request.json()
     instructions = str(data.get("instructions", "")).strip()
-    config = _load_nexus_config()
-    ws = config.setdefault("workspace", {})
-    if not isinstance(ws, dict):
-        ws = {}
-        config["workspace"] = ws
-    ws["instructions"] = instructions
-    ws["instructions_updated_at"] = time.time()
-    _save_nexus_config(config)
+    def mutate(config):
+        ws = config.setdefault("workspace", {})
+        if not isinstance(ws, dict):
+            ws = {}
+            config["workspace"] = ws
+        ws["instructions"] = instructions
+        ws["instructions_updated_at"] = time.time()
+
+    await asyncio.to_thread(_mutate_nexus_config_sync, mutate)
     _invalidate_workspace_summary_cache()
     _record_workspace_activity("settings_changed", "Workspace instructions updated", status="ok")
     return {"status": "success"}
@@ -6699,11 +7954,6 @@ async def workspace_import(request: Request):
     if not isinstance(version, int) or version > 1:
         raise HTTPException(status_code=400, detail="Unsupported configuration version")
     ws = payload.get("workspace") if isinstance(payload.get("workspace"), dict) else {}
-    config = _load_nexus_config()
-    existing = config.setdefault("workspace", {})
-    if not isinstance(existing, dict):
-        existing = {}
-        config["workspace"] = existing
     preview = {
         "instructions": bool(ws.get("instructions")),
         "protected_paths": len(ws.get("protected_paths") or []) if isinstance(ws.get("protected_paths"), list) else 0,
@@ -6711,10 +7961,16 @@ async def workspace_import(request: Request):
         "memory": len(ws.get("memory") or {}) if isinstance(ws.get("memory"), dict) else 0,
     }
     if data.get("apply"):
-        for key in ("instructions", "protected_paths", "ignore_rules", "memory"):
-            if key in ws:
-                existing[key] = ws[key]
-        _save_nexus_config(config)
+        def mutate(config):
+            existing = config.setdefault("workspace", {})
+            if not isinstance(existing, dict):
+                existing = {}
+                config["workspace"] = existing
+            for key in ("instructions", "protected_paths", "ignore_rules", "memory"):
+                if key in ws:
+                    existing[key] = ws[key]
+
+        await asyncio.to_thread(_mutate_nexus_config_sync, mutate)
         _invalidate_workspace_summary_cache()
         _record_workspace_activity("settings_changed", "Workspace configuration imported", status="ok")
         return {"status": "success", "applied": True, "preview": preview}
@@ -6767,7 +8023,7 @@ async def workspace_set_root(request: Request):
     if not validation.get("valid"):
         raise HTTPException(status_code=400, detail=validation.get("reason", "Invalid workspace path"))
     _RUNTIME_SETTINGS["workspace_root"] = validation["path"]
-    _save_runtime_preferences()
+    await asyncio.to_thread(_save_runtime_preferences)
     _invalidate_workspace_summary_cache()
     apply_runtime_to_all_loops()
     _record_workspace_activity("root_changed", f"Workspace root changed to {validation['path']}", status="ok")
@@ -6806,7 +8062,7 @@ async def workspace_dirs_add(request: Request):
         access_mode = "read_write"
     dirs.append(target)
     _WORKSPACE_DIR_ACCESS[target] = access_mode
-    _save_runtime_preferences()
+    await asyncio.to_thread(_save_runtime_preferences)
     _invalidate_workspace_summary_cache()
     apply_runtime_to_all_loops()
     _record_workspace_activity("directory_added", f"Additional directory added: {target}", status="ok")
@@ -6844,7 +8100,7 @@ async def workspace_dirs_remove(request: Request):
     dirs = [d for d in dirs if d != path]
     _RUNTIME_SETTINGS["additional_dirs"] = dirs
     _WORKSPACE_DIR_ACCESS.pop(path, None)
-    _save_runtime_preferences()
+    await asyncio.to_thread(_save_runtime_preferences)
     _invalidate_workspace_summary_cache()
     apply_runtime_to_all_loops()
     _record_workspace_activity("directory_removed", f"Additional directory removed: {path}", status="ok")
@@ -6952,6 +8208,33 @@ def _voice_launch_options(mode: str) -> Dict[str, Any]:
         "creationflags": flags,
         "log_handle": log_handle,
     }
+
+
+def _start_voice_process_sync(mode: str, session_id: str, owner_pid: int = 0) -> subprocess.Popen:
+    """Prepare voice logging and launch the child process off the API loop."""
+    os.makedirs(os.path.dirname(_VOICE_LOG_PATH), exist_ok=True)
+    _kill_stray_voice_processes()
+    try:
+        with open(_VOICE_LOG_PATH, "w", encoding="utf-8") as handle:
+            handle.write("")
+    except Exception:
+        logger.warning("server: voice log reset failed", exc_info=True)
+    command = _voice_command_for_mode(mode, session_id, owner_pid=owner_pid)
+    launch = _voice_launch_options(mode)
+    try:
+        return subprocess.Popen(
+            command,
+            cwd=_PROJECT_ROOT,
+            stdout=launch["stdout"],
+            stderr=launch["stderr"],
+            stdin=launch["stdin"],
+            creationflags=launch["creationflags"],
+            shell=False,
+        )
+    except Exception:
+        if launch.get("log_handle"):
+            launch["log_handle"].close()
+        raise
 
 
 def _voice_is_running() -> bool:
@@ -7118,7 +8401,6 @@ def _stop_voice_process() -> Dict[str, Any]:
     return _voice_status_payload()
 
 
-@app.get("/api/voice/status")
 def get_voice_status():
     return {"status": "success", **_voice_status_payload()}
 
@@ -7129,50 +8411,24 @@ async def start_voice(request: Request):
     data = await request.json()
     requested_mode = str(data.get("mode", "auto")).strip().lower()
     mode = requested_mode if requested_mode in {"auto", "manual", "text"} else "auto"
-    session_id = str(data.get("session_id", "default")).strip()
+    session_id = safe_session_id(str(data.get("session_id", "default")).strip())
     owner_pid = int(data.get("owner_pid") or 0)
 
     if _voice_is_running():
         return {"status": "success", **_voice_status_payload()}
 
-    os.makedirs(os.path.dirname(_VOICE_LOG_PATH), exist_ok=True)
-    _kill_stray_voice_processes()
     try:
-        with open(_VOICE_LOG_PATH, "w", encoding="utf-8") as f:
-            f.write("")
-    except Exception:
-        logger.warning("server:1886 async start_voice: suppressed error", exc_info=True)
-        pass
-    command = _voice_command_for_mode(mode, session_id, owner_pid=owner_pid)
-    launch = _voice_launch_options(mode)
-    try:
-        _VOICE_PROCESS = subprocess.Popen(
-            command,
-            cwd=_PROJECT_ROOT,
-            stdout=launch["stdout"],
-            stderr=launch["stderr"],
-            stdin=launch["stdin"],
-            creationflags=launch["creationflags"],
-            shell=False,
+        _VOICE_PROCESS = await asyncio.to_thread(
+            _start_voice_process_sync, mode, session_id, owner_pid
         )
     except FileNotFoundError as exc:
-        if launch.get("log_handle"):
-            launch["log_handle"].close()
         raise HTTPException(status_code=500, detail=f"Voice Python runtime not found: {exc}") from exc
     except Exception as exc:
-        if launch.get("log_handle"):
-            launch["log_handle"].close()
         raise HTTPException(status_code=500, detail=f"Unable to start voice mode: {exc}") from exc
 
     await asyncio.sleep(1.0)
     if _VOICE_PROCESS.poll() is not None:
-        tail = ""
-        if os.path.exists(_VOICE_LOG_PATH):
-            try:
-                with open(_VOICE_LOG_PATH, "r", encoding="utf-8", errors="ignore") as f:
-                    tail = f.read()[-2000:].strip()
-            except Exception:
-                tail = ""
+        tail = (await asyncio.to_thread(_tail_voice_log, 2000)).strip()
         _VOICE_PROCESS = None
         _VOICE_MODE = "off"
         _VOICE_STARTED_AT = 0.0
@@ -7203,10 +8459,9 @@ def get_voice_statistics():
         return {"status": "success", "statistics": stats}
     except Exception as e:
         logger.warning("Voice statistics failed", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _public_api_failure("Voice statistics", e)}
 
 
-@app.get("/api/voice/history")
 def get_voice_history(limit: int = 50):
     """Return voice transcription history."""
     try:
@@ -7218,7 +8473,7 @@ def get_voice_history(limit: int = 50):
         return {"status": "success", "history": history, "count": len(history)}
     except Exception as e:
         logger.warning("Voice history failed", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _public_api_failure("Voice history", e)}
 
 
 @app.post("/api/voice/search")
@@ -7239,7 +8494,7 @@ async def search_voice_history(request: Request):
         return {"status": "success", "results": results, "count": len(results)}
     except Exception as e:
         logger.warning("Voice search failed", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _public_api_failure("Voice search", e)}
 
 
 @app.post("/api/voice/export")
@@ -7258,7 +8513,7 @@ async def export_voice_data(request: Request):
         return {"status": "success", "format": format, "data": exported}
     except Exception as e:
         logger.warning("Voice export failed", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _public_api_failure("Voice export", e)}
 
 
 @app.post("/api/voice/clear-history")
@@ -7273,7 +8528,7 @@ def clear_voice_history():
         return {"status": "success", "message": "Voice history cleared"}
     except Exception as e:
         logger.warning("Clear voice history failed", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _public_api_failure("Clear voice history", e)}
 
 
 @app.post("/api/voice/reset-statistics")
@@ -7288,10 +8543,9 @@ def reset_voice_statistics():
         return {"status": "success", "message": "Voice statistics reset"}
     except Exception as e:
         logger.warning("Reset voice statistics failed", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _public_api_failure("Reset voice statistics", e)}
 
 
-@app.get("/api/voice/voices")
 def get_available_voices():
     """Return list of available TTS voices."""
     try:
@@ -7303,10 +8557,9 @@ def get_available_voices():
         return {"status": "success", "voices": voices}
     except Exception as e:
         logger.warning("Get voices failed", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _public_api_failure("Get voices", e)}
 
 
-@app.get("/api/voice/languages")
 def get_available_languages():
     """Return list of supported STT languages."""
     try:
@@ -7318,7 +8571,7 @@ def get_available_languages():
         return {"status": "success", "languages": languages}
     except Exception as e:
         logger.warning("Get languages failed", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _public_api_failure("Get languages", e)}
 
 
 @app.get("/api/voice/devices")
@@ -7333,10 +8586,9 @@ def get_audio_devices():
         return {"status": "success", "devices": devices}
     except Exception as e:
         logger.warning("Get audio devices failed", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _public_api_failure("Get audio devices", e)}
 
 
-@app.post("/api/voice/settings")
 async def update_voice_settings(request: Request):
     """Update voice settings."""
     try:
@@ -7359,22 +8611,52 @@ async def update_voice_settings(request: Request):
         return {"status": "success", "message": "Voice settings updated"}
     except Exception as e:
         logger.warning("Update voice settings failed", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": _public_api_failure("Update voice settings", e)}
 
 
 @app.post("/api/multi_agent")
 async def multi_agent(request: Request):
     """Trigger a multi-agent workflow."""
-    data = await request.json()
-    command = str(data.get("command", "")).lower()
-    prompt = str(data.get("prompt", ""))
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Multi-agent request must be an object")
+    command = str(data.get("command", "") or "").strip().lower()
+    prompt = str(data.get("prompt", "") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
 
     # Simple echo for now — full implementation needs Workflow integration
+    try:
+        hive_engine = _get_hive_engine()
+        personas = {str(name).lower(): str(name) for name in hive_engine.list_personas()}
+        requested_persona = command.lstrip("/").strip().lower()
+        persona = personas.get(requested_persona, personas.get("worker", "WORKER"))
+        hive_id, spawned = await hive_engine.spawn_hive([(prompt, persona)])
+    except Exception as exc:
+        logger.warning("Multi-agent workflow launch failed", exc_info=True)
+        raise HTTPException(status_code=503, detail=_public_api_failure("Multi-agent launch", exc))
+
+    agent_summaries = [
+        {"id": agent.agent_id, "task": agent.task, "persona": agent.persona, "status": agent.status}
+        for agent in spawned
+    ]
+    with _HIVES_LOCK:
+        _HIVES[hive_id] = {
+            "id": hive_id,
+            "status": "running",
+            "agents": agent_summaries,
+            "created_at": time.time(),
+        }
+    _persist_hive_manifest()
     return {
         "status": "started",
         "command": command,
-        "result": f"Multi-agent {command} started. Prompt: {prompt[:100]}",
-        "note": "Full workflow engine integration required for live agent execution."
+        "hive_id": hive_id,
+        "hive": {"id": hive_id, "status": "running", "agents": agent_summaries},
+        "result": f"Multi-agent {command or '/run'} started. Prompt: {prompt[:100]}",
     }
 
 
@@ -7389,7 +8671,7 @@ def engine_status():
     except ImportError:
         return {"status": "unavailable", "config": {}}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_public_api_failure("Engine status", e))
 
 @app.post("/api/engine/config")
 async def update_engine_config(request: Request):
@@ -7414,7 +8696,7 @@ async def update_engine_config(request: Request):
         save_config(config)
         return {"status": "success", "config": config}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_public_api_failure("Engine configuration", e))
 
 @app.post("/api/engine/compile")
 async def compile_engine():
@@ -7425,7 +8707,24 @@ async def compile_engine():
     except ImportError:
         raise HTTPException(status_code=501, detail="Engine compiler not available")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_public_api_failure("Engine compilation", e))
+
+
+def _resolve_local_model_path(model_name: Any) -> Optional[str]:
+    """Resolve a model name without permitting filesystem escape."""
+    if model_name is None or not str(model_name).strip():
+        return None
+    model_root = (Path(_PROJECT_ROOT) / "models" / "local").resolve(strict=False)
+    try:
+        candidate = Path(str(model_name)).expanduser()
+        if not candidate.is_absolute():
+            candidate = model_root / candidate
+        resolved = candidate.resolve(strict=False)
+        resolved.relative_to(model_root)
+    except (OSError, RuntimeError, ValueError):
+        raise HTTPException(status_code=403, detail="model must be inside the local model directory")
+    return str(resolved)
+
 
 @app.post("/api/engine/reload")
 async def reload_local_engine(request: Request):
@@ -7435,72 +8734,145 @@ async def reload_local_engine(request: Request):
         raise HTTPException(status_code=501, detail="Engine manager not available")
     try:
         data = await request.json()
-        model_name = data.get("model")
-        # Map model name to path if it is relative
-        model_path = None
-        if model_name:
-            if os.path.isabs(model_name) and os.path.exists(model_name):
-                model_path = model_name
-            else:
-                model_path = os.path.join(_PROJECT_ROOT, "models", "local", model_name)
+        model_name = data.get("model") if isinstance(data, dict) else None
+        model_path = _resolve_local_model_path(model_name)
                 
         status = reload_engine(model_path)
         return {"status": "success", "engine": status}
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_public_api_failure("Engine reload", e))
 
 _active_train_process = None
+_TRAIN_LOCK = threading.Lock()
+
+
+def _training_status_path() -> str:
+    return os.path.join(_PROJECT_ROOT, "config", "self_improvement_status.json")
+
+
+def _write_training_status(payload: Dict[str, Any]) -> None:
+    """Persist a bounded training lifecycle record atomically."""
+    path = _training_status_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=".self_improvement_status.", suffix=".tmp", dir=os.path.dirname(path)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _read_training_status() -> Dict[str, Any]:
+    try:
+        with open(_training_status_path(), "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else {}
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return {}
+
+
+def _training_pid_is_alive(pid: Any) -> bool:
+    try:
+        numeric_pid = int(pid)
+        if numeric_pid <= 0:
+            return False
+        os.kill(numeric_pid, 0)
+        return True
+    except PermissionError:
+        # The process exists but belongs to another user/session.
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _start_training_sync(steps: int) -> Dict[str, Any]:
+    """Coordinate and launch one training process outside the async loop."""
+    global _active_train_process
+    with _TRAIN_LOCK, _interprocess_event_lock(_training_status_path()):
+        if _active_train_process and _active_train_process.poll() is None:
+            return {"status": "running", "message": "Self-improvement training is already in progress."}
+        persisted = _read_training_status()
+        if persisted.get("status") in ("training", "running") and _training_pid_is_alive(persisted.get("pid")):
+            return {
+                "status": "running",
+                "run_id": persisted.get("run_id", ""),
+                "pid": persisted.get("pid"),
+                "steps": persisted.get("steps"),
+                "message": "Self-improvement training is already in progress.",
+            }
+
+        import platform
+        import subprocess
+        import sys
+
+        train_script = os.path.join(_PROJECT_ROOT, "evolution", "self_improvement.py")
+        run_id = uuid.uuid4().hex
+        cmd = [sys.executable, train_script, str(steps)]
+        creation_flags = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=_PROJECT_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creation_flags,
+            )
+        except OSError as exc:
+            logger.warning("Self-improvement process launch failed", exc_info=True)
+            raise HTTPException(status_code=503, detail=_public_api_failure("Training launch", exc))
+        _active_train_process = proc
+        try:
+            _write_training_status({
+                "status": "training",
+                "run_id": run_id,
+                "pid": proc.pid,
+                "steps": steps,
+                "started_at": time.time(),
+            })
+        except Exception:
+            logger.warning("Could not persist training start status", exc_info=True)
+    return {"status": "started", "run_id": run_id, "pid": proc.pid, "steps": steps,
+            "message": f"Self-improvement training session started with {steps} steps."}
 
 @app.post("/api/engine/train")
 async def train_local_engine(request: Request):
-    global _active_train_process
-    
-    # Check if already running
-    if _active_train_process and _active_train_process.poll() is None:
-        return {"status": "running", "message": "Self-improvement training is already in progress."}
-        
     try:
         data = await request.json() or {}
     except Exception:
         data = {}
-    steps = data.get("steps", 50)
-    
-    # Launch background training process to avoid blocking
-    import platform
-    import subprocess
-    import sys
-    
-    train_script = os.path.join(_PROJECT_ROOT, "evolution", "self_improvement.py")
-    cmd = [sys.executable, train_script, str(steps)]
-    
-    creation_flags = 0
-    if platform.system() == "Windows":
-        creation_flags = subprocess.CREATE_NO_WINDOW
-        
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=creation_flags
-    )
-    _active_train_process = proc
-    
-    return {"status": "started", "pid": proc.pid, "message": f"Self-improvement training session started with {steps} steps."}
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Training request must be an object")
+    raw_steps = data.get("steps", 50)
+    if isinstance(raw_steps, bool):
+        raise HTTPException(status_code=400, detail="steps must be an integer between 1 and 10000")
+    try:
+        steps = int(raw_steps)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="steps must be an integer between 1 and 10000")
+    if not 1 <= steps <= 10000:
+        raise HTTPException(status_code=400, detail="steps must be an integer between 1 and 10000")
+    return await asyncio.to_thread(_start_training_sync, steps)
 
 @app.get("/api/engine/train/status")
 def train_status():
     global _active_train_process
 
-    status_file = os.path.join(_PROJECT_ROOT, "config", "self_improvement_status.json")
+    status_file = _training_status_path()
     status = {"status": "idle", "message": "No training has been run yet."}
 
     if os.path.exists(status_file):
-        try:
-            with open(status_file, "r") as f:
-                status = json.load(f)
-        except Exception:
-            logger.warning("server:2071 train_status: suppressed error", exc_info=True)
-            pass
+        status = _read_training_status()
+        if not status:
+            logger.warning("Training status file was invalid or unreadable")
 
     is_running = _active_train_process and _active_train_process.poll() is None
     if is_running:
@@ -7515,6 +8887,12 @@ def train_status():
                 status["status"] = "failed"
                 status["error"] = f"Training process terminated unexpectedly with code {exit_code}."
                 status["message"] = f"Failed: Process exited with code {exit_code}."
+            elif exit_code == 0 and status.get("status") == "training":
+                status["status"] = "completed"
+                status["message"] = "Training process completed."
+        elif status.get("status") in ("training", "running"):
+            status["status"] = "orphaned"
+            status["message"] = "Training state was found without a live process after server recovery."
 
     return status
 

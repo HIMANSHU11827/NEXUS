@@ -4,10 +4,10 @@
  */
 import React from 'react';
 import {Box, Text} from 'ink';
-import {THEME, COMMANDS} from './helpers.js';
+import {THEME, type CommandDefinition} from './helpers.js';
 
 interface CommandPaletteProps {
-    matches: typeof COMMANDS;
+    matches: CommandDefinition[];
     selectedIndex: number;
 }
 

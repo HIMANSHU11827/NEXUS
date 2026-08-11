@@ -12,7 +12,7 @@ from html.parser import HTMLParser
 from socket import SOCK_STREAM, getaddrinfo
 from urllib import error as urlerror
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request, ProxyHandler, build_opener, urlopen
 
 try:
     from defusedxml.ElementTree import fromstring as _xml_fromstring
@@ -22,6 +22,25 @@ except ImportError:
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
 
 logger = logging.getLogger("nexus.tools.web_search")
+
+# urllib automatically inherits HTTP(S)_PROXY/ALL_PROXY from the machine.
+# On this workstation those variables point to a stopped localhost proxy,
+# which caused every search to fail with WinError 10061. NEXUS web search
+# uses direct HTTPS by default; operators who require a corporate proxy can
+# opt back in with NEXUS_WEB_USE_PROXY=1.
+_DIRECT_OPENER = build_opener(ProxyHandler({}))
+
+
+def _open_url(request: Request, timeout: int):
+    if os.environ.get("NEXUS_WEB_USE_PROXY", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return urlopen(request, timeout=timeout)
+    return _DIRECT_OPENER.open(request, timeout=timeout)
+
+
+def _fetch_response(request: Request, timeout: int) -> tuple[int, bytes]:
+    """Perform and fully consume one blocking urllib response."""
+    with _open_url(request, timeout=timeout) as response:
+        return int(getattr(response, "status", 200)), response.read()
 
 
 class _DuckDuckGoResultsParser(HTMLParser):
@@ -193,7 +212,9 @@ class WebSearchTool(BaseTool):
 
     async def _fetch_url(self, url: str, timeout: int, max_chars: int) -> ToolResult:
         try:
-            block = _ssrf_block_reason(url)
+            # DNS resolution is synchronous too; keep the complete network
+            # boundary off the event loop, not only the final HTTP request.
+            block = await asyncio.to_thread(_ssrf_block_reason, url)
             if block:
                 return ToolResult(
                     success=False,
@@ -207,9 +228,10 @@ class WebSearchTool(BaseTool):
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 },
             )
-            loop = asyncio.get_running_loop()
-            resp = await loop.run_in_executor(None, lambda: urlopen(req, timeout=max(5, timeout or 20)))
-            raw = resp.read().decode("utf-8", errors="replace")
+            status, payload = await asyncio.to_thread(
+                _fetch_response, req, max(5, timeout or 20)
+            )
+            raw = payload.decode("utf-8", errors="replace")
             if not raw:
                 return ToolResult(success=False, error=f"Empty response from {url}")
             clean = self._strip_html(raw)
@@ -218,7 +240,7 @@ class WebSearchTool(BaseTool):
             return ToolResult(
                 success=True,
                 output=clean[:100000],
-                metadata={"status": resp.status, "url": url, "chars": len(clean)},
+                metadata={"status": status, "url": url, "chars": len(clean)},
             )
         except urlerror.HTTPError as e:
             return ToolResult(success=False, error=f"HTTP {e.code}: {e.reason} for {url}")
@@ -244,7 +266,7 @@ class WebSearchTool(BaseTool):
             headers={"User-Agent": "Mozilla/5.0 (compatible; NEXUS/1.0; +local-agent)"},
         )
         try:
-            with urlopen(rss_request, timeout=15) as response:
+            with _open_url(rss_request, timeout=15) as response:
                 rss_document = response.read()
             root = _xml_fromstring(rss_document)
             results: list[dict[str, str]] = []
@@ -270,7 +292,7 @@ class WebSearchTool(BaseTool):
                 "Accept": "text/html,application/xhtml+xml",
             },
         )
-        with urlopen(request, timeout=15) as response:
+        with _open_url(request, timeout=15) as response:
             document = response.read().decode("utf-8", errors="replace")
         parser = _DuckDuckGoResultsParser()
         parser.feed(document)

@@ -1,7 +1,10 @@
 import json
+import logging
 from typing import Dict, Iterator, List, Optional
 
 from providers.base import NexusBaseProvider
+
+logger = logging.getLogger(__name__)
 
 
 class LMStudioProvider(NexusBaseProvider):
@@ -14,6 +17,9 @@ class LMStudioProvider(NexusBaseProvider):
         super().__init__("lm_studio", "http://localhost:1234/v1/chat/completions")
         if not self.model:
             self.model = "unknown" # LM Studio often ignores model name if only one is loaded
+        self.headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            self.headers["Authorization"] = f"Bearer {self.api_key}"
 
     @staticmethod
     def _tool_envelope(tool_calls) -> str:
@@ -43,7 +49,7 @@ class LMStudioProvider(NexusBaseProvider):
     def generate(self, prompt: str = "", system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {
-            "model": self.model,
+            "model": kwargs.pop("model", None) or self.model,
             "messages": msgs,
             "temperature": 0.2,
             **kwargs,
@@ -52,7 +58,7 @@ class LMStudioProvider(NexusBaseProvider):
             "stream": False,
         }
         try:
-            response = self.session.post(self.endpoint, json=payload, timeout=60)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=self.request_timeout(kwargs, 60))
             if response.status_code == 200:
                 message = response.json()["choices"][0]["message"]
                 native_tools = message.get("tool_calls") or []
@@ -64,16 +70,17 @@ class LMStudioProvider(NexusBaseProvider):
             return f"Error: LM Studio not reachable. {str(e)}"
 
     def stream_generate(self, prompt: str = "", system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
+        response = None
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {
-            "model": self.model,
+            "model": kwargs.pop("model", None) or self.model,
             "messages": msgs,
             "temperature": 0.2,
             **kwargs,
             "stream": True,
         }
         try:
-            response = self.session.post(self.endpoint, json=payload, stream=True, timeout=60)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=self.request_timeout(kwargs, 60))
             if response.status_code == 200:
                 streamed_tool_calls = {}
                 buffered_content = []
@@ -128,3 +135,9 @@ class LMStudioProvider(NexusBaseProvider):
                 yield f"Error: {response.status_code}"
         except Exception as e:
             yield f"Error in LM Studio stream: {str(e)}"
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    logger.debug("LM Studio stream response cleanup failed", exc_info=True)

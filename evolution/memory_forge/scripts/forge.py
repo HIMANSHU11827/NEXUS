@@ -16,6 +16,7 @@ __version__ = "2.1.0"
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -46,12 +47,18 @@ class MemoryForge:
         self.memory_dir = os.path.join(self.root, MEMORY_DIR)
         os.makedirs(self.memory_dir, exist_ok=True)
 
+    @staticmethod
+    def _safe_name(value: Any) -> str:
+        """Convert a memory name into one bounded filesystem component."""
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(value or "").strip().lower())
+        return safe.strip("._")[:40] or "memory"
+
     @forge_guard("memory")
     def forge(self, title: str, content: str = "", importance: int = 5, tags: List[str] = None) -> Dict[str, Any]:
         tags = tags or []
-        safe_name = title.strip().lower().replace(" ", "_").replace("-", "_")[:40]
-        if not safe_name:
+        if not str(title or "").strip():
             return {"created": False, "error": "title is required"}
+        safe_name = self._safe_name(title).replace("-", "_")
         content_text = str(content or "")
         # V5 honesty: never crystallize empty/error-shaped evidence as a Learning.
         if not content_text.strip() or looks_like_provider_error(content_text):
@@ -85,6 +92,7 @@ class MemoryForge:
     @forge_guard("memory")
     def refine(self, name: str, updates: Dict[str, Any] = None) -> Dict[str, Any]:
         updates = updates or {}
+        name = self._safe_name(name)
         mem_dir = os.path.join(self.memory_dir, name)
         path = os.path.join(mem_dir, "memory.json")
         if not os.path.exists(path):

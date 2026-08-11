@@ -60,3 +60,11 @@ def test_observer_retries_trailing_partial_json_record(tmp_path):
     assert offset == path.stat().st_size
     assert cursor == 1
     assert [event["sequence"] for event in events] == [1]
+
+
+def test_observer_uses_canonical_session_path(tmp_path):
+    from nexus.observer import event_path
+
+    path = event_path(str(tmp_path), "../../observer.json")
+
+    assert path == tmp_path / "workspace" / "work_events" / "observer.jsonl"

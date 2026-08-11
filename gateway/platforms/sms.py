@@ -23,6 +23,13 @@ try:
     HAS_FLASK = True
 except ImportError:
     HAS_FLASK = False
+    Flask = None  # type: ignore
+    request = None  # type: ignore
+
+try:
+    from werkzeug.serving import make_server
+except ImportError:
+    make_server = None  # type: ignore
 
 
 def valid_twilio_signature(url: str, params, signature: str, auth_token: str) -> bool:
@@ -62,6 +69,7 @@ class SMSAdapter(BasePlatformAdapter):
         self.from_number = from_number or os.getenv("TWILIO_FROM_NUMBER", "")
         self._client: Optional[TwilioRestClient] = None
         self._webhook_server: Optional[asyncio.Task] = None
+        self._webhook_http_server = None
 
     async def connect(self) -> bool:
         if not HAS_TWILIO:
@@ -81,9 +89,16 @@ class SMSAdapter(BasePlatformAdapter):
             return False
 
     async def disconnect(self):
-        if self._webhook_server:
-            self._webhook_server.cancel()
-            self._webhook_server = None
+        http_server = self._webhook_http_server
+        self._webhook_http_server = None
+        if http_server is not None:
+            try:
+                http_server.shutdown()
+            except Exception:
+                logger.debug("SMS webhook server shutdown failed", exc_info=True)
+        webhook_task = self._webhook_server
+        self._webhook_server = None
+        await self._cancel_task(webhook_task)
         self._client = None
 
     async def _run_webhook(self):
@@ -91,7 +106,11 @@ class SMSAdapter(BasePlatformAdapter):
         if not HAS_FLASK:
             logger.warning("Flask not installed — cannot run SMS webhook server for incoming messages")
             return
+        if make_server is None:
+            logger.warning("Werkzeug server unavailable — cannot run SMS webhook server")
+            return
 
+        loop = asyncio.get_running_loop()
         app = Flask(__name__)
 
         @app.route("/sms", methods=["POST"])
@@ -113,13 +132,31 @@ class SMSAdapter(BasePlatformAdapter):
                     platform="sms",
                     message_id=msg_sid,
                 )
-                asyncio.run_coroutine_threadsafe(self._on_message(event), asyncio.get_event_loop())
+                future = asyncio.run_coroutine_threadsafe(self._on_message(event), loop)
+
+                def _report_dispatch_failure(done):
+                    try:
+                        done.result()
+                    except Exception:
+                        logger.warning("SMS webhook event dispatch failed", exc_info=True)
+
+                future.add_done_callback(_report_dispatch_failure)
 
             return "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response></Response>", 200, {"Content-Type": "text/xml"}
 
         port = int(os.getenv("TWILIO_WEBHOOK_PORT", "8081"))
         logger.info(f"SMS webhook listening on port {port}")
-        app.run(host="0.0.0.0", port=port)
+        server = make_server("0.0.0.0", port, app, threaded=True)
+        self._webhook_http_server = server
+        try:
+            await asyncio.to_thread(server.serve_forever)
+        finally:
+            try:
+                server.server_close()
+            except Exception:
+                logger.debug("SMS webhook server close failed", exc_info=True)
+            if self._webhook_http_server is server:
+                self._webhook_http_server = None
 
     async def send_text(self, chat_id: str, text: str, reply_to: Optional[str] = None) -> SendResult:
         if not self._client:

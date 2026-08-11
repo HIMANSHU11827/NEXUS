@@ -60,17 +60,20 @@ class ContextManager:
 
     def _discover_context_files(self):
         """Discover context files in the project."""
+        discovered: Dict[str, str] = {}
         for pattern in self.config.context_file_names:
             if "*" in pattern:
                 # Glob pattern
                 import glob
                 matches = glob.glob(os.path.join(self.root_dir, pattern))
-                self._context_files.extend(matches)
+                for match in matches:
+                    discovered[os.path.normcase(os.path.abspath(match))] = os.path.abspath(match)
             else:
                 # Direct file
                 path = os.path.join(self.root_dir, pattern)
                 if os.path.exists(path):
-                    self._context_files.append(path)
+                    discovered[os.path.normcase(os.path.abspath(path))] = os.path.abspath(path)
+        self._context_files = list(discovered.values())
         
         self.logger.debug(f"Discovered {len(self._context_files)} context")
 
@@ -80,7 +83,16 @@ class ContextManager:
         Returns:
             ContextSnapshot with loaded context info
         """
+        return await asyncio.to_thread(self._load_context_sync)
+
+    def _load_context_sync(self) -> ContextSnapshot:
+        """Perform context discovery and file reads in a worker thread."""
         snapshot = ContextSnapshot()
+        self._context_cache.clear()
+        self._context_files = []
+        self._discover_context_files()
+        self._stable_prompt_cache = None
+        self._stable_prompt_built = False
         
         for file_path in self._context_files:
             try:

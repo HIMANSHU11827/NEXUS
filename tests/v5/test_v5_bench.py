@@ -27,6 +27,7 @@ def test_load_missing_replay_returns_empty(tmp_path):
     bench = V5Bench(root_dir=str(tmp_path))
     assert bench.load() == []
     assert bench.stats["skipped"] == 0
+    assert bench.stats["replay_status"] == "missing"
     assert bench.replay_path == str(tmp_path / ".nexus_v5" / "replays.jsonl")
 
 

@@ -61,6 +61,8 @@ def test_v5_router_returns_full_runtime_policy(tmp_path, monkeypatch):
 
 def test_planning_route_persists_through_registered_planning_tool(tmp_path, monkeypatch):
     loop = NexusLoopV5(root_dir=str(tmp_path))
+    monkeypatch.setenv("NEXUS_HIVE", "0")
+    monkeypatch.setenv("NEXUS_V5_ACTIVE_MODE", "false")
     perceived = PerceivedInput(
         original_input="build and test the small application",
         input_type=InputType.TEXT,
@@ -92,6 +94,37 @@ def test_planning_route_persists_through_registered_planning_tool(tmp_path, monk
     assert captured[0].params["plan_spec"]["steps"] == [
         "Inspect the project", "Implement the application", "Run the application tests"
     ]
+
+
+def test_active_hive_gate_runs_before_plan_persistence(tmp_path, monkeypatch):
+    loop = NexusLoopV5(root_dir=str(tmp_path))
+    perceived = PerceivedInput(
+        original_input="delete the generated artifact",
+        input_type=InputType.TEXT,
+        intent=Intent.TASK,
+        confidence=1.0,
+    )
+    captured = []
+
+    async def plan_model(_perceived):
+        return [{"description": "Delete the artifact", "tool": "deleting", "params": {}}]
+
+    async def reject(steps, _goal):
+        assert steps[0]["tool"] == "deleting"
+        return []
+
+    async def run_tool(call):
+        captured.append(call)
+        return "plan persisted"
+
+    monkeypatch.setenv("NEXUS_HIVE", "1")
+    monkeypatch.setenv("NEXUS_V5_ACTIVE_MODE", "true")
+    monkeypatch.setattr(loop, "_llm_plan_with_enforcement", plan_model)
+    monkeypatch.setattr(loop, "_gate_plan", reject)
+    loop._run_tool = run_tool
+
+    assert asyncio.run(loop._plan_with_tool(perceived)) == []
+    assert captured == []
 
 
 def test_direct_fallback_does_not_claim_steps_completed(tmp_path):

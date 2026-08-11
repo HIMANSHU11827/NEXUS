@@ -63,6 +63,15 @@ class TestOAuthTokenStore:
             assert loaded is not None
             assert loaded.access == "a"
 
+    def test_stale_store_instances_merge_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "oauth_store.json"
+            first = OAuthTokenStore(path)
+            stale = OAuthTokenStore(path)
+            first.set("first", OAuthCredentials("a", "r", 999.0))
+            stale.set("second", OAuthCredentials("b", "r", 999.0))
+            assert set(OAuthTokenStore(path).list_providers()) == {"first", "second"}
+
     def test_store_file_is_written_with_private_permissions(self):
         if os.name == "nt":
             pytest.skip("POSIX permission bits are not reliable on Windows ACL filesystems")

@@ -120,6 +120,41 @@ export interface RuntimeProviderStatus {
     endpoint?: string
     reason?: string
   }
+  provider_diagnostics?: ProviderDiagnostics
+}
+
+export interface ProviderDiagnostics {
+  active?: { provider?: string; profile?: string; model?: string }
+  attempts?: Array<{
+    provider_id?: string
+    profile?: string
+    model?: string
+    status?: string
+    failure_class?: string
+    strategy?: string
+    reason?: string
+    duration_ms?: number
+    timestamp?: number
+  }>
+  fallback_attempts?: number
+  cooldowns?: Array<{
+    provider?: string
+    profile?: string
+    active?: boolean
+    enabled?: boolean
+    cooldown_seconds?: number
+    reason?: string
+    error_count?: number
+  }>
+  last_failure?: {
+    provider?: string
+    profile?: string
+    model?: string
+    failure_class?: string
+    strategy?: string
+    reason?: string
+    timestamp?: number
+  } | null
 }
 
 export interface WorkspaceValidation {
@@ -439,7 +474,7 @@ export const api = {
 
   state: () => request<Record<string, unknown>>('/state'),
   version: () => request<{ version?: string; service?: string }>('/version'),
-  providers: () => request<{ providers: InventoryItem[]; runtime?: { provider?: string; model?: string } }>('/providers'),
+  providers: () => request<{ providers: InventoryItem[]; runtime?: { provider?: string; profile?: string; model?: string }; diagnostics?: ProviderDiagnostics }>('/providers'),
   addCustomProvider: (value: { name: string; id?: string; connection_type: 'api_key' | 'local'; model: string; endpoint: string; api_key?: string }) =>
     request<{ status: string; id: string; name: string }>('/providers/custom', { method: 'POST', body: JSON.stringify(value) }),
   startProviderOAuthLogin: (provider: string) => request<OAuthLoginRun>(`/providers/${encodeURIComponent(provider)}/oauth/login`, { method: 'POST' }),
@@ -655,7 +690,7 @@ export const api = {
 
   fileTree: (path?: string) => request<{ path: string; items: FileItemDTO[] }>(`/files/tree${path ? `?path=${encodeURIComponent(path)}` : ''}`),
 
-  readFile: (path: string) => request<{ path: string; content: string }>(`/files/read?path=${encodeURIComponent(path)}`),
+  readFile: (path: string) => request<{ path: string; content: string }>(`/files/read?path=${encodeURIComponent(path)}&format=json`),
 
   writeFile: (path: string, content: string) =>
     request<{ status: string }>('/files/write', { method: 'POST', body: JSON.stringify({ path, content }) }),
@@ -872,6 +907,7 @@ export interface HiveAgentItem {
 export interface HiveItem {
   id: string
   status?: string
+  partial?: boolean
   agents: HiveAgentItem[]
   resumed_from?: string
   resumed_to?: string

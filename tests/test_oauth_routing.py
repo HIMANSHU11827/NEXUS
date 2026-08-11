@@ -51,6 +51,14 @@ def test_grok_oauth_provider_resolves_real_endpoint_from_config(monkeypatch):
     assert provider.headers.get("Authorization") == "Bearer test-bearer-token"
 
 
+def test_oauth_resolution_runs_without_named_profile(monkeypatch):
+    monkeypatch.setattr(factory_module, "_resolve_api_key", lambda provider, profile=None: "oauth-token" if provider == "grok" else None)
+    monkeypatch.setattr(factory_module, "_environment_value", lambda *_a, **_k: "")
+    provider = NexusProviderFactory().get_provider_by_name("cloud", "grok")
+    assert provider.api_key == "oauth-token"
+    assert provider._credential_id == "oauth:grok"
+
+
 def test_oauth_tokens_route_away_from_localhost_placeholder():
     for pid, ep in _configured_endpoints().items():
         if any(host in ep.lower() for host in ("127.0.0.1", "localhost")):

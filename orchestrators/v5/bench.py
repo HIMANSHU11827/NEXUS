@@ -233,6 +233,7 @@ class V5Bench:
             "skipped": 0,
             "duration_s": 0.0,
             "pass_rate": 0.0,
+            "replay_status": "missing",
         }
 
     @staticmethod
@@ -257,9 +258,13 @@ class V5Bench:
         file returns ``[]``; this method never raises.
         """
         self.stats["skipped"] = 0
+        self.stats["replay_status"] = "missing"
         entries: List[Dict[str, Any]] = []
         try:
             if not os.path.exists(self.replay_path):
+                return entries
+            if not os.path.isfile(self.replay_path):
+                self.stats["replay_status"] = "invalid"
                 return entries
             with open(self.replay_path, "r", encoding="utf-8") as fh:
                 for line in fh:
@@ -275,8 +280,9 @@ class V5Bench:
                         self.stats["skipped"] += 1
                         continue
                     entries.append(parsed)
+            self.stats["replay_status"] = "empty" if not entries else "present"
         except Exception:
-            pass
+            self.stats["replay_status"] = "invalid"
         return entries
 
     # ``success`` is the only hard-required key — ``turn_id`` and ``input``
@@ -422,6 +428,7 @@ class V5Bench:
             "skipped": 0,
             "duration_s": 0.0,
             "pass_rate": 0.0,
+            "replay_status": "missing",
         }
         self.verdicts: List[Dict[str, Any]] = []
         entries = self.load()

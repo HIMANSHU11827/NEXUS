@@ -29,9 +29,9 @@ log mixins.
   loops where validation is prompt-encouraged, not structural.
 - **Deterministic turn learning** (no LLM): failures/reflections/JSONL replay.
   No CLI or framework ships this in-loop.
-- **Content-based threat scanning** (55 regex patterns, 3 scopes) + 4 permission
+- **Content-based threat scanning** (41 regex patterns, 3 scopes) + 4 permission
   modes + risk score + decision log — the CLIs rely on OS sandboxes + rule lists.
-- **Multi-provider routing + fallback + OAuth** (45+ providers) vs single-vendor.
+- **Multi-provider routing + fallback + OAuth** (40+ providers) vs single-vendor.
 - **Canonical event system** (~50 typed events, telemetry, chunk streaming) —
   matches Codex JSONL, exceeds Claude SDK-only, feeds GUI/TUI/CLI.
 - **Runtime tool auto-discovery** (`./tools/` scan at startup) + free-text tool-call

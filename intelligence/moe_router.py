@@ -1,9 +1,12 @@
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from providers.factory import NexusProviderFactory
+from providers.attempts import ProviderAttemptRecorder
+from providers.reliability import classify_failure
 
 logger = logging.getLogger("NEXUS_LOCAL_BRAIN")
 
@@ -23,9 +26,18 @@ class NexusMoERouter:
         self.mode = "auto"
         self.provider_override = ""
         self.profile_override = ""
+        self.attempts = ProviderAttemptRecorder()
         if not _auto_routing_done:
             _auto_routing_done = True
             self._run_auto_detect()
+
+    def _attempt_recorder(self) -> ProviderAttemptRecorder:
+        """Lazily restore telemetry for lightweight/test object restores."""
+        recorder = getattr(self, "attempts", None)
+        if not isinstance(recorder, ProviderAttemptRecorder):
+            recorder = ProviderAttemptRecorder()
+            self.attempts = recorder
+        return recorder
 
     def _run_auto_detect(self):
         try:
@@ -126,14 +138,109 @@ class NexusMoERouter:
             chain = cfg.get("fallback_chain") or []
             if not chain:
                 return ""
+            # Health must shape the PRIMARY pick, not only fallback rotation.
+            # ``rank_models`` already applies a bounded degrade penalty when a
+            # health registry is supplied (providers/model_bench.py), which is
+            # how ModelRouter uses it (providers/router.py:520). Without this
+            # argument a provider that had just failed was still selected first
+            # on every following turn. It only reorders the CONFIGURED chain:
+            # no new provider can be introduced, and when every candidate is
+            # degraded the ranking still returns one, so routing never empties.
             ranked = model_bench.rank_models(
                 task,
                 [self._normalize_provider_id(c) for c in chain],
                 tier=self._preference_tier(prefs),
+                health=self._health_registry(),
             )
             return self._normalize_provider_id(ranked[0]) if ranked else ""
         except Exception:
             return ""
+
+    def _health_registry(self):
+        """Shared provider-health registry for this router.
+
+        ``providers/health.py`` already implements healthy/degraded tracking
+        with a decay TTL, but nothing on the live MoE path ever wrote to or
+        read from it: health was observable telemetry that could not affect a
+        routing decision. This accessor closes that loop. Returns ``None`` if
+        the registry cannot be created, so routing degrades to legacy order.
+        """
+        registry = getattr(self, "_provider_health", None)
+        if registry is None:
+            try:
+                from providers.health import ProviderHealthRegistry
+
+                registry = ProviderHealthRegistry()
+            except Exception:
+                return None
+            self._provider_health = registry
+        return registry
+
+    def _note_provider_health(self, provider_id: str, ok: bool,
+                              error: Any = None, duration_ms: float = 0.0) -> None:
+        """Record one real provider outcome. Never raises."""
+        registry = self._health_registry()
+        if registry is None:
+            return
+        try:
+            if ok:
+                registry.mark_success(provider_id, float(duration_ms))
+            else:
+                registry.mark_failure(provider_id, error if error is not None else "no response")
+        except Exception:
+            logger.debug("provider health record skipped", exc_info=True)
+
+    def _is_provider_degraded(self, provider_id: str) -> bool:
+        """True when this provider failed recently and is still inside its
+        decay window. Health only *skips* a candidate during rotation; it can
+        never invent a provider that was not already in the fallback chain,
+        and an explicit caller-selected provider is still authoritative."""
+        registry = self._health_registry()
+        if registry is None:
+            return False
+        try:
+            return bool(registry.is_degraded(provider_id))
+        except Exception:
+            return False
+
+    def _next_healthy_provider(self, provider_name: str, attempted: set):
+        """Pick the next fallback provider, skipping recently-failed ones.
+
+        This is the routing half of the provider health loop. It walks the
+        SAME ``factory.next_provider_fallback`` chain as before and only
+        skips a candidate that is currently inside its degraded decay window,
+        so it can never route to a provider the chain would not have offered.
+        If every remaining candidate is degraded it returns the first one
+        anyway: a degraded provider is strictly better than no attempt.
+        """
+        try:
+            first = self.factory.next_provider_fallback(provider_name)
+        except Exception:
+            return None
+        candidate = first
+        seen = set()
+        while candidate and candidate not in seen:
+            seen.add(candidate)
+            if candidate not in attempted and not self._is_provider_degraded(candidate):
+                return candidate
+            try:
+                nxt = self.factory.next_provider_fallback(candidate)
+            except Exception:
+                break
+            if not nxt or nxt in seen:
+                break
+            candidate = nxt
+        return first
+
+    def provider_health(self) -> list:
+        """Expose current health for UI/telemetry. Never raises."""
+        registry = self._health_registry()
+        if registry is None:
+            return []
+        try:
+            return registry.all()
+        except Exception:
+            return []
 
     @staticmethod
     def _normalize_provider_id(provider: Any) -> str:
@@ -236,10 +343,43 @@ class NexusMoERouter:
                 chunks = list(provider.stream_generate(messages=messages))
             result = "".join(chunks)
             if self._is_quota_error(result):
+                self._attempt_recorder().record(provider_name, credential_id=getattr(provider, "_credential_id", ""), profile=profile_name, model=getattr(provider, "model", ""),
+                                    status="failed", classification=classify_failure(body=result), reason=result)
+                if profile_name:
+                    from providers.profiles import load_profile_store
+                    load_profile_store().record_failure(provider_name, profile_name, reason="rate_limit")
                 return None, result[:200]
+            self._attempt_recorder().record(provider_name, credential_id=getattr(provider, "_credential_id", ""), profile=profile_name, model=getattr(provider, "model", ""), status="success")
+            if profile_name:
+                from providers.profiles import load_profile_store
+                load_profile_store().record_success(provider_name, profile_name)
             return result, None
         except Exception as e:
+            self._attempt_recorder().record(provider_name, credential_id=getattr(provider, "_credential_id", ""), profile=profile_name, model=getattr(provider, "model", ""),
+                                 status="failed", classification=classify_failure(e), reason=e)
             return None, str(e)
+        finally:
+            self._release_provider_lease(provider)
+
+    @staticmethod
+    def _release_provider_lease(provider: Any) -> None:
+        lease = getattr(provider, "_profile_lease", None)
+        store = getattr(provider, "_profile_store", None)
+        if lease is None or store is None:
+            return
+        try:
+            store.release_lease(lease)
+        except Exception:
+            logger.debug("provider lease release failed", exc_info=True)
+        finally:
+            try:
+                provider._profile_lease = None
+            except Exception:
+                pass
+
+    def provider_attempts(self) -> list[dict]:
+        """Return bounded, redacted provider-attempt diagnostics."""
+        return self._attempt_recorder().snapshot()
 
     def stream_generate(self, messages: List[Dict[str, str]], **kwargs):
         # Optional routing-preference hints (preferred/latency_tier/cost_tier)
@@ -261,6 +401,7 @@ class NexusMoERouter:
         for attempt in range(8):
             provider = self._resolve_with_auto_fallback(provider_name, profile_name)
             if provider is None:
+                self._attempt_recorder().record(provider_name, profile=profile_name, status="skipped", reason="provider unavailable")
                 logger.error(
                     "[PROVIDER_RESOLVE_FAILED] provider=%s profile=%s attempt=%s",
                     provider_name,
@@ -274,6 +415,9 @@ class NexusMoERouter:
 
             saw_chunk = False
             error_probe = ""
+            attempt_started = time.time()
+            self._attempt_recorder().record(provider_name, credential_id=getattr(provider, "_credential_id", ""), profile=profile_name, model=getattr(provider, "model", ""),
+                                 attempt=attempt + 1, status="started")
             try:
                 # Do not serialize unset optional fields (notably
                 # ``max_tokens=None``). Some local OpenAI-compatible servers
@@ -294,13 +438,40 @@ class NexusMoERouter:
                     saw_chunk = True
                     yield text
                 if saw_chunk:
+                    if profile_name:
+                        from providers.profiles import load_profile_store
+                        load_profile_store().record_success(provider_name, profile_name)
+                    self._attempt_recorder().record(provider_name, credential_id=getattr(provider, "_credential_id", ""), profile=profile_name, model=getattr(provider, "model", ""),
+                                        attempt=attempt + 1, status="success",
+                                        duration_ms=(time.time() - attempt_started) * 1000)
+                    self._note_provider_health(
+                        provider_name, True,
+                        duration_ms=(time.time() - attempt_started) * 1000,
+                    )
+                    self._release_provider_lease(provider)
                     return
                 error = None
             except Exception as e:
                 error = str(e)
+                self._note_provider_health(
+                    provider_name, False, e,
+                    duration_ms=(time.time() - attempt_started) * 1000,
+                )
+                self._attempt_recorder().record(provider_name, credential_id=getattr(provider, "_credential_id", ""), profile=profile_name, model=getattr(provider, "model", ""),
+                                     attempt=attempt + 1, status="failed", classification=classify_failure(e),
+                                     reason=e, duration_ms=(time.time() - attempt_started) * 1000)
                 if saw_chunk:
+                    self._release_provider_lease(provider)
                     yield f"[PROVIDER_ERROR]: {error}"
                     return
+            self._release_provider_lease(provider)
+
+            # A caller-selected provider is authoritative. Never hide its
+            # credential, endpoint, or quota failure by silently switching to
+            # another provider (especially an unconfigured local server).
+            if explicit_provider:
+                yield f"[PROVIDER_ERROR]: {error or 'Selected provider returned no response.'}"
+                return
 
             is_quota = self._is_quota_error(error or "")
 
@@ -308,20 +479,22 @@ class NexusMoERouter:
                 if profile_name:
                     from providers.profiles import load_profile_store
                     store = load_profile_store()
-                    store.mark_inactive(provider_name, profile_name)
+                    store.record_failure(provider_name, profile_name, reason="rate_limit")
                     next_profile = self.factory.next_profile_fallback(provider_name, profile_name)
                     if next_profile and next_profile not in attempted_profiles:
                         attempted_profiles.add(profile_name)
                         profile_name = next_profile
                         logger.info(f"[AUTO] Quota hit on {provider_name}/{profile_name}, trying next profile")
+                        self._attempt_recorder().record(provider_name, profile=profile_name, status="fallback", reason="quota; rotating profile")
                         continue
 
                 profile_name = None
-                next_prov = self.factory.next_provider_fallback(provider_name)
+                next_prov = self._next_healthy_provider(provider_name, attempted_providers)
                 if next_prov and next_prov not in attempted_providers:
                     attempted_providers.add(provider_name)
                     provider_name = next_prov
                     logger.info(f"[AUTO] Quota exhausted, falling back to provider: {provider_name}")
+                    self._attempt_recorder().record(provider_name, status="fallback", reason="quota; rotating provider")
                     continue
 
             if attempt < 7:
@@ -330,12 +503,14 @@ class NexusMoERouter:
                     if next_profile and next_profile not in attempted_profiles:
                         attempted_profiles.add(profile_name)
                         profile_name = next_profile
+                        self._attempt_recorder().record(provider_name, profile=profile_name, status="fallback", reason="retry; next profile")
                         continue
                 profile_name = None
-                next_prov = self.factory.next_provider_fallback(provider_name)
+                next_prov = self._next_healthy_provider(provider_name, attempted_providers)
                 if next_prov and next_prov not in attempted_providers:
                     attempted_providers.add(provider_name)
                     provider_name = next_prov
+                    self._attempt_recorder().record(provider_name, status="fallback", reason="retry; next provider")
                     continue
 
             break

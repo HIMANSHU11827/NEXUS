@@ -164,9 +164,18 @@ def test_ink_tui_starts_without_waiting_for_api(monkeypatch, tmp_path):
     class FakePopen:
         def __init__(self, *args, **kwargs):
             calls.append("backend")
+            self.running = True
+            self.pid = None
+
+        def poll(self):
+            return None if self.running else 0
 
         def terminate(self):
             calls.append("terminated")
+            self.running = False
+
+        def wait(self, timeout=None):
+            return 0
 
     class FakeCompleted:
         returncode = 0
@@ -176,3 +185,115 @@ def test_ink_tui_starts_without_waiting_for_api(monkeypatch, tmp_path):
 
     assert nexus._run_ink_tui(str(tmp_path), console=None) == 0
     assert calls == [("kill", 8000), "backend", ("tui", ["runner", "nexus-tui.tsx"]), "terminated"]
+
+
+def test_server_launcher_owns_process_group_and_reaps_child(monkeypatch):
+    import nexus
+
+    kwargs = nexus._server_process_group_kwargs()
+    if nexus.os.name == "nt":
+        assert "creationflags" in kwargs
+    else:
+        assert kwargs == {"start_new_session": True}
+
+    class FakeProcess:
+        pid = None
+
+        def __init__(self):
+            self.running = True
+            self.terminated = False
+            self.waited = False
+
+        def poll(self):
+            return None if self.running else 0
+
+        def terminate(self):
+            self.terminated = True
+            self.running = False
+
+        def wait(self, timeout=None):
+            self.waited = True
+            return 0
+
+    process = FakeProcess()
+    nexus._terminate_server_process(process)
+
+    assert process.terminated
+    assert process.waited
+
+
+def test_gui_foreground_process_is_reaped(monkeypatch, tmp_path):
+    import subprocess
+    import nexus
+
+    calls = []
+
+    class FakeProcess:
+        pid = None
+
+        def __init__(self):
+            self.running = True
+
+        def poll(self):
+            return None if self.running else 0
+
+        def wait(self, timeout=None):
+            calls.append("wait")
+            self.running = False
+            return 0
+
+        def terminate(self):
+            calls.append("terminate")
+            self.running = False
+
+    process = FakeProcess()
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: process)
+
+    assert nexus._run_owned_foreground_process(["npm", "run", "dev"], str(tmp_path)) == 0
+    assert calls == ["wait"]
+
+
+def test_stale_gui_port_cleanup_is_not_windows_only(monkeypatch):
+    import sys
+    import types
+    import nexus
+
+    events = []
+
+    class Child:
+        def terminate(self):
+            events.append("child-terminate")
+
+        def kill(self):
+            events.append("child-kill")
+
+    class Process:
+        pid = 123
+
+        def cmdline(self):
+            return ["node", "vite", "--port", "5173"]
+
+        def children(self, recursive=False):
+            return [Child()]
+
+        def terminate(self):
+            events.append("parent-terminate")
+
+        def kill(self):
+            events.append("parent-kill")
+
+    fake_psutil = types.SimpleNamespace(
+        CONN_LISTEN="LISTEN",
+        AccessDenied=RuntimeError,
+        NoSuchProcess=RuntimeError,
+        net_connections=lambda kind="tcp": [
+            types.SimpleNamespace(status="LISTEN", laddr=types.SimpleNamespace(port=5173), pid=123)
+        ],
+        Process=lambda pid: Process(),
+        wait_procs=lambda processes, timeout=3.0: (processes, []),
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    nexus._kill_windows_port(5173)
+
+    assert events == ["child-terminate", "parent-terminate"]

@@ -5,7 +5,7 @@
 import React from 'react';
 import {Box, Text} from 'ink';
 import {ActivityCard} from './activity-card.js';
-import type {ActivityItem, PendingQuestion} from './helpers.js';
+import {THEME, type ActivityItem, type PendingQuestion} from './helpers.js';
 
 export const ActivityPanelBody = React.memo(({activity, width}: {activity: ActivityItem | null; width: number}) => (
     <Box flexDirection="column" flexGrow={1}>
@@ -21,55 +21,64 @@ export const ActivityPanelBody = React.memo(({activity, width}: {activity: Activ
 export const QuestionPanelBody = React.memo(({
     question,
     selectedIndex,
-    customActive
+    customActive,
+    width
 }: {
     question: PendingQuestion | null;
     selectedIndex: number;
     customActive: boolean;
+    width: number;
 }) => (
     <Box flexDirection="column" flexGrow={1}>
-        <Box marginBottom={1}>
-            <Text color="white" bold>Question</Text>
-        </Box>
-
         {question ? (
             <>
-                <Box marginBottom={1}>
-                    <Text color="white" wrap="wrap">{question.prompt}</Text>
+                <Box flexDirection="column" marginBottom={1} backgroundColor={THEME.panelSoftBg} paddingX={1} paddingY={1}>
+                    <Text color="cyanBright" bold>NEXUS NEEDS YOUR INPUT</Text>
+                    <Text color="grey">Choose the best response, or write your own.</Text>
+                </Box>
+
+                <Box marginBottom={1} paddingX={1}>
+                    <Text color="white" bold wrap="wrap">{question.prompt}</Text>
                 </Box>
 
                 {question.options.map((option, index) => (
-                    <Box key={`${question.id}-${index}`} marginTop={1}>
-                        <Box width={3}>
-                            <Text color={index === selectedIndex ? 'cyanBright' : 'cyan'} bold={index === selectedIndex}>
-                                {index === selectedIndex ? '›' : ' '}{index + 1}.
-                            </Text>
-                        </Box>
-                        <Text
-                            color={index === selectedIndex ? 'cyanBright' : 'white'}
-                            bold={index === selectedIndex}
-                            wrap="wrap"
-                        >
+                    <Box
+                        key={`${question.id}-${index}`}
+                        width={Math.max(12, width - 2)}
+                        marginBottom={1}
+                        paddingX={1}
+                        backgroundColor={index === selectedIndex ? '#12313a' : THEME.panelSoftBg}
+                    >
+                        <Text color={index === selectedIndex ? 'cyanBright' : 'white'} bold={index === selectedIndex} wrap="wrap">
+                            <Text color={index === selectedIndex ? 'cyanBright' : 'grey'} bold>{index === selectedIndex ? '›' : ' '} {index + 1}. </Text>
                             {option}
                         </Text>
                     </Box>
                 ))}
 
                 {question.allowCustom !== false && (
-                    <Box marginTop={1}>
-                        <Box width={3}>
-                            <Text color="magenta">{question.options.length + 1}.</Text>
-                        </Box>
-                        <Text color={customActive ? 'magentaBright' : 'grey'} bold={customActive}>type your own answer in chat box{customActive ? ' (active)' : ''}</Text>
+                    <Box
+                        width={Math.max(12, width - 2)}
+                        marginBottom={1}
+                        paddingX={1}
+                        backgroundColor={selectedIndex === question.options.length || customActive ? '#321f3d' : THEME.panelSoftBg}
+                    >
+                        <Text
+                            color={selectedIndex === question.options.length || customActive ? 'magentaBright' : 'white'}
+                            bold={selectedIndex === question.options.length || customActive}
+                            wrap="wrap"
+                        >
+                            {selectedIndex === question.options.length ? '›' : ' '} {question.options.length + 1}. {customActive ? 'Type your answer in the composer below' : 'Write a different answer'}
+                        </Text>
                     </Box>
                 )}
 
-                <Box marginTop={1}>
-                    <Text color="grey30">↑/↓ or wheel to select · Enter/number to choose</Text>
+                <Box marginTop={1} paddingX={1}>
+                    <Text color="grey">↑↓ move  ·  Enter choose  ·  1–9 quick select</Text>
                 </Box>
             </>
         ) : (
-            <Text color="grey30">No pending question</Text>
+            <Text color="grey">No pending question</Text>
         )}
 
         <Box flexGrow={1} />

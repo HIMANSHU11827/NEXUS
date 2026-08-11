@@ -27,7 +27,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from .persistence import load_state, save_state
+from .persistence import load_state, persistence_status, save_state
 
 logger = logging.getLogger("nexus.lifecycle.supervisor")
 
@@ -530,9 +530,15 @@ class ComponentSupervisor:
         counts = {}
         for comp in self._components.values():
             counts[comp["stage"].name] = counts.get(comp["stage"].name, 0) + 1
+        persistence = (
+            persistence_status(self._persist_key)
+            if self._persist_key
+            else {"available": True, "operation": "disabled", "error": "", "updated_at": 0.0}
+        )
         return {
             "total_components": len(self._components),
             "by_stage": counts,
+            "persistence": persistence,
         }
 
 

@@ -16,6 +16,7 @@ import pytest
 from skills.engine import NexusSkillEngine
 from skills.experience import SkillExperience
 from tools.nexus_tools.skill_adapter import (
+    SkillExecutor,
     SkillToolAdapter,
     build_instruction_block,
     parse_skill_md,
@@ -250,6 +251,25 @@ class TestAdapter:
     def test_build_instruction_block_shape(self):
         assert "Instructions" in build_instruction_block("x", "PROMPT")
         assert build_instruction_block("x", "PROMPT").startswith("Skill: x")
+
+    def test_skill_executor_failure_is_not_reported_as_success(self):
+        async def failing_llm(_prompt):
+            raise RuntimeError("provider unavailable")
+
+        async def _run():
+            executor = SkillExecutor(
+                name="research",
+                skill_prompt="Research the requested topic",
+                llm_call=failing_llm,
+            )
+            return await executor.execute(args="latest findings")
+
+        result = asyncio.run(_run())
+        assert result.status == "error"
+        assert result.success is False
+        assert result.error == "provider unavailable"
+        assert result.error_info["type"] == "RuntimeError"
+        assert result.metadata["execution_failed"] is True
 
 
 # ─── experience tracking ──────────────────────────────────────────

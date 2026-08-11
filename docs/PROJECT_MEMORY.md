@@ -13,16 +13,16 @@ A thread-safe singleton managing lazy-loading for all core services:
 *   **MoE Router:** Dynamic model tiering (NANO to EXTREME).
 *   **Hive Engine:** Asynchronous Hive worker orchestration.
 *   **RAG Engine:** Long-term vector memory (BM25 + hybrid vector).
-*   **Tool Registry:** Hardened access to current tools: bash, code_search, creating, deep_research, deleting, git_ops, hive, knowledge, memory, modifying, planning, reading, reasoning, shortcuts, system, task, terminal, test_runner, web_search.
+*   **Tool Registry:** Hardened access to current tools: code_search, creating, deep_research, deleting, git_ops, hive, knowledge, memory, modifying, planning, reading, reasoning, shortcuts, system, task, terminal, test_runner, web_search (`bash` is retired).
 
 ### Unified Cognitive Loop (`orchestrators/v5/core.py`)
 The current `NexusLoop` uses a unified model/tool runtime rather than the removed `SCAState` enum. It grounds prompt context, classifies whether real tools are required, streams provider output, extracts tool calls, applies permission/risk/sandbox checks, executes read tools in parallel and write tools sequentially, verifies outcomes, persists session memory, and emits canonical work events throughout.
 
 ### Evolution & Version System (`evolution/` package)
-18 modules in per-folder format:
+20 modules in per-folder format:
 *   `tool_forge/`, `skill_forge/`, `plugin_forge/`, `memory_forge/`, `knowledge_forge/`, `log_forge/`
-*   Support: `logs/`, `status/`, `ledger/`, `nudge/`, `intent/`, `self_improvement/`, `sop/`, `ensemble/`, `version/`
-*   `VersionManager` tracks semver (1.0.0) across all 39 `.jsnol` module files
+*   Support: `logs/`, `status/`, `ledger/`, `nudge/`, `intent/`, `self_improvement/`, `sop/`, `ensemble/`, `version/`, `local_trainer/`, `omni_kernel/`, `hyper_kernel/`, `researcher/`, `curator/`, `horizons/`
+*   `VersionManager` tracks semver across all 67 `.jsnol` module files (repo-wide)
 *   All 6 forges auto-bump versions on refine (minor by default, major on upgrade)
 *   Every `scripts/*.py` has `__version__` embedded inline
 *   Config YAMLs are versioned for non-secret settings. Provider YAML should use environment-variable placeholders for credentials.
@@ -31,16 +31,16 @@ The current `NexusLoop` uses a unified model/tool runtime rather than the remove
 | Interface | Start | Path |
 |-----------|-------|------|
 | **TUI** | `python -m nexus` | `tui/` + `gui.api` backend |
-| **Rich shell** | `python -m nexus --shell` | `shell/` — in-process |
+| **Rich shell** | `python -m nexus --shell` | in-process Rich compat mode (legacy) |
 | **GUI** | `python -m nexus --gui` | `gui/` + `gui.api` |
-| **Gateway** | `python -m nexus --gateway` | `gateway/` — Telegram, Discord, WhatsApp, Slack |
+| **Gateway** | `python -m nexus --gateway` | `gateway/` — 21 platforms (Telegram, Discord, WhatsApp, Slack, Teams, etc.) |
 
 ---
 
 ## Implemented Upgrades
 
 1.  **7-State Sovereign Loop:** GROUNDING → PLANNING → INFERENCE → AUDITING → EXECUTION → VERIFICATION → EVOLVE
-2.  **Auto-Version Tracking:** VersionManager tracks all 39 modules with semver bump on every forge refine
+2.  **Auto-Version Tracking:** VersionManager tracks all 67 `.jsnol` modules with semver bump on every forge refine
 3.  **Per-Module Evolution Structure:** Every evolution module has `<name>.jsnol` (metadata), `scripts/` (code), `<name>.md` (docs)
 4.  **Embedded Inline Versions:** Every script file has `__version__ = "1.0.0"` at the source level
 5.  **Tool Registry:** Current split tools under `tools/<name>/` with jsnol metadata + sandboxed execution, including dedicated `reading`, `creating`, `modifying`, and `deleting` filesystem tools instead of the removed `file_ops` tool.

@@ -1,8 +1,11 @@
 import json
 import os
 import time
+import asyncio
+import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 from providers.oauth.types import OAuthCredentials
 
@@ -15,6 +18,42 @@ def _restrict_path(path: Path, mode: int) -> None:
         os.chmod(path, mode)
     except OSError:
         pass
+
+
+@contextmanager
+def _file_lock(path: Path) -> Iterator[None]:
+    """Serialize OAuth store mutations across Nexus processes."""
+    lock_path = Path(f"{path}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    _restrict_path(lock_path.parent, 0o700)
+    handle = lock_path.open("a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            handle.write(b"0")
+            handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 class OAuthTokenStore:
@@ -33,41 +72,78 @@ class OAuthTokenStore:
         else:
             self._data = {}
 
-    def _save(self) -> None:
+    @contextmanager
+    def _process_lock(self) -> Iterator[None]:
+        with _file_lock(self._path):
+            self._load()
+            yield
+
+    def _save(self, *, _lock_held: bool = False) -> None:
+        if not _lock_held:
+            with self._process_lock():
+                self._save(_lock_held=True)
+            return
         self._path.parent.mkdir(parents=True, exist_ok=True)
         _restrict_path(self._path.parent, 0o700)
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._data, indent=2, default=str), "utf-8")
-        _restrict_path(tmp, 0o600)
-        tmp.replace(self._path)
-        _restrict_path(self._path, 0o600)
+        tmp = self._path.with_name(f".{self._path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        try:
+            with tmp.open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps(self._data, indent=2, default=str))
+                handle.flush()
+                os.fsync(handle.fileno())
+            _restrict_path(tmp, 0o600)
+            tmp.replace(self._path)
+            _restrict_path(self._path, 0o600)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def get(self, provider_id: str) -> Optional[OAuthCredentials]:
-        raw = self._data.get(provider_id)
-        if raw is None:
-            return None
-        return OAuthCredentials.from_dict(raw)
+        with self._process_lock():
+            raw = self._data.get(provider_id)
+            if raw is None:
+                return None
+            return OAuthCredentials.from_dict(raw)
 
     def set(self, provider_id: str, credentials: OAuthCredentials) -> None:
-        self._data[provider_id] = credentials.to_dict()
-        self._save()
+        with self._process_lock():
+            self._data[provider_id] = credentials.to_dict()
+            self._save(_lock_held=True)
 
     def delete(self, provider_id: str) -> bool:
-        if provider_id in self._data:
-            del self._data[provider_id]
-            self._save()
-            return True
-        return False
+        with self._process_lock():
+            if provider_id in self._data:
+                del self._data[provider_id]
+                self._save(_lock_held=True)
+                return True
+            return False
 
     def list_providers(self) -> list[str]:
-        return list(self._data.keys())
+        with self._process_lock():
+            return list(self._data.keys())
 
     def clear(self) -> None:
-        self._data.clear()
-        self._save()
+        with self._process_lock():
+            self._data.clear()
+            self._save(_lock_held=True)
 
 
 _store_instance: Optional[OAuthTokenStore] = None
+_refresh_lock_guard = threading.Lock()
+_refresh_locks: dict[tuple[str, int], asyncio.Lock] = {}
+
+
+def _refresh_lock(provider_id: str) -> asyncio.Lock:
+    """Return a single-flight lock scoped to provider and running loop."""
+    key = (str(provider_id), id(asyncio.get_running_loop()))
+    with _refresh_lock_guard:
+        lock = _refresh_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _refresh_locks[key] = lock
+        return lock
 
 
 def load_oauth_token_store() -> OAuthTokenStore:
@@ -97,8 +173,15 @@ async def get_oauth_api_key(
         provider = get_oauth_provider(provider_id)
         if provider is not None:
             try:
-                credentials = await provider.refresh_token(credentials)
-                store.set(provider_id, credentials)
+                async with _refresh_lock(provider_id):
+                    # Another waiter may have completed the refresh while it
+                    # was queued. Re-read and avoid issuing a second token.
+                    current = store.get(provider_id)
+                    if current is not None and time.time() * 1000 < current.expires:
+                        credentials = current
+                    else:
+                        credentials = await provider.refresh_token(current or credentials)
+                        store.set(provider_id, credentials)
             except Exception:
                 return None
 

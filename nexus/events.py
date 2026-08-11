@@ -21,7 +21,9 @@ approval.requested guardrail.blocked agent.thinking agent.completed
 memory.updated skill.used skill.created skill.updated error retry status.changed
 checkpoint.created checkpoint.started checkpoint.completed checkpoint.failed checkpoint.restored checkpoint.deleted""".split()
 )
-EVENT_STATUSES = frozenset({"pending", "running", "success", "failed", "blocked", "skipped", "cancelled"})
+EVENT_STATUSES = frozenset({
+    "pending", "running", "success", "failed", "blocked", "skipped", "cancelled", "timed_out",
+})
 
 
 def canonical_status(value: Any) -> str:

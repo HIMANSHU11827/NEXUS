@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import logging
 import os
+import secrets
 import shutil
 import signal
 import sys
@@ -143,7 +144,7 @@ def _quick_configure(project_root: str) -> None:
     os.makedirs(config_dir, exist_ok=True)
 
     env = load_env(project_root)
-    env.setdefault("NEXUS_SANDBOX_TIER", "no_sandbox")
+    env.setdefault("NEXUS_SANDBOX_TIER", "normal")
     save_env(project_root, env)
 
     cfg = load_provider_yml(project_root)
@@ -173,7 +174,7 @@ def _quick_configure(project_root: str) -> None:
             "thinking_mode": True,
             "log_level": "INFO",
             "language": "en",
-            "sandbox_tier": "no_sandbox",
+            "sandbox_tier": "normal",
             "theme": {
                 "name": "dark",
                 "primary": "bold magenta",
@@ -271,6 +272,7 @@ def _make_parser() -> argparse.ArgumentParser:
     group.add_argument("--shell", action="store_true", help="Start the compatibility shell (falls back to Ink TUI when legacy shell is unavailable)")
     group.add_argument("--gui", action="store_true", help="Start GUI + backend")
     group.add_argument("--server", action="store_true", help="Start API server only")
+    group.add_argument("--supervise", action="store_true", help="Run the API under a durable crash/restart supervisor")
     group.add_argument("--gateway", action="store_true", help="Start gateway")
     group.add_argument("--v5", action="store_true", help="Start the V5 engine (interactive REPL)")
     group.add_argument("--autonomous", action="store_true", help="Start the 24/7 durable task-queue driver (pulls tasks and runs them forever)")
@@ -396,45 +398,154 @@ def _import_config(project_root: str, import_path: str):
 
 
 def _kill_windows_port(port: int) -> None:
-    if os.name != "nt":
-        return
+    """Release a designated Nexus API/GUI port on every supported platform.
+
+    The historical name is retained for compatibility with launcher tests and
+    callers, but stale-port cleanup is no longer Windows-only. Only processes
+    whose command line looks like the Nexus API or GUI toolchain are touched;
+    unrelated services listening on the same port are left alone.
+    """
     try:
-        import re
-        import subprocess
-        for line in subprocess.check_output(["netstat", "-ano"], text=True).splitlines():
-            if f":{port} " in line and "LISTENING" in line:
-                match = re.search(r"\s+(\d+)\s*$", line)
-                if match:
-                    subprocess.run(
-                        ["taskkill", "/F", "/PID", match.group(1)],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
+        import psutil
+
+        markers = (
+            ("uvicorn", "server", "nexus")
+            if port == 8000
+            else ("vite", "npm", "node", "nexus", "gui")
+        )
+        processes = {}
+        for connection in psutil.net_connections(kind="tcp"):
+            address = connection.laddr
+            if connection.status != psutil.CONN_LISTEN or not address or address.port != port:
+                continue
+            if not connection.pid:
+                continue
+            try:
+                process = psutil.Process(connection.pid)
+                command_line = " ".join(process.cmdline()).lower()
+            except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+                continue
+            if any(marker in command_line for marker in markers):
+                processes[process.pid] = process
+
+        for process in processes.values():
+            descendants = process.children(recursive=True)
+            for child in reversed(descendants):
+                try:
+                    child.terminate()
+                except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                    pass
+            try:
+                process.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                pass
+
+        if processes:
+            gone, alive = psutil.wait_procs(list(processes.values()), timeout=3.0)
+            for process in alive:
+                try:
+                    process.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                    pass
     except Exception:
         logger.warning("Failed to clear port %s", port, exc_info=True)
 
 
-def _api_is_ready() -> bool:
+def _server_process_group_kwargs() -> dict:
+    """Give the launcher ownership of the API process tree it starts."""
+    import subprocess
+
+    if os.name == "nt":
+        return {
+            "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200),
+        }
+    return {"start_new_session": True}
+
+
+def _terminate_server_process(proc) -> None:
+    """Terminate and reap the API child and any launcher-owned descendants."""
+    if proc is None:
+        return
+    import subprocess
+
+    try:
+        running = proc.poll() is None
+    except Exception:
+        running = True
+    if running:
+        pid = getattr(proc, "pid", None)
+        tree_stopped = False
+        try:
+            if pid and os.name == "nt":
+                result = subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5.0,
+                    check=False,
+                )
+                tree_stopped = result.returncode == 0
+            elif pid:
+                os.killpg(os.getpgid(int(pid)), signal.SIGTERM)
+                tree_stopped = True
+        except (OSError, subprocess.SubprocessError, ValueError):
+            logger.debug("API process-tree termination unavailable", exc_info=True)
+        if not tree_stopped:
+            try:
+                proc.terminate()
+            except (OSError, ProcessLookupError):
+                pass
+    try:
+        proc.wait(timeout=5.0)
+    except (OSError, subprocess.SubprocessError, ProcessLookupError):
+        logger.debug("API process reap failed", exc_info=True)
+
+
+def _run_owned_foreground_process(command, cwd: str, *, env=None) -> int:
+    """Run an interactive child while retaining ownership of its process tree."""
+    import subprocess
+
+    kwargs = {
+        "cwd": cwd,
+        **_server_process_group_kwargs(),
+    }
+    if env is not None:
+        kwargs["env"] = env
+    proc = subprocess.Popen(command, **kwargs)
+    try:
+        return proc.wait()
+    finally:
+        if proc.poll() is None:
+            _terminate_server_process(proc)
+
+
+def _api_is_ready(token: str | None = None) -> bool:
+    """Return whether the local API accepts the launcher credentials."""
     try:
         import httpx
-        token = os.environ.get("NEXUS_DASHBOARD_TOKEN", "").strip() or "nexus-local-tui"
-        headers = {"Authorization": f"Bearer {token}"}
+        api_token = (token or os.environ.get("NEXUS_DASHBOARD_TOKEN", "")).strip()
+        if not api_token:
+            return False
+        headers = {"Authorization": f"Bearer {api_token}"}
         health = httpx.get("http://127.0.0.1:8000/api/health", headers=headers, timeout=1.5)
         status = httpx.get("http://127.0.0.1:8000/api/status", headers=headers, timeout=1.5)
-        voice = httpx.get("http://127.0.0.1:8000/api/voice/status", headers=headers, timeout=1.5)
-        return health.status_code == 200 and status.status_code == 200 and voice.status_code == 200
+        # Voice is optional and can initialise after the API. Gate TUI startup
+        # on the core server contract, not an optional peripheral service.
+        return health.status_code == 200 and status.status_code == 200
     except Exception:
         return False
 
 
-def _api_is_current() -> bool:
+def _api_is_current(token: str | None = None) -> bool:
     """Distinguish the current server contract from an older stale process."""
     try:
         import httpx
-        token = os.environ.get("NEXUS_DASHBOARD_TOKEN", "").strip() or "nexus-local-tui"
+        api_token = (token or os.environ.get("NEXUS_DASHBOARD_TOKEN", "")).strip()
+        if not api_token:
+            return False
         response = httpx.get(
             "http://127.0.0.1:8000/api/status",
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {api_token}"},
             timeout=1.5,
         )
         payload = response.json() if response.status_code == 200 else {}
@@ -479,6 +590,13 @@ def _find_tui_runner(tui_dir: str) -> list[str] | None:
 def _run_ink_tui(project_root: str, console) -> int:
     import subprocess
 
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        console.print(
+            "[yellow]NEXUS TUI needs an interactive terminal. Start `nexus` from "
+            "PowerShell, Command Prompt, Windows Terminal, or a WSL shell.[/yellow]"
+        )
+        return 1
+
     tui_dir = os.path.join(project_root, "tui")
     tui_entry = os.path.join(tui_dir, "nexus-tui.tsx")
     if not os.path.exists(tui_entry):
@@ -490,26 +608,49 @@ def _run_ink_tui(project_root: str, console) -> int:
         console.print("[red]Node TUI runner not found.[/red]")
         return 1
 
+    # The API requires an authenticated status request. Use a per-launch,
+    # high-entropy local token and pass it to both child processes. This avoids
+    # relying on a stale config token or the old, invalid short fallback.
+    launch_env = os.environ.copy()
+    api_token = secrets.token_urlsafe(32)
+    launch_env["NEXUS_DASHBOARD_TOKEN"] = api_token
+
     backend_proc = None
     reuse_existing_api = os.environ.get("NEXUS_REUSE_API", "").lower() in {"1", "true", "yes", "on"}
-    if not reuse_existing_api:
-        _kill_windows_port(8000)
-    if reuse_existing_api and _api_is_ready():
-        backend_proc = None
-    else:
-        backend_proc = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", "8000"],
-            cwd=project_root,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
     try:
-        result = subprocess.run(runner, cwd=tui_dir)
+        if not reuse_existing_api:
+            _kill_windows_port(8000)
+        if reuse_existing_api and _api_is_ready(api_token):
+            backend_proc = None
+        else:
+            backend_proc = subprocess.Popen(
+                [sys.executable, "-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", "8000"],
+                cwd=project_root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=launch_env,
+                **_server_process_group_kwargs(),
+            )
+
+            # Ink immediately requests a new session and panel state. Do not show a
+            # blank, apparently broken TUI while its owned backend is still booting.
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
+                if _api_is_ready(api_token):
+                    break
+                if backend_proc.poll() is not None:
+                    console.print("[red]NEXUS API exited before the TUI could start.[/red]")
+                    return int(backend_proc.returncode or 1)
+                time.sleep(0.2)
+            else:
+                console.print("[red]NEXUS API did not become ready within 30 seconds.[/red]")
+                return 1
+
+        result = subprocess.run(runner, cwd=tui_dir, env=launch_env)
         return result.returncode
     finally:
         if backend_proc:
-            backend_proc.terminate()
+            _terminate_server_process(backend_proc)
 
 
 def _run_rich_shell() -> int:
@@ -759,13 +900,31 @@ def boot():
         _print_banner(console)
         console.print("[bold green]Starting API Server on :8000...[/bold green]")
         import subprocess
-        proc = subprocess.Popen([sys.executable, "-m", "server"], cwd=project_root)
+        # Anonymous mode is an explicit local-development choice. Do not
+        # silently weaken authentication from the launcher.
+        server_env = os.environ.copy()
+        server_env.setdefault("NEXUS_ALLOW_LOCAL_ANON", "false")
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "server"],
+            cwd=project_root,
+            env=server_env,
+            **_server_process_group_kwargs(),
+        )
         try:
             asyncio.run(_wait_for_health("http://127.0.0.1:8000/api/health", label="API server"))
             proc.wait()
         except KeyboardInterrupt:
-            proc.terminate()
+            _terminate_server_process(proc)
+        finally:
+            if proc.poll() is None:
+                _terminate_server_process(proc)
         return
+
+    if args.supervise:
+        _print_banner(console)
+        console.print("[bold green]Starting supervised Nexus API...[/bold green]")
+        from nexus.supervisor import run_supervisor
+        raise SystemExit(run_supervisor(project_root))
 
     if args.gui:
         _print_banner(console)
@@ -782,26 +941,23 @@ def boot():
         _kill_windows_port(8000)
         _kill_windows_port(5173)
 
+        server_env = os.environ.copy()
+        server_env.setdefault("NEXUS_ALLOW_LOCAL_ANON", "false")
         proc = subprocess.Popen(
             [sys.executable, "-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", "8000"],
             cwd=project_root,
+            env=server_env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            **_server_process_group_kwargs(),
         )
         asyncio.run(_wait_for_health("http://127.0.0.1:8000/api/health", label="API server"))
         try:
-            if os.name == "nt":
-                subprocess.run(
-                    ["npm.cmd", "run", "dev", "--", "--host", "127.0.0.1"],
-                    cwd=os.path.join(project_root, "gui"),
-                )
-            else:
-                subprocess.run(
-                    ["npm", "run", "dev", "--", "--host", "127.0.0.1"],
-                    cwd=os.path.join(project_root, "gui"),
-                )
+            command = (["npm.cmd"] if os.name == "nt" else ["npm"])
+            command.extend(["run", "dev", "--", "--host", "127.0.0.1"])
+            _run_owned_foreground_process(command, os.path.join(project_root, "gui"))
         finally:
-            proc.terminate()
+            _terminate_server_process(proc)
         return
 
     if args.mission:

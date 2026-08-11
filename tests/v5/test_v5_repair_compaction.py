@@ -1,6 +1,7 @@
 """Test V5 bounded self-repair (roadmap item 3) and context compaction (item 11)."""
 
 import json
+import asyncio
 import sys
 from pathlib import Path
 
@@ -122,6 +123,36 @@ async def test_v5_compaction_boundary(tmp_path):
 
     guarded = mgr._compaction_boundary("not a list")
     assert guarded == {"kept": "not a list", "dropped": 0, "boundary_event": None}
+
+
+async def test_context_loading_does_not_block_event_loop(tmp_path, monkeypatch):
+    mgr = ContextManager(str(tmp_path))
+    original = mgr._load_context_sync
+
+    def slow_load():
+        import time
+
+        time.sleep(0.08)
+        return original()
+
+    monkeypatch.setattr(mgr, "_load_context_sync", slow_load)
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0.01)
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    try:
+        snapshot = await mgr.load_context()
+    finally:
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
+
+    assert snapshot.files_loaded == []
+    assert ticks >= 4
 
 
 async def test_v5_compact_context(tmp_path):

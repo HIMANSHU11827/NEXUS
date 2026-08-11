@@ -5,6 +5,8 @@ from typing import Dict, Iterator, List, Optional
 
 from providers.base import NexusBaseProvider
 
+logger = logging.getLogger(__name__)
+
 
 class XAIProvider(NexusBaseProvider):
     """
@@ -53,8 +55,9 @@ class XAIProvider(NexusBaseProvider):
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs}
         self._add_tool_payload(payload, kwargs)
+        response = None
         try:
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=30)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=self.request_timeout(kwargs, 30))
             if response.status_code == 200:
                 data = response.json()
                 message = data["choices"][0].get("message", {})
@@ -72,8 +75,9 @@ class XAIProvider(NexusBaseProvider):
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs, "stream": True}
         self._add_tool_payload(payload, kwargs)
+        response = None
         try:
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=30)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=self.request_timeout(kwargs, 30))
             if response.status_code == 200:
                 streamed_tool_calls = {}
                 for line in response.iter_lines():
@@ -102,5 +106,11 @@ class XAIProvider(NexusBaseProvider):
                 yield f"Error: {response.status_code}. {response.text}"
         except Exception as e:
             yield f"Error in xAI stream: {str(e)}"
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    logger.debug("xAI stream response cleanup failed", exc_info=True)
 
 

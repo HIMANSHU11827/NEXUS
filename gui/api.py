@@ -1,16 +1,19 @@
 import asyncio
 import concurrent.futures
 import inspect
+import ipaddress
 import json
 import logging
 import os
 import queue
 import re
 import shutil
+import stat
 import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -38,7 +41,13 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 
 from nexus.events import CanonicalEvent
 from nexus.run_context import list_run_contexts, load_run_context
-from nexus.work_items import project_work_item_event
+from nexus.session_store import atomic_write_json, session_write_lock
+from nexus.work_items import (
+    pending_work_item_projection_failures,
+    project_work_item_event,
+    record_work_item_projection_failure,
+    replay_work_item_event_log,
+)
 from nexus.control_plane import project_plan_event
 from nexus.runtime import (
     build_chat_request,
@@ -94,6 +103,8 @@ _WORK_EVENT_MAX_RECORDS = max(100, int(os.environ.get("NEXUS_WORK_EVENT_MAX_RECO
 _WORK_EVENT_MAX_BYTES = max(1024 * 1024, int(os.environ.get("NEXUS_WORK_EVENT_MAX_BYTES", str(50 * 1024 * 1024))))
 _WORK_EVENT_CACHE: Dict[str, Tuple[Tuple[int, int], List[Dict[str, Any]], int]] = {}
 _WORK_EVENT_CACHE_LOCK = threading.RLock()
+_SOURCE_LIBRARY_LOCK = threading.RLock()
+_PROVIDER_CONFIG_LOCK = threading.RLock()
 
 
 @contextmanager
@@ -195,6 +206,23 @@ def _cached_work_events(path: str) -> Tuple[List[Dict[str, Any]], int]:
     with _WORK_EVENT_CACHE_LOCK:
         _WORK_EVENT_CACHE[path] = (signature, events, count)
     return events, count
+
+
+def _session_work_event_paths(session_id: str) -> List[str]:
+    """Return canonical plus pre-normalization event-log paths for reads."""
+    canonical = work_events_path(session_id)
+    raw = str(session_id or "default")
+    legacy_name = re.sub(r"[^A-Za-z0-9_.-]", "_", raw.strip())[:120] or "default"
+    legacy = os.path.abspath(os.path.join(_WORK_EVENTS_DIR, f"{legacy_name}.jsonl"))
+    return [canonical] if legacy == canonical or not os.path.isfile(legacy) else [canonical, legacy]
+
+
+def _session_work_events(session_id: str) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    for path in _session_work_event_paths(session_id):
+        events.extend(_cached_work_events(path)[0])
+    events.sort(key=lambda event: (_safe_event_sequence(event), str(event.get("created_at") or "")))
+    return events
 
 
 def _invalidate_work_event_cache(path: str) -> None:
@@ -328,6 +356,16 @@ async def security_middleware(request: Request, call_next):
         audit_event(request, "blocked", "non-local client")
         return JSONResponse({"detail": "Dashboard is local-only"}, status_code=403)
 
+    # When the GUI is intentionally exposed beyond loopback, local-only
+    # network placement is no longer a security boundary. Require the same
+    # dashboard authentication used by the canonical API. Health remains a
+    # public liveness probe so a reverse proxy can monitor the process.
+    if not _LOCAL_ONLY and request.url.path != "/api/health":
+        from authentication import check_auth
+        if check_auth(request) is None:
+            audit_event(request, "blocked", "not authenticated")
+            return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+
     now = time.time()
     bucket = [t for t in _RATE_BUCKETS.get(client, []) if now - t < _RATE_WINDOW_SECONDS]
     bucket.append(now)
@@ -360,74 +398,177 @@ def safe_upload_path(filename: str) -> str:
     if not parts or any(part == ".." for part in parts):
         raise HTTPException(status_code=400, detail="Invalid upload filename")
     safe_parts = [re.sub(r"[^A-Za-z0-9_. -]", "_", part).strip() or "upload" for part in parts]
-    upload_root = os.path.abspath(_UPLOAD_DIR)
-    path = os.path.abspath(os.path.join(upload_root, *safe_parts))
-    if os.path.commonpath([upload_root, path]) != upload_root:
+    upload_root = os.path.realpath(os.path.abspath(_UPLOAD_DIR))
+    path = os.path.realpath(os.path.abspath(os.path.join(upload_root, *safe_parts)))
+    try:
+        inside = os.path.commonpath([upload_root, path]) == upload_root
+    except ValueError:
+        inside = False
+    if not inside:
         raise HTTPException(status_code=400, detail="Invalid upload filename")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     return path
 
 
-def load_source_library() -> List[Dict[str, Any]]:
+def _write_uploaded_bytes_sync(path: str, content: bytes) -> None:
+    """Write an already bounded upload outside the async request thread."""
+    temporary = f"{path}.{uuid.uuid4().hex}.tmp"
     try:
-        if not os.path.exists(_SOURCE_LIBRARY_PATH):
-            return []
-        with open(_SOURCE_LIBRARY_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            return [item for item in data if isinstance(item, dict)]
-    except Exception:
-        pass
+        with open(temporary, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject redirects so URL validation cannot be bypassed by a second hop."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # pragma: no cover - urllib calls this on redirect
+        raise HTTPException(status_code=403, detail="Redirects are not allowed for website imports")
+
+
+def _validate_public_source_url(raw_url: str):
+    """Validate every resolved address before fetching an external source."""
+    parsed = urlparse(raw_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise HTTPException(status_code=400, detail="Enter a valid public http(s) URL")
+    try:
+        addresses = {
+            info[4][0]
+            for info in socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+        }
+    except (OSError, ValueError):
+        raise HTTPException(status_code=400, detail="Could not resolve URL")
+    if not addresses:
+        raise HTTPException(status_code=400, detail="Could not resolve URL")
+    for address in addresses:
+        try:
+            ip = ipaddress.ip_address(address.split("%", 1)[0])
+        except ValueError:
+            raise HTTPException(status_code=403, detail="URL resolved to an invalid address")
+        if any((ip.is_private, ip.is_loopback, ip.is_link_local, ip.is_multicast, ip.is_unspecified, ip.is_reserved)):
+            raise HTTPException(status_code=403, detail="Private/internal URLs are not allowed")
+    return parsed
+
+
+def _fetch_website_source_sync(raw_url: str, parsed: Any) -> tuple[str, str]:
+    """Fetch and extract a bounded website source outside the event loop."""
+    req = urllib.request.Request(
+        raw_url, headers={"User-Agent": "NEXUS-AI-Source-Importer/1.0"}
+    )
+    opener = urllib.request.build_opener(_NoRedirectHandler())
+    with opener.open(req, timeout=12) as response:
+        content_type = response.headers.get("content-type", "")
+        raw = response.read(_MAX_UPLOAD_BYTES + 1)
+    if len(raw) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Website source is too large")
+    text = raw.decode("utf-8", errors="replace")
+    if "html" in content_type.lower() or "<html" in text[:2000].lower():
+        try:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(text, "html.parser")
+            for tag in soup(["script", "style", "noscript"]):
+                tag.decompose()
+            title = soup.title.get_text(" ", strip=True) if soup.title else parsed.netloc
+            body = soup.get_text("\n", strip=True)
+            text = f"# {title}\n\nSource URL: {raw_url}\n\n{body}"
+        except Exception:
+            title = parsed.netloc
+            text = f"Source URL: {raw_url}\n\n{text}"
+    else:
+        title = os.path.basename(parsed.path.strip("/")) or parsed.netloc
+        text = f"Source URL: {raw_url}\nContent-Type: {content_type}\n\n{text}"
+    return text[:_MAX_UPLOAD_BYTES], title
+
+
+def load_source_library() -> List[Dict[str, Any]]:
+    with _SOURCE_LIBRARY_LOCK:
+        try:
+            if not os.path.exists(_SOURCE_LIBRARY_PATH):
+                return []
+            with open(_SOURCE_LIBRARY_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+        except Exception:
+            pass
     return []
 
 
 def save_source_library(sources: List[Dict[str, Any]]) -> None:
-    os.makedirs(os.path.dirname(_SOURCE_LIBRARY_PATH), exist_ok=True)
-    with open(_SOURCE_LIBRARY_PATH, "w", encoding="utf-8") as f:
-        json.dump(sources, f, indent=2)
+    with _SOURCE_LIBRARY_LOCK:
+        os.makedirs(os.path.dirname(_SOURCE_LIBRARY_PATH), exist_ok=True)
+        temporary = f"{_SOURCE_LIBRARY_PATH}.{uuid.uuid4().hex}.tmp"
+        try:
+            with open(temporary, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(sources, f, indent=2)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, _SOURCE_LIBRARY_PATH)
+        finally:
+            try:
+                os.remove(temporary)
+            except FileNotFoundError:
+                pass
 
 
 def upsert_source_library(item: Dict[str, Any]) -> Dict[str, Any]:
-    sources = load_source_library()
-    source_id = str(item.get("id") or f"src_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}")
-    normalized = {
-        "id": source_id,
-        "name": str(item.get("name") or "Untitled source")[:180],
-        "type": "Website" if str(item.get("type")).lower() == "website" else "File",
-        "checked": bool(item.get("checked", True)),
-        "path": str(item.get("path") or ""),
-        "url": str(item.get("url") or ""),
-        "created_at": float(item.get("created_at") or time.time()),
-        "updated_at": time.time(),
-    }
-    sources = [src for src in sources if str(src.get("id")) != source_id]
-    sources.insert(0, normalized)
-    save_source_library(sources)
-    return normalized
+    with _SOURCE_LIBRARY_LOCK, _interprocess_event_lock(_SOURCE_LIBRARY_PATH):
+        sources = load_source_library()
+        source_id = str(item.get("id") or f"src_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}")
+        normalized = {
+            "id": source_id,
+            "name": str(item.get("name") or "Untitled source")[:180],
+            "type": "Website" if str(item.get("type")).lower() == "website" else "File",
+            "checked": bool(item.get("checked", True)),
+            "path": str(item.get("path") or ""),
+            "url": str(item.get("url") or ""),
+            "created_at": float(item.get("created_at") or time.time()),
+            "updated_at": time.time(),
+        }
+        sources = [src for src in sources if str(src.get("id")) != source_id]
+        sources.insert(0, normalized)
+        save_source_library(sources)
+        return normalized
+
+
+def _index_source_sync(rel_path: str) -> None:
+    """Run potentially expensive RAG indexing outside an async handler."""
+    get_loop("default").rag.index_workspace(file_path=rel_path)
 
 
 def update_source_library(source_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
-    sources = load_source_library()
-    for index, item in enumerate(sources):
-        if str(item.get("id")) == source_id:
-            item = dict(item)
-            if "name" in patch:
-                item["name"] = str(patch.get("name") or item.get("name") or "Untitled source")[:180]
-            if "checked" in patch:
-                item["checked"] = bool(patch.get("checked"))
-            item["updated_at"] = time.time()
-            sources[index] = item
-            save_source_library(sources)
-            return item
+    with _SOURCE_LIBRARY_LOCK, _interprocess_event_lock(_SOURCE_LIBRARY_PATH):
+        sources = load_source_library()
+        for index, item in enumerate(sources):
+            if str(item.get("id")) == source_id:
+                item = dict(item)
+                if "name" in patch:
+                    item["name"] = str(patch.get("name") or item.get("name") or "Untitled source")[:180]
+                if "checked" in patch:
+                    item["checked"] = bool(patch.get("checked"))
+                item["updated_at"] = time.time()
+                sources[index] = item
+                save_source_library(sources)
+                return item
     raise HTTPException(status_code=404, detail="Source not found")
 
 
 def delete_source_library(source_id: str) -> None:
-    sources = load_source_library()
-    next_sources = [item for item in sources if str(item.get("id")) != source_id]
-    if len(next_sources) == len(sources):
-        raise HTTPException(status_code=404, detail="Source not found")
-    save_source_library(next_sources)
+    with _SOURCE_LIBRARY_LOCK, _interprocess_event_lock(_SOURCE_LIBRARY_PATH):
+        sources = load_source_library()
+        next_sources = [item for item in sources if str(item.get("id")) != source_id]
+        if len(next_sources) == len(sources):
+            raise HTTPException(status_code=404, detail="Source not found")
+        save_source_library(next_sources)
 
 
 def safe_workspace_read_path(raw_path: str) -> str:
@@ -436,13 +577,27 @@ def safe_workspace_read_path(raw_path: str) -> str:
         raise HTTPException(status_code=400, detail="Path is required")
     if not os.path.isabs(value):
         value = os.path.join(_ROOT, value)
-    path = os.path.abspath(value)
-    root = os.path.abspath(_ROOT)
+    root = os.path.realpath(os.path.abspath(_ROOT))
+    path = os.path.realpath(os.path.abspath(value))
     if os.path.commonpath([root, path]) != root:
         raise HTTPException(status_code=400, detail="Path is outside the NEXUS workspace")
     if not os.path.exists(path) or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not found")
     return path
+
+
+def _safe_artifact_file_path(root: str, candidate: str) -> str | None:
+    """Return an artifact file only when it is a real, in-root file."""
+    root_path = os.path.realpath(os.path.abspath(root))
+    candidate_path = os.path.abspath(candidate)
+    if os.path.islink(candidate_path):
+        return None
+    resolved = os.path.realpath(candidate_path)
+    try:
+        inside = os.path.commonpath([root_path, resolved]) == root_path
+    except ValueError:
+        inside = False
+    return resolved if inside and os.path.isfile(resolved) else None
 
 
 def work_events_path(session_id: str) -> str:
@@ -786,8 +941,13 @@ def append_work_event(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any
     try:
         project_work_item_event(root=_ROOT, session_id=event["conversation_id"], event=event)
         project_plan_event(root=_ROOT, session_id=event["conversation_id"], event=event)
-    except Exception:
+    except Exception as exc:
         logger.debug("Could not project GUI work event onto WorkItem", exc_info=True)
+        record_work_item_projection_failure(
+            event_log_path=work_events_path(event["conversation_id"]),
+            event=event,
+            error=exc,
+        )
         
     if event.get("kind") not in ("todo", "planning_artifact") and event.get("role") != "planning_artifact":
         try:
@@ -1013,15 +1173,27 @@ def build_workflow_todo_markdown(prompt: str, plan: List[Dict[str, Any]]) -> str
 
 def write_workspace_todo_plan(content: str) -> str:
     """Persist the visible agent plan as a real workspace file."""
+    from tools.planning.scripts.planning import plan_transaction
+
     workspace_dir = os.path.join(_ROOT, "workspace")
     os.makedirs(workspace_dir, exist_ok=True)
     todo_path = os.path.abspath(os.path.join(workspace_dir, "todo.md"))
     if os.path.commonpath([os.path.abspath(workspace_dir), todo_path]) != os.path.abspath(workspace_dir):
         raise HTTPException(status_code=400, detail="Invalid todo path")
-    temp_path = f"{todo_path}.{uuid.uuid4().hex[:8]}.tmp"
-    with open(temp_path, "w", encoding="utf-8") as f:
-        f.write(content)
-    os.replace(temp_path, todo_path)
+    with plan_transaction(_ROOT):
+        temp_path = f"{todo_path}.{uuid.uuid4().hex[:8]}.tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, todo_path)
+        finally:
+            try:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+            except OSError:
+                pass
     return os.path.relpath(todo_path, _ROOT)
 
 
@@ -1031,10 +1203,13 @@ def workflow_needs_plan(prompt: str) -> bool:
 
 
 def clear_workspace_todo_plan() -> None:
+    from tools.planning.scripts.planning import plan_transaction
+
     try:
-        todo_path = os.path.abspath(os.path.join(_ROOT, "workspace", "todo.md"))
-        if os.path.exists(todo_path):
-            os.remove(todo_path)
+        with plan_transaction(_ROOT):
+            todo_path = os.path.abspath(os.path.join(_ROOT, "workspace", "todo.md"))
+            if os.path.exists(todo_path):
+                os.remove(todo_path)
     except Exception:
         pass
 
@@ -1174,7 +1349,7 @@ def complete_chat_workflow(session_id: str, prompt: str, turn_id: str = "", stat
 
 def list_work_events(session_id: str, limit: int = 200, active_turn_id: str = "") -> List[Dict[str, Any]]:
     path = work_events_path(session_id)
-    raw_events, _ = _cached_work_events(path)
+    raw_events = _session_work_events(session_id)
 
     _HIDDEN_TARGETS = {
         "prompt_files",
@@ -1291,11 +1466,19 @@ def list_work_events(session_id: str, limit: int = 200, active_turn_id: str = ""
 
 def replay_work_events_after(session_id: str, after_sequence: int, limit: int = 200) -> List[Dict[str, Any]]:
     """Replay the append-only canonical log without lifecycle-state dedupe."""
+    hidden_targets = {
+        "prompt_files",
+        "CRITICAL PREVENTIVE VACCINE: internal",
+    }
     events: List[Dict[str, Any]] = []
     path = work_events_path(session_id)
-    raw_events, _ = _cached_work_events(path)
+    raw_events = _session_work_events(session_id)
     for event in raw_events:
         if str(event.get("visibility", "")).lower() == "internal":
+            continue
+        if event.get("target") in hidden_targets:
+            continue
+        if event.get("kind") == "test" and event.get("target") in hidden_targets:
             continue
         if _safe_event_sequence(event) > after_sequence:
             events.append(event)
@@ -1306,7 +1489,7 @@ def replay_work_events_after(session_id: str, after_sequence: int, limit: int = 
 
 def work_event_run_summary(session_id: str, run_id: str) -> Dict[str, Any]:
     """Small replay index for a durable run without sending the whole log."""
-    raw_events, _ = _cached_work_events(work_events_path(session_id))
+    raw_events = _session_work_events(session_id)
     statuses: Dict[str, int] = {}
     kinds: Dict[str, int] = {}
     event_count = 0
@@ -1327,7 +1510,10 @@ def work_event_run_summary(session_id: str, run_id: str) -> Dict[str, Any]:
         except (TypeError, ValueError):
             pass
         event_type = str(event.get("event_type") or event.get("type") or "")
-        if event_type.startswith("run.") and status in {"success", "failed", "cancelled"}:
+        if event_type.startswith("run.") and (
+            status in {"success", "failed", "cancelled", "canceled", "timed_out", "error"}
+            or event_type == "run.timed_out"
+        ):
             terminal_event = event_type
     return {
         "event_count": event_count,
@@ -1434,6 +1620,34 @@ def _apply_sandbox_tier(loop: NexusLoop) -> None:
         raise RuntimeError("Sandbox is unavailable; refusing to start a GUI session without execution isolation")
     sandbox.tier = loop.sandbox_tier
     sandbox.root = _SANDBOX_ROOT
+
+
+class _CancellableStreamQueue(queue.Queue):
+    """Bound stream queue that releases producers when a client disconnects."""
+
+    def __init__(self, stop_event: threading.Event, maxsize: int = 256):
+        super().__init__(maxsize=maxsize)
+        self._stop_event = stop_event
+
+    def put(self, item, block=True, timeout=None):
+        if not block:
+            if self._stop_event.is_set():
+                return False
+            super().put(item, block=False)
+            return True
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        while not self._stop_event.is_set():
+            wait = 0.25
+            if deadline is not None:
+                wait = min(wait, max(0.0, deadline - time.monotonic()))
+                if wait <= 0:
+                    raise queue.Full
+            try:
+                super().put(item, block=True, timeout=wait)
+                return True
+            except queue.Full:
+                continue
+        return False
 
 
 def bind_live_work_event_sink(loop: NexusLoop, session_id: str, turn_id: str, out_queue) -> tuple[Any, Any]:
@@ -1579,24 +1793,36 @@ def _clear_session_files(session_id: str) -> bool:
     """Reset or remove persisted session data and in-memory loop cache."""
     path = session_file_path(session_id)
     meta_path = session_file_path(session_id, ".meta")
-    existed = os.path.exists(path) or os.path.exists(meta_path) or session_id in _LOOPS
 
     clear_workspace_todo_plan()
 
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump([], f)
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump({"title": "New Chat"}, f)
-
-    if session_id in _LOOPS:
-        loop = _LOOPS[session_id]
-        loop.memory = []
-        try:
-            loop.save_memory()
-        except Exception:
-            pass
+    # Use the same lock/atomic replacement protocol as V5 and MemoryManager.
+    # This prevents a GUI clear from racing a server/V5 transcript save.
+    with session_write_lock(path):
+        existed = os.path.exists(path) or os.path.exists(meta_path) or session_id in _LOOPS
+        atomic_write_json(path, [])
+        atomic_write_json(meta_path, {"title": "New Chat"})
+        if session_id in _LOOPS:
+            _LOOPS[session_id].memory = []
 
     return existed
+
+
+def _delete_session_files(session_id: str) -> bool:
+    """Delete one non-default session under the shared persistence lock."""
+    path = session_file_path(session_id)
+    meta_path = session_file_path(session_id, ".meta")
+    with session_write_lock(path):
+        existed = os.path.exists(path) or os.path.exists(meta_path) or session_id in _LOOPS
+        if not existed:
+            return False
+        for candidate in (path, meta_path):
+            try:
+                os.remove(candidate)
+            except FileNotFoundError:
+                pass
+        _LOOPS.pop(session_id, None)
+        return True
 
 
 @app.delete("/api/sessions/{session_id}")
@@ -1614,17 +1840,8 @@ def delete_session(session_id: str):
             "message": "Default session cleared",
         }
 
-    path = session_file_path(session_id)
-    meta_path = session_file_path(session_id, ".meta")
-    if not os.path.exists(path) and session_id not in _LOOPS:
+    if not _delete_session_files(session_id):
         return {"status": "error", "id": session_id, "deleted": False, "message": "Session not found"}
-
-    if os.path.exists(path):
-        os.remove(path)
-    if os.path.exists(meta_path):
-        os.remove(meta_path)
-    if session_id in _LOOPS:
-        del _LOOPS[session_id]
     return {"status": "success", "id": session_id, "deleted": True}
 
 @app.post("/api/sessions/rename")
@@ -1635,10 +1852,30 @@ async def rename_session(request: Request):
     path = session_file_path(sid)
     if os.path.exists(path):
         meta_path = session_file_path(sid, ".meta")
-        with open(meta_path, "w", encoding='utf-8') as f:
-            json.dump({"title": new_title}, f)
+        await asyncio.to_thread(_write_session_title_sync, meta_path, new_title)
         return {"status": "success"}
     return {"status": "error"}
+
+
+def _write_session_title_sync(meta_path: str, title: str) -> None:
+    """Persist GUI session metadata atomically outside the async loop."""
+    directory = os.path.dirname(meta_path) or "."
+    os.makedirs(directory, exist_ok=True)
+    session_path = os.path.join(directory, f"{os.path.basename(meta_path)[:-5]}.json")
+    with session_write_lock(session_path):
+        atomic_write_json(meta_path, {"title": title})
+
+
+def _session_title_needs_write_sync(meta_path: str) -> bool:
+    """Read session metadata outside the async chat request path."""
+    if not os.path.exists(meta_path):
+        return True
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        return meta.get("title") == "New Chat" if isinstance(meta, dict) else True
+    except Exception:
+        return True
 
 @app.post("/api/chat")
 async def chat(request: Request):
@@ -1691,22 +1928,10 @@ async def chat(request: Request):
     
     # Auto-title session if new
     meta_path = session_file_path(sid, ".meta")
-    should_write = False
-    if not os.path.exists(meta_path):
-        should_write = True
-    else:
-        try:
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-                if meta.get("title") == "New Chat":
-                    should_write = True
-        except Exception:
-            should_write = True
+    should_write = await asyncio.to_thread(_session_title_needs_write_sync, meta_path)
     if should_write:
-        os.makedirs(os.path.dirname(meta_path), exist_ok=True)
         try:
-            with open(meta_path, "w", encoding="utf-8") as f:
-                json.dump({"title": prompt[:50]}, f)
+            await asyncio.to_thread(_write_session_title_sync, meta_path, prompt[:50])
         except Exception as e:
             print(f"[API_ERROR]: Failed to write session meta: {e}")
 
@@ -1723,7 +1948,8 @@ async def chat(request: Request):
         partial_response = []
         deadline_at = time.monotonic() + chat_timeout
         legacy_raw_stream = str(data.get("stream_format") or "").lower() in {"raw", "legacy"}
-        stream_queue: "queue.Queue[tuple[str, Any]]" = queue.Queue()
+        stop_event = threading.Event()
+        stream_queue: "queue.Queue[tuple[str, Any]]" = _CancellableStreamQueue(stop_event)
         previous_work_event_sink, active_work_event_sink = bind_live_work_event_sink(loop, sid, turn_id, stream_queue)
         last_activity_at = time.monotonic()
         thought_events: list[tuple[str, dict[str, str]]] = []
@@ -1782,7 +2008,8 @@ async def chat(request: Request):
             except Exception as stream_error:
                 stream_queue.put(("error", str(stream_error)))
 
-        threading.Thread(target=run_loop_stream, daemon=True).start()
+        producer_thread = threading.Thread(target=run_loop_stream, daemon=True)
+        producer_thread.start()
 
         try:
             while True:
@@ -1841,6 +2068,14 @@ async def chat(request: Request):
                 pass
             yield stream_frame("error", {"message": error_text})
         finally:
+            stop_event.set()
+            if not completed:
+                request_abort = getattr(loop, "request_abort", None)
+                if callable(request_abort):
+                    try:
+                        request_abort(turn_id, "client_disconnect")
+                    except Exception:
+                        pass
             if loop.work_event_sink is active_work_event_sink:
                 loop.work_event_sink = previous_work_event_sink
             if completed:
@@ -1864,6 +2099,8 @@ async def chat(request: Request):
                         loop.save_memory()
                 except Exception as save_error:
                     print(f"[API_ERROR]: Failed to save interrupted chat stream: {save_error}")
+            if producer_thread.is_alive():
+                await asyncio.to_thread(producer_thread.join, 1.0)
             if completed:
                 yield stream_frame("done", "[DONE]")
 
@@ -1907,23 +2144,19 @@ async def upload_files(files: List[UploadFile] = File(...)):
     for file in files:
         file_path = safe_upload_path(file.filename)
         total = 0
-        with open(file_path, "wb") as buffer:
-            while True:
-                chunk = file.file.read(1024 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > _MAX_UPLOAD_BYTES:
-                    buffer.close()
-                    try:
-                        os.remove(file_path)
-                    except OSError:
-                        pass
-                    raise HTTPException(status_code=413, detail="Upload too large")
-                buffer.write(chunk)
+        content = bytearray()
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="Upload too large")
+            content.extend(chunk)
+        await asyncio.to_thread(_write_uploaded_bytes_sync, file_path, bytes(content))
         saved_paths.append(file_path)
         rel_path = os.path.relpath(file_path, _ROOT).replace("\\", "/")
-        source_items.append(upsert_source_library({
+        source_items.append(await asyncio.to_thread(upsert_source_library, {
             "id": f"file_{uuid.uuid4().hex[:10]}",
             "name": os.path.basename(file_path),
             "type": "File",
@@ -1931,7 +2164,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
             "checked": True,
         }))
         try:
-            get_loop("default").rag.index_workspace(file_path=rel_path)
+            await asyncio.to_thread(_index_source_sync, rel_path)
         except Exception as index_error:
             print(f"[SOURCE_WARN]: Could not index upload {rel_path}: {index_error}")
     
@@ -1950,40 +2183,12 @@ def get_sources():
 async def import_website_source(request: Request):
     data = await request.json()
     raw_url = str(data.get("url") or "").strip()
-    parsed = urlparse(raw_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise HTTPException(status_code=400, detail="Enter a valid http(s) URL")
-    import socket as _socket
-    try:
-        _ip = _socket.gethostbyname(parsed.hostname)
-        if _ip.startswith(("10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.", "192.168.", "127.", "0.")) or _ip == "::1":
-            raise HTTPException(status_code=403, detail="Private/internal URLs not allowed")
-    except _socket.gaierror:
-        raise HTTPException(status_code=400, detail="Could not resolve URL")
+    parsed = await asyncio.to_thread(_validate_public_source_url, raw_url)
 
     try:
-        req = urllib.request.Request(raw_url, headers={"User-Agent": "NEXUS-AI-Source-Importer/1.0"})
-        with urllib.request.urlopen(req, timeout=12) as response:
-            content_type = response.headers.get("content-type", "")
-            raw = response.read(_MAX_UPLOAD_BYTES + 1)
-        if len(raw) > _MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="Website source is too large")
-        text = raw.decode("utf-8", errors="replace")
-        if "html" in content_type.lower() or "<html" in text[:2000].lower():
-            try:
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(text, "html.parser")
-                for tag in soup(["script", "style", "noscript"]):
-                    tag.decompose()
-                title = soup.title.get_text(" ", strip=True) if soup.title else parsed.netloc
-                body = soup.get_text("\n", strip=True)
-                text = f"# {title}\n\nSource URL: {raw_url}\n\n{body}"
-            except Exception:
-                title = parsed.netloc
-                text = f"Source URL: {raw_url}\n\n{text}"
-        else:
-            title = os.path.basename(parsed.path.strip("/")) or parsed.netloc
-            text = f"Source URL: {raw_url}\nContent-Type: {content_type}\n\n{text}"
+        text, title = await asyncio.to_thread(
+            _fetch_website_source_sync, raw_url, parsed
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -1992,10 +2197,11 @@ async def import_website_source(request: Request):
     safe_host = re.sub(r"[^A-Za-z0-9._-]+", "_", parsed.netloc).strip("._") or "website"
     file_name = f"web_{safe_host}_{uuid.uuid4().hex[:8]}.txt"
     file_path = safe_upload_path(file_name)
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(text[:_MAX_UPLOAD_BYTES])
+    await asyncio.to_thread(
+        _write_uploaded_bytes_sync, file_path, text.encode("utf-8")
+    )
     rel_path = os.path.relpath(file_path, _ROOT).replace("\\", "/")
-    source = upsert_source_library({
+    source = await asyncio.to_thread(upsert_source_library, {
         "id": f"web_{uuid.uuid4().hex[:10]}",
         "name": str(data.get("name") or title or parsed.netloc)[:180],
         "type": "Website",
@@ -2004,7 +2210,7 @@ async def import_website_source(request: Request):
         "checked": True,
     })
     try:
-        get_loop("default").rag.index_workspace(file_path=rel_path)
+        await asyncio.to_thread(_index_source_sync, rel_path)
     except Exception as index_error:
         print(f"[SOURCE_WARN]: Could not index website {rel_path}: {index_error}")
     return {"status": "success", "source": source}
@@ -2013,12 +2219,13 @@ async def import_website_source(request: Request):
 @app.patch("/api/sources/{source_id}")
 async def patch_source(source_id: str, request: Request):
     data = await request.json()
-    return {"status": "success", "source": update_source_library(source_id, data)}
+    source = await asyncio.to_thread(update_source_library, source_id, data)
+    return {"status": "success", "source": source}
 
 
 @app.delete("/api/sources/{source_id}")
-def delete_source(source_id: str):
-    delete_source_library(source_id)
+async def delete_source(source_id: str):
+    await asyncio.to_thread(delete_source_library, source_id)
     return {"status": "success"}
 
 @app.get("/api/history")
@@ -2065,20 +2272,26 @@ def get_run_context(session_id: str, run_id: str, include_events: bool = True, l
 
 @app.get("/api/work-events")
 def get_work_events(request: Request, session_id: str = "default", limit: int = 200, turn_id: str = "", after_sequence: int = 0):
+    sid = safe_session_id(session_id)
+    replay_work_item_event_log(
+        root=_ROOT,
+        session_id=sid,
+        event_log_path=work_events_path(sid),
+    )
     header_cursor = request.headers.get("Last-Event-ID", "").strip()
     if header_cursor:
         try:
             after_sequence = max(after_sequence, int(header_cursor))
         except ValueError:
             raise HTTPException(status_code=400, detail="Last-Event-ID must be an integer sequence")
-    raw_events, _ = _cached_work_events(work_events_path(session_id))
+    raw_events = _session_work_events(sid)
     retained_sequences = [_safe_event_sequence(event) for event in raw_events if _safe_event_sequence(event) > 0]
     oldest_sequence = min(retained_sequences, default=0)
     replay_truncated = bool(after_sequence and oldest_sequence and after_sequence < oldest_sequence - 1)
     events = (
-        replay_work_events_after(session_id, after_sequence, limit=limit)
+        replay_work_events_after(sid, after_sequence, limit=limit)
         if after_sequence > 0
-        else list_work_events(session_id, limit=limit, active_turn_id=turn_id)
+        else list_work_events(sid, limit=limit, active_turn_id=turn_id)
     )
     if turn_id:
         events = [event for event in events if str(event.get("turn_id", "")) == turn_id]
@@ -2089,6 +2302,9 @@ def get_work_events(request: Request, session_id: str = "default", limit: int = 
         "next_sequence": next_sequence,
         "oldest_sequence": oldest_sequence,
         "replay_truncated": replay_truncated,
+        "projection_failures": pending_work_item_projection_failures(
+            event_log_path=work_events_path(sid)
+        ),
     }
 
 
@@ -2218,6 +2434,9 @@ async def run_work_command(request: Request):
 async def run_work_command_stream(request: Request):
     data = await request.json()
     sid = safe_session_id(data.get("session_id", "default"))
+    profile = str(data.get("profile") or "pwsh").strip().lower()
+    if profile not in {"pwsh", "cmd", "bash", "wsl"}:
+        raise HTTPException(status_code=400, detail="Unsupported terminal profile")
     turn_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(data.get("turn_id", "")).strip())[:120]
     command = str(data.get("command") or data.get("target") or "").strip()
     if not command:
@@ -2307,7 +2526,16 @@ async def run_work_command_stream(request: Request):
                 return
 
             sandbox = SovereignSandbox(_ROOT)
-            async for text in sandbox.stream_execute(command, _ROOT, timeout=timeout):
+            stream_kwargs = {"timeout": timeout}
+            if profile == "pwsh":
+                stream_kwargs["shell"] = "powershell"
+            elif profile == "cmd":
+                stream_kwargs["shell"] = "cmd"
+            elif profile == "bash":
+                stream_kwargs["shell"] = "bash"
+            elif profile == "wsl":
+                stream_kwargs["shell"] = "wsl"
+            async for text in sandbox.stream_execute(command, _ROOT, **stream_kwargs):
                 output_parts.append(text)
                 chunks_list.append([time.time() - started_time, text])
                 yield sse({"type": "chunk", "stream": "stdout", "text": text})
@@ -2375,27 +2603,32 @@ def api_run_sync(data: dict, request: Request):
     if not command:
         raise HTTPException(status_code=400, detail="command is required")
     try:
-        import os as _os
-        proc = subprocess.run(
-            command if _os.name == "nt" else ["sh", "-c", command],
-            shell=(_os.name == "nt"),
-            cwd=_ROOT,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=90,
-        )
+        from sandbox.risk import CommandRiskScorer
+        from sandbox.sandbox_manager import SovereignSandbox
+
+        assessment = CommandRiskScorer().assess(command)
+        if (
+            os.environ.get("NEXUS_ALLOW_DANGEROUS_SHELL", "false").lower() != "true"
+            and assessment
+            and assessment.blocked
+        ):
+            raise HTTPException(status_code=403, detail=f"Command blocked by risk policy: {assessment.summary()}")
+
+        # Keep the compatibility endpoint on the same canonical execution
+        # path as streamed terminal work. It must never bypass workspace
+        # validation by invoking subprocess directly.
+        sandbox = SovereignSandbox(_SANDBOX_ROOT)
+        output = sandbox.execute(command, _SANDBOX_ROOT)
+        return_code = sandbox.last_exit_code if sandbox.last_exit_code is not None else 0
         return {
             "command": command,
-            "returncode": proc.returncode,
-            "stdout": proc.stdout,
+            "returncode": return_code,
+            "stdout": output,
             "stderr": "",
-            "output": proc.stdout,
+            "output": output,
         }
-    except subprocess.TimeoutExpired:
-        return {"command": command, "returncode": -1, "stdout": "", "stderr": "timeout", "output": "Command timed out"}
+    except HTTPException:
+        raise
     except Exception as exc:
         return {"command": command, "returncode": 1, "stdout": "", "stderr": str(exc), "output": str(exc)}
 
@@ -2411,8 +2644,9 @@ def api_files_list(data: dict):
     target = str(data.get("path", "") or "").strip() or "."
     if not os.path.isabs(target):
         target = os.path.join(_ROOT, target)
-    target = os.path.abspath(target)
-    if os.path.commonpath([os.path.abspath(_ROOT), target]) != os.path.abspath(_ROOT):
+    root = os.path.realpath(os.path.abspath(_ROOT))
+    target = os.path.realpath(os.path.abspath(target))
+    if os.path.commonpath([root, target]) != root:
         raise HTTPException(status_code=400, detail="Path outside workspace")
     if os.path.isfile(target):
         return {
@@ -2489,12 +2723,13 @@ def session_files_zip(session_id: str = "default"):
             pass
 
     artifact_dir = os.path.abspath(os.path.join(_ARTIFACTS_DIR, sid))
-    artifact_root = os.path.abspath(_ARTIFACTS_DIR)
-    if os.path.isdir(artifact_dir) and os.path.commonpath([artifact_root, artifact_dir]) == artifact_root:
+    artifact_root = os.path.realpath(os.path.abspath(_ARTIFACTS_DIR))
+    if os.path.isdir(artifact_dir) and os.path.commonpath([artifact_root, os.path.realpath(artifact_dir)]) == artifact_root:
         for name in os.listdir(artifact_dir):
             path = os.path.abspath(os.path.join(artifact_dir, name))
-            if os.path.isfile(path) and os.path.commonpath([artifact_dir, path]) == artifact_dir:
-                candidates[f"artifacts/{name}"] = path
+            safe_path = _safe_artifact_file_path(artifact_dir, path)
+            if safe_path:
+                candidates[f"artifacts/{name}"] = safe_path
 
     work_path = work_events_path(sid)
     if os.path.exists(work_path):
@@ -2582,6 +2817,14 @@ async def create_artifact(request: Request):
 
     lang = str(data.get("lang", "txt")).lower().strip() or "txt"
     name = safe_artifact_name(str(data.get("name", "")), lang)
+    return await asyncio.to_thread(
+        _create_artifact_sync, data, sid, turn_id, content, lang, name
+    )
+
+
+def _create_artifact_sync(
+    data: Dict[str, Any], sid: str, turn_id: str, content: str, lang: str, name: str
+):
     session_dir = os.path.abspath(os.path.join(_ARTIFACTS_DIR, sid))
     os.makedirs(session_dir, exist_ok=True)
     path = os.path.abspath(os.path.join(session_dir, name))
@@ -3303,6 +3546,36 @@ def _normalize_repo_url(raw_url: str) -> tuple[str, str]:
     return value, _safe_slug(name)
 
 
+def _safe_extract_zip(archive: zipfile.ZipFile, destination: str) -> None:
+    """Extract an untrusted archive without traversal or symlink escapes."""
+    root = os.path.realpath(os.path.abspath(destination))
+    os.makedirs(root, exist_ok=True)
+    for member in archive.infolist():
+        raw_name = str(member.filename or "").replace("\\", "/")
+        if not raw_name or raw_name == ".":
+            continue
+        if raw_name.startswith("/") or re.match(r"^[A-Za-z]:/", raw_name):
+            raise RuntimeError("Archive contains an absolute path")
+        relative = os.path.normpath(raw_name.replace("/", os.sep))
+        if relative in {"", "."}:
+            continue
+        target = os.path.abspath(os.path.join(root, relative))
+        try:
+            if os.path.commonpath([root, os.path.realpath(target)]) != root:
+                raise RuntimeError("Archive contains a path traversal entry")
+        except ValueError:
+            raise RuntimeError("Archive contains a path traversal entry") from None
+        mode = (int(member.external_attr) >> 16) & 0o170000
+        if stat.S_ISLNK(mode):
+            raise RuntimeError("Archive contains a symbolic link")
+        if member.is_dir() or raw_name.endswith("/"):
+            os.makedirs(target, exist_ok=True)
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with archive.open(member, "r") as source, open(target, "wb") as output:
+            shutil.copyfileobj(source, output)
+
+
 def _download_github_zip(repo_url: str, target_dir: str) -> None:
     parsed = urlparse(repo_url)
     parts = [p for p in parsed.path.strip("/").split("/") if p]
@@ -3317,17 +3590,19 @@ def _download_github_zip(repo_url: str, target_dir: str) -> None:
         zip_url = f"https://github.com/{owner}/{repo}/archive/refs/heads/master.zip"
         urllib.request.urlretrieve(zip_url, temp_zip)
     temp_extract = target_dir + "_extract"
-    with zipfile.ZipFile(temp_zip, "r") as archive:
-        archive.extractall(temp_extract)
-    entries = [os.path.join(temp_extract, entry) for entry in os.listdir(temp_extract)]
-    if not entries:
-        raise RuntimeError("Downloaded repository archive was empty")
-    shutil.move(entries[0], target_dir)
-    shutil.rmtree(temp_extract, ignore_errors=True)
     try:
-        os.remove(temp_zip)
-    except OSError:
-        pass
+        with zipfile.ZipFile(temp_zip, "r") as archive:
+            _safe_extract_zip(archive, temp_extract)
+        entries = [os.path.join(temp_extract, entry) for entry in os.listdir(temp_extract)]
+        if not entries:
+            raise RuntimeError("Downloaded repository archive was empty")
+        shutil.move(entries[0], target_dir)
+    finally:
+        shutil.rmtree(temp_extract, ignore_errors=True)
+        try:
+            os.remove(temp_zip)
+        except OSError:
+            pass
 
 
 def install_plugin_from_source(raw_url: str, kind: str = "plugin", force: bool = False, enable: bool = True) -> Dict[str, Any]:
@@ -3344,38 +3619,64 @@ def install_plugin_from_source(raw_url: str, kind: str = "plugin", force: bool =
     target = os.path.abspath(os.path.join(install_root, slug))
     if os.path.commonpath([install_root, target]) != install_root:
         raise HTTPException(status_code=400, detail="Invalid plugin target")
+    if os.path.lexists(target) and os.path.islink(target):
+        raise HTTPException(status_code=409, detail=f"Plugin target '{slug}' is a symbolic link")
     if os.path.exists(target):
         if not force:
             raise HTTPException(status_code=409, detail=f"Plugin '{slug}' already exists. Enable force reinstall to replace it.")
-        shutil.rmtree(target)
+    staging = os.path.join(install_root, f".{slug}.install-{uuid.uuid4().hex}")
+    backup = ""
     try:
-        subprocess.run(["git", "clone", "--depth", "1", repo_url, target], cwd=_ROOT, check=True, capture_output=True, text=True, timeout=120)
+        subprocess.run(["git", "clone", "--depth", "1", repo_url, staging], cwd=_ROOT, check=True, capture_output=True, text=True, timeout=120)
     except Exception as git_exc:
         try:
-            _download_github_zip(repo_url, target)
+            if os.path.lexists(staging):
+                shutil.rmtree(staging, ignore_errors=True)
+            _download_github_zip(repo_url, staging)
         except Exception as zip_exc:
+            shutil.rmtree(staging, ignore_errors=True)
             raise HTTPException(status_code=500, detail=f"Install failed. git: {git_exc}; zip: {zip_exc}")
 
-    manifest_dir = os.path.join(target, ".codex-plugin")
-    manifest_path = os.path.join(manifest_dir, "plugin.json")
-    if not os.path.exists(manifest_path):
-        os.makedirs(manifest_dir, exist_ok=True)
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "name": slug,
-                    "description": "External NEXUS plugin installed from source.",
-                    "version": "0.1.0",
-                    "install_kind": kind,
-                    "source_url": repo_url,
-                    "installed_at": time.time(),
-                    "active": bool(enable),
-                    "skills": [],
-                    "tools": [],
-                },
-                f,
-                indent=2,
-            )
+    try:
+        manifest_dir = os.path.join(staging, ".codex-plugin")
+        manifest_path = os.path.join(manifest_dir, "plugin.json")
+        if not os.path.exists(manifest_path):
+            os.makedirs(manifest_dir, exist_ok=True)
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "name": slug,
+                        "description": "External NEXUS plugin installed from source.",
+                        "version": "0.1.0",
+                        "install_kind": kind,
+                        "source_url": repo_url,
+                        "installed_at": time.time(),
+                        "active": bool(enable),
+                        "skills": [],
+                        "tools": [],
+                    },
+                    f,
+                    indent=2,
+                )
+        if os.path.exists(target):
+            if not force:
+                raise HTTPException(status_code=409, detail=f"Plugin '{slug}' already exists. Enable force reinstall to replace it.")
+            backup = os.path.join(install_root, f".{slug}.backup-{uuid.uuid4().hex}")
+            os.replace(target, backup)
+        os.replace(staging, target)
+    except HTTPException:
+        shutil.rmtree(staging, ignore_errors=True)
+        if backup and os.path.exists(backup) and not os.path.lexists(target):
+            os.replace(backup, target)
+        raise
+    except Exception as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        if backup and os.path.exists(backup) and not os.path.lexists(target):
+            os.replace(backup, target)
+        raise HTTPException(status_code=500, detail=f"Plugin promotion failed: {exc}") from exc
+    finally:
+        if backup and os.path.exists(backup):
+            shutil.rmtree(backup, ignore_errors=True)
     return {"id": f"plugins:{slug}", "path": target, "url": repo_url}
 
 
@@ -3798,6 +4099,45 @@ async def set_provider(data: dict, request: Request):
     return {"status": "success", "sid": sid, "provider": loop.provider_override}
 
 
+@app.post("/api/agent")
+async def set_agent(data: dict, request: Request):
+    """Store the selected agent identity for the local GUI runtime."""
+    require_config_write_allowed(request)
+    agent = str(data.get("agent", "") or "").strip()[:200]
+    sid = safe_session_id(data.get("session_id", "default") or "default")
+    loop = get_loop(sid)
+    # The V5 loop does not require a separate agent object to execute, but
+    # retaining this selection on the loop keeps settings and future turns
+    # consistent across the GUI and the runtime.
+    loop.agent = agent
+    return {"status": "success", "sid": sid, "agent": agent}
+
+
+@app.post("/api/goal")
+async def set_goal(data: dict, request: Request):
+    """Store the active long-running goal for the local GUI runtime."""
+    require_config_write_allowed(request)
+    goal = str(data.get("goal", "") or "").strip()[:1000]
+    sid = safe_session_id(data.get("session_id", "default") or "default")
+    loop = get_loop(sid)
+    loop.goal = goal
+    return {"status": "success", "sid": sid, "goal": goal, "active": bool(goal)}
+
+
+@app.post("/api/thinking")
+async def set_thinking(data: dict, request: Request):
+    """Toggle V5 reasoning mode using the loop's public configuration hook."""
+    require_config_write_allowed(request)
+    enabled = bool(data.get("enabled", True))
+    sid = safe_session_id(data.get("session_id", "default") or "default")
+    loop = get_loop(sid)
+    if hasattr(loop, "configure_thinking"):
+        loop.configure_thinking(enabled)
+    else:
+        loop.thinking_mode = enabled
+    return {"status": "success", "sid": sid, "thinking": enabled}
+
+
 @app.get("/api/state")
 def get_state():
     from kernel import get_nexus_kernel
@@ -3901,6 +4241,22 @@ def get_config():
     return kernel.config.data
 
 
+def _save_kernel_config_sync(kernel: Any, data: Dict[str, Any]) -> None:
+    kernel.config.data = data
+    if not kernel.config.save():
+        raise RuntimeError("Failed to save active profile config")
+    if hasattr(kernel.config, "reload"):
+        kernel.config.reload()
+
+
+def _mutate_kernel_config_sync(kernel: Any, mutate) -> None:
+    """Apply one config mutation under the kernel lock and persist it."""
+    with getattr(kernel, "_lock", threading.RLock()):
+        cfg = kernel.config.data
+        mutate(cfg)
+        _save_kernel_config_sync(kernel, cfg)
+
+
 @app.post("/api/config")
 async def save_config(data: dict, request: Request):
     require_config_write_allowed(request)
@@ -3909,11 +4265,10 @@ async def save_config(data: dict, request: Request):
     from kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
-    kernel.config.data = data
-    if not kernel.config.save():
-        raise HTTPException(status_code=500, detail="Failed to save active profile config")
-    if hasattr(kernel.config, "reload"):
-        kernel.config.reload()
+    try:
+        await asyncio.to_thread(_save_kernel_config_sync, kernel, data)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     _invalidate_dashboard_cache()
     return {"status": "success", "message": "Configuration saved."}
 
@@ -4017,6 +4372,44 @@ async def install_plugin(data: dict, request: Request):
     return {"status": "success", "message": f"Installed {installed['id']} into plugins/.", **installed}
 
 
+_LOCAL_PLUGIN_LOCK = threading.RLock()
+
+
+def _create_local_plugin_sync(
+    target: str,
+    name: str,
+    description: str,
+    version: str,
+    manifest: Dict[str, Any],
+) -> None:
+    """Create a local plugin without blocking the async request loop."""
+    with _LOCAL_PLUGIN_LOCK:
+        if os.path.exists(target):
+            raise FileExistsError(target)
+        os.makedirs(os.path.join(target, ".codex-plugin"), exist_ok=False)
+        os.makedirs(os.path.join(target, "skills"), exist_ok=True)
+        os.makedirs(os.path.join(target, "tools"), exist_ok=True)
+        try:
+            with open(os.path.join(target, ".codex-plugin", "plugin.json"), "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            with open(os.path.join(target, "README.md"), "w", encoding="utf-8") as f:
+                f.write(f"# {name}\n\n{description}\n\nVersion: {version}\n")
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception:
+            shutil.rmtree(target, ignore_errors=True)
+            raise
+
+
+def _remove_plugin_tree_sync(path: str) -> None:
+    """Remove one already-validated plugin directory off the event loop."""
+    with _LOCAL_PLUGIN_LOCK:
+        if os.path.lexists(path):
+            shutil.rmtree(path)
+
+
 @app.post("/api/plugins/create")
 async def create_local_plugin(data: dict, request: Request):
     require_config_write_allowed(request)
@@ -4034,9 +4427,6 @@ async def create_local_plugin(data: dict, request: Request):
     if os.path.exists(target):
         raise HTTPException(status_code=409, detail=f"Plugin '{name}' already exists")
 
-    os.makedirs(os.path.join(target, ".codex-plugin"), exist_ok=True)
-    os.makedirs(os.path.join(target, "skills"), exist_ok=True)
-    os.makedirs(os.path.join(target, "tools"), exist_ok=True)
     manifest = {
         "name": name,
         "description": description,
@@ -4048,10 +4438,19 @@ async def create_local_plugin(data: dict, request: Request):
         "skills": [],
         "tools": [],
     }
-    with open(os.path.join(target, ".codex-plugin", "plugin.json"), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
-    with open(os.path.join(target, "README.md"), "w", encoding="utf-8") as f:
-        f.write(f"# {name}\n\n{description}\n\nVersion: {version}\n")
+    try:
+        await asyncio.to_thread(
+            _create_local_plugin_sync,
+            target,
+            name,
+            description,
+            version,
+            manifest,
+        )
+    except FileExistsError:
+        raise HTTPException(status_code=409, detail=f"Plugin '{name}' already exists") from None
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Failed to create plugin on disk") from exc
     _invalidate_dashboard_cache()
     return {"status": "success", "message": f"Created plugin '{name}'.", "id": f"plugins:{name}", "path": target}
 
@@ -4068,20 +4467,23 @@ async def configure_plugin(data: dict, request: Request):
     from kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
-    cfg = kernel.config.data
-    disabled = sorted(_config_disabled_set(cfg, "disabled_plugins"))
-    if active:
-        disabled = [item for item in disabled if item != plugin_id]
-    elif plugin_id not in disabled:
-        disabled.append(plugin_id)
-    cfg["disabled_plugins"] = disabled
-    if isinstance(plugin_config, dict):
-        registry = cfg.setdefault("plugin_configs", {})
-        saved = dict(plugin_config)
-        saved["active"] = active
-        registry[plugin_id] = saved
-    if not kernel.config.save():
-        raise HTTPException(status_code=500, detail="Failed to save plugin configuration")
+    def mutate(cfg):
+        disabled = sorted(_config_disabled_set(cfg, "disabled_plugins"))
+        if active:
+            disabled = [item for item in disabled if item != plugin_id]
+        elif plugin_id not in disabled:
+            disabled.append(plugin_id)
+        cfg["disabled_plugins"] = disabled
+        if isinstance(plugin_config, dict):
+            registry = cfg.setdefault("plugin_configs", {})
+            saved = dict(plugin_config)
+            saved["active"] = active
+            registry[plugin_id] = saved
+
+    try:
+        await asyncio.to_thread(_mutate_kernel_config_sync, kernel, mutate)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to save plugin configuration") from exc
     _invalidate_dashboard_cache()
     return {"status": "success", "message": f"Plugin {'enabled' if active else 'disabled'}."}
 
@@ -4098,21 +4500,29 @@ async def delete_plugin(plugin_id: str, request: Request):
     from kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
-    cfg = kernel.config.data
     if plugin.get("disk_removable"):
         path = os.path.abspath(plugin.get("path", ""))
         plugin_root = os.path.abspath(os.path.join(_ROOT, "plugins"))
-        if os.path.commonpath([plugin_root, path]) != plugin_root:
+        resolved_root = os.path.realpath(plugin_root)
+        resolved_path = os.path.realpath(path)
+        if os.path.commonpath([resolved_root, resolved_path]) != resolved_root:
             raise HTTPException(status_code=400, detail="Plugin path is outside plugins/")
-        shutil.rmtree(path, ignore_errors=True)
+        try:
+            await asyncio.to_thread(_remove_plugin_tree_sync, path)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="Failed to remove plugin from disk") from exc
         message = "Plugin removed from disk."
     else:
-        deleted = sorted(_config_disabled_set(cfg, "deleted_plugins"))
-        if plugin_id not in deleted:
-            deleted.append(plugin_id)
-        cfg["deleted_plugins"] = deleted
-        if not kernel.config.save():
-            raise HTTPException(status_code=500, detail="Failed to save plugin removal")
+        def mutate(cfg):
+            deleted = sorted(_config_disabled_set(cfg, "deleted_plugins"))
+            if plugin_id not in deleted:
+                deleted.append(plugin_id)
+            cfg["deleted_plugins"] = deleted
+
+        try:
+            await asyncio.to_thread(_mutate_kernel_config_sync, kernel, mutate)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Failed to save plugin removal") from exc
         message = "Plugin hidden from inventory."
     _invalidate_dashboard_cache()
     return {"status": "success", "message": message}
@@ -4133,22 +4543,25 @@ async def configure_asset(asset_kind: str, data: dict, request: Request):
     from kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
-    key = "custom_skill_configs" if asset_kind == "skills" else "custom_tool_configs"
-    registry = kernel.config.data.setdefault(key, {})
-    registry[name] = config
-    disabled_key = "disabled_skills" if asset_kind == "skills" else "disabled_tools"
-    disabled = sorted(_config_disabled_set(kernel.config.data, disabled_key))
-    if config.get("active", True) is False:
-        if name not in disabled:
-            disabled.append(name)
-    else:
-        disabled = [item for item in disabled if item != name]
-    kernel.config.data[disabled_key] = disabled
-    description_key = "custom_skill_descriptions" if asset_kind == "skills" else "custom_tool_descriptions"
-    if config.get("description"):
-        kernel.config.data.setdefault(description_key, {})[name] = str(config.get("description"))
-    if not kernel.config.save():
-        raise HTTPException(status_code=500, detail=f"Failed to save {asset_kind} config")
+    def mutate(cfg):
+        key = "custom_skill_configs" if asset_kind == "skills" else "custom_tool_configs"
+        cfg.setdefault(key, {})[name] = config
+        disabled_key = "disabled_skills" if asset_kind == "skills" else "disabled_tools"
+        disabled = sorted(_config_disabled_set(cfg, disabled_key))
+        if config.get("active", True) is False:
+            if name not in disabled:
+                disabled.append(name)
+        else:
+            disabled = [item for item in disabled if item != name]
+        cfg[disabled_key] = disabled
+        description_key = "custom_skill_descriptions" if asset_kind == "skills" else "custom_tool_descriptions"
+        if config.get("description"):
+            cfg.setdefault(description_key, {})[name] = str(config.get("description"))
+
+    try:
+        await asyncio.to_thread(_mutate_kernel_config_sync, kernel, mutate)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to save {asset_kind} config") from exc
     _invalidate_dashboard_cache("state", "skills" if asset_kind == "skills" else "tools")
     return {"status": "success", "message": f"{asset_kind[:-1].title()} '{name}' saved."}
 
@@ -4163,21 +4576,25 @@ async def _delete_asset_config(asset_kind: str, name: str, request: Request):
     from kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
-    deleted_key = "deleted_skills" if asset_kind == "skills" else "deleted_tools"
-    deleted = sorted(_config_disabled_set(kernel.config.data, deleted_key))
-    if item_name not in deleted:
-        deleted.append(item_name)
-    kernel.config.data[deleted_key] = deleted
-    disabled_key = "disabled_skills" if asset_kind == "skills" else "disabled_tools"
-    disabled = sorted(_config_disabled_set(kernel.config.data, disabled_key))
-    if item_name not in disabled:
-        disabled.append(item_name)
-    kernel.config.data[disabled_key] = disabled
-    custom_key = "custom_skill_configs" if asset_kind == "skills" else "custom_tool_configs"
-    if isinstance(kernel.config.data.get(custom_key), dict):
-        kernel.config.data[custom_key].pop(item_name, None)
-    if not kernel.config.save():
-        raise HTTPException(status_code=500, detail=f"Failed to delete {asset_kind[:-1]}")
+    def mutate(cfg):
+        deleted_key = "deleted_skills" if asset_kind == "skills" else "deleted_tools"
+        deleted = sorted(_config_disabled_set(cfg, deleted_key))
+        if item_name not in deleted:
+            deleted.append(item_name)
+        cfg[deleted_key] = deleted
+        disabled_key = "disabled_skills" if asset_kind == "skills" else "disabled_tools"
+        disabled = sorted(_config_disabled_set(cfg, disabled_key))
+        if item_name not in disabled:
+            disabled.append(item_name)
+        cfg[disabled_key] = disabled
+        custom_key = "custom_skill_configs" if asset_kind == "skills" else "custom_tool_configs"
+        if isinstance(cfg.get(custom_key), dict):
+            cfg[custom_key].pop(item_name, None)
+
+    try:
+        await asyncio.to_thread(_mutate_kernel_config_sync, kernel, mutate)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to delete {asset_kind[:-1]}") from exc
     _invalidate_dashboard_cache("state", "skills" if asset_kind == "skills" else "tools")
     return {"status": "success", "message": f"{asset_kind[:-1].title()} '{item_name}' hidden."}
 
@@ -4395,10 +4812,13 @@ async def configure_mcp_server(data: dict, request: Request):
     from kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
-    servers = kernel.config.data.setdefault("mcp_servers", {})
-    servers[name] = config
-    if not kernel.config.save():
-        raise HTTPException(status_code=500, detail="Failed to persist MCP server configuration")
+    def mutate(cfg):
+        cfg.setdefault("mcp_servers", {})[name] = config
+
+    try:
+        await asyncio.to_thread(_mutate_kernel_config_sync, kernel, mutate)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to persist MCP server configuration") from exc
     return {"status": "success", "name": name}
 
 
@@ -4412,11 +4832,14 @@ async def delete_mcp_server(name: str, request: Request):
     from kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
-    servers = kernel.config.data.setdefault("mcp_servers", {})
-    if server_name in servers:
-        del servers[server_name]
-        if not kernel.config.save():
-            raise HTTPException(status_code=500, detail="Failed to persist MCP server configuration")
+    def mutate(cfg):
+        servers = cfg.setdefault("mcp_servers", {})
+        servers.pop(server_name, None)
+
+    try:
+        await asyncio.to_thread(_mutate_kernel_config_sync, kernel, mutate)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to persist MCP server configuration") from exc
     return {"status": "success", "name": server_name}
 
 
@@ -4430,7 +4853,7 @@ def get_vision_accelerator_state():
 
 
 def _provider_config_path() -> str:
-    return os.path.join(_ROOT, "config", "nexus_config.yaml")
+    return os.path.join(_ROOT, "config", "settings.yml")
 
 
 def _is_masked_secret_placeholder(value: str) -> bool:
@@ -4454,11 +4877,85 @@ def _load_provider_config() -> Dict[str, Any]:
     return cfg
 
 
+@contextmanager
+def _provider_config_transaction():
+    """Load/modify/save provider YAML as one cross-process transaction."""
+    config_path = _provider_config_path()
+    with _PROVIDER_CONFIG_LOCK, _interprocess_event_lock(config_path):
+        cfg = _load_provider_config()
+        yield cfg
+
+
 def _save_provider_config(cfg: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(_provider_config_path()), exist_ok=True)
-    with open(_provider_config_path(), "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+    config_path = _provider_config_path()
+    temp_path = f"{config_path}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, config_path)
+    finally:
+        try:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+        except OSError:
+            pass
     _invalidate_dashboard_cache("state", "providers")
+
+
+def _add_provider_sync(provider_type_name: str, target_section: str, endpoint: str) -> str:
+    with _provider_config_transaction() as cfg:
+        section = cfg["providers"].setdefault(target_section, {})
+        if provider_type_name not in section:
+            section[provider_type_name] = {"active": True, "parent_provider": provider_type_name}
+        section[provider_type_name]["active"] = True
+        section[provider_type_name]["parent_provider"] = provider_type_name
+        if endpoint:
+            section[provider_type_name]["endpoint"] = endpoint
+        _save_provider_config(cfg)
+    return f"Provider '{provider_type_name}' saved."
+
+
+def _configure_provider_sync(
+    provider_type_name: str,
+    instance_id: str,
+    api_key: str,
+    model: str,
+    endpoint: str,
+) -> str:
+    with _provider_config_transaction() as cfg:
+        target_section = "local" if provider_type_name in ["ollama", "lm_studio", "llama_cpp"] else "cloud"
+        if instance_id not in cfg["providers"][target_section]:
+            cfg["providers"][target_section][instance_id] = {"active": True}
+
+        conf = cfg["providers"][target_section][instance_id]
+        conf["active"] = True
+        conf["parent_provider"] = provider_type_name
+        if api_key and not _is_masked_secret_placeholder(api_key):
+            conf["api_key"] = api_key
+        if model:
+            conf["model"] = model
+        if endpoint:
+            conf["endpoint"] = endpoint
+        _save_provider_config(cfg)
+    return f"Configuration '{instance_id}' saved."
+
+
+def _delete_provider_sync(instance_id: str) -> bool:
+    with _provider_config_transaction() as cfg:
+        deleted = False
+        prov_root = cfg.get("providers", {})
+        for p_type in ["local", "cloud"]:
+            section = prov_root.get(p_type, {})
+            if instance_id in section:
+                del section[instance_id]
+                deleted = True
+                break
+        if deleted:
+            _save_provider_config(cfg)
+        return deleted
 
 
 @app.post("/api/providers/add")
@@ -4469,23 +4966,21 @@ async def add_provider(data: dict, request: Request):
         raise HTTPException(status_code=400, detail="Provider name is required")
     profile = str(data.get("profile", "cloud")).lower()
     target_section = "local" if profile == "local" or provider_type_name in {"ollama", "lm_studio", "llama_cpp"} else "cloud"
-    cfg = _load_provider_config()
-    section = cfg["providers"].setdefault(target_section, {})
-    if provider_type_name not in section:
-        section[provider_type_name] = {"active": True, "parent_provider": provider_type_name}
-    section[provider_type_name]["active"] = True
-    section[provider_type_name]["parent_provider"] = provider_type_name
     endpoint = str(data.get("endpoint", "")).strip()
-    if endpoint:
-        section[provider_type_name]["endpoint"] = endpoint
-    _save_provider_config(cfg)
-    return {"status": "success", "message": f"Provider '{provider_type_name}' saved."}
+    message = await asyncio.to_thread(
+        _add_provider_sync, provider_type_name, target_section, endpoint
+    )
+    return {"status": "success", "message": message}
 
 
 @app.post("/api/providers/ping")
 async def ping_provider(data: dict, request: Request):
     require_config_write_allowed(request)
     endpoint = str(data.get("endpoint", "")).strip()
+    return await asyncio.to_thread(_ping_provider_sync, endpoint)
+
+
+def _ping_provider_sync(endpoint: str):
     started = time.time()
     if not endpoint:
         return {"ok": True, "status": "success", "message": "No endpoint configured; provider route is locally editable.", "latency_ms": 0}
@@ -4527,26 +5022,15 @@ async def configure_provider(data: dict, request: Request):
         raise HTTPException(status_code=400, detail="Provider name and instance id are required")
     
     try:
-        cfg = _load_provider_config()
-        cfg.setdefault("providers", {}).setdefault("cloud", {})
-        cfg.setdefault("providers", {}).setdefault("local", {})
-
-        target_section = "local" if provider_type_name in ["ollama", "lm_studio", "llama_cpp"] else "cloud"
-        if instance_id not in cfg["providers"][target_section]:
-            cfg["providers"][target_section][instance_id] = {"active": True}
-
-        conf = cfg["providers"][target_section][instance_id]
-        conf["active"] = True
-        conf["parent_provider"] = provider_type_name
-        if api_key and not _is_masked_secret_placeholder(api_key):
-            conf["api_key"] = api_key
-        if model:
-            conf["model"] = model
-        if endpoint:
-            conf["endpoint"] = endpoint
-
-        _save_provider_config(cfg)
-        return {"status": "success", "message": f"Configuration '{instance_id}' saved."}
+        message = await asyncio.to_thread(
+            _configure_provider_sync,
+            provider_type_name,
+            instance_id,
+            api_key,
+            model,
+            endpoint,
+        )
+        return {"status": "success", "message": message}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -4557,18 +5041,8 @@ async def delete_provider_instance(instance_id: str, request: Request):
     if not instance_id:
         raise HTTPException(status_code=400, detail="Invalid instance id")
     try:
-        cfg = _load_provider_config()
-        deleted = False
-        prov_root = cfg.get("providers", {})
-        for p_type in ["local", "cloud"]:
-            section = prov_root.get(p_type, {})
-            if instance_id in section:
-                del section[instance_id]
-                deleted = True
-                break
-
+        deleted = await asyncio.to_thread(_delete_provider_sync, instance_id)
         if deleted:
-            _save_provider_config(cfg)
             return {"status": "success", "message": f"Instance {instance_id} deleted."}
         return {"status": "error", "message": f"Instance {instance_id} not found."}
     except Exception as e:
@@ -5153,7 +5627,10 @@ async def save_todo_endpoint(request: Request):
     content = str(data.get("content", ""))
     session_id = safe_session_id(data.get("session_id", "default"))
     turn_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(data.get("turn_id", "")).strip())[:120]
-    
+    return await asyncio.to_thread(_save_todo_sync, content, session_id, turn_id)
+
+
+def _save_todo_sync(content: str, session_id: str, turn_id: str):
     try:
         write_workspace_todo_plan(content)
         

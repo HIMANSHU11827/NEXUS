@@ -5,9 +5,11 @@ from typing import Optional
 
 from gateway.base import (
     HEALTH_HEALTHY,
+    HEALTH_UNAVAILABLE,
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
+    STATE_RECOVERING,
     SendResult,
 )
 
@@ -47,6 +49,7 @@ class DiscordAdapter(BasePlatformAdapter):
         )
         self.client = None
         self._run_task: Optional[asyncio.Task] = None
+        self._disconnecting = False
 
     async def connect(self) -> bool:
         if discord is None:
@@ -57,6 +60,7 @@ class DiscordAdapter(BasePlatformAdapter):
             return False
 
         try:
+            self._disconnecting = False
             intents = discord.Intents.default()
             intents.message_content = True
             self.client = discord.Client(intents=intents)
@@ -74,13 +78,37 @@ class DiscordAdapter(BasePlatformAdapter):
             async def on_ready():
                 logger.info(f"NEXUS Discord Adapter online as {self.client.user}")
 
-            # Start the Discord client as a background task so connect() returns.
-            self._run_task = asyncio.ensure_future(self.client.start(self.token))
+            # Start the Discord client as a supervised background task so a
+            # later transport failure reaches the gateway supervisor instead
+            # of becoming an unobserved task exception.
+            self._run_task = asyncio.create_task(self.client.start(self.token))
+            self._run_task.add_done_callback(self._on_run_task_done)
             self.health = HEALTH_HEALTHY
             return True
         except Exception as e:  # pragma: no cover - defensive
             logger.error(f"Discord connection failed: {e}")
             return False
+
+    def _on_run_task_done(self, task: asyncio.Task) -> None:
+        """Project Discord client task failure into adapter health state."""
+        if self._run_task is task:
+            self._run_task = None
+        if self._disconnecting:
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # defensive: task inspection can fail
+            error = exc
+        if error is not None:
+            self.last_error = str(error)
+            logger.warning("Discord client stopped unexpectedly: %s", error)
+        else:
+            self.last_error = "Discord client stopped unexpectedly"
+            logger.warning("Discord client stopped unexpectedly")
+        self.health = HEALTH_UNAVAILABLE
+        self.state = STATE_RECOVERING
 
     async def _handle_incoming(self, message):
         """Normalise a raw discord.py ``Message`` into a NEXUS ``MessageEvent``."""
@@ -111,6 +139,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 await result
 
     async def disconnect(self):
+        self._disconnecting = True
         if self.client is not None:
             try:
                 await self.client.close()
@@ -118,6 +147,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 pass
         if self._run_task is not None:
             self._run_task.cancel()
+            await asyncio.gather(self._run_task, return_exceptions=True)
             self._run_task = None
 
     async def send_text(self, chat_id: str, text: str, reply_to: Optional[str] = None) -> SendResult:

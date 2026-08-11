@@ -32,6 +32,70 @@ def test_gateway_main_exports_run():
     assert callable(module.run)
 
 
+def test_send_result_redacts_adapter_error_text():
+    result = SendResult(success=False, error="provider failed with sk-secret-value")
+    assert result.error is not None
+    assert "sk-secret-value" not in result.error
+    assert "REDACTED" in result.error
+
+
+def test_gateway_connect_isolates_adapter_failure():
+    class FailingAdapter(FakeAdapter):
+        async def connect(self) -> bool:
+            raise RuntimeError("connect failed with sk-secret-value")
+
+    async def exercise():
+        runner = GatewayRunner()
+        broken = FailingAdapter("broken")
+        healthy = FakeAdapter("healthy")
+        assert await runner._connect_adapter(broken) is False
+        assert await runner._connect_adapter(healthy) is True
+        return broken, healthy
+
+    broken, healthy = asyncio.run(exercise())
+    assert broken.health == "unavailable"
+    assert "sk-secret-value" not in str(broken.last_error)
+    assert healthy.health == "healthy"
+
+
+def test_gateway_poll_reconnect_log_redacts_exception(caplog):
+    adapter = FakeAdapter("polling")
+    observed = asyncio.Event()
+
+    async def failing_poll():
+        observed.set()
+        raise RuntimeError("poll failed with sk-secret-value")
+
+    async def exercise():
+        task = asyncio.create_task(
+            adapter._guard_poll(failing_poll, backoff_base=0.01, backoff_cap=0.01)
+        )
+        await asyncio.wait_for(observed.wait(), timeout=1)
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    with caplog.at_level("WARNING", logger="gateway.base"):
+        asyncio.run(exercise())
+
+    assert "sk-secret-value" not in caplog.text
+    assert "***REDACTED***" in caplog.text
+
+
+def test_gateway_disconnect_isolates_adapter_failure():
+    class FailingAdapter(FakeAdapter):
+        async def disconnect(self):
+            raise RuntimeError("disconnect failed")
+
+    async def exercise():
+        runner = GatewayRunner()
+        runner.add_adapter(FailingAdapter("broken"))
+        runner.add_adapter(FakeAdapter("healthy"))
+        await runner.stop()
+
+    asyncio.run(exercise())
+
+
 def test_gateway_adapter_factory_loads_only_requested_optional_module(monkeypatch):
     import gateway.platforms as platforms
 
@@ -153,3 +217,31 @@ def test_gateway_handle_message_retains_legacy_string_chunk_support(monkeypatch)
     asyncio.run(runner.handle_message(event))
 
     assert adapter.sent == ["legacy response"]
+
+
+def test_gateway_reasoning_error_uses_safe_public_message(monkeypatch):
+    import gateway.run as gateway_run
+
+    class FailingLoop:
+        root = "C:\\project"
+
+        def load_memory(self, session_id):
+            self.session_id = session_id
+
+        async def stream_run(self, text):
+            raise RuntimeError("provider failed with sk-secret-value")
+            yield  # keep this an async generator
+
+    monkeypatch.setattr(gateway_run, "NexusLoop", FailingLoop)
+    from utils import session_bus
+    monkeypatch.setattr(session_bus, "set_active_session_id", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(session_bus, "sync_loop_from_disk", lambda _loop: None)
+    monkeypatch.setattr("authentication.is_gateway_authorized", lambda _platform, _sender: True)
+
+    runner = GatewayRunner()
+    adapter = FakeAdapter("telegram")
+    runner.add_adapter(adapter)
+    event = MessageEvent(text="hi", sender_id="user", chat_id="chat", platform="telegram")
+    asyncio.run(runner.handle_message(event))
+
+    assert adapter.sent == ["[GATEWAY_ERROR]: The gateway could not complete this request."]

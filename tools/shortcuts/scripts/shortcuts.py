@@ -2,6 +2,7 @@ from __future__ import annotations
 
 __version__ = "2.0.0"
 import os
+import asyncio
 from glob import glob
 
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
@@ -18,17 +19,21 @@ class ShortcutsTool(BaseTool):
         return True
 
     async def execute(self, action: str = "list", path: str = "", pattern: str = "", **kwargs) -> ToolResult:
+        """Run filesystem-heavy shortcut operations without blocking the loop."""
+        return await asyncio.to_thread(
+            self._execute_sync, action, path, pattern, **kwargs
+        )
+
+    def _execute_sync(self, action: str = "list", path: str = "", pattern: str = "", **kwargs) -> ToolResult:
         try:
             action = (action or "list").strip().lower()
-            root = os.path.abspath(self.root_dir or os.getcwd())
+            root = os.path.realpath(os.path.abspath(self.root_dir or os.getcwd()))
             raw = os.path.join(root, path) if path and not os.path.isabs(path) else (path or root)
             target = os.path.abspath(os.path.normpath(raw))
-            # Workspace containment: reject any target that escapes the root.
-            try:
-                outside = os.path.commonpath([root, target]) != root
-            except ValueError:
-                outside = True
-            if outside:
+            # Workspace containment must follow symlinks, not only compare
+            # lexical paths. Otherwise an in-workspace link can expose files
+            # outside the workspace to list/tree/info/find operations.
+            if not self._within_root(root, target):
                 return ToolResult(success=False, error=f"Path traversal blocked: {path or '.'}")
 
             if action == "pwd":
@@ -69,7 +74,11 @@ class ShortcutsTool(BaseTool):
 
             if action == "find":
                 p = pattern or "*"
-                matches = glob(os.path.join(target, p), recursive=True)[:100]
+                matches = [
+                    match
+                    for match in glob(os.path.join(target, p), recursive=True)
+                    if self._within_root(root, match)
+                ][:100]
                 if not matches:
                     return ToolResult(success=True, output=f"No matches for: {p}")
                 lines = [f"Matches for: {p}"]
@@ -84,6 +93,14 @@ class ShortcutsTool(BaseTool):
             return ToolResult(success=False, error=str(e))
 
     @staticmethod
+    def _within_root(root: str, candidate: str) -> bool:
+        """Return whether candidate resolves inside the workspace root."""
+        try:
+            return os.path.commonpath([root, os.path.realpath(candidate)]) == root
+        except ValueError:
+            return False
+
+    @staticmethod
     def _build_tree(dirpath: str, lines: list, prefix: str):
         entries = sorted(os.listdir(dirpath))
         for i, e in enumerate(entries):
@@ -92,8 +109,14 @@ class ShortcutsTool(BaseTool):
             full = os.path.join(dirpath, e)
             is_last = i == len(entries) - 1
             connector = "+-- " if is_last else "|-- "
-            lines.append(f"{prefix}{connector}{e}{'/' if os.path.isdir(full) else ''}")
-            if os.path.isdir(full):
+            is_link = os.path.islink(full)
+            lines.append(
+                f"{prefix}{connector}{e}{'@' if is_link else '/' if os.path.isdir(full) else ''}"
+            )
+            # Do not follow links during recursive tree traversal. The
+            # requested root itself is validated separately, while child
+            # links can create cycles or point outside the workspace.
+            if os.path.isdir(full) and not is_link:
                 ext = "    " if is_last else "|   "
                 try:
                     ShortcutsTool._build_tree(full, lines, prefix + ext)

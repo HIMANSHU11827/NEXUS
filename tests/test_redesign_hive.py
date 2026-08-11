@@ -291,6 +291,38 @@ async def test_valid_json_data_envelope_injected(monkeypatch, tmp_path):
     assert "HIVE_RESULT" in perceived.context_summary
 
 
+@pytest.mark.asyncio
+async def test_failed_consolidation_is_not_reported_or_injected_as_success(monkeypatch, tmp_path):
+    monkeypatch.setenv("NEXUS_HIVE", "1")
+    engine = FakeEngine()
+    engine._consolidate_result = "HIVE FAILED: no successful agent results available."
+    host = _make_host(tmp_path, engine)
+
+    perceived = _perceived()
+    await host._inject_hive_context(perceived)
+
+    assert perceived.context_summary == "base"
+    assert host._v5_hive_turn_failure["status"] == "failed"
+    assert "consolidation rejected" in host._v5_hive_turn_failure["reason"]
+    states = host._hive_load_subagent_states()
+    assert states and all(record["status"] == "failed" for record in states.values())
+
+
+def test_group_success_does_not_erase_terminal_worker_failure(tmp_path):
+    host = _make_host(tmp_path, FakeEngine())
+    host._hive_remember_spawn(
+        "hive-partial",
+        [FakeAgent("agent-failed"), FakeAgent("agent-running")],
+    )
+    host._hive_update_subagent_state("agent-failed", status="failed", reason="provider")
+    host._hive_mark_group_done("hive-partial", status="succeeded", partial=True)
+
+    states = host._hive_load_subagent_states()
+    assert states["agent-failed"]["status"] == "failed"
+    assert states["agent-running"]["status"] == "succeeded"
+    assert states["agent-running"]["partial"] is True
+
+
 # ─────────────────────────────────────────────────────────────────────
 # 4. Cancel propagation
 # ─────────────────────────────────────────────────────────────────────

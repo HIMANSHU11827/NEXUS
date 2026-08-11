@@ -13,10 +13,10 @@
 |---|-----------|---------|--------|
 | 1 | `nexus/` | Events & Boot Loader | Stable |
 | 2 | `server/` | FastAPI HTTP/SSE Server (v2.1.0) | Stable |
-| 3 | `gateway/` | Multi-Platform Gateway (10 platforms) | Beta |
+| 3 | `gateway/` | Multi-Platform Gateway (21 platforms) | Beta |
 | 4 | `orchestrators/` | NexusLoop Agent Loop (rebuilt) | Stable |
-| 5 | `kernel/` | Central Singleton (19 subsystems) | Stable |
-| 6 | `providers/` | 45+ LLM Provider + OAuth | Stable |
+| 5 | `kernel/` | Central Singleton (20 subsystems) | Stable |
+| 6 | `providers/` | 40+ LLM Provider + OAuth | Stable |
 | 7 | `intelligence/` | MoE Router + NATE 5-Layer Engine | Beta |
 | 8 | `rag/` | BM25 + SimHash + Atlas Deep Indexing | Beta |
 | 9 | `reasoning/` | HyperReasoningEngine | Beta |
@@ -36,7 +36,7 @@
 | 23 | `shell/` | Legacy Rich Compat Shim | Legacy |
 | 24 | `voice/` | Voice Pipeline (4 STT backends) | Beta |
 | 25 | `config/` | YAML/JSON/env Configuration | Stable |
-| 26 | `tests/` | 42+ Test Files (126/127 passing) | Stable |
+| 26 | `tests/` | 150+ Test Files | Stable |
 | 27 | `docs/` | Documentation (32 markdown files) | Mixed |
 | 28 | `scripts/` | Build & Run Scripts | Stable |
 | 29 | `deploy/` | Docker Deployment | Stable |
@@ -52,7 +52,7 @@
 |------|-------------|
 | `nexus/__init__.py` | Boot loader (687 lines) — loads `.env`, applies command aliases, launches TUI/GUI/server/gateway/setup, export/import, first-run wizard |
 | `nexus/__main__.py` | Delegates to `boot()` |
-| `nexus/commands.py` | CommandRegistry singleton — 30+ built-in slash commands across general/settings/info categories |
+| `nexus/commands.py` | CommandRegistry singleton — 42 built-in slash commands across general/settings/info categories |
 | `nexus/events.py` | **CanonicalEvent** dataclass — ~50 event types with validation, `infer_event_type()` heuristic |
 | `nexus/runtime.py` | `ChatRunRequest`, session/turn ID sanitization, provider normalization |
 | `nexus/run_context.py` | `RunContext` durable identity, `start_run_context()`, `list_run_contexts()`
@@ -77,7 +77,7 @@
 
 ## 3. `orchestrators/` — Agent Loop
 
-**Purpose**: Core agent orchestration — the main `NexusLoop` sovereign reasoning loop (rebuilt, 3555 lines).
+**Purpose**: Core agent orchestration — the main `NexusLoop` sovereign reasoning loop (`orchestrators/v5/core.py`, rebuilt).
 
 ### Python Files
 | File | Description |
@@ -90,7 +90,7 @@
 
 ---
 
-## 4. `providers/` — 45+ LLM Provider Implementations
+## 4. `providers/` — 40+ LLM Provider Implementations
 
 **Purpose**: Universal LLM provider abstraction. Every major provider has a dedicated adapter with OAuth, auto-healing, health checks, and routing.
 
@@ -155,36 +155,42 @@
 | `tools/__init__.py` | Tool package init |
 | `tools/nexus_tools/base_tool.py` | BaseTool abstract class + ToolResult dataclass |
 | `tools/nexus_tools/registry.py` | ToolRegistry — loads `.jsnol` metadata, discovers BaseTool subclasses, validates |
-| `tools/threat_patterns.py` | Content-level threat scanner — 55 regex patterns in 3 scopes (all/context/strict) |
+| `tools/threat_patterns.py` | Content-level threat scanner — 41 regex patterns in 3 scopes (all/context/strict) |
 
 ### Tool Implementations (each has `.jsnol` + `.md` + `scripts/*.py` extending BaseTool)
 | Tool | Handler | Lines | Status |
 |------|---------|-------|--------|
-| `bash` | BashTool | 33 | Stable |
-| `code_search` | CodeSearchTool | 43 | Stable |
+| `code_search` | CodeSearchTool | 75 | Stable |
 | `creating` | CreatingTool | 27 | Stable |
 | `deep_research` | DeepResearchTool | 160 | Stable |
 | `deleting` | DeletingTool | 23 | Stable |
 | `git_ops` | GitOpsTool | 78 | Stable |
-| `hive` | HiveTool | 135 | Stable |
-| `knowledge` | KnowledgeTool | 49 | Stable |
-| `memory` | MemoryTool | 66 | Stable |
-| `modifying` | ModifyingTool | 29 | Stable |
-| `planning` | PlanningTool | 270 | Stable |
+| `hive` | HiveTool | 157 | Stable |
+| `knowledge` | KnowledgeTool | 85 | Stable |
+| `memory` | MemoryTool | 104 | Stable |
+| `modifying` | ModifyingTool | 85 | Stable |
+| `planning` | PlanningTool | 316 | Stable |
 | `reading` | ReadingTool | 24 | Stable |
-| `reasoning` | ReasoningTool | 22 | Stub |
-| `shortcuts` | ShortcutsTool | 95 | Stable |
-| `system` | SystemTool | 37 | Partial |
-| `task` | TaskTool | 68 | Stable |
+| `reasoning` | ReasoningTool | 106 | Stable (v3.0.0, LLM-backed) |
+| `shortcuts` | ShortcutsTool | 101 | Stable |
+| `system` | SystemTool | 73 | Stable |
+| `task` | TaskTool | 216 | Stable |
 | `terminal` | TerminalTool | 33 | Stable |
-| `test_runner` | TestRunnerTool | 79 | Stable |
-| `web_search` | WebSearchTool | 189 | Stable |
+| `test_runner` | TestRunnerTool | 89 | Stable |
+| `web_search` | WebSearchTool | 277 | Stable |
+
+> **Note**: `bash` is retired (disabled in `ToolRegistry`). 13 additional tool directories
+> (`bash_timeout_control`, `browser_open`, `fault_tolerant_command_runner`, `file_path_resolver`,
+> `live_news_tool`, `long_running_command_handler`, `news_aggregator_live`, `nexus_codebase_research`,
+> `safe_file_path_tracking`, `sandbox_path_validation`, `sandbox_path_validator`, `workspace_path_guard`,
+> `workspace_path_validation`) are **unimplemented stubs** — registered via `.json` metadata but marked
+> `unavailable` by `ToolRegistry`.
 
 ---
 
 ## 6. `gateway/` — Multi-Platform Gateway
 
-**Purpose**: Connects NEXUS AI to external messaging platforms. Supports Telegram, Discord, WhatsApp, and Slack with per-platform message handling, authentication, and event routing.
+**Purpose**: Connects NEXUS AI to external messaging platforms via 21 async platform adapters with per-platform message handling, webhook HMAC verification, session tracking, and supervised lifecycle.
 
 ### Python Files
 | File | Description |
@@ -192,19 +198,15 @@
 | `gateway/__init__.py` | Package init |
 | `gateway/base.py` | Base gateway interface |
 | `gateway/main.py` | Gateway entry point |
-| `gateway/run.py` | Gateway runner |
-| `gateway/webhook_server.py` | Webhook server for incoming messages |
+| `gateway/run.py` | Gateway runner + ingress dedupe |
+| `gateway/supervisor.py` | GatewaySupervisor — supervised lifecycle (retries, crash-loop detection, state persistence) |
+| `gateway/state.py` | GatewayStateStore — atomic JSON state persistence |
+| `gateway/webhook_server.py` | Webhook server (Meta HMAC + LINE, Teams, Google Chat, Feishu, YuanBao, QQBot, DingTalk, WeCom, Weixin, BlueBubbles) |
 | `gateway/session_bus_integration.py` | Session bus bridge |
 | `gateway/session_ids.py` | Session ID management |
 
 ### Subdirectories
-- `gateway/platforms/` — Async adapters: Discord, Telegram, WhatsApp/Meta, Slack, Signal, Matrix, Mattermost, Email, SMS (10 platforms)
-- `gateway/telegram/` — Legacy standalone scripts (deprecated)
-- `gateway/discord/` — Legacy standalone scripts (deprecated)
-- `gateway/slack/` — Legacy standalone scripts (deprecated)
-- `gateway/whatsapp/` — Legacy standalone scripts (deprecated)
-- `gateway/signal/` — Legacy standalone scripts (deprecated)
-- `gateway/meta/` — Legacy standalone scripts (deprecated)
+- `gateway/platforms/` — 21 async adapters: BlueBubbles, DingTalk, Discord, Email, Feishu, Google Chat, IRC, LINE, Matrix, Mattermost, Meta, QQBot, Signal, Slack, SMS, Teams, Telegram, WeCom, Weixin, WhatsApp, Yuanbao
 
 ---
 
@@ -222,7 +224,7 @@
 | `docs/AGENT_CONTEXT.md` | Agent context management | Outdated |
 | `docs/NEXUS.md` | NEXUS platform persona/soul | Current |
 | `docs/ROADMAP.md` | Project roadmap | Current |
-| `docs/ROADMAP_STATUS.md` | Roadmap status tracking (64.3%) | Current |
+| `docs/ROADMAP_STATUS.md` | Roadmap status tracking (67.9%) | Current |
 | `docs/PROJECT_MEMORY.md` | A-to-Z project memory | Outdated |
 | `docs/GUI_ARCHITECTURE.md` | GUI frontend architecture | Current |
 | `docs/TUI_COMMANDS.md` | TUI command reference | Current |

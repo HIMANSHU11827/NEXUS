@@ -58,7 +58,7 @@ class NvidiaProvider(NexusBaseProvider):
         payload = {"model": model, "messages": msgs}
         self._add_tool_payload(payload, kwargs)
         try:
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=30)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=self.request_timeout(kwargs, 30))
             if response.status_code == 200:
                 data = response.json()
                 message = data["choices"][0].get("message", {})
@@ -73,12 +73,13 @@ class NvidiaProvider(NexusBaseProvider):
             return f"Error: Failed to reach NVIDIA NIM. {str(e)}"
 
     def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
+        response = None
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         model = kwargs.get("model") or self.model
         payload = {"model": model, "messages": msgs, "stream": True}
         self._add_tool_payload(payload, kwargs)
         try:
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=120)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=self.request_timeout(kwargs, 120))
             if response.status_code == 200:
                 streamed_tool_calls = {}
                 for line in response.iter_lines():
@@ -109,5 +110,11 @@ class NvidiaProvider(NexusBaseProvider):
                 yield f"Error: {response.status_code}. {response.text}"
         except Exception as e:
             yield f"Error in NVIDIA NIM stream: {str(e)}"
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    logger.debug("NVIDIA NIM stream response cleanup failed", exc_info=True)
 
 

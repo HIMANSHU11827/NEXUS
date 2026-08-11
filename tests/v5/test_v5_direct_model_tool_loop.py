@@ -1,6 +1,7 @@
 """Regression tests for the V5 transcript-driven model/tool loop."""
 
 import asyncio
+import json
 import time
 
 from orchestrators.v5.core import NexusLoopV5, _DuckPerceived
@@ -203,6 +204,35 @@ def test_direct_loop_accepts_model_driven_repair_after_failed_tool(tmp_path):
     assert any("REPAIR REQUIRED" in str(item.get("content")) for item in seen_messages[1])
 
 
+def test_direct_loop_allows_repair_after_last_tool_round(tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="boundary-repair-loop-test")
+    rounds = 0
+
+    async def model(messages, **kwargs):
+        nonlocal rounds
+        rounds += 1
+        if rounds == 1:
+            return _native("terminal", {"command": "bad"}, "bad-call")
+        if rounds == 2:
+            return _native("terminal", {"command": "fixed"}, "fixed-call")
+        return {"choices": [{"message": {"content": "The repaired command is verified."}}]}
+
+    async def tool(call):
+        if call.params.get("command") == "bad":
+            raise RuntimeError("sandbox rejected command")
+        return "verified output"
+
+    loop._safe_model_call_raw = model
+    loop._get_direct_tool_schemas = lambda **kwargs: []
+    loop._run_tool = tool
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("repair the command", max_rounds=1))
+
+    assert result["success"] is True
+    assert result["calls_executed"] == 2
+    assert result["actions"][0]["repaired"] is True
+
+
 def test_same_model_response_cannot_repair_an_unobserved_failure(tmp_path):
     """Two calls in one response are not a retry until the model sees results."""
     loop = NexusLoopV5(str(tmp_path), session_id="same-response-repair-test")
@@ -339,6 +369,98 @@ def test_direct_loop_bounds_repeated_non_unavailable_failures(tmp_path):
     assert result["verification"]["failed_actions"] == loop.repair_attempt_budget
 
 
+def test_direct_loop_redacts_secret_from_failed_tool_observation(tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="tool-error-redaction")
+    secret = "sk-live-direct-loop-secret"
+
+    async def model(messages, **kwargs):
+        return _native("terminal", {"command": "always-bad"}, "call-1")
+
+    async def tool(call):
+        raise RuntimeError(f"remote failed with token={secret}")
+
+    loop._safe_model_call_raw = model
+    loop._get_direct_tool_schemas = lambda **kwargs: []
+    loop._run_tool = tool
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("run the tool", max_rounds=2))
+
+    assert result["success"] is False
+    assert secret not in json.dumps(result, default=str)
+    assert "REDACTED" in json.dumps(result, default=str)
+
+
+def test_direct_loop_redacts_secret_from_successful_tool_output_and_evidence(tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="tool-output-redaction")
+    secret = "sk-live-success-output-secret"
+    seen_messages = []
+    replies = iter([
+        _native("fixture_tool", "{}", "call-1"),
+        {"choices": [{"message": {"content": "The check completed."}}]},
+    ])
+
+    async def model(messages, **kwargs):
+        seen_messages.append(messages)
+        return next(replies)
+
+    async def tool(call):
+        return f"verified output with token={secret}"
+
+    loop._safe_model_call_raw = model
+    loop._get_direct_tool_schemas = lambda **kwargs: []
+    loop._run_tool = tool
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("do the check", max_rounds=2))
+
+    serialized = json.dumps(result, default=str)
+    assert result["success"] is True
+    assert secret not in serialized
+    assert "REDACTED" in serialized
+    assert secret not in json.dumps(seen_messages, default=str)
+
+
+def test_active_hive_self_repair_gets_one_escalation_after_native_budget(tmp_path, monkeypatch):
+    """Hive adds one reviewed decision after native repair is exhausted."""
+    monkeypatch.setenv("NEXUS_HIVE", "1")
+    monkeypatch.setenv("NEXUS_V5_ACTIVE_MODE", "true")
+    loop = NexusLoopV5(str(tmp_path), session_id="hive-repair-escalation")
+    loop.repair_attempt_budget = 1
+    calls = {"count": 0}
+    hive_calls = []
+
+    async def model(_messages, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return _native("terminal", {"command": "first"}, "first")
+        if calls["count"] == 2:
+            return _native("terminal", {"command": "corrected"}, "corrected")
+        return {"choices": [{"message": {"content": "Corrected successfully."}}]}
+
+    async def tool(call):
+        if call.params.get("command") == "first":
+            raise RuntimeError("first attempt failed")
+        return "fresh verified output"
+
+    async def hive_repair(result, perceived):
+        hive_calls.append((result["actions"][-1]["tool"], perceived.original_input))
+        return [{"description": "retry with corrected command", "tool": "terminal", "params": {}}]
+
+    loop._safe_model_call_raw = model
+    loop._get_direct_tool_schemas = lambda **_kwargs: []
+    loop._run_tool = tool
+    loop._hive_self_repair = hive_repair
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("repair the command", max_rounds=4))
+
+    assert result["success"] is True
+    assert hive_calls == [("terminal", "repair the command")]
+    assert any(
+        message.get("role") == "system"
+        and "HIVE REPAIR PROPOSAL" in message.get("content", "")
+        for message in result["messages"]
+    )
+
+
 def test_direct_loop_only_marks_immediately_previous_failure_repaired(tmp_path):
     loop = NexusLoopV5(str(tmp_path), session_id="repair-attribution-test")
     rounds = 0
@@ -401,7 +523,7 @@ def test_direct_loop_does_not_leak_raw_tool_envelope(tmp_path):
 
     assert result["success"] is False
     assert "<function=" not in result["response"]
-    assert "tool loop ended after a failed action" in result["error"]
+    assert result["error"] == "repair attempts exhausted"
 
 
 def test_direct_loop_reserves_finalization_after_last_tool_round(tmp_path):
@@ -774,3 +896,282 @@ def test_stream_turn_transcript_write_is_idempotent(tmp_path):
         {"role": "user", "content": "same prompt", "turn_id": "turn-1"},
         {"role": "assistant", "content": "updated answer", "turn_id": "turn-1"},
     ]
+
+
+def test_direct_loop_stops_when_identical_tool_call_repeats_without_progress(tmp_path):
+    """Closed loop-detection: an identical (tool, params) call that keeps
+    returning the same result must terminate the turn instead of burning the
+    whole round budget on a non-progressing strategy."""
+    loop = NexusLoopV5(str(tmp_path), session_id="stagnation-test")
+    model_calls = {"n": 0}
+    tool_calls = {"n": 0}
+
+    async def model(messages, **kwargs):
+        model_calls["n"] += 1
+        # A stuck model: always asks for the exact same call with the exact
+        # same arguments, no matter what the observation was.
+        return _native("stuck_tool", '{"q": "same"}', f"call-{model_calls['n']}")
+
+    async def tool(call):
+        tool_calls["n"] += 1
+        return "identical result"
+
+    loop._safe_model_call_raw = model
+    loop._get_tool_schemas = lambda **kwargs: [
+        {"type": "function", "function": {"name": "stuck_tool"}}
+    ]
+    loop._run_tool = tool
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("do the stuck thing"))
+
+    assert result["success"] is False
+    assert result["error"] == "repeated identical tool call made no progress"
+    assert result["stagnation"]["tool"] == "stuck_tool"
+    assert result["stagnation"]["repeats"] == loop.repeat_call_budget
+    # It must stop AT the budget, not run the full round budget.
+    assert tool_calls["n"] == loop.repeat_call_budget
+    assert tool_calls["n"] < loop.direct_loop_max_rounds
+    # Every assistant tool_call still has a matching tool result: the
+    # transcript we persisted must remain a valid provider envelope.
+    ids = [c["id"] for m in result["messages"]
+           if m.get("role") == "assistant" for c in (m.get("tool_calls") or [])]
+    results = [m["tool_call_id"] for m in result["messages"] if m.get("role") == "tool"]
+    assert ids == results
+
+
+def test_direct_loop_allows_same_tool_with_different_arguments(tmp_path):
+    """Loop detection must key on (tool, params), not the tool name alone."""
+    loop = NexusLoopV5(str(tmp_path), session_id="stagnation-neg")
+    n = {"i": 0}
+
+    async def model(messages, **kwargs):
+        n["i"] += 1
+        if n["i"] <= 3:
+            return _native("probe", '{"q": "%d"}' % n["i"], f"call-{n['i']}")
+        return {"choices": [{"message": {"content": "Explored three paths."}}]}
+
+    async def tool(call):
+        return "result for " + str(call.params.get("q"))
+
+    loop._safe_model_call_raw = model
+    loop._get_tool_schemas = lambda **kwargs: [
+        {"type": "function", "function": {"name": "probe"}}
+    ]
+    loop._run_tool = tool
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("probe three ways"))
+
+    assert result["success"] is True
+    assert "stagnation" not in result
+    assert result["calls_executed"] == 3
+
+
+def _native_multi(names, cid):
+    return {"choices": [{"message": {"content": None, "tool_calls": [
+        {"id": f"{cid}-{i}", "type": "function",
+         "function": {"name": n, "arguments": '{"q":"same"}'}}
+        for i, n in enumerate(names)]}}]}
+
+
+def test_stagnation_stop_still_answers_every_tool_call_in_the_batch(tmp_path):
+    """A stagnation stop mid-batch must not leave an assistant tool_call
+    without a matching tool result: OpenAI-compatible providers reject that
+    envelope, so the next request (or a resume) would fail outright."""
+    loop = NexusLoopV5(str(tmp_path), session_id="envelope-test")
+    n = {"i": 0}
+
+    async def model(messages, **kwargs):
+        n["i"] += 1
+        return _native_multi(["stuck_tool", "second_tool"], f"c{n['i']}")
+
+    async def tool(call):
+        return "identical result"
+
+    loop._safe_model_call_raw = model
+    loop._get_tool_schemas = lambda **kwargs: [
+        {"type": "function", "function": {"name": "stuck_tool"}},
+        {"type": "function", "function": {"name": "second_tool"}},
+    ]
+    loop._run_tool = tool
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("go"))
+
+    assert result["error"] == "repeated identical tool call made no progress"
+    ids = [c["id"] for m in result["messages"]
+           if m.get("role") == "assistant" for c in (m.get("tool_calls") or [])]
+    results = [m["tool_call_id"] for m in result["messages"] if m.get("role") == "tool"]
+    assert ids, "expected tool calls in the transcript"
+    assert [i for i in ids if i not in results] == [], (
+        "every assistant tool_call must have a matching tool result"
+    )
+
+
+def test_polling_workflow_is_not_mistaken_for_stagnation(tmp_path):
+    """A poll/wait-until-ready workflow issues the SAME call repeatedly and
+    that is real progress: the observation changes. Loop detection must key
+    on (tool, params, observation), so polling is never falsely stopped."""
+    loop = NexusLoopV5(str(tmp_path), session_id="polling-test")
+    state = {"n": 0}
+
+    async def model(messages, **kwargs):
+        state["n"] += 1
+        if state["n"] <= 5:
+            return _native("check_status", '{"job": "build"}', f"poll-{state['n']}")
+        return {"choices": [{"message": {"content": "The job finished."}}]}
+
+    async def tool(call):
+        # Same request, genuinely advancing observation.
+        return f"progress {state['n']}0%"
+
+    loop._safe_model_call_raw = model
+    loop._get_tool_schemas = lambda **kwargs: [
+        {"type": "function", "function": {"name": "check_status"}}
+    ]
+    loop._run_tool = tool
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("poll until done"))
+
+    assert result["success"] is True
+    assert "stagnation" not in result
+    assert result["calls_executed"] == 5
+
+
+
+
+def test_stagnation_persists_valid_envelope_after_mid_batch_stop(tmp_path):
+    """Stagnation tripping on slot k<N-1 must leave the *persisted* transcript
+    (runtime.memory, the resume/continue source) with a valid envelope: every
+    assistant tool_call id has a matching tool_result entry. A missing result
+    on disk makes the next request/resume 400, so this is the sticky failure
+    the reviewer was worried about."""
+    loop = NexusLoopV5(str(tmp_path), session_id="persist-envelope")
+    n = {"i": 0}
+
+    async def model(messages, **kwargs):
+        n["i"] += 1
+        return _native_multi(["stuck_tool", "second_tool"], f"c{n['i']}")
+
+    async def tool(call):
+        return "identical result"
+
+    loop._safe_model_call_raw = model
+    loop._get_tool_schemas = lambda **kwargs: [
+        {"type": "function", "function": {"name": "stuck_tool"}},
+        {"type": "function", "function": {"name": "second_tool"}},
+    ]
+    loop._run_tool = tool
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("go"))
+    assert result["error"] == "repeated identical tool call made no progress"
+
+    # The returned transcript is what production persists (via the session
+    # bus / checkpoint resume) and what the next request sends. Every
+    # assistant tool_call id must have a matching tool result -- including
+    # the skipped results the detector appends for the remainder of the
+    # batch. A missing result makes the next request/resume 400.
+    messages = result["messages"]
+    call_ids = []
+    result_ids = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        if m.get("role") == "assistant":
+            for c in (m.get("tool_calls") or []):
+                call_ids.append(str(c.get("id") or c.get("call_id") or ""))
+        if m.get("role") == "tool":
+            result_ids.append(str(m.get("tool_call_id") or ""))
+    assert call_ids, "assistant tool calls must be present in the transcript"
+    missing = [i for i in call_ids if i and i not in result_ids]
+    assert missing == [], f"tool calls without a matching result: {missing}"
+    # The second tool in the batch was never executed, so it must appear as
+    # an explicit skipped tool result rather than being absent.
+    assert any(
+        "Skipped" in (m.get("content") or "") for m in messages if m.get("role") == "tool"
+    ), "remaining batch calls must be recorded as skipped results"
+
+def test_active_hive_stall_replan_is_connected_to_live_loop(tmp_path, monkeypatch):
+    """The live loop records actions and exposes one Hive replan proposal."""
+    monkeypatch.setenv("NEXUS_HIVE", "1")
+    monkeypatch.setenv("NEXUS_V5_ACTIVE_MODE", "true")
+    loop = NexusLoopV5(str(tmp_path), session_id="hive-replan-live")
+    loop.repeat_call_budget = 10
+    model_calls = {"count": 0}
+    replan_calls = []
+
+    async def model(_messages, **_kwargs):
+        model_calls["count"] += 1
+        if model_calls["count"] >= 5:
+            return {"choices": [{"message": {"content": "Finished after replan."}}]}
+        return _native("probe", "{}", f"replan-{model_calls['count']}")
+
+    async def tool(_call):
+        return "same observation"
+
+    async def replan(perceived):
+        replan_calls.append(perceived.original_input)
+        if len(loop._ledger_history()) >= 3:
+            return [{"description": "Use the alternate probe", "tool": "reading"}]
+        return None
+
+    loop._safe_model_call_raw = model
+    loop._get_tool_schemas = lambda **_kwargs: [
+        {"type": "function", "function": {"name": "probe"}}
+    ]
+    loop._run_tool = tool
+    loop._hive_replan_on_stall = replan
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("recover the stalled task"))
+
+    assert result["success"] is True
+    assert replan_calls == [
+        "recover the stalled task",
+        "recover the stalled task",
+        "recover the stalled task",
+        "recover the stalled task",
+    ]
+    assert len(loop._ledger_history()) == result["calls_executed"]
+    assert any(
+        message.get("role") == "system"
+        and "HIVE REPLAN PROPOSAL" in message.get("content", "")
+        for message in result["messages"]
+    )
+
+
+def test_chaos_repeated_identical_success_triggers_stagnation(tmp_path):
+    """CHAOS: a tool that keeps succeeding with the SAME result (e.g. a
+    poll/wait-until-ready that never advances) must be detected as
+    stagnation and stopped, not looped forever or reported as real
+    progress. This exercises the closed loop-detection path end-to-end
+    through the real runtime loop."""
+    loop = NexusLoopV5(str(tmp_path), session_id="stagnation-chaos")
+    # Model keeps asking for the same tool call; tool keeps returning the
+    # identical observation. This is the harder case the detector owns.
+    replies = iter([
+        _native("fixture_tool", '{"path": "/job/1"}', "call-1"),
+        _native("fixture_tool", '{"path": "/job/1"}', "call-2"),
+        _native("fixture_tool", '{"path": "/job/1"}', "call-3"),
+        _native("fixture_tool", '{"path": "/job/1"}', "call-4"),
+        _native("fixture_tool", '{"path": "/job/1"}', "call-5"),
+        {"choices": [{"message": {"content": "done"}}]},
+    ])
+
+    async def model(_messages, **_kwargs):
+        return next(replies)
+
+    async def tool(call):
+        # Always reports the same unchanged status.
+        return "job still pending"
+
+    loop._safe_model_call_raw = model
+    loop._get_tool_schemas = lambda **_kwargs: [{"type": "function", "function": {"name": "fixture_tool"}}]
+    loop._run_tool = tool
+    loop._current_turn_id = "turn-stagnation-chaos"
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("check the job", max_rounds=20))
+
+    # Must NOT loop until max_rounds; must detect stagnation and stop.
+    assert result.get("stagnation") is not None, "stagnation not detected under repeated identical success"
+    assert result["success"] is False, "stagnation must not be reported as success"
+    # The repair/loop budget (not max_rounds) bounds it.
+    assert result["tool_rounds"] < 20, "loop was not bounded by stagnation detector"
+    assert "made no progress" in (result.get("error") or "")

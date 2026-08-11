@@ -64,8 +64,9 @@ class DeepSeekProvider(NexusBaseProvider):
         if kwargs.get("max_tokens") is not None:
             payload["max_tokens"] = kwargs["max_tokens"]
         self._add_tool_payload(payload, kwargs)
+        response = None
         try:
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=60)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=self.request_timeout(kwargs, 60))
             if response.status_code == 200:
                 data = response.json()
                 message = data["choices"][0].get("message", {})
@@ -95,7 +96,7 @@ class DeepSeekProvider(NexusBaseProvider):
             payload["max_tokens"] = kwargs["max_tokens"]
         self._add_tool_payload(payload, kwargs)
         try:
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=60)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=self.request_timeout(kwargs, 60))
             if response.status_code == 200:
                 in_thinking = False
                 streamed_tool_calls = {}
@@ -147,5 +148,11 @@ class DeepSeekProvider(NexusBaseProvider):
                 )
         except Exception as e:
             yield f"Error in DeepSeek stream: {redact_secrets(e)[:500]}"
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    logging.debug("DeepSeek stream response cleanup failed", exc_info=True)
 
 

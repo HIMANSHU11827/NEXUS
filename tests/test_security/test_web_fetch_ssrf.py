@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -88,3 +89,35 @@ class TestFetchUrlBlockedAtRuntime:
         result = _run(tool._fetch_url("http://169.254.169.254/latest/meta-data/", timeout=5, max_chars=5))
         assert result.success is False
         assert "SSRF guard" in result.error
+
+    def test_fetch_url_keeps_event_loop_responsive_during_blocking_network(self, monkeypatch):
+        monkeypatch.setattr(ws_mod, "_ssrf_block_reason", lambda _url: (time.sleep(0.08) or None))
+        monkeypatch.setattr(
+            ws_mod,
+            "_fetch_response",
+            lambda _request, _timeout: (200, b"<html><body>hello</body></html>"),
+        )
+        ticks = 0
+        done = False
+
+        async def scenario():
+            nonlocal ticks, done
+
+            async def heartbeat():
+                nonlocal ticks
+                while not done:
+                    ticks += 1
+                    await asyncio.sleep(0.01)
+
+            heartbeat_task = asyncio.create_task(heartbeat())
+            try:
+                result = await ws_mod.WebSearchTool()._fetch_url(
+                    "https://example.com/", timeout=5, max_chars=5
+                )
+            finally:
+                done = True
+                await heartbeat_task
+            assert result.success is True
+
+        _run(scenario())
+        assert ticks >= 5

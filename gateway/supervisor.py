@@ -43,6 +43,7 @@ from gateway.base import (
 from gateway.platforms import all_adapters, get_adapter
 from gateway.run import GatewayRunner, _PLATFORM_ENV_MAP, _has_required_env
 from gateway.state import GatewayStateStore
+from providers.reliability import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +182,7 @@ class PlatformRuntime:
         try:
             ok = await self.adapter.connect()
         except Exception as exc:  # a raising connect == a failed attempt
-            self.last_error = str(exc)
+            self.last_error = redact_secrets(exc)
             ok = False
         if ok:
             self._record_success()
@@ -284,6 +285,10 @@ class GatewaySupervisor:
         self._runner = runner or GatewayRunner()
         self._running = False
         self._tick_task: Optional[asyncio.Task] = None
+        # ``tick(once=True)`` is also a public diagnostic/recovery entry point.
+        # Serialize it with the periodic loop so two callers cannot both see
+        # the same runtime as restartable and invoke adapter.connect() twice.
+        self._tick_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ #
     # Registration
@@ -315,6 +320,11 @@ class GatewaySupervisor:
     # Lifecycle
     # ------------------------------------------------------------------ #
     async def start_all(self) -> None:
+        """Arm registered runtimes without racing a tick or shutdown."""
+        async with self._tick_lock:
+            await self._start_all()
+
+    async def _start_all(self) -> None:
         """Start one supervised runtime per registered, env-gated adapter.
 
         Loads persisted lifecycle state and honours ``disabled_until``: a
@@ -325,6 +335,9 @@ class GatewaySupervisor:
         for name, rt in self.runtimes.items():
             rt.restore(saved.get(name, {}))
         self._running = True
+        start_delivery = getattr(self._runner, "start_delivery_loop", None)
+        if callable(start_delivery):
+            start_delivery()
         for name, rt in self.runtimes.items():
             if rt.state == STATE_DISABLED and rt.disabled_until > now:
                 # Persisted crash-loop cooldown not yet elapsed — stay off.
@@ -365,13 +378,17 @@ class GatewaySupervisor:
             await asyncio.sleep(self.config["tick_interval"])
 
     async def _tick_once(self) -> None:
-        now = time.time()
-        for name, rt in self.runtimes.items():
-            try:
-                await self._supervise(rt, now)
-            except Exception:  # one bad runtime must not take the loop down
-                logger.exception("gateway/supervisor.py tick error for %s", name)
-        self._store.save(self._snapshot())
+        async with self._tick_lock:
+            now = time.time()
+            # Snapshot the mapping before awaiting adapter work. Registration
+            # from another task must not invalidate dictionary iteration.
+            runtimes = tuple(self.runtimes.items())
+            for name, rt in runtimes:
+                try:
+                    await self._supervise(rt, now)
+                except Exception:  # one bad runtime must not take the loop down
+                    logger.exception("gateway/supervisor.py tick error for %s", name)
+            self._store.save(self._snapshot())
 
     async def _supervise(self, rt: PlatformRuntime, now: float) -> None:
         """Reconnect any runtime that is down, respecting backoff + crash budget."""
@@ -396,6 +413,11 @@ class GatewaySupervisor:
         await rt.connect_once(now)
 
     async def stop_all(self) -> None:
+        """Stop platforms after any in-flight supervision pass has settled."""
+        async with self._tick_lock:
+            await self._stop_all()
+
+    async def _stop_all(self) -> None:
         """Gracefully shut down all platforms: cancel tick, disconnect, persist.
 
         Bound the disconnect phase by ``shutdown_timeout`` so a hung adapter
@@ -403,6 +425,9 @@ class GatewaySupervisor:
         is honoured on the next start.
         """
         self._running = False
+        stop_delivery = getattr(self._runner, "stop_delivery_loop", None)
+        if callable(stop_delivery):
+            await stop_delivery()
         if self._tick_task is not None:
             self._tick_task.cancel()
             try:

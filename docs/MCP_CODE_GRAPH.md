@@ -10,6 +10,17 @@ whole repository.
 nexus-mcp
 ```
 
+> **Note**: `nexus-mcp` and `python -m mcp.server` launch the **full NEXUS tool
+> server** (`mcp/server/` package — `NEXUSMCPServer`), which exposes every
+> registered NEXUS tool over stdio MCP. The code-graph tools below belong to the
+> **legacy** `mcp/server.py` module, which is shadowed by the `mcp/server/`
+> package under Python's import rules. To run the code-graph server directly,
+> execute the module as a file:
+
+```powershell
+python mcp/server.py
+```
+
 If the package is not installed in editable mode yet:
 
 ```powershell

@@ -8,14 +8,122 @@ so the GUI/TUI frontends consume V5 events exactly like V1 events.
 from __future__ import annotations
 
 import inspect
+import hashlib
 import os
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from providers.reliability import redact_secrets
+
+
+EVENT_SUMMARY_LIMIT = 128
+
+
+def _safe_event_text(value: Any, limit: int = 160) -> str:
+    """Bound and redact identity text; never retain event payload content."""
+    return redact_secrets(str(value or ""))[:limit]
+
+
+def stable_event_id(event: Dict[str, Any], *, ordinal: int = 0, run_id: str = "") -> str:
+    """Return an opaque stable ID without hashing or copying event payloads.
+
+    Existing producer IDs remain compatible.  For malformed/anonymous events,
+    derive an ID from bounded envelope fields and emission order only.
+    """
+    explicit = event.get("event_id") or event.get("id")
+    if explicit:
+        return _safe_event_text(explicit)
+    fields = "|".join(
+        (
+            _safe_event_text(run_id or event.get("run_id") or event.get("turn_id")),
+            _safe_event_text(event.get("event_type") or event.get("type")),
+            _safe_event_text(event.get("status")),
+            _safe_event_text(event.get("parent_id")),
+            _safe_event_text(event.get("tool") or event.get("name")),
+            str(max(0, int(ordinal))),
+        )
+    ).encode("utf-8", "replace")
+    return "v5evt_" + hashlib.sha256(fields).hexdigest()[:32]
+
+
+def summarize_work_event(event: Any, *, ordinal: int = 0, run_id: str = "") -> Dict[str, Any]:
+    """Create an identity-only, bounded event summary.
+
+    Deliberately excludes ``payload``, output/result fields, commands, paths,
+    titles, and errors.  This is suitable for terminal evidence persistence.
+    """
+    item = event if isinstance(event, dict) else {}
+    summary: Dict[str, Any] = {
+        "event_id": stable_event_id(item, ordinal=ordinal, run_id=run_id),
+        "event_type": _safe_event_text(item.get("event_id") and item.get("event_type") or item.get("event_type") or item.get("type"), 80),
+        "status": _safe_event_text(item.get("status"), 32),
+        "parent_id": _safe_event_text(item.get("parent_id"), 160),
+        "tool": _safe_event_text(item.get("related_tool") or item.get("tool") or item.get("name"), 120),
+        "kind": _safe_event_text(item.get("kind"), 40),
+        "part_type": _safe_event_text(item.get("part_type"), 40),
+        "visibility": _safe_event_text(item.get("visibility"), 16),
+    }
+    for key in ("sequence", "exit_code"):
+        value = item.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            summary[key] = value
+    duration = item.get("duration_ms")
+    if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+        summary["duration_ms"] = round(max(0.0, float(duration)), 3)
+    return summary
+
+
+def summarize_work_events(events: Any, *, limit: int = EVENT_SUMMARY_LIMIT,
+                          run_id: str = "") -> Dict[str, Any]:
+    """Summarize only the last bounded set of canonical work events."""
+    source = events if isinstance(events, list) else []
+    bounded_limit = max(1, min(int(limit), EVENT_SUMMARY_LIMIT))
+    start = max(0, len(source) - bounded_limit)
+    summaries = [
+        summarize_work_event(event, ordinal=index, run_id=run_id)
+        for index, event in enumerate(source[start:], start=start)
+        if isinstance(event, dict)
+    ]
+    return {
+        "schema_version": 1,
+        "count": len(source),
+        "truncated": len(source) > bounded_limit,
+        "events": summaries,
+    }
 
 
 class V5EventEmitter:
     """Mixin providing canonical event emission to the work event sink."""
+
+    def canonical_event_summaries(self, limit: int = 128) -> List[Dict[str, Any]]:
+        """Return bounded event identity for durable evidence, without payloads."""
+        try:
+            cap = max(1, min(int(limit), 256))
+        except (TypeError, ValueError):
+            cap = 128
+        events = getattr(self, "_stream_events", [])
+        summaries: List[Dict[str, Any]] = []
+        for sequence, event in enumerate(events[-cap:], start=max(0, len(events) - cap)):
+            if not isinstance(event, dict):
+                continue
+            event_id = event.get("event_id") or event.get("id")
+            event_type = event.get("type") or event.get("event_type")
+            if not event_id and not event_type:
+                continue
+            item: Dict[str, Any] = {
+                "event_id": str(event_id or "")[:160],
+                "type": str(event_type or "")[:80],
+                "status": str(event.get("status") or "")[:32],
+                "sequence": sequence,
+                "parent_id": str(event.get("parent_id") or "")[:160],
+                "related_tool": str(event.get("related_tool") or event.get("tool") or "")[:120],
+            }
+            if isinstance(event.get("error"), dict):
+                item["has_error"] = bool(event["error"])
+            summaries.append(item)
+        return summaries
 
     async def _emit_work_event(self, payload: Dict[str, Any]) -> None:
         """Deliver a canonical work event to the sink and stream queue.
@@ -23,6 +131,34 @@ class V5EventEmitter:
         The sink call is fully guarded so a broken GUI sink can never break
         the loop.
         """
+        # A few compatibility/test emitters provide class-level defaults;
+        # never let one emitter instance share its mutable event buffers with
+        # another instance.
+        if "_stream_events" not in getattr(self, "__dict__", {}):
+            self._stream_events = []
+        if "_event_summary_turn_id" not in getattr(self, "__dict__", {}):
+            self._event_summary_turn_id = ""
+            self._event_summary_events = []
+            self._event_summary_count = 0
+        # Keep the live queue backward-compatible, but retain only an
+        # identity-only summary for terminal evidence.  The summary buffer is
+        # reset when a new turn becomes active and never contains raw payloads.
+        turn_key = str(getattr(self, "_current_turn_id", "") or getattr(self, "session_id", ""))
+        if getattr(self, "_event_summary_turn_id", "") != turn_key:
+            self._event_summary_turn_id = turn_key
+            self._event_summary_events = []
+            self._event_summary_count = 0
+        summary_events = getattr(self, "_event_summary_events", [])
+        self._event_summary_count = int(getattr(self, "_event_summary_count", 0)) + 1
+        summary_events.append(
+            summarize_work_event(
+                payload,
+                ordinal=self._event_summary_count - 1,
+                run_id=turn_key,
+            )
+        )
+        del summary_events[:-EVENT_SUMMARY_LIMIT]
+        self._event_summary_events = summary_events
         self._stream_events.append(payload)
         sink = self.runtime.work_event_sink or self.work_event_sink
         if not sink:
@@ -152,7 +288,48 @@ class V5EventEmitter:
                 end_time = time.time()
                 payload["end_time"] = end_time
                 payload["duration_ms"] = max(0.0, (end_time - started_at) * 1000.0)
+                # Close the tool-telemetry loop: every terminal tool outcome is
+                # recorded into the registry's execution history so that
+                # success-rate / latency / error stats are actually populated
+                # (record_execution previously had NO production caller, so the
+                # whole get_tool_stats subsystem was dead telemetry). This must
+                # never fail the tool event itself -- telemetry is best-effort.
+                status_for_stats = {
+                    "done": "ok",
+                    "error": "error",
+                    "failed": "error",
+                    "blocked": "blocked",
+                }.get(status, status)
+                registry = getattr(self, "tool_registry", None)
+                if registry is not None and callable(getattr(registry, "record_execution", None)):
+                    try:
+                        registry.record_execution(
+                            name=str(call.name or ""),
+                            params=getattr(call, "params", None) or {},
+                            result=result or error,
+                            duration_ms=payload["duration_ms"],
+                            status=status_for_stats,
+                        )
+                    except Exception:
+                        pass
         await self._emit_work_event(payload)
+        # A successful file mutation invalidates the durable verifier state
+        # for this workspace/session. Reads do not make an old verdict stale.
+        if kind == "file" and status not in ("running", "queued") and not error:
+            action = str(call.params.get("action") or "").lower()
+            name = str(call.name or "").lower()
+            if name in {"modifying", "creating", "deleting", "write", "create", "delete", "remove"} \
+                    or action in {"write", "create", "edit", "update", "delete", "remove", "mkdir"}:
+                try:
+                    from .verification_state import VerifierStateStore
+
+                    path = call.params.get("path") or call.params.get("filepath")
+                    root_dir = str(getattr(self, "root_dir", "") or os.getcwd())
+                    VerifierStateStore(Path(root_dir) / ".nexus_v5" / "verifier_state.json").mark_stale(
+                        str(getattr(self, "session_id", "default") or "default"), root_dir, [path]
+                    )
+                except Exception:
+                    pass
 
     async def _emit_tool_chunk(
         self,
@@ -300,6 +477,7 @@ class V5EventEmitter:
         ``duration_ms``, ``attempts``) is carried verbatim in the payload so
         callers control the exact telemetry shape.
         """
+        safe_payload = dict(payload or {})
         event: Dict[str, Any] = {
             "id": f"run_{self._current_turn_id or self.session_id}_finished",
             "event_type": "run.finished",
@@ -310,9 +488,23 @@ class V5EventEmitter:
             "title": "Run finished",
             "action": "run",
             "status": status,
-            "payload": payload or {},
+            "payload": safe_payload,
             "visibility": "public",
         }
+        terminal_summary = self._terminal_event_summary()
+        terminal_summary["events"].append(
+            summarize_work_event(
+                event,
+                ordinal=terminal_summary["count"],
+                run_id=str(getattr(self, "_event_summary_turn_id", "") or ""),
+            )
+        )
+        terminal_summary["count"] += 1
+        if len(terminal_summary["events"]) > EVENT_SUMMARY_LIMIT:
+            terminal_summary["events"] = terminal_summary["events"][-EVENT_SUMMARY_LIMIT:]
+        terminal_summary["truncated"] = terminal_summary["count"] > len(terminal_summary["events"])
+        safe_payload["event_summary"] = terminal_summary
+        event["payload"] = safe_payload
         if error:
             event["error"] = {"message": error}
         await self._emit_work_event(event)
@@ -321,6 +513,17 @@ class V5EventEmitter:
                 self._log_event("run.finished", status, payload)
         except Exception:
             pass
+
+    def _terminal_event_summary(self) -> Dict[str, Any]:
+        """Return the bounded identity summary captured for the active turn."""
+        summary = summarize_work_events(
+            getattr(self, "_event_summary_events", []),
+            run_id=str(getattr(self, "_event_summary_turn_id", "") or ""),
+        )
+        count = int(getattr(self, "_event_summary_count", summary["count"]))
+        summary["count"] = count
+        summary["truncated"] = count > len(summary["events"])
+        return summary
 
     # ─────────────────────────────────────────────────────────────────────────
     # WORK EVENT CLASSIFICATION HELPERS

@@ -13,9 +13,10 @@ import os
 import json
 import random
 import shutil
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ class EvolutionCandidate:
     test_results: Dict[str, bool] = field(default_factory=dict)
     confidence: float = 0.0
     verified: bool = False
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -50,7 +51,7 @@ class EvolutionLog:
     candidates: List[EvolutionCandidate] = field(default_factory=list)
     deployed_candidate: Optional[str] = None
     rollback_performed: bool = False
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     success: bool = False
 
 
@@ -65,6 +66,108 @@ class SelfEvolutionLayer:
         self.evolution_enabled = True
         self.safe_mode = True  # Only deploy with high confidence
         self._deployed_backups: Dict[str, Optional[str]] = {}  # target -> backup path (None if none existed)
+        self._recover_interrupted_deployment()
+
+    def _transaction_manifest_path(self) -> str:
+        return os.path.join(self.root_dir, ".nexus_v5_evolution_transaction.json")
+
+    def _write_transaction_manifest(self, manifest: Dict[str, Any]) -> None:
+        """Durably publish the deployment journal before target replacement."""
+        path = self._transaction_manifest_path()
+        parent = os.path.dirname(path) or "."
+        os.makedirs(parent, exist_ok=True)
+        temporary = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=parent,
+                prefix=".nexus-evolution-manifest-", suffix=".tmp", delete=False,
+            ) as handle:
+                temporary = handle.name
+                json.dump(manifest, handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary and os.path.exists(temporary):
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
+
+    def _remove_transaction_manifest(self) -> None:
+        try:
+            os.remove(self._transaction_manifest_path())
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            self.logger.warning("Failed to remove evolution transaction journal: %s", exc)
+
+    def _recover_interrupted_deployment(self) -> None:
+        """Recover an uncommitted deployment left by a terminated process."""
+        path = self._transaction_manifest_path()
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            if manifest.get("status") == "committed":
+                self._cleanup_transaction_backups(manifest.get("files", []))
+                self._remove_transaction_manifest()
+                return
+
+            root = os.path.realpath(os.path.abspath(self.root_dir))
+            restored = 0
+            for entry in manifest.get("files", []):
+                target = os.path.realpath(os.path.abspath(str(entry.get("target") or "")))
+                backup_value = entry.get("backup")
+                backup = (
+                    os.path.realpath(os.path.abspath(str(backup_value)))
+                    if backup_value else None
+                )
+                if not target or os.path.commonpath([root, target]) != root:
+                    raise ValueError("transaction target is outside the evolution root")
+                if backup and os.path.commonpath([root, backup]) != root:
+                    raise ValueError("transaction backup is outside the evolution root")
+                if backup and os.path.exists(backup):
+                    shutil.copy2(backup, target)
+                    restored += 1
+                elif not backup and os.path.exists(target):
+                    os.remove(target)
+                    restored += 1
+                temporary = entry.get("temporary")
+                if temporary and os.path.exists(temporary):
+                    os.remove(temporary)
+            self._cleanup_transaction_backups(manifest.get("files", []))
+            self._remove_transaction_manifest()
+            self.logger.warning(
+                "Recovered interrupted self-evolution deployment (%d targets)", restored
+            )
+        except Exception as exc:
+            self.logger.error(
+                "Could not recover self-evolution transaction; journal retained: %s", exc,
+                exc_info=True,
+            )
+
+    def _cleanup_transaction_backups(self, entries: List[Dict[str, Any]]) -> None:
+        """Remove only backup files owned by the recorded transaction."""
+        root = os.path.realpath(os.path.abspath(self.root_dir))
+        for entry in entries:
+            backup_value = entry.get("backup") if isinstance(entry, dict) else None
+            if not backup_value:
+                continue
+            backup = os.path.realpath(os.path.abspath(str(backup_value)))
+            try:
+                inside_root = os.path.commonpath([root, backup]) == root
+            except ValueError:
+                inside_root = False
+            if not inside_root:
+                self.logger.error("Refusing to remove out-of-root evolution backup: %s", backup)
+                continue
+            try:
+                if os.path.isfile(backup):
+                    os.remove(backup)
+            except OSError as exc:
+                self.logger.warning("Failed to remove evolution backup %s: %s", backup, exc)
 
     async def evolve(self, runtime: Any) -> Dict[str, Any]:
         """Execute self-evolution process.
@@ -115,12 +218,17 @@ class SelfEvolutionLayer:
                         await self._rollback(best_candidate)
                         evolution_log.rollback_performed = True
             else:
-                # Unsafe mode: deploy best candidate regardless
+                # Unsafe mode still records the real deployment outcome. A
+                # failed write must never be reported as a successful mission.
                 best_candidate = self._select_best_candidate(tested_candidates)
                 if best_candidate:
-                    await self._deploy_candidate(best_candidate)
-                    evolution_log.deployed_candidate = best_candidate.candidate_id
-                    evolution_log.success = True
+                    deployed = await self._deploy_candidate(best_candidate)
+                    if deployed:
+                        evolution_log.deployed_candidate = best_candidate.candidate_id
+                        evolution_log.success = True
+                    else:
+                        await self._rollback(best_candidate)
+                        evolution_log.rollback_performed = True
             
             self.current_phase = EvolutionPhase.COMPLETED
             self.evolution_history.append(evolution_log)
@@ -312,41 +420,111 @@ class SelfEvolutionLayer:
     async def _deploy_candidate(self, candidate: EvolutionCandidate) -> bool:
         """Deploy a candidate improvement to disk.
 
-        Each target file is backed up to ``<path>.bak`` before it is
-        written so the deployment can be reverted via ``_rollback``.
+        Each existing target is copied to a transaction-owned temporary
+        backup before it is written so the deployment can be reverted via
+        ``_rollback`` without leaving user-visible ``.bak`` files behind.
         """
+        return await asyncio.to_thread(self._deploy_candidate_sync, candidate)
+
+    def _deploy_candidate_sync(self, candidate: EvolutionCandidate) -> bool:
+        """Stage and atomically commit a multi-file candidate transaction."""
         self.logger.info(f"Deploying candidate {candidate.candidate_id}")
-        
+        staged: List[str] = []
+        commit_targets: List[str] = []
         try:
+            root = os.path.realpath(os.path.abspath(self.root_dir))
+            self._deployed_backups.clear()
             for file_path, new_content in candidate.code_changes.items():
                 if not new_content:
                     continue
-                
+
                 target = file_path if os.path.isabs(file_path) else os.path.join(self.root_dir, file_path)
-                backup = target + ".bak"
-                
+                target = os.path.abspath(os.path.normpath(target))
+                resolved = os.path.realpath(target)
+                try:
+                    outside = os.path.commonpath([root, resolved]) != root
+                except ValueError:
+                    outside = True
+                if outside:
+                    raise ValueError(f"Candidate path is outside the evolution root: {file_path}")
+
+                parent = os.path.dirname(target)
+                os.makedirs(parent, exist_ok=True)
                 if os.path.exists(target):
+                    backup_handle = tempfile.NamedTemporaryFile(
+                        mode="wb", dir=parent, prefix=".nexus-evolution-backup-",
+                        suffix=".bak", delete=False,
+                    )
+                    backup = backup_handle.name
+                    backup_handle.close()
                     shutil.copy2(target, backup)
                     self._deployed_backups[target] = backup
                 else:
                     self._deployed_backups[target] = None
-                
-                with open(target, "w", encoding="utf-8") as f:
-                    f.write(new_content)
-                
+
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=parent,
+                    prefix=".nexus-evolution-", suffix=".tmp", delete=False,
+                ) as staged_file:
+                    staged_file.write(str(new_content))
+                    staged_file.flush()
+                    os.fsync(staged_file.fileno())
+                    staged.append(staged_file.name)
+                    commit_targets.append(target)
+
+            self._write_transaction_manifest({
+                "version": 1,
+                "status": "commit_started",
+                "candidate_id": candidate.candidate_id,
+                "files": [
+                    {
+                        "target": target,
+                        "backup": self._deployed_backups.get(target),
+                        "temporary": temporary,
+                    }
+                    for target, temporary in zip(commit_targets, staged)
+                ],
+            })
+
+            for target, temporary in zip(commit_targets, staged):
+                os.replace(temporary, target)
                 self.logger.debug(f"Updated {target}")
-            
-            await asyncio.sleep(0.2)  # Simulate deployment
-            
+
+            self._write_transaction_manifest({
+                "version": 1,
+                "status": "committed",
+                "candidate_id": candidate.candidate_id,
+                "files": [
+                    {"target": target, "backup": backup, "temporary": ""}
+                    for target, backup in self._deployed_backups.items()
+                    if backup
+                ],
+            })
+            self._cleanup_transaction_backups([
+                {"backup": backup} for backup in self._deployed_backups.values() if backup
+            ])
+            self._deployed_backups.clear()
+            self._remove_transaction_manifest()
+
             self.logger.info(f"Successfully deployed candidate {candidate.candidate_id}")
             return True
-            
         except Exception as e:
             self.logger.error(f"Deployment failed: {e}")
+            for temporary in staged:
+                try:
+                    if os.path.exists(temporary):
+                        os.remove(temporary)
+                except OSError:
+                    pass
+            self._rollback_sync(candidate)
             return False
 
     async def _rollback(self, candidate: EvolutionCandidate):
         """Rollback a deployed candidate from its backups."""
+        await asyncio.to_thread(self._rollback_sync, candidate)
+
+    def _rollback_sync(self, candidate: EvolutionCandidate):
+        """Restore a deployment transaction without blocking the event loop."""
         self.logger.info(f"Rolling back candidate {candidate.candidate_id}")
         
         restored = 0
@@ -360,8 +538,13 @@ class SelfEvolutionLayer:
                     restored += 1
             except Exception as e:
                 self.logger.warning(f"Rollback failed for {target}: {e}")
-        
+
+        backups = list(self._deployed_backups.values())
         self._deployed_backups.clear()
+        self._cleanup_transaction_backups([
+            {"backup": backup} for backup in backups if backup
+        ])
+        self._remove_transaction_manifest()
         
         self.logger.info(f"Rollback complete ({restored} files restored)")
 

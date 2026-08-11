@@ -153,6 +153,7 @@ class LlamaCPPProvider(NexusBaseProvider):
 
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         tool_kwargs = self._add_tool_payload(kwargs)
+        stream = None
         try:
             stream = self.llm.create_chat_completion(messages=msgs, stream=True, **tool_kwargs)
             # llama.cpp streams OpenAI-style delta.tool_calls fragments.
@@ -173,3 +174,10 @@ class LlamaCPPProvider(NexusBaseProvider):
                 yield self._tool_envelope(list(streamed_tool_calls.values()))
         except Exception as e:
             yield f"Error in Llama-CPP stream: {e}"
+        finally:
+            close_stream = getattr(stream, "close", None)
+            if callable(close_stream):
+                try:
+                    close_stream()
+                except Exception:
+                    logger.debug("Llama-CPP stream cleanup failed", exc_info=True)

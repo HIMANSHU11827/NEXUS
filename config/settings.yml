@@ -4,16 +4,27 @@ theme:
   accent: bold cyan
   success: bold green
   panel_border: cyan
+
 temperature: 0.7
 max_tokens: 4096
 max_turns: 10
 thinking_mode: true
-permission_mode: auto
 auto_save: true
 check_updates: true
 telemetry: false
 log_level: INFO
 language: en
+
+runtime:
+  permission_mode: ask
+  sandbox_tier: normal
+
+security:
+  allow_local_anonymous: false
+  allow_unsandboxed_autonomous: false
+
+# Compatibility keys for older NEXUS entry points.
+permission_mode: ask
 safety:
-  sandbox_enabled: false
-  sandbox_tier: no_sandbox
+  sandbox_enabled: true
+  sandbox_tier: normal

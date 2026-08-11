@@ -8,9 +8,12 @@ services:
     container_name: nexus-ai
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      # Keep the backend off the public host interface.  The GUI proxy reaches
+      # it over the private Compose network.
+      - "127.0.0.1:8000:8000"
     volumes:
       - nexus_data:/home/nexus/.nexus
+      - nexus_config:/app/config
       - ../workspace:/app/workspace
       - ../logs:/app/logs
     env_file:
@@ -18,22 +21,59 @@ services:
     environment:
       - NEXUS_HOME=/home/nexus/.nexus
       - NEXUS_ROOT=/app
-    command: python -m nexus
+      - NEXUS_API_HOST=0.0.0.0
+      - NEXUS_API_PORT=8000
+      - NEXUS_PUBLIC_DEPLOYMENT=true
+      - NEXUS_ALLOW_LOCAL_ANON=false
+      - NEXUS_EMBED_QUEUE_DRIVER=true
+      - NEXUS_QUEUE_WORKERS=1
+      - NEXUS_SANDBOX_TIER=normal
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: 2g
+    command: python -m server
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   nexus-gui:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: gui/Dockerfile
     container_name: nexus-gui
     restart: unless-stopped
     ports:
       - "3000:3000"
     depends_on:
-      - nexus
-    environment:
-      - VITE_API_URL=http://nexus:8000
+      nexus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     working_dir: /app/gui
-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    command: ["nginx", "-g", "daemon off;"]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev
+      - /var/cache/nginx:rw,nosuid,nodev
+      - /var/run:rw,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 256m
 
 volumes:
   nexus_data:
+  nexus_config:

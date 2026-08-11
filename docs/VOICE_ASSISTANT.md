@@ -126,7 +126,7 @@ Controls:
 ```text
 voice/
   audio_io.py      microphone recording, speaker playback, stop support
-  config.py        VoiceSettings dataclass loaded from nexus_config.yaml
+  config.py        VoiceSettings dataclass loaded from settings.yml
   pipeline.py      microphone -> STT -> NEXUS -> TTS orchestration
   stt.py           Whisper loader/transcriber
   tts.py           KittenTTS loader, sentence chunking, speech playback

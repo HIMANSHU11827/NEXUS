@@ -4,8 +4,8 @@
 
 1. **Clone the repository**
    ```powershell
-   git clone https://github.com/himanshu/nexus-ai.git
-   cd nexus-ai
+   git clone https://github.com/HIMANSHU11827/NEXUS.git
+   cd NEXUS
    ```
 
 2. **Create a virtual environment**

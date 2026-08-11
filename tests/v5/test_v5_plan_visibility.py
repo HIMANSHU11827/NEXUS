@@ -104,6 +104,35 @@ async def test_v5_paorr_denied_plan_runs_no_tools():
         assert result["plan"].goal == "user task"
 
 
+async def test_v5_paorr_approval_error_fails_closed_without_tools():
+    """A broken configured approval gate must never authorize execution."""
+    with TemporaryDirectory() as tmp:
+
+        async def fake_planner(_perceived):
+            return [{"description": "dangerous step", "tool": "bash", "params": {}}]
+
+        async def failing_gate(_steps, _goal):
+            raise RuntimeError("approval surface unavailable")
+
+        async def fake_executor(_call):
+            raise AssertionError("tool executor must not run after approval failure")
+
+        paorr = PAORREnhanced(
+            root_dir=tmp,
+            planner=fake_planner,
+            tool_executor=fake_executor,
+            approval_gate=failing_gate,
+        )
+        perceived = SimpleNamespace(
+            original_input="user task", intent=SimpleNamespace(value="task")
+        )
+        result = await paorr.execute(perceived)
+
+        assert result["success"] is False
+        assert result["actions"] == []
+        assert result["plan"].approved is False
+
+
 async def test_v5_paorr_plan_emitter_tracks_steps():
     """plan_emitter receives running/done per step plus a plan-level done."""
     with TemporaryDirectory() as tmp:

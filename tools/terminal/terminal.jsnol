@@ -7,7 +7,8 @@
   "params": {
     "command": {"type": "string", "description": "Command to execute", "required": true},
     "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 30},
-    "workdir": {"type": "string", "description": "Working directory inside the workspace", "default": "."}
+    "workdir": {"type": "string", "description": "Working directory inside the workspace", "default": "."},
+    "shell": {"type": "string", "enum": ["cmd", "powershell", "bash", "wsl"], "description": "Shell selection. Windows defaults to cmd; choose powershell, bash, or wsl explicitly when installed."}
   },
   "category": "system"
 }

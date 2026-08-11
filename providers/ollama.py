@@ -1,8 +1,11 @@
 import json
+import logging
 import os
 from typing import Dict, Iterator, List, Optional
 
 from providers.base import NexusBaseProvider
+
+logger = logging.getLogger(__name__)
 
 
 class OllamaProvider(NexusBaseProvider):
@@ -46,8 +49,9 @@ class OllamaProvider(NexusBaseProvider):
             "stream": False
         }
         self._add_tool_payload(payload, kwargs)
+        response = None
         try:
-            response = self.session.post(self.endpoint, json=payload, timeout=60)
+            response = self.session.post(self.endpoint, json=payload, timeout=self.request_timeout(kwargs, 60))
             if response.status_code == 200:
                 data = response.json()
                 message = data.get("message", {})
@@ -68,7 +72,7 @@ class OllamaProvider(NexusBaseProvider):
         }
         self._add_tool_payload(payload, kwargs)
         try:
-            response = self.session.post(self.endpoint, json=payload, stream=True, timeout=60)
+            response = self.session.post(self.endpoint, json=payload, stream=True, timeout=self.request_timeout(kwargs, 60))
             if response.status_code == 200:
                 # Ollama streams full tool_call objects per chunk (index-keyed).
                 streamed_tool_calls = {}
@@ -89,6 +93,12 @@ class OllamaProvider(NexusBaseProvider):
                 yield f"Error: {response.status_code}"
         except Exception as e:
             yield f"Error in Ollama stream: {str(e)}"
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    logger.debug("Ollama stream response cleanup failed", exc_info=True)
 
 
 if __name__ == "__main__":

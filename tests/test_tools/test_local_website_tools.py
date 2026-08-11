@@ -46,6 +46,22 @@ async def test_test_runner_forwards_timeout_and_reports_execution_metadata(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_test_runner_fails_closed_when_exit_code_is_missing(tmp_path, monkeypatch):
+    class MissingExitSandbox:
+        last_exit_code = None
+
+        def __init__(self, root_dir):
+            self.root_dir = root_dir
+
+        async def stream_execute(self, command, workdir=None, timeout=None):
+            yield "completed output"
+
+    monkeypatch.setattr(test_runner_module, "SovereignSandbox", MissingExitSandbox)
+    result = await TestRunnerTool(root_dir=str(tmp_path)).execute(command="pytest -q")
+    assert result.success is False
+
+
+@pytest.mark.asyncio
 async def test_file_tools_reject_sibling_prefix_traversal(tmp_path):
     workspace = tmp_path / "app"
     sibling = tmp_path / "app-copy"

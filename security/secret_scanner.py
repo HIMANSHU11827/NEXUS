@@ -24,6 +24,7 @@ class SecretScanner:
         "google_api_key": re.compile(r"\bAIza[0-9A-Za-z_-]{20,}"),
         "github_token": re.compile(r"\b(?:ghp_|github_pat_)[0-9A-Za-z_]{20,}"),
         "slack_token": re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{20,}"),
+        "stripe_live_key": re.compile(r"\b(?:sk|rk)_live_[0-9A-Za-z]{20,}"),
     }
     EXCLUDED_DIRS = {
         ".git",

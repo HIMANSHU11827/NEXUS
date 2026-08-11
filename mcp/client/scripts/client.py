@@ -16,6 +16,26 @@ logger = logging.getLogger(__name__)
 #: background timers poking the transport.
 MAX_RECONNECT_ATTEMPTS = 3
 
+#: Handshake/discovery budget. A stdio MCP server that starts but never
+#: answers must not stall Nexus startup for the full 30s per-call default:
+#: with several configured servers that serialises into minutes of dead
+#: wait before the agent loop is usable.
+#:
+#: These must NOT be tightened aggressively. The shipped catalog uses
+#: ``npx -y @modelcontextprotocol/server-*``, which on a cold npm cache
+#: downloads the package before it can answer, and Docker-based servers
+#: pay container start. 20s keeps a real cold start working while still
+#: cutting a hung server's cost by a third; the circuit breaker below is
+#: what actually makes repeated calls to a dead server cheap.
+MCP_HANDSHAKE_TIMEOUT = 20
+MCP_DISCOVERY_TIMEOUT = 20
+
+#: Circuit breaker. Once a server has exhausted its reconnect budget it is
+#: ``unavailable``; re-running the full backoff cycle on every subsequent
+#: call makes one dead server cost minutes repeatedly. Hold the breaker
+#: open for this long, then allow one half-open retry.
+MCP_BREAKER_COOLDOWN = 60.0
+
 
 class MCPClient:
     """
@@ -40,6 +60,10 @@ class MCPClient:
         self.responses: Dict[str, queue.Queue] = {}
         self.id_counter = 0
         self._lock = threading.Lock()
+        # ``call_tool`` is commonly dispatched through worker threads. Keep
+        # process lifecycle transitions single-owner so concurrent first calls
+        # cannot launch multiple MCP children for one configured server.
+        self._lifecycle_lock = threading.RLock()
         self._running = False
         self._reader_thread: Optional[threading.Thread] = None
         # Lifecycle state for reconnect/parking.  "unavailable" until the first
@@ -47,6 +71,8 @@ class MCPClient:
         # back to "healthy" after a successful re-probe.
         self.state = "unavailable"
         self._reconnecting = False
+        #: Monotonic time the breaker opened; 0.0 means closed.
+        self._breaker_opened_at = 0.0
         # Optional registry integration hooks (installed by ToolRegistry so a
         # dead server's tools can be parked and later restored).
         self.degraded_cb = None   # callable() -> None  (park tools)
@@ -75,8 +101,18 @@ class MCPClient:
 
     def start(self) -> bool:
         """Start the MCP server process."""
+        with self._lifecycle_lock:
+            return self._start_unlocked()
+
+    def _start_unlocked(self) -> bool:
         if self.is_running():
             return True
+        # Respect the breaker here too: without this, every call to a
+        # dead server paid a fresh handshake timeout before the recovery
+        # cycle could even consult the breaker.
+        opened_at = getattr(self, "_breaker_opened_at", 0.0)
+        if opened_at and (time.time() - opened_at) < MCP_BREAKER_COOLDOWN:
+            return False
         self._clear_exited_process()
 
         logger.info("Starting MCP server executable: %s", self.command)
@@ -110,11 +146,19 @@ class MCPClient:
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {"name": "nexus-ai", "version": "1.0.0"}
-        })
+        }, timeout=MCP_HANDSHAKE_TIMEOUT)
 
-        if init_result:
+        # A timed-out or errored handshake returns an ``{"error": ...}``
+        # envelope, which is TRUTHY. Treating that as success marked a
+        # server that never answered as ``healthy`` and published its
+        # tools to the model, so every later call paid a full timeout.
+        if init_result and not (isinstance(init_result, dict) and init_result.get("error")):
             self.send_notification("notifications/initialized")
             self.state = "healthy"
+            # A completed handshake means the server is genuinely back:
+            # close the breaker so recovery is not gated on a stale
+            # cooldown from an earlier outage.
+            self._breaker_opened_at = 0.0
             logger.info("MCP server initialized")
             return True
         else:
@@ -125,14 +169,15 @@ class MCPClient:
 
     def stop(self):
         """Stop the MCP server process."""
-        self._running = False
-        if self.process:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-            self.process = None
+        with self._lifecycle_lock:
+            self._running = False
+            if self.process:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                self.process = None
 
     def _read_stdout(self):
         """Reader loop for stdout."""
@@ -231,6 +276,11 @@ class MCPClient:
                     del self.responses[req_id]
 
     def _recover(self, max_attempts: int = MAX_RECONNECT_ATTEMPTS) -> bool:
+        """Run one serialized bounded recovery cycle."""
+        with self._lifecycle_lock:
+            return self._recover_unlocked(max_attempts)
+
+    def _recover_unlocked(self, max_attempts: int = MAX_RECONNECT_ATTEMPTS) -> bool:
         """Mark the session degraded, park tools, and reconnect with backoff.
 
         Returns True when the server is healthy again (restart + successful
@@ -240,6 +290,13 @@ class MCPClient:
         """
         if self._reconnecting:
             return False
+        # Breaker open: fail fast instead of replaying the whole backoff
+        # cycle against a server already proven dead. One half-open retry
+        # is allowed once the cooldown elapses.
+        opened_at = getattr(self, "_breaker_opened_at", 0.0)
+        if opened_at and (time.time() - opened_at) < MCP_BREAKER_COOLDOWN:
+            return False
+        self._breaker_opened_at = 0.0
         self._reconnecting = True
         try:
             self.state = "degraded"
@@ -266,6 +323,7 @@ class MCPClient:
                     time.sleep(delay)
                     delay = min(delay * 2, 60)
             self.state = "unavailable"
+            self._breaker_opened_at = time.time()
             logger.warning("MCP server '%s' unavailable after %d reconnect attempts", self.command, max_attempts)
             return False
         finally:
@@ -305,8 +363,10 @@ class MCPClient:
 
     def list_tools(self) -> List[Dict[str, Any]]:
         """List tools available on the MCP server."""
-        result = self.call("tools/list")
-        return result.get("tools", []) if result else []
+        result = self.call("tools/list", timeout=MCP_DISCOVERY_TIMEOUT)
+        if not result or (isinstance(result, dict) and result.get("error")):
+            return []
+        return result.get("tools", [])
 
     def call_tool(self, name: str, arguments: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Call a specific tool on the MCP server."""

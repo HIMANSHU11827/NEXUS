@@ -23,13 +23,20 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 _HIGH_RISK_TOOLS = frozenset({
     "bash", "run_command", "terminal", "shell", "execute_command",
-    "deleting", "modifying", "git_ops",
+    "deleting", "modifying", "creating", "writing", "editing",
+    "write", "edit", "patch", "apply_patch", "create", "update",
+    "delete", "remove", "install", "deploy", "self_evolution", "git_ops",
+})
+_MUTATING_PLAN_ACTIONS = frozenset({
+    "write", "create", "edit", "update", "delete", "remove", "mkdir",
+    "install", "deploy", "apply_patch", "patch",
 })
 _PLAN_RISK_THRESHOLD = 1
 
@@ -74,8 +81,13 @@ class V5ActiveLoop:
             if not hasattr(self, "_task_ledger") or self._task_ledger is None:
                 self._init_task_ledger()
             self._task_ledger.append({
-                "description": str(step.get("description") or ""),
-                "tool": str(step.get("tool") or ""),
+                "description": str(
+                    step.get("description")
+                    or step.get("name")
+                    or step.get("tool")
+                    or ""
+                ),
+                "tool": str(step.get("tool") or step.get("name") or ""),
                 "success": success,
             })
         except Exception:
@@ -100,13 +112,46 @@ class V5ActiveLoop:
         risk = 0
         risky: List[str] = []
         try:
+            registry = getattr(self, "tool_registry", None)
             for step in steps:
+                if not isinstance(step, dict):
+                    continue
                 tool = str(step.get("tool") or "").strip().lower()
-                if tool in _HIGH_RISK_TOOLS:
+                params = step.get("params")
+                params = params if isinstance(params, dict) else {}
+                action = str(params.get("action") or "").strip().lower()
+                command = str(
+                    params.get("command") or params.get("cmd") or ""
+                ).strip()
+                entry = None
+                try:
+                    if registry is not None and callable(getattr(registry, "get", None)):
+                        entry = registry.get(tool)
+                except Exception:
+                    logger.debug("V5ActiveLoop: tool metadata lookup failed", exc_info=True)
+
+                metadata_mutates = False
+                if entry is not None and callable(getattr(entry, "is_read_only", None)):
+                    try:
+                        metadata_mutates = not bool(entry.is_read_only(params))
+                    except TypeError:
+                        metadata_mutates = not bool(entry.is_read_only())
+                    except Exception:
+                        # An unavailable policy contract must not make a step
+                        # look read-only; explicit names/actions below still
+                        # provide the deterministic fallback.
+                        metadata_mutates = True
+
+                if (
+                    tool in _HIGH_RISK_TOOLS
+                    or action in _MUTATING_PLAN_ACTIONS
+                    or bool(command)
+                    or metadata_mutates
+                ):
                     risk += 1
                     risky.append(
                         f"step '{step.get('description', tool)}' uses "
-                        f"high-risk tool '{tool}'"
+                        f"high-risk operation '{tool or action or 'unknown'}'"
                     )
         except Exception:
             logger.debug("V5ActiveLoop: suppressed error", exc_info=True)
@@ -156,15 +201,28 @@ class V5ActiveLoop:
             )
             concerns: List[str] = []
             approved = True
+            reviewer_verdict_seen = False
             for agent in agents:
                 result = str(agent.result or "")
-                if "BLOCK" in result.upper():
+                verdicts = re.findall(
+                    r"^\s*verdict\s*:\s*(approve|block)\b",
+                    result,
+                    flags=re.IGNORECASE | re.MULTILINE,
+                )
+                is_reviewer = str(getattr(agent, "persona", "")).strip().upper() == "REVIEWER"
+                if is_reviewer:
+                    reviewer_verdict_seen = bool(verdicts)
+                if is_reviewer and any(verdict.lower() == "block" for verdict in verdicts):
                     approved = False
                 for line in result.splitlines():
                     if line.strip().lower().startswith("concerns:"):
                         c = line.split(":", 1)[1].strip()
                         if c and c.lower() not in ("none", "n/a", ""):
                             concerns.append(c)
+            risk, risky = self._classify_plan_risk(steps)
+            if not reviewer_verdict_seen and risk >= _PLAN_RISK_THRESHOLD:
+                approved = False
+                concerns.extend(risky or ["reviewer returned no explicit verdict"])
             return {"approved": approved, "concerns": concerns,
                     "modified_steps": steps}
         except Exception as e:
@@ -206,9 +264,74 @@ class V5ActiveLoop:
             return review.get("modified_steps", steps)
         except Exception as e:
             logger.warning("V5ActiveLoop: plan gating failed: %s", e)
+            risk, risky = self._classify_plan_risk(steps)
+            if risk >= _PLAN_RISK_THRESHOLD:
+                self.logger.warning(
+                    "V5ActiveLoop: blocking high-risk plan after review failure: %s",
+                    "; ".join(risky[:3]),
+                )
+                return []
             return steps
 
     # ── HIVE-BASED SELF-REPAIR (items #26–#28) ──────────────────────────
+
+    def _normalize_hive_plan(self, raw: Any) -> List[Dict[str, Any]]:
+        """Normalize untrusted JSON emitted by a Hive recovery agent."""
+        if not isinstance(raw, list):
+            return []
+        known = None
+        registry = getattr(self, "tool_registry", None)
+        try:
+            if registry is not None and callable(getattr(registry, "list_tools", None)):
+                known = set(registry.list_tools(include_unavailable=False))
+        except TypeError:
+            try:
+                known = set(registry.list_tools())
+            except Exception:
+                known = None
+        except Exception:
+            known = None
+
+        normalized: List[Dict[str, Any]] = []
+        for item in raw[:8]:
+            if not isinstance(item, dict):
+                continue
+            description = str(item.get("description") or item.get("task") or "").strip()
+            if not description:
+                continue
+            tool = str(item.get("tool") or item.get("tool_name") or "").strip()
+            if known is not None and tool and tool not in known:
+                self.logger.warning(
+                    "Hive recovery step dropped: unknown tool '%s'", tool
+                )
+                continue
+            params = item.get("params")
+            normalized.append({
+                "description": description,
+                "tool": tool,
+                "params": params if isinstance(params, dict) else {},
+            })
+        return normalized
+
+    async def _review_hive_recovery_plan(
+        self, raw: Any, user_input: str
+    ) -> List[Dict[str, Any]]:
+        """Normalize and safety-review a Hive-generated recovery proposal."""
+        steps = self._normalize_hive_plan(raw)
+        if not steps:
+            return []
+        gate = getattr(self, "_gate_plan", None)
+        if callable(gate):
+            try:
+                reviewed = await gate(steps, user_input)
+                return reviewed if isinstance(reviewed, list) else []
+            except Exception:
+                self.logger.warning(
+                    "V5ActiveLoop: Hive recovery plan review failed",
+                    exc_info=True,
+                )
+                return []
+        return steps
 
     async def _hive_self_repair(
         self, result: Dict[str, Any], perceived: Any
@@ -266,8 +389,11 @@ class V5ActiveLoop:
                             json_part = line.split(":", 1)[1].strip()
                             try:
                                 parsed = json.loads(json_part)
-                                if isinstance(parsed, list) and parsed:
-                                    return parsed
+                                reviewed = await self._review_hive_recovery_plan(
+                                    parsed, user_input
+                                )
+                                if reviewed:
+                                    return reviewed
                             except Exception:
                                 logger.debug("V5ActiveLoop: suppressed error", exc_info=True)
             return None
@@ -327,8 +453,11 @@ class V5ActiveLoop:
                         json_part = line.split(":", 1)[1].strip()
                         try:
                             parsed = json.loads(json_part)
-                            if isinstance(parsed, list) and parsed:
-                                return parsed
+                            reviewed = await self._review_hive_recovery_plan(
+                                parsed, user_input
+                            )
+                            if reviewed:
+                                return reviewed
                         except Exception:
                             logger.debug("V5ActiveLoop: suppressed error", exc_info=True)
             return None

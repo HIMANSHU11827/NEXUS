@@ -9,6 +9,7 @@ existing todo.md or run-context formats invalid.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -20,6 +21,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from threading import RLock
 from typing import Any, Dict, Iterable, List, Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 WORK_ITEM_STATUSES = frozenset(
@@ -76,6 +80,111 @@ def _safe_id(value: str) -> str:
 
 def _now() -> float:
     return time.time()
+
+
+def _projection_failure_key(event: Dict[str, Any]) -> str:
+    """Return a stable key for a failed event, including legacy records."""
+    event_id = str(event.get("event_id") or event.get("id") or "").strip()
+    if event_id:
+        return event_id[:240]
+    return ":".join(
+        (
+            str(event.get("sequence") or "0"),
+            str(event.get("task_id") or ""),
+            str(event.get("event_type") or event.get("type") or ""),
+        )
+    )[:240]
+
+
+def _projection_failure_path(event_log_path: str) -> Path:
+    return Path(f"{event_log_path}.projection-failures.json")
+
+
+def _read_projection_failures(path: Path) -> Dict[str, Dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        str(key): value
+        for key, value in payload.items()
+        if isinstance(key, str) and isinstance(value, dict)
+    }
+
+
+def _write_projection_failures(path: Path, failures: Dict[str, Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(failures, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _projection_retry_delay(attempts: int) -> float:
+    """Bound retries so a permanently malformed event cannot hot-loop."""
+    return (1.0, 5.0, 30.0, 300.0)[min(max(attempts, 1), 4) - 1]
+
+
+def record_work_item_projection_failure(*, event_log_path: str, event: Dict[str, Any], error: Exception) -> Dict[str, Any]:
+    """Persist a bounded-backoff retry record for a failed projection."""
+    path = _projection_failure_path(event_log_path)
+    with _interprocess_projection_lock(path):
+        failures = _read_projection_failures(path)
+        key = _projection_failure_key(event)
+        previous = failures.get(key, {})
+        try:
+            previous_attempts = int(previous.get("attempts") or 0)
+        except (TypeError, ValueError):
+            previous_attempts = 0
+        attempts = max(previous_attempts, 0) + 1
+        record = {
+            "event_id": key,
+            "event_type": str(event.get("event_type") or event.get("type") or ""),
+            "task_id": str(event.get("task_id") or ""),
+            "attempts": attempts,
+            "last_error": str(error)[:1000],
+            "last_failed_at": _now(),
+        }
+        record["next_retry_at"] = record["last_failed_at"] + _projection_retry_delay(attempts)
+        failures[key] = record
+        _write_projection_failures(path, failures)
+        return record
+
+
+def clear_work_item_projection_failure(*, event_log_path: str, event: Dict[str, Any]) -> None:
+    """Remove a retry record after the event projects successfully."""
+    path = _projection_failure_path(event_log_path)
+    with _interprocess_projection_lock(path):
+        failures = _read_projection_failures(path)
+        if _projection_failure_key(event) not in failures:
+            return
+        failures.pop(_projection_failure_key(event), None)
+        if failures:
+            _write_projection_failures(path, failures)
+        else:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def pending_work_item_projection_failures(*, event_log_path: str) -> List[Dict[str, Any]]:
+    """Return durable projection failures for diagnostics and API status."""
+    path = _projection_failure_path(event_log_path)
+    with _interprocess_projection_lock(path):
+        failures = list(_read_projection_failures(path).values())
+    return sorted(failures, key=lambda item: float(item.get("last_failed_at") or 0.0))
 
 
 @dataclass
@@ -200,7 +309,7 @@ def work_item_path(root: str, session_id: str, task_id: str) -> Path:
     return Path(os.path.abspath(root)) / ".nexus" / "work_items" / _safe_id(session_id) / f"{_safe_id(task_id)}.json"
 
 
-def persist_work_item(item: WorkItem) -> Path:
+def _persist_work_item_unlocked(item: WorkItem) -> Path:
     path = item.path
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = _lock_for(path)
@@ -219,6 +328,12 @@ def persist_work_item(item: WorkItem) -> Path:
             except FileNotFoundError:
                 pass
     return path
+
+
+def persist_work_item(item: WorkItem) -> Path:
+    """Persist a WorkItem under the same interprocess projection mutex."""
+    with _interprocess_projection_lock(item.path):
+        return _persist_work_item_unlocked(item)
 
 
 def load_work_item(root: str, session_id: str, task_id: str) -> Optional[WorkItem]:
@@ -273,7 +388,7 @@ def create_work_item(
     with _interprocess_projection_lock(path):
         if load_work_item(root, session_id, item.task_id) is not None:
             raise FileExistsError(f"Work item already exists: {item.task_id}")
-        persist_work_item(item)
+        _persist_work_item_unlocked(item)
     return item
 
 
@@ -317,7 +432,7 @@ def reconcile_checklist_work_item(
             item.metadata = {**item.metadata, "_retired_run_ids": retired}
             item.run_id = ""
             item.transition("planned", reason="new checklist attempt")
-            persist_work_item(item)
+            _persist_work_item_unlocked(item)
             return item
 
     # A checklist is a planning projection, not proof that an execution run
@@ -326,7 +441,7 @@ def reconcile_checklist_work_item(
     # terminal outcome.  Keep writing todo.md for legacy compatibility, but
     # leave the run-owned lifecycle state untouched until its terminal event.
         if target == "applied" and item.run_id and item.status not in _TERMINAL_STATUSES:
-            persist_work_item(item)
+            _persist_work_item_unlocked(item)
             return item
 
         if target != item.status:
@@ -343,11 +458,11 @@ def reconcile_checklist_work_item(
                 # A terminal run outcome is authoritative until a new explicit
                 # execution starts; do not rewrite it from a stale checklist mark.
                 if item.status in {"running", "waiting", "ready_for_review", "applied"}:
-                    persist_work_item(item)
+                    _persist_work_item_unlocked(item)
                     return item
                 if item.status not in {"failed", "cancelled"}:
                     raise
-        persist_work_item(item)
+        _persist_work_item_unlocked(item)
         return item
 
 
@@ -432,7 +547,7 @@ def _project_work_item_event_unlocked(
         **item.metadata,
         "_projected_work_event_ids": (seen + [event_id])[-256:],
     }
-    persist_work_item(item)
+    _persist_work_item_unlocked(item)
     return item
 
 
@@ -481,6 +596,29 @@ def replay_work_item_event_log(
         return 0
 
     records.sort(key=_event_sequence)
+    failure_path = _projection_failure_path(event_log_path)
+    failures = _read_projection_failures(failure_path)
+    now = _now()
     for event in records:
-        project_work_item_event(root=root, session_id=session_id, event=event)
+        key = _projection_failure_key(event)
+        retry_at = float(failures.get(key, {}).get("next_retry_at") or 0.0)
+        if retry_at > now:
+            continue
+        try:
+            project_work_item_event(root=root, session_id=session_id, event=event)
+            clear_work_item_projection_failure(event_log_path=event_log_path, event=event)
+        except Exception as exc:
+            # One corrupt item or transient projection failure must not prevent
+            # later terminal events from being recovered. The append-only log
+            # remains the durable retry source for this failed event.
+            logger.warning(
+                "WorkItem event projection failed during replay: %s",
+                event.get("event_id") or event.get("id") or "unknown",
+                exc_info=True,
+            )
+            record_work_item_projection_failure(
+                event_log_path=event_log_path,
+                event=event,
+                error=exc,
+            )
     return len(records)

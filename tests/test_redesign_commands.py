@@ -134,3 +134,70 @@ def test_handlers_degrade_softly_on_empty_state(tmp_path):
         result = asyncio.run(reg.execute(name, ctx))
         assert isinstance(result.output, str), f"/{name} produced no text output"
         assert result.output.strip() != "", f"/{name} returned an empty output on empty state"
+
+
+def test_resume_is_session_scoped_and_ignores_completed_turn_history(tmp_path):
+    checkpoints = tmp_path / ".nexus_v5" / "checkpoints"
+    checkpoints.mkdir(parents=True, exist_ok=True)
+    (checkpoints / "old_planning.json").write_text(json.dumps({
+        "turn_id": "old", "phase": "planning", "session": "test",
+        "ts": 1, "context_summary": "stale",
+    }), encoding="utf-8")
+    (checkpoints / "old_completed.json").write_text(json.dumps({
+        "turn_id": "old", "phase": "completed", "session": "test",
+        "ts": 2,
+    }), encoding="utf-8")
+    (checkpoints / "other_planning.json").write_text(json.dumps({
+        "turn_id": "other", "phase": "planning", "session": "other",
+        "ts": 3, "context_summary": "wrong session",
+    }), encoding="utf-8")
+
+    result = asyncio.run(get_registry().execute(
+        "resume", CommandContext(session_id="test", extra={"root": str(tmp_path)})
+    ))
+    assert result.success is True
+    assert "no unfinished" in result.output.lower()
+
+
+def test_resume_without_terminal_done_event_is_not_reported_successfully(tmp_path):
+    checkpoints = tmp_path / ".nexus_v5" / "checkpoints"
+    checkpoints.mkdir(parents=True, exist_ok=True)
+    (checkpoints / "turn_planning.json").write_text(json.dumps({
+        "turn_id": "turn", "phase": "planning", "session": "test",
+        "ts": 1, "context_summary": "continue this",
+    }), encoding="utf-8")
+
+    class Loop:
+        async def stream_run(self, *_args, **_kwargs):
+            yield {"type": "status", "data": {"content": "started"}}
+
+    result = asyncio.run(get_registry().execute(
+        "resume", CommandContext(session_id="test", loop=Loop(), extra={"root": str(tmp_path)})
+    ))
+    assert result.success is False
+    assert "resume failed" in result.output.lower()
+
+
+def test_successful_resume_claim_prevents_duplicate_dispatch(tmp_path):
+    checkpoints = tmp_path / ".nexus_v5" / "checkpoints"
+    checkpoints.mkdir(parents=True, exist_ok=True)
+    (checkpoints / "turn_planning.json").write_text(json.dumps({
+        "turn_id": "turn", "phase": "planning", "session": "test",
+        "ts": 1, "context_summary": "continue once",
+    }), encoding="utf-8")
+
+    class Loop:
+        calls = 0
+
+        async def stream_run(self, *_args, **_kwargs):
+            self.calls += 1
+            yield {"type": "done", "data": {"success": True, "response": "done"}}
+
+    loop = Loop()
+    ctx = CommandContext(session_id="test", loop=loop, extra={"root": str(tmp_path)})
+    first = asyncio.run(get_registry().execute("resume", ctx))
+    second = asyncio.run(get_registry().execute("resume", ctx))
+    assert first.success is True
+    assert second.success is False
+    assert "already resumed" in second.error.lower()
+    assert loop.calls == 1

@@ -6,17 +6,21 @@ import os
 import time
 from typing import Optional
 
+from nexus.runtime import safe_session_id
+
 logger = logging.getLogger("nexus.session_bus")
 
-_SESSION_PATH: Optional[str] = None
+_SESSION_PATHS: dict[str, str] = {}
 
 
 def _ensure_path(root: str) -> str:
-    global _SESSION_PATH
-    if _SESSION_PATH is None:
-        _SESSION_PATH = os.path.join(root, "workspace", "active_session.json")
-        os.makedirs(os.path.dirname(_SESSION_PATH), exist_ok=True)
-    return _SESSION_PATH
+    normalized_root = os.path.abspath(root or ".")
+    path = _SESSION_PATHS.get(normalized_root)
+    if path is None:
+        path = os.path.join(normalized_root, "workspace", "active_session.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        _SESSION_PATHS[normalized_root] = path
+    return path
 
 
 def get_active_session_id(root: str, default_session_id: str) -> str:
@@ -25,7 +29,7 @@ def get_active_session_id(root: str, default_session_id: str) -> str:
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-                return data.get("session_id", default_session_id)
+                return safe_session_id(data.get("session_id", default_session_id))
         except (json.JSONDecodeError, OSError) as e:
             logger.debug("get_active_session_id: %s", e)
     return default_session_id
@@ -38,18 +42,18 @@ def get_active_session(root: str, default_session_id: str = "default") -> dict:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             return {
-                "session_id": str(data.get("session_id") or default_session_id),
+                "session_id": safe_session_id(data.get("session_id") or default_session_id),
                 "source": str(data.get("source") or "unknown"),
                 "updated_at": float(data.get("updated_at") or 0),
             }
         except (json.JSONDecodeError, OSError, ValueError, TypeError) as e:
             logger.debug("get_active_session: %s", e)
-    return {"session_id": default_session_id, "source": "default", "updated_at": 0.0}
+    return {"session_id": safe_session_id(default_session_id), "source": "default", "updated_at": 0.0}
 
 
 def set_active_session_id(root: str, session_id: str, source: str = "terminal") -> str:
     path = _ensure_path(root)
-    session_id = str(session_id or "default")
+    session_id = safe_session_id(session_id)
     data = {"session_id": session_id, "source": source, "updated_at": time.time()}
     try:
         with open(path, "w", encoding="utf-8") as f:

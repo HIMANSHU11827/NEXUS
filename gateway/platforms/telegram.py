@@ -174,11 +174,13 @@ class TelegramAdapter(BasePlatformAdapter):
         if self.bot is None:
             return SendResult(success=False, error="Bot not connected")
         try:
-            # Bounded retry (2 retries) for transient Telegram API blips; a
-            # persistent failure still returns a SendResult, never raises here.
+            # Sending a message is non-idempotent: a timeout can occur after
+            # Telegram accepted the request, so replaying it may duplicate a
+            # user-visible answer. Keep the operation single-attempt and let
+            # the caller decide whether/how to reconcile delivery.
             msg = await bounded_tool_retry(
                 self.bot.send_message, chat_id, text,
-                reply_to_message_id=reply_to, retry_policy=2,
+                reply_to_message_id=reply_to, retry_policy=0,
             )
             return SendResult(success=True, message_id=str(getattr(msg, "message_id", "")))
         except Exception as e:

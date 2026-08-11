@@ -71,11 +71,27 @@ class MCPToolAdapter(BaseTool):
                     error="MCP server disconnected",
                 )
             if isinstance(result, dict) and "error" in result:
+                error_text = str(result["error"])
+                # MCPClient reports its bounded JSON-RPC wait as a structured
+                # result. Preserve timeout semantics so the registry can apply
+                # retry/backoff policy instead of treating it as a permanent
+                # server-side MCP error.
+                if error_text.lower().startswith("timeout calling"):
+                    return ToolCallResult(
+                        name=self.name,
+                        status=STATUS_TIMEOUT,
+                        error_info={
+                            "type": "TimeoutError",
+                            "message": error_text[:4000],
+                            "retryable": True,
+                        },
+                        error=error_text,
+                    )
                 return ToolCallResult(
                     name=self.name,
                     status=STATUS_ERROR,
-                    error_info={"type": "MCPError", "message": str(result["error"])[:4000], "retryable": False},
-                    error=str(result["error"]),
+                    error_info={"type": "MCPError", "message": error_text[:4000], "retryable": False},
+                    error=error_text,
                 )
             output = ""
             if isinstance(result, dict):

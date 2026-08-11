@@ -8,7 +8,7 @@ from config.config_loader import NexusConfigLoader
 class LMStudioAutoProvider:
     """
     NEXUS AUTO-DISCOVERY PROVIDER (LM STUDIO)
-    Now fully linked to the MASTER nexus_config.yaml.
+    Now fully linked to the MASTER settings.yml.
     It will automatically find your 'Gemma-3-270m-it-qat'
     or whatever you have running on port 1234.
     """

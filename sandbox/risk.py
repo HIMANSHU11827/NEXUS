@@ -51,6 +51,9 @@ class CommandRiskScorer:
     )
 
     RISK_RULES = (
+        (r"\b(get-content|type|cat|head|tail)\b.*(\.env|\.pem|\.key|id_rsa|credential|secret)", 100, "credential access"),
+        (r"\b(env|printenv)\b", 100, "credential access"),
+        (r"\.\.(?:\\|/)+", 100, "path traversal"),
         (r"\brm\b[^|;&]*?(?:\s+-[a-zA-Z]*[rR][a-zA-Z]*)(?:\s+[^\s|;&]+)*\s+-[a-zA-Z]*[fF][a-zA-Z]*\b|\brm\b[^|;&]*?(?:\s+-[a-zA-Z]*[fF][a-zA-Z]*)(?:\s+[^\s|;&]+)*\s+-[a-zA-Z]*[rR][a-zA-Z]*\b|\brm\b[^|;&]*\s+-[a-zA-Z]*[rR][a-zA-Z]*[fF][a-zA-Z]*\b|\brm\b[^|;&]*\s+-[a-zA-Z]*[fF][a-zA-Z]*[rR][a-zA-Z]*\b|\brmdir\b\s+/[sq]\b|\bRemove-Item\b.*(?<!\\w)-Recurse(?!\\w)", 95, "recursive deletion"),
         (r"\bformat\b|\bdiskpart\b|\bdd\s+if=", 100, "disk/device destructive command"),
         (r"\bchmod\s+777\b|\bicacls\b.*\b/grant\b.*\bEveryone\b", 70, "unsafe permission widening"),

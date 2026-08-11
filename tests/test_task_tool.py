@@ -1,5 +1,6 @@
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from tools.task.scripts.task import TaskTool
 from nexus.work_items import load_work_item, project_work_item_event
 
@@ -41,6 +42,19 @@ def test_task_create_list_update_and_status_share_planning_todo(tmp_path):
     assert updated.success is True
     assert "completed" in current.output
     assert "[x] [task-1] Inspect the system" in (tmp_path / "todo.md").read_text(encoding="utf-8")
+
+
+def test_concurrent_task_creates_preserve_both_plan_updates(tmp_path):
+    def create(title):
+        return asyncio.run(TaskTool(str(tmp_path)).execute(action="create", title=title))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(create, ("First concurrent task", "Second concurrent task")))
+
+    assert all(result.success for result in results)
+    plan = (tmp_path / "todo.md").read_text(encoding="utf-8")
+    assert "First concurrent task" in plan
+    assert "Second concurrent task" in plan
 
 
 def test_unknown_task_id_remains_a_real_failure(tmp_path):
@@ -100,3 +114,37 @@ def test_task_completion_does_not_override_active_projected_run(tmp_path):
     assert result.success is True
     assert item is not None
     assert item.status == "running"
+
+
+def test_task_persistence_does_not_block_event_loop(tmp_path, monkeypatch):
+    tool = TaskTool(str(tmp_path))
+    original = tool._execute_sync
+
+    def slow_persistence(*args, **kwargs):
+        import time
+
+        time.sleep(0.08)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tool, "_execute_sync", slow_persistence)
+
+    async def run_with_heartbeat():
+        ticks = 0
+
+        async def heartbeat():
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        heartbeat_task = asyncio.create_task(heartbeat())
+        try:
+            result = await tool.execute(action="create", title="Heartbeat task")
+        finally:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+        return result, ticks
+
+    result, ticks = asyncio.run(run_with_heartbeat())
+    assert result.success is True
+    assert ticks >= 4

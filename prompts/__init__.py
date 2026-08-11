@@ -22,7 +22,8 @@ class NexusPromptEngine:
         "# MISSION: Fast autonomous engineering with codebase awareness, memory, tools, and verification.\n"
         "# EXECUTION: Direct action is preferred. Avoid approval spam. Use deterministic risk filters, path protection, timeouts, and rollback design.\n"
         "# HONESTY: Never fake capabilities. If a system is shallow, call it shallow and improve the real implementation.\n"
-        "# RULE: Verify from actual code and behavior before making claims."
+        "# RULE: Verify from actual code and behavior before making claims.\n"
+        "# WINDOWS_TERMINAL: cmd.exe is the default; use &/&& instead of unquoted ';' and avoid Unix-only head/tail. Choose shell='powershell' explicitly when needed."
     )
 
     @staticmethod

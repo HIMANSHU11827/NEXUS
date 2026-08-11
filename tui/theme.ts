@@ -4,31 +4,34 @@
  */
 import type {TuiTheme} from './types.js';
 
+/** Shared filled transcript surface for user, assistant, and activity rows. */
+export const TRANSCRIPT_SURFACE_BG = '#292929';
+
 export const DARK_THEME: TuiTheme = {
     // Base
     bg: '',
-    panelBg: '#1a1a2e',
-    panelSoftBg: '#16213e',
-    borderSoft: '#2a2a4a',
+    panelBg: '#15191f',
+    panelSoftBg: '#11151b',
+    borderSoft: '#374151',
 
     // Text
     text: '#e0e0e0',
-    textDim: '#888888',
-    textMuted: '#666666',
+    textDim: '#a3aab7',
+    textMuted: '#7f8794',
 
     // Accent
-    primary: '#7c3aed',
-    secondary: '#06b6d4',
+    primary: '#4db5ff',
+    secondary: '#22d3ee',
     success: '#22c55e',
     warning: '#f59e0b',
     error: '#ef4444',
     info: '#3b82f6',
 
     // Roles
-    userColor: '#3b82f6',
-    assistantColor: '#a78bfa',
-    toolColor: '#6366f1',
-    hiveColor: '#8b5cf6',
+    userColor: '#4d8dff',
+    assistantColor: '#48c8e8',
+    toolColor: '#4db5ff',
+    hiveColor: '#a78bfa',
     planColor: '#f59e0b',
     mcpColor: '#ec4899',
     skillColor: '#10b981',
@@ -113,29 +116,34 @@ export function activityColor(kind: string): string {
 
 export function activityGlyph(kind: string): string {
     const map: Record<string, string> = {
-        tool: '🔧',
-        command: '⚡',
-        file: '📄',
-        test: '🧪',
-        search: '🔍',
-        browser: '🌐',
-        mcp: '🔌',
-        skill: '🎯',
-        plugin: '🧩',
-        hive: '🐝',
-        agent: '🤖',
-        worker: '👷',
-        provider: '☁️',
-        rag: '📚',
-        approval: '✋',
-        error: '❌',
-        retry: '🔄',
-        plan: '📋',
-        todo: '✅',
-        memory: '🧠',
-        background: '⏳',
+        tool: '>',
+        command: '$',
+        terminal: '$',
+        run: '$',
+        file: '+',
+        test: '#',
+        search: '?',
+        browser: '@',
+        mcp: '&',
+        skill: '*',
+        plugin: '*',
+        hive: 'H',
+        agent: 'A',
+        worker: 'A',
+        provider: 'P',
+        rag: 'R',
+        approval: '!',
+        error: '!',
+        retry: '~',
+        plan: '=',
+        todo: '=',
+        memory: 'M',
+        compact: 'M',
+        background: '~',
+        config: '%',
+        settings: '%',
     };
-    return map[kind] || '•';
+    return map[kind] || '>';
 }
 
 export function statusColor(status: string): string {

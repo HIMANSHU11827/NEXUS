@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -8,6 +9,7 @@ import pytest
 
 from nexus.run_control import RunControlRegistry
 from orchestrators.v5.model import V5ModelCaller
+from orchestrators.v5.tools import V5ToolExecutor
 
 
 def test_cancel_before_registration_survives_generator_startup():
@@ -106,6 +108,126 @@ def test_concurrent_registration_and_cancellation_are_consistent():
     for index in range(4):
         registry.unregister(f"turn-{index}")
         assert registry.get(f"turn-{index}") is None
+
+
+def test_cancellation_intent_survives_registry_restart(tmp_path):
+    path = str(tmp_path / "run_controls.sqlite3")
+    first = RunControlRegistry(store_path=path)
+    assert first.request_cancel("restart-turn", "operator stopped it") is True
+
+    restarted = RunControlRegistry(store_path=path)
+    control = restarted.register("restart-turn")
+    assert control.cancelled is True
+    assert control.reason == "operator stopped it"
+
+    restarted.unregister("restart-turn")
+    fresh = RunControlRegistry(store_path=path)
+    assert fresh.register("restart-turn").cancelled is False
+
+
+def test_running_registry_refreshes_cancellation_from_another_process(tmp_path):
+    path = str(tmp_path / "run_controls-cross-process.sqlite3")
+    running = RunControlRegistry(store_path=path)
+    surface = RunControlRegistry(store_path=path)
+    control = running.register("live-turn")
+    assert control.cancelled is False
+
+    assert surface.request_cancel("live-turn", "operator stopped it") is True
+    assert control.cancelled is False
+    assert running.refresh_cancel("live-turn") is True
+    assert control.cancelled is True
+    assert control.reason == "operator stopped it"
+
+
+@pytest.mark.asyncio
+async def test_live_model_stream_observes_cross_process_cancellation(tmp_path):
+    class Brain:
+        def stream_generate(self, **_kwargs):
+            for index in range(20):
+                time.sleep(0.02)
+                yield f"chunk-{index}"
+
+    path = str(tmp_path / "run_controls-stream.sqlite3")
+    running = RunControlRegistry(store_path=path)
+    surface = RunControlRegistry(store_path=path)
+    running.register("stream-cross-process")
+
+    host = V5ModelCaller()
+    host.brain = Brain()
+    host.logger = logging.getLogger("test.v5.model")
+    host._current_turn_id = "stream-cross-process"
+    host._run_controls = running
+
+    stream = host._stream_model([{"role": "user", "content": "wait"}])
+    assert await stream.__anext__() == "chunk-0"
+    assert surface.request_cancel("stream-cross-process", "operator stopped stream") is True
+
+    with pytest.raises(asyncio.CancelledError, match="operator stopped stream"):
+        await stream.__anext__()
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_in_flight_tool_wait_observes_cross_process_cancellation(tmp_path):
+    path = str(tmp_path / "run_controls-tool.sqlite3")
+    running = RunControlRegistry(store_path=path)
+    surface = RunControlRegistry(store_path=path)
+    running.register("tool-cross-process")
+
+    host = V5ToolExecutor()
+    host._current_turn_id = "tool-cross-process"
+    host._run_controls = running
+
+    async def slow_operation():
+        await asyncio.sleep(2)
+        return "unexpected completion"
+
+    pending = asyncio.create_task(host._await_run_budget(slow_operation()))
+    await asyncio.sleep(0.08)
+    assert surface.request_cancel("tool-cross-process", "operator stopped tool") is True
+
+    with pytest.raises(asyncio.CancelledError, match="operator stopped tool"):
+        await asyncio.wait_for(pending, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_safe_model_call_propagates_effective_transport_timeout():
+    class Brain:
+        def __init__(self):
+            self.kwargs = None
+
+        def generate(self, **kwargs):
+            self.kwargs = kwargs
+            return "ok"
+
+    host = V5ModelCaller()
+    host.brain = Brain()
+    host.logger = logging.getLogger("test.v5.model")
+
+    assert await host._safe_model_call(
+        [{"role": "user", "content": "hello"}], timeout=7.5
+    ) == "ok"
+    assert host.brain.kwargs["timeout"] == 7.5
+
+
+@pytest.mark.asyncio
+async def test_stream_model_propagates_effective_transport_timeout():
+    class Brain:
+        def __init__(self):
+            self.kwargs = None
+
+        def stream_generate(self, **kwargs):
+            self.kwargs = kwargs
+            yield "ok"
+
+    host = V5ModelCaller()
+    host.brain = Brain()
+    host.logger = logging.getLogger("test.v5.model")
+
+    assert [chunk async for chunk in host._stream_model(
+        [{"role": "user", "content": "hello"}], timeout=8.5
+    )] == ["ok"]
+    assert host.brain.kwargs["timeout"] == 8.5
 
 
 @pytest.mark.asyncio

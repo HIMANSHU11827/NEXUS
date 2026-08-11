@@ -3,14 +3,55 @@ from __future__ import annotations
 __version__ = "2.0.0"
 
 import json
+import asyncio
 import os
 import re
+import sqlite3
+import tempfile
+import threading
 import uuid
+from contextlib import contextmanager
 from typing import Any
 
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
 from nexus.control_plane import create_checklist_plan
 from nexus.work_items import reconcile_checklist_work_item
+
+
+_PLAN_LOCKS: dict[str, threading.RLock] = {}
+_PLAN_LOCKS_GUARD = threading.RLock()
+
+
+def _todo_path_for_root(root_dir: str | None) -> str:
+    root = os.path.abspath(root_dir or os.getcwd())
+    workspace = os.path.join(root, "workspace")
+    return os.path.join(workspace, "todo.md") if os.path.isdir(workspace) else os.path.join(root, "todo.md")
+
+
+@contextmanager
+def plan_transaction(root_dir: str | None):
+    """Serialize plan read/modify/write transactions across threads/processes."""
+    todo_path = _todo_path_for_root(root_dir)
+    os.makedirs(os.path.dirname(todo_path), exist_ok=True)
+    key = os.path.normcase(os.path.abspath(todo_path))
+    with _PLAN_LOCKS_GUARD:
+        local_lock = _PLAN_LOCKS.setdefault(key, threading.RLock())
+    lock_path = f"{todo_path}.lock.sqlite"
+    connection = sqlite3.connect(lock_path, timeout=60.0, isolation_level=None)
+    try:
+        with local_lock:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS plan_mutex "
+                "(id INTEGER PRIMARY KEY CHECK (id = 1))"
+            )
+            connection.execute("INSERT OR IGNORE INTO plan_mutex(id) VALUES (1)")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            finally:
+                connection.rollback()
+    finally:
+        connection.close()
 
 
 class PlanningTool(BaseTool):
@@ -20,6 +61,46 @@ class PlanningTool(BaseTool):
     description = "Create, update, add, and complete task plans in todo.md"
 
     async def execute(
+        self,
+        goal: str = "",
+        action: str = "create",
+        item: str = "",
+        phase: str = "",
+        old_text: str = "",
+        new_text: str = "",
+        plan_spec: Any = None,
+        **kwargs,
+    ) -> ToolResult:
+        """Persist plan/checklist state without blocking the event loop."""
+        return await asyncio.to_thread(
+            self._execute_sync,
+            goal,
+            action,
+            item,
+            phase,
+            old_text,
+            new_text,
+            plan_spec,
+            **kwargs,
+        )
+
+    def _execute_sync(
+        self,
+        goal: str = "",
+        action: str = "create",
+        item: str = "",
+        phase: str = "",
+        old_text: str = "",
+        new_text: str = "",
+        plan_spec: Any = None,
+        **kwargs,
+    ) -> ToolResult:
+        with plan_transaction(self.root_dir):
+            return self._execute_sync_unlocked(
+                goal, action, item, phase, old_text, new_text, plan_spec, **kwargs
+            )
+
+    def _execute_sync_unlocked(
         self,
         goal: str = "",
         action: str = "create",
@@ -79,7 +160,10 @@ class PlanningTool(BaseTool):
             return ToolResult(success=False, error=str(exc))
 
     def _todo_path(self) -> str:
-        return os.path.join(self.root_dir, "todo.md") if self.root_dir else "todo.md"
+        if not self.root_dir:
+            return "todo.md"
+        workspace = os.path.join(self.root_dir, "workspace")
+        return os.path.join(workspace, "todo.md") if os.path.isdir(workspace) else os.path.join(self.root_dir, "todo.md")
 
     def _read_plan(self) -> str:
         path = self._todo_path()
@@ -89,8 +173,26 @@ class PlanningTool(BaseTool):
             return handle.read().strip()
 
     def _write_plan(self, plan: str) -> None:
-        with open(self._todo_path(), "w", encoding="utf-8") as handle:
-            handle.write(plan.rstrip() + "\n")
+        path = self._todo_path()
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        fd, temporary_path = tempfile.mkstemp(
+            dir=os.path.dirname(os.path.abspath(path)), prefix=".todo-", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                fd = -1
+                handle.write(plan.rstrip() + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            if fd != -1:
+                os.close(fd)
+            try:
+                if os.path.exists(temporary_path):
+                    os.unlink(temporary_path)
+            except OSError:
+                pass
 
     @staticmethod
     def _ensure_stable_ids(plan: str, previous: str = "") -> str:

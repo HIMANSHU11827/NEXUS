@@ -13,7 +13,7 @@ class _Request:
 
 
 def test_mcp_create_and_delete_keep_yaml_and_registry_json_in_sync(tmp_path, monkeypatch):
-    config_path = tmp_path / "nexus_config.yaml"
+    config_path = tmp_path / "settings.yml"
     mcp_path = tmp_path / "mcp_servers.json"
     config = {}
 

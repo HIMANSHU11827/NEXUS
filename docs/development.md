@@ -121,7 +121,7 @@ Key config files:
 | `config/.env` | API keys and secrets |
 | `config/provider.yml` | LLM provider definitions; use `${ENV_VAR}` references, not raw secrets |
 | `config/settings.yml` | Runtime settings |
-| `config/nexus_config.yaml` | Runtime preferences persisted by API/TUI |
+| `config/settings.yml` | Runtime settings and preferences persisted by API/TUI |
 | `config/mcp_servers.json` | MCP server definitions |
 
 ## Testing

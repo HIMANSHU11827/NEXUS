@@ -3,7 +3,13 @@ import logging
 import os
 from typing import List, Optional
 
-from gateway.base import BasePlatformAdapter, MessageEvent, SendResult
+from gateway.base import (
+    HEALTH_UNAVAILABLE,
+    STATE_RECOVERING,
+    BasePlatformAdapter,
+    MessageEvent,
+    SendResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +47,8 @@ class SlackAdapter(BasePlatformAdapter):
         self.app_token = app_token or os.getenv("SLACK_APP_TOKEN", "")
         self._client: Optional["AsyncWebClient"] = None
         self._socket_client: Optional["SocketModeClient"] = None
+        self._socket_task: Optional[asyncio.Task] = None
+        self._disconnecting = False
 
     def is_configured(self) -> bool:
         """True only when slack_sdk is importable and a bot token is present."""
@@ -55,6 +63,7 @@ class SlackAdapter(BasePlatformAdapter):
             return False
 
         try:
+            self._disconnecting = False
             self._client = AsyncWebClient(token=self.bot_token)
 
             if self.app_token:
@@ -69,7 +78,10 @@ class SlackAdapter(BasePlatformAdapter):
                     if event is not None and self._on_message:
                         await self._on_message(event)
 
-                asyncio.create_task(self._socket_client.connect())
+                # Own the long-lived socket task so failures are projected to
+                # supervisor-readable health state and shutdown can await it.
+                self._socket_task = asyncio.create_task(self._socket_client.connect())
+                self._socket_task.add_done_callback(self._on_socket_task_done)
             else:
                 logger.info("Slack adapter initialized (app token missing — webhook mode only)")
 
@@ -78,10 +90,39 @@ class SlackAdapter(BasePlatformAdapter):
             logger.error(f"Slack connection failed: {e}")
             return False
 
+    def _on_socket_task_done(self, task: asyncio.Task) -> None:
+        """Project Socket Mode task failure/exit into adapter health."""
+        if self._socket_task is task:
+            self._socket_task = None
+        if self._disconnecting:
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            error = exc
+        if error is not None:
+            self.last_error = str(error)
+            logger.warning("Slack Socket Mode stopped unexpectedly: %s", error)
+        else:
+            self.last_error = "Slack Socket Mode stopped unexpectedly"
+            logger.warning("Slack Socket Mode stopped unexpectedly")
+        self.health = HEALTH_UNAVAILABLE
+        self.state = STATE_RECOVERING
+
     async def disconnect(self):
-        if self._socket_client:
-            await self._socket_client.close()
-        self._client = None
+        self._disconnecting = True
+        try:
+            if self._socket_client:
+                await self._socket_client.close()
+        finally:
+            if self._socket_task is not None:
+                self._socket_task.cancel()
+                await asyncio.gather(self._socket_task, return_exceptions=True)
+                self._socket_task = None
+            self._socket_client = None
+            self._client = None
 
     @staticmethod
     def _parse_message_event(payload: dict) -> Optional[MessageEvent]:

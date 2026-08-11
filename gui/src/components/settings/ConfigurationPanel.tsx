@@ -247,68 +247,15 @@ export function ConfigurationPanel({ state, onSaved }: { state: Record<string, u
           </div>
           <div className="rounded-lg border border-border bg-card p-6">
             <p className="text-sm font-medium">Session persistence</p>
-            <p className="mt-1 text-xs text-muted-foreground">Configure how Nexus handles session data and history across restarts.</p>
-            <div className="mt-3 space-y-3">
-              <label className="flex items-center gap-3">
-                <input type="checkbox" defaultChecked className="rounded border-border" />
-                <span className="text-sm">Save chat history</span>
-              </label>
-              <label className="flex items-center gap-3">
-                <input type="checkbox" defaultChecked className="rounded border-border" />
-                <span className="text-sm">Save tool outputs</span>
-              </label>
-              <label className="flex items-center gap-3">
-                <input type="checkbox" defaultChecked={false} className="rounded border-border" />
-                <span className="text-sm">Auto-resume last session</span>
-              </label>
-            </div>
+            <p className="mt-1 text-sm text-muted-foreground">Session history is managed by the Memory & context page and the active Nexus runtime. The current configuration API does not expose separate save-history, tool-output, or auto-resume switches.</p>
           </div>
         </div>
       )}
 
       {activeTab === 'advanced' && (
-        <div className="space-y-4">
-          <div className="rounded-lg border border-border bg-card p-6">
-            <p className="text-sm font-medium">Performance</p>
-            <p className="mt-1 text-xs text-muted-foreground">Optimize Nexus performance for your system.</p>
-            <div className="mt-3 space-y-3">
-              <label className="flex items-center gap-3">
-                <input type="checkbox" defaultChecked className="rounded border-border" />
-                <span className="text-sm">Enable parallel tool execution</span>
-              </label>
-              <label className="flex items-center gap-3">
-                <input type="checkbox" defaultChecked className="rounded border-border" />
-                <span className="text-sm">Cache model responses</span>
-              </label>
-              <label className="flex items-center gap-3">
-                <input type="checkbox" defaultChecked={false} className="rounded border-border" />
-                <span className="text-sm">Disable streaming responses</span>
-              </label>
-            </div>
-          </div>
-          <div className="rounded-lg border border-border bg-card p-6">
-            <p className="text-sm font-medium">Logging</p>
-            <p className="mt-1 text-xs text-muted-foreground">Configure logging verbosity and output.</p>
-            <div className="flex justify-end">
-              <button className="rounded-md bg-foreground px-4 py-2 text-sm text-background">
-                Save Settings
-              </button>
-            </div>
-          </div>
-          <div className="rounded-lg border border-border bg-card p-6">
-            <p className="text-sm font-medium">Developer options</p>
-            <p className="mt-1 text-xs text-muted-foreground">Advanced settings for development and debugging.</p>
-            <div className="mt-3 space-y-3">
-              <label className="flex items-center gap-3">
-                <input type="checkbox" defaultChecked={false} className="rounded border-border" />
-                <span className="text-sm">Enable debug mode</span>
-              </label>
-              <label className="flex items-center gap-3">
-                <input type="checkbox" defaultChecked={false} className="rounded border-border" />
-                <span className="text-sm">Show internal tool calls</span>
-              </label>
-            </div>
-          </div>
+        <div className="rounded-lg border border-border bg-card p-6">
+          <p className="text-sm font-medium">Advanced runtime controls</p>
+          <p className="mt-1 text-sm text-muted-foreground">Parallel execution, response caching, streaming, logging, and developer flags are not exposed by the current configuration API. They belong here only once Nexus can validate and persist them.</p>
         </div>
       )}
 

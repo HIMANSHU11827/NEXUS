@@ -140,7 +140,7 @@ class V5ResponseBuilder:
         run_id = self._current_turn_id or self.session_id
         for idx, note in enumerate(notes):
             await self._emit_runtime_event(
-                "progress",
+                "assistant.progress",
                 note,
                 "running",
                 event_id=f"progress_{run_id}_{idx}",

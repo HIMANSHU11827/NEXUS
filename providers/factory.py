@@ -2,12 +2,21 @@ import asyncio
 import importlib
 import logging
 import os
+import threading
 from typing import Any, Optional
 
 from utils.singleton import ThreadSafeSingleton
 from providers.reliability import redact_secrets
 
 logger = logging.getLogger(__name__)
+_oauth_refresh_locks: dict[str, threading.Lock] = {}
+_oauth_refresh_locks_guard = threading.Lock()
+
+
+def _oauth_refresh_lock(provider_id: str) -> threading.Lock:
+    key = str(provider_id or "")
+    with _oauth_refresh_locks_guard:
+        return _oauth_refresh_locks.setdefault(key, threading.Lock())
 
 
 def _run_coro_safely(coro):
@@ -87,8 +96,15 @@ def _resolve_api_key(provider_id: str, profile_name: Optional[str] = None) -> Op
             import time
             if time.time() * 1000 >= credentials.expires and oauth_provider is not None:
                 try:
-                    credentials = _run_coro_safely(oauth_provider.refresh_token(credentials))
-                    store.set(provider_id, credentials)
+                    with _oauth_refresh_lock(provider_id):
+                        current = store.get(provider_id)
+                        if current is not None and time.time() * 1000 < current.expires:
+                            credentials = current
+                        else:
+                            credentials = _run_coro_safely(
+                                oauth_provider.refresh_token(current or credentials)
+                            )
+                            store.set(provider_id, credentials)
                 except Exception:
                     logger.warning("OAuth token refresh failed for provider %s; refusing expired credentials", provider_id, exc_info=True)
                     return None
@@ -222,6 +238,8 @@ class NexusProviderFactory(ThreadSafeSingleton):
     def get_provider_by_name(self, group: str, name: str, profile: Optional[str] = None) -> Any:
         try:
             provider_id = str(name or "").strip()
+            profile_store = None
+            selected_profile = None
             inst_config = self.loader.get_provider_config(provider_id)
             # NexusConfigLoader.get_provider_config() *pops* parent_provider while
             # merging, so it is never present in inst_config. Read the raw
@@ -240,7 +258,8 @@ class NexusProviderFactory(ThreadSafeSingleton):
             if profile:
                 try:
                     from providers.profiles import load_profile_store
-                    selected_profile = load_profile_store().get_profile(provider_id, profile)
+                    profile_store = load_profile_store()
+                    selected_profile = profile_store.get_profile(provider_id, profile)
                     if selected_profile is not None:
                         profile_model = str(getattr(selected_profile, "model_id", "") or getattr(selected_profile, "model", "") or "").strip()
                         profile_endpoint = str(getattr(selected_profile, "endpoint", "") or "").strip()
@@ -256,7 +275,35 @@ class NexusProviderFactory(ThreadSafeSingleton):
                 _environment_value(f"{provider_id.upper()}_API_KEY")
                 or _environment_value(f"{target_name.upper()}_API_KEY")
             )
-            key = config_key or _resolve_api_key(provider_id, profile) or env_key
+            profile_key = _resolve_api_key(provider_id, profile) if profile else None
+            oauth_key = None
+            # OAuth credentials are profile-independent for the normal auth
+            # path. Resolve them when config/env credentials did not already
+            # provide a concrete key; previously this lookup happened only
+            # when a named profile was supplied, silently dropping valid
+            # tokens for providers such as Grok and OpenRouter.
+            if not config_key and not env_key and not profile_key:
+                oauth_key = _resolve_api_key(provider_id)
+            key = config_key or profile_key or env_key or oauth_key
+            credential_id = ""
+            credential_source = ""
+            if config_key:
+                configured_value = str(inst_config.get("api_key") or "")
+                if configured_value.strip().startswith("${"):
+                    credential_id = f"env:{provider_id}"
+                    credential_source = "environment"
+                else:
+                    credential_id = f"config:{provider_id}"
+                    credential_source = "config"
+            elif profile_key:
+                credential_id = f"profile:{provider_id}:{profile}"
+                credential_source = "profile"
+            elif env_key:
+                credential_id = f"env:{provider_id}"
+                credential_source = "environment"
+            elif oauth_key:
+                credential_id = f"oauth:{provider_id}"
+                credential_source = "oauth"
             if key:
                 # Live credential refresh: reload_credentials() bakes the newly
                 # resolved key into every auth header (raw + Authorization)
@@ -276,6 +323,8 @@ class NexusProviderFactory(ThreadSafeSingleton):
                 except Exception:
                     parent_key = None
                 if parent_key:
+                    credential_id = f"config:{target_name}"
+                    credential_source = "parent_config"
                     if hasattr(provider, "reload_credentials"):
                         provider.reload_credentials(parent_key)
                     else:
@@ -285,6 +334,15 @@ class NexusProviderFactory(ThreadSafeSingleton):
 
             provider._provider_id = provider_id
             provider._profile_name = profile
+            provider._credential_id = credential_id
+            provider._credential_source = credential_source
+            if profile_store is not None and selected_profile is not None:
+                lease = profile_store.acquire_lease(provider_id, profile, ttl_seconds=120.0)
+                if lease is None:
+                    logger.info("provider profile is leased by another worker: %s/%s", provider_id, profile)
+                    return None
+                provider._profile_lease = lease
+                provider._profile_store = profile_store
             return provider
 
         except Exception as e:

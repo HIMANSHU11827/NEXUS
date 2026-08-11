@@ -13,6 +13,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -74,6 +75,41 @@ class TestReadingToolPathTraversal:
         result = _run(ReadingTool(root_dir=str(ws)).execute(path="doc.md"))
         assert result.success is True
         assert "hello world" in result.output
+
+    def test_reading_does_not_block_event_loop(self, tmp_path, monkeypatch):
+        ws, _sibling = _workspace_env(tmp_path)
+        (ws / "doc.txt").write_text("hello world", encoding="utf-8")
+        tool = ReadingTool(root_dir=str(ws))
+        original = tool._execute_sync
+
+        def slow_read(*args, **kwargs):
+            import time
+
+            time.sleep(0.08)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(tool, "_execute_sync", slow_read)
+
+        async def run_with_heartbeat():
+            ticks = 0
+
+            async def heartbeat():
+                nonlocal ticks
+                while True:
+                    ticks += 1
+                    await asyncio.sleep(0.01)
+
+            heartbeat_task = asyncio.create_task(heartbeat())
+            try:
+                result = await tool.execute(path="doc.txt")
+            finally:
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
+            return result, ticks
+
+        result, ticks = _run(run_with_heartbeat())
+        assert result.success is True
+        assert ticks >= 4
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +183,43 @@ class TestModifyingToolPathTraversal:
         assert result.success is True
         assert (ws / "conf.txt").read_text(encoding="utf-8") == "edited"
 
+    def test_modifying_does_not_block_event_loop(self, tmp_path, monkeypatch):
+        ws, _sibling = _workspace_env(tmp_path)
+        (ws / "conf.txt").write_text("original", encoding="utf-8")
+        tool = ModifyingTool(root_dir=str(ws))
+        original = tool._execute_sync
+
+        def slow_modify(*args, **kwargs):
+            import time
+
+            time.sleep(0.08)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(tool, "_execute_sync", slow_modify)
+
+        async def run_with_heartbeat():
+            ticks = 0
+
+            async def heartbeat():
+                nonlocal ticks
+                while True:
+                    ticks += 1
+                    await asyncio.sleep(0.01)
+
+            heartbeat_task = asyncio.create_task(heartbeat())
+            try:
+                result = await tool.execute(
+                    path="conf.txt", old_string="original", new_string="edited"
+                )
+            finally:
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
+            return result, ticks
+
+        result, ticks = _run(run_with_heartbeat())
+        assert result.success is True
+        assert ticks >= 4
+
 
 # ---------------------------------------------------------------------------
 # Code search tool: ``path`` parameter must not escape the workspace
@@ -185,6 +258,40 @@ class TestCodeSearchPathContainment:
         assert "hello.py" in result.output
         assert "outside_leak" not in result.output
 
+    def test_code_search_does_not_block_event_loop(self, tmp_path, monkeypatch):
+        ws = self._setup(tmp_path)
+        tool = CodeSearchTool(root_dir=str(ws))
+        original = tool._execute_sync
+
+        def slow_search(*args, **kwargs):
+            import time
+
+            time.sleep(0.08)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(tool, "_execute_sync", slow_search)
+
+        async def run_with_heartbeat():
+            ticks = 0
+
+            async def heartbeat():
+                nonlocal ticks
+                while True:
+                    ticks += 1
+                    await asyncio.sleep(0.01)
+
+            heartbeat_task = asyncio.create_task(heartbeat())
+            try:
+                result = await tool.execute("GREP_NEEDLE", path="src", mode="grep")
+            finally:
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
+            return result, ticks
+
+        result, ticks = _run(run_with_heartbeat())
+        assert result.success is True
+        assert ticks >= 4
+
 
 # ---------------------------------------------------------------------------
 # Shortcuts tool: target path must stay inside the workspace
@@ -216,3 +323,69 @@ class TestShortcutsPathContainment:
         result = _run(ShortcutsTool(root_dir=str(ws)).execute(action="list", path="sub"))
         assert result.success is True
         assert "a.txt" in result.output
+
+    def test_shortcuts_blocks_symlink_target_outside_workspace(self, tmp_path):
+        ws, sibling = _workspace_env(tmp_path)
+        secret = sibling / "secret.txt"
+        secret.write_text("secret", encoding="utf-8")
+        link = ws / "linked-secret"
+        try:
+            link.symlink_to(secret)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+
+        result = _run(ShortcutsTool(root_dir=str(ws)).execute(action="info", path="linked-secret"))
+        assert result.success is False
+        assert "Path traversal blocked" in result.error
+
+    def test_shortcuts_tree_does_not_follow_child_symlink(self, tmp_path):
+        ws, sibling = _workspace_env(tmp_path)
+        outside_dir = sibling / "outside-dir"
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("secret", encoding="utf-8")
+        link = ws / "linked-dir"
+        try:
+            link.symlink_to(outside_dir, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"directory symlink creation unavailable: {exc}")
+
+        result = _run(ShortcutsTool(root_dir=str(ws)).execute(action="tree"))
+        assert result.success is True
+        assert "linked-dir@" in result.output
+        assert "secret.txt" not in result.output
+
+    def test_shortcuts_does_not_block_event_loop(self, tmp_path, monkeypatch):
+        ws, _sibling = _workspace_env(tmp_path)
+        (ws / "sub").mkdir(exist_ok=True)
+        (ws / "sub" / "a.txt").write_text("a", encoding="utf-8")
+        tool = ShortcutsTool(root_dir=str(ws))
+        original = tool._execute_sync
+
+        def slow_operation(*args, **kwargs):
+            import time
+
+            time.sleep(0.08)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(tool, "_execute_sync", slow_operation)
+
+        async def run_with_heartbeat():
+            ticks = 0
+
+            async def heartbeat():
+                nonlocal ticks
+                while True:
+                    ticks += 1
+                    await asyncio.sleep(0.01)
+
+            heartbeat_task = asyncio.create_task(heartbeat())
+            try:
+                result = await tool.execute(action="list", path="sub")
+            finally:
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
+            return result, ticks
+
+        result, ticks = _run(run_with_heartbeat())
+        assert result.success is True
+        assert ticks >= 4

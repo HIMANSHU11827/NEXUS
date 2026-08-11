@@ -192,3 +192,16 @@ def test_work_event_reads_and_append_survive_malformed_sequences_and_utf8(tmp_pa
 
     appended = server._append_work_event("hostile", {"event_id": "new", "status": "success"})
     assert appended["sequence"] == 5
+
+
+def test_server_reads_legacy_event_session_alias(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "_RUN_ROOT", str(tmp_path))
+    monkeypatch.setattr(server, "_WORK_EVENTS_DIR", str(tmp_path / "work_events"))
+    server._WORK_EVENT_CACHE.clear()
+    legacy = Path(server._WORK_EVENTS_DIR) / "team_alpha.jsonl"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps({"event_id": "legacy-event", "sequence": 1, "status": "success"}) + "\n", encoding="utf-8")
+
+    events = server.replay_work_events_after("team/alpha", 0, limit=20)
+
+    assert [event["event_id"] for event in events] == ["legacy-event"]

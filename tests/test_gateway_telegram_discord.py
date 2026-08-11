@@ -286,6 +286,25 @@ async def test_telegram_send_text_not_connected():
     assert "not connected" in result.error.lower()
 
 
+async def test_telegram_send_text_does_not_replay_non_idempotent_send(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "some-token")
+    monkeypatch.setattr(tg_module, "AsyncTeleBot", FakeTeleBot, raising=False)
+
+    adapter = TelegramAdapter()
+    await adapter.connect()
+    calls = {"count": 0}
+
+    async def timed_out_send(*_args, **_kwargs):
+        calls["count"] += 1
+        raise TimeoutError("response status unknown")
+
+    adapter.bot.send_message = timed_out_send
+    result = await adapter.send_text("chat-1", "may already be delivered")
+
+    assert result.success is False
+    assert calls["count"] == 1
+
+
 async def test_telegram_send_typing(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "some-token")
     monkeypatch.setattr(tg_module, "AsyncTeleBot", FakeTeleBot, raising=False)
@@ -355,6 +374,27 @@ async def test_discord_connect_success_registers_handler(monkeypatch):
     assert adapter.client.started is True
     # on_message was registered as an event handler
     assert callable(getattr(adapter.client, "on_message", None))
+
+
+async def test_discord_background_client_failure_updates_health(monkeypatch):
+    class FailingClient(FakeDiscordClient):
+        async def start(self, token):
+            raise ConnectionError("discord gateway dropped")
+
+    class FailingDiscord(FakeDiscord):
+        Client = FailingClient
+
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "some-token")
+    monkeypatch.setattr(dc_module, "discord", FailingDiscord, raising=False)
+
+    adapter = DiscordAdapter()
+    assert await adapter.connect() is True
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert adapter.health == "unavailable"
+    assert adapter.state == "recovering"
+    assert "gateway dropped" in adapter.last_error
 
 
 async def test_discord_incoming_text_normalized_and_skips_self(monkeypatch):

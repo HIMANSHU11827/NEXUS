@@ -10,10 +10,75 @@ import asyncio
 import json
 import logging
 import os
+import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+from nexus.runtime import build_resume_prompt
+
+
+def _resume_claim(path: str, session_id: str):
+    """Atomically claim one checkpoint for live resume execution."""
+    claim_path = f"{path}.resume.claim.json"
+    now = time.time()
+    try:
+        if os.path.exists(claim_path):
+            with open(claim_path, "r", encoding="utf-8") as handle:
+                prior = json.load(handle)
+            if str(prior.get("session_id") or "") != str(session_id):
+                return False, "checkpoint belongs to another session", claim_path, ""
+            if str(prior.get("status") or "") == "success":
+                return False, "checkpoint was already resumed successfully", claim_path, ""
+            if str(prior.get("status") or "") == "running" and now - float(prior.get("claimed_at") or now) < 3600:
+                return False, "checkpoint resume is already in progress", claim_path, ""
+            # A crashed resumptor may leave a stale running claim. Remove it
+            # before the exclusive create below; a competing process can still
+            # win the race and will receive FileExistsError safely.
+            try:
+                os.unlink(claim_path)
+            except OSError:
+                pass
+        claim = {"session_id": str(session_id), "status": "running", "claimed_at": now,
+                 "resume_id": f"resume_{uuid.uuid4().hex}"}
+        fd = os.open(claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(claim, handle, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            try:
+                os.unlink(claim_path)
+            except OSError:
+                pass
+            raise
+        return True, "", claim_path, claim["resume_id"]
+    except FileExistsError:
+        # A competing process won the exclusive create. Re-read on the next
+        # command invocation rather than risking duplicate side effects.
+        return False, "checkpoint resume is already in progress", claim_path, ""
+    except Exception as exc:
+        return False, f"could not claim checkpoint: {exc}", claim_path, ""
+
+
+def _finish_resume_claim(claim_path: str, status: str, error: str = "") -> None:
+    try:
+        with open(claim_path, "r", encoding="utf-8") as handle:
+            claim = json.load(handle)
+        claim["status"] = str(status)
+        claim["updated_at"] = time.time()
+        if error:
+            claim["error"] = str(error)[:1000]
+        temporary = f"{claim_path}.{os.getpid()}.tmp"
+        with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(claim, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, claim_path)
+    except Exception:
+        logger.debug("could not finalize resume claim", exc_info=True)
 
 
 @dataclass
@@ -145,6 +210,22 @@ async def _cmd_clear(ctx: CommandContext) -> CommandResult:
 
 async def _cmd_exit(ctx: CommandContext) -> CommandResult:
     return CommandResult(output="exit", formatted="[bold red]SESSION TERMINATED.[/bold red]", data={"exit": True})
+
+
+async def _cmd_stop(ctx: CommandContext) -> CommandResult:
+    """Client-owned stream cancellation; interactive clients perform the abort."""
+    return CommandResult(
+        output="No interactive stream is attached to this command request.",
+        data={"client_action": "stop"},
+    )
+
+
+async def _cmd_retry(ctx: CommandContext) -> CommandResult:
+    """Client-owned retry; the client preserves the exact original prompt."""
+    return CommandResult(
+        output="Retry requires an interactive client with conversation history.",
+        data={"client_action": "retry"},
+    )
 
 
 async def _cmd_new(ctx: CommandContext) -> CommandResult:
@@ -611,18 +692,45 @@ async def _cmd_context(ctx: CommandContext) -> CommandResult:
 
 
 async def _cmd_resume(ctx: CommandContext) -> CommandResult:
-    """Resume the latest run by reading the newest .nexus_v5 checkpoint (real V5Checkpoint reader)."""
+    """Continue the newest unfinished checkpoint through the live V5 loop."""
     try:
         from orchestrators.v5.checkpoint import V5Checkpoint
         cp = V5Checkpoint()
         cp.root_dir = _nexus_root(ctx)
-        entries = cp._checkpoint_list(limit=1)
+        entries = cp._checkpoint_list(limit=0)
         if not entries:
             return CommandResult(output="no data yet", formatted="[dim]No checkpoints yet[/dim]")
-        path = str(entries[0].get("file") or "")
-        data = cp._checkpoint_read(path)
+        data = {}
+        path = ""
+        session_id = str(getattr(ctx, "session_id", "default") or "default")
+        terminal = {"complete", "completed", "done", "success", "succeeded", "finished"}
+        # A completed checkpoint for a turn makes all earlier phase snapshots
+        # of that same turn stale.  Without this fence a later /resume could
+        # replay tool work that already finished successfully.
+        terminal_turns = set()
+        decoded = []
+        for entry in entries:
+            candidate = cp._checkpoint_read(str(entry.get("file") or ""))
+            decoded.append((entry, candidate))
+            candidate_session = str(candidate.get("session") or "")
+            if candidate_session and candidate_session != session_id:
+                continue
+            if str(candidate.get("phase") or entry.get("phase") or "").lower() in terminal:
+                turn = str(candidate.get("turn_id") or entry.get("turn_id") or "")
+                if turn:
+                    terminal_turns.add(turn)
+        for entry, candidate in decoded:
+            candidate_session = str(candidate.get("session") or "")
+            turn = str(candidate.get("turn_id") or entry.get("turn_id") or "")
+            if candidate_session and candidate_session != session_id:
+                continue
+            if turn in terminal_turns:
+                continue
+            if str(candidate.get("phase") or entry.get("phase") or "").lower() not in terminal:
+                data, path = candidate, str(entry.get("file") or "")
+                break
         if not data:
-            return CommandResult(output="no data yet", formatted="[dim]Checkpoint unreadable[/dim]")
+            return CommandResult(output="no unfinished checkpoint", formatted="[dim]No unfinished checkpoint[/dim]")
         lines = [
             f"Checkpoint: {os.path.basename(path)}",
             f"Turn: {data.get('turn_id', '')}  phase: {data.get('phase', '')}",
@@ -634,6 +742,49 @@ async def _cmd_resume(ctx: CommandContext) -> CommandResult:
         if plan:
             plan_str = str(plan)
             lines.append("Next plan/actions: " + plan_str[:200])
+        loop = getattr(ctx, "loop", None)
+        stream_run = getattr(loop, "stream_run", None)
+        if callable(stream_run):
+            claimed, claim_error, claim_path, resume_id = _resume_claim(path, session_id)
+            if not claimed:
+                return CommandResult(
+                    success=False,
+                    output=claim_error or "checkpoint resume unavailable",
+                    error=claim_error or "checkpoint resume unavailable",
+                    data={**data, "resumed": False},
+                )
+            evidence = data.get("context_summary") or data.get("plan") or data.get("actions") or data.get("recent_messages") or ""
+            prompt = build_resume_prompt("Continue the unfinished task from the saved checkpoint.", evidence)
+            response = ""
+            done: Dict[str, Any] = {}
+            resume_messages = data.get("recent_messages")
+            resume_kwargs: Dict[str, Any] = {
+                "provider": ctx.provider,
+                "model": ctx.model,
+                "turn_id": resume_id,
+            }
+            if isinstance(resume_messages, list) and resume_messages:
+                resume_kwargs["conversation_history"] = resume_messages[-12:]
+            async for event in stream_run(prompt, **resume_kwargs):
+                if not isinstance(event, dict):
+                    continue
+                payload = event.get("data") if isinstance(event.get("data"), dict) else event
+                for key in ("response", "content", "text", "summary"):
+                    if isinstance(payload.get(key), str) and payload[key].strip():
+                        response = payload[key]
+                if event.get("type") == "done" and isinstance(event.get("data"), dict):
+                    done = event["data"]
+            # A stream without an explicit terminal event is incomplete, not
+            # successful. This prevents a provider/network interruption from
+            # being reported as a completed resume.
+            success = bool(done) and bool(done.get("success"))
+            if not success:
+                _finish_resume_claim(claim_path, "failed", done.get("error") or "resume failed")
+                return CommandResult(success=False, output=done.get("error") or "resume failed",
+                                     error=done.get("error") or "resume failed", data={**data, "resumed": False})
+            _finish_resume_claim(claim_path, "success")
+            return CommandResult(output=response or "Resumed task completed", formatted=response or "[green]Resumed task completed[/green]",
+                                 data={**data, "resumed": True, "resume_id": resume_id})
         return CommandResult(
             output="\n".join(lines),
             formatted="[bold]Resume[/bold]\n" + "\n".join(f"  {ln}" for ln in lines),
@@ -824,9 +975,11 @@ def init_registry(registry: Optional[CommandRegistry] = None) -> CommandRegistry
 
     builtins = [
         # general
-        Command("help", "Show all commands", _cmd_help, category="general", aliases=["h"]),
+        Command("help", "Show all commands", _cmd_help, category="general", aliases=["h", "commands"]),
         Command("clear", "Clear screen", _cmd_clear, category="general"),
         Command("exit", "Exit NEXUS", _cmd_exit, category="general", aliases=["quit"]),
+        Command("stop", "Stop the active interactive run", _cmd_stop, category="general", aliases=["cancel"]),
+        Command("retry", "Retry the last user prompt verbatim", _cmd_retry, category="general"),
         Command("new", "Create a new session", _cmd_new, category="general"),
         Command("sessions", "List all sessions", _cmd_sessions, category="general"),
         Command("session", "Switch to a session by ID", _cmd_session, category="general"),

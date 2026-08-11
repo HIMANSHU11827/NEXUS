@@ -12,9 +12,12 @@ import {InputComposer} from './input-composer.js';
 import {activeHiveAgents} from './live-agent-state.js';
 import {appendToolOutput, isSyntheticAgentLifecycle, toolActivityIdentity, toolEventDeliveryIdentity} from './tool-call-state.js';
 import {NexusBanner, WorkingStatus, VoiceEqualizer} from './banner.js';
-import {ChatLineView, buildChatLines, appendVoicePreviewLines, buildThinkingRows} from './chat-view.js';
+import {NexusWelcomeLogo} from './welcome-logo.js';
+import {ChatLineView, activityIdsFromChatLines, buildChatLines, appendVoicePreviewLines, buildThinkingRows, nextActivityFocus, toggleActivityExpansion} from './chat-view.js';
 import {CommandPalette} from './command-palette.js';
 import {NexusWorkspacePanel} from './workspace-panel.js';
+import {resolveTuiLayout} from './layout.js';
+import {isExplicitInspectorShortcut, moveQuestionSelection, nextInspectorPanel, resolveQuestionSelection} from './interaction-state.js';
 import {
     API_BASE,
     API_AUTH_HEADERS,
@@ -22,16 +25,16 @@ import {
     PROJECT_ROOT,
     syncStopVoiceProcess,
     adaptCanonicalEvent,
+    canonicalActivityFromSseFrame,
     normalizeSandboxTier,
-    nextSandboxTier,
     sandboxLabel,
     normalizePermissionMode,
-    nextPermissionMode,
     voicePhaseLabel,
     voicePhaseColor,
-    COMMANDS,
     commandDefinitionFor,
     commandMatches,
+    normalizeCommandRegistry,
+    canStartTurn,
     estimateTokens,
     formatTokens,
     formatContextPercent,
@@ -41,6 +44,7 @@ import {
     stripQuestionMarkers,
     parseQuestionMarker,
     activityFromWorkEvent,
+    mergeActivityTargetFields,
     withActivityIdentity,
     inferWorkingPhaseFromTool,
     inferWorkingPhaseFromText,
@@ -59,7 +63,6 @@ import {
     startDetached,
     commandExists,
     apiHasTuiCapabilities,
-    clearApiPortForRestart,
     sanitizeComposerInput,
     mouseWheelDirection,
     mouseWheelDirections,
@@ -81,7 +84,8 @@ import {
     type PendingQuestion,
     type WorkingPhase,
     type SandboxTier,
-    type PermissionMode
+    type PermissionMode,
+    type CommandDefinition
 } from './helpers.js';
 
 // ── [SESSION]
@@ -90,6 +94,7 @@ const INITIAL_HISTORY: Message[] = [];
 const App = () => {
     const [input, setInput] = useState('');
     const [commandIndex, setCommandIndex] = useState(0);
+    const [commandRegistry, setCommandRegistry] = useState<CommandDefinition[]>([]);
     const [history, setHistory] = useState<Message[]>(INITIAL_HISTORY);
     const [sessionId, setSessionId] = useState(() => `tui_${Date.now()}`);
     const [provider, setProvider] = useState('');
@@ -105,6 +110,7 @@ const App = () => {
     const [permissionMode, setPermissionMode] = useState<PermissionMode>('auto');
     const [voiceTranscriptPreview, setVoiceTranscriptPreview] = useState('');
     const [voiceReplyPreview, setVoiceReplyPreview] = useState('');
+    const [connectionState, setConnectionState] = useState<'connecting' | 'online' | 'offline'>('connecting');
     const voiceSessionIdRef = useRef<string | null>(null);
     const voiceShutdownRef = useRef(false);
     const [agents, setAgents] = useState<AgentInfo[]>([]);
@@ -134,6 +140,7 @@ const App = () => {
     // Track the first observed wall-clock time per task id so the task list can
     // show real elapsed duration across /tasks polls, never a fabricated value.
     const taskStartTimesRef = useRef(new Map<string, number>());
+    const panelRefreshRef = useRef<Promise<{agents: AgentInfo[]; tasks: TaskItem[]}> | null>(null);
     // SSE reconnects and server history replay can deliver the same canonical
     // event more than once. Keep a bounded identity set so replay is harmless
     // before it reaches timeline/history side effects.
@@ -141,6 +148,11 @@ const App = () => {
     const previousChatLineCount = useRef(0);
     const voiceJustStartedRef = useRef(0);
     const chatAbortControllerRef = useRef<AbortController | null>(null);
+    // The browser/Ink stream is only a transport. Keep the server-owned run
+    // identity so Stop can cancel provider and tool work as well.
+    const activeRunIdRef = useRef<string | null>(null);
+    const [activeRunId, setActiveRunId] = useState<string | null>(null);
+    const turnInFlightRef = useRef(false);
     const [isThinking, setIsThinking] = useState(false);
     const [workingPhase, setWorkingPhase] = useState<WorkingPhase>('thinking');
     const [expandedThinking, setExpandedThinking] = useState(false);
@@ -152,17 +164,35 @@ const App = () => {
         height: Math.max(process.stdout.rows || 30, 8)
     });
     const {exit} = useApp();
+
+    const cancelActiveTurn = () => {
+        const runId = activeRunIdRef.current;
+        const suffix = runId ? `?turn_id=${encodeURIComponent(runId)}` : '';
+        void fetch(`${API_BASE}/chat/${encodeURIComponent(sessionId)}/cancel${suffix}`, {
+            method: 'POST',
+            headers: API_AUTH_HEADERS
+        }).catch(() => {
+            // The local stream still stops if the backend has already finished
+            // or is temporarily unreachable; the backend owns final state.
+        });
+        chatAbortControllerRef.current?.abort();
+        activeRunIdRef.current = null;
+    };
     const slashInput = input.trimStart();
     const slashToken = slashInput.startsWith('/') && !slashInput.includes(' ') ? slashInput : '';
-    const slashMatches = slashToken ? commandMatches(slashToken) : [];
+    const slashMatches = slashToken ? commandMatches(slashToken, commandRegistry) : [];
     const showCommandPalette = slashMatches.length > 0;
     const {width, height} = terminalSize;
-    const isWide = width > 110;
-    const sidebarWidth = isWide ? Math.min(52, Math.max(38, Math.floor(width * 0.30))) : 0;
-    const leftPanelWidth = Math.max(40, width - sidebarWidth);
-    const chatContentWidth = Math.max(20, leftPanelWidth - 2);
-    const bannerHeight = chatContentWidth >= 72 ? 7 : 2;
-    const chatViewportHeight = Math.max(3, height - 4 - bannerHeight);
+    const layout = resolveTuiLayout(width, height, {
+        paletteRows: showCommandPalette ? slashMatches.length : 0,
+        voiceVisible: voiceMode !== 'off'
+    });
+    const {isWide, sidebarWidth, mainWidth: leftPanelWidth, chatContentWidth, chatViewportHeight} = layout;
+    const elapsedMs = isThinking && thinkingStartedAt ? Math.max(0, Date.now() - thinkingStartedAt) : 0;
+    const currentTask = thinkingPrompt || [...history].reverse().find(message => message.role === 'user')?.content || '';
+    const activeActivity = activityItems.find(activity =>
+        ['running', 'queued', 'pending', 'in_progress', 'working', 'active'].includes(activity.status.toLowerCase())
+    );
     const baseChatLines = buildChatLines(
         history,
         activityItems,
@@ -187,8 +217,23 @@ const App = () => {
     const visibleChatLineCount = Math.max(1, chatViewportHeight - thinkingLineCount);
     const maxChatScroll = Math.max(0, chatLines.length - visibleChatLineCount);
     const safeChatScroll = Math.min(chatScroll, maxChatScroll);
+    // Inspector content is a user choice. A new plan or agent may update its
+    // data, but it must not unexpectedly steal the user's current view.
+    const displayedPanelMode: PanelMode = pendingQuestion ? 'question' : panelMode;
+    // A custom answer needs the normal composer even though its question body
+    // lives in the inspector on narrow terminals.
+    const showNarrowInspector = !isWide
+        && displayedPanelMode !== 'workspace'
+        && !(pendingQuestion && questionCustomMode);
     const chatEnd = chatLines.length - safeChatScroll;
     const visibleChatLines = chatLines.slice(Math.max(0, chatEnd - visibleChatLineCount), chatEnd);
+    const showWelcomeLogo = history.length === 0
+        && activityItems.length === 0
+        && !isThinking
+        && voiceMode === 'off';
+    const cycleInspectorPane = () => {
+        setPanelMode(current => nextInspectorPanel(current));
+    };
 
     useEffect(() => {
         setCommandIndex(0);
@@ -215,12 +260,15 @@ const App = () => {
         };
     }, []);
 
+    const shouldAnimate = isThinking || voiceMode !== 'off' || Boolean(activeActivity);
+
     useEffect(() => {
+        if (!shouldAnimate) return;
         const timer = setInterval(() => {
             setMotionFrame(frame => (frame + 1) % 10000);
         }, 350);
         return () => clearInterval(timer);
-    }, []);
+    }, [shouldAnimate]);
 
     useEffect(() => {
         if (!process.stdin.isTTY || pendingQuestion) return;
@@ -236,20 +284,6 @@ const App = () => {
             }
             const pointer = mousePointer(mouseBuffer, terminalSize.width);
             if (!pointer || !(pointer.button === 35 || (pointer.button === 0 && pointer.pressed))) return;
-            if (pointer.button === 0 && pointer.y >= Math.max(1, terminalSize.height - 2)) {
-                const footerX = Math.max(1, Math.min(pointer.x, leftPanelWidth));
-                const sandboxZoneEnd = Math.floor(leftPanelWidth / 3);
-                const permissionZoneEnd = Math.floor(leftPanelWidth * 0.68);
-                if (footerX > permissionZoneEnd) {
-                    void handleFooterVoiceClick();
-                } else if (footerX <= sandboxZoneEnd) {
-                    void handleFooterSandboxClick();
-                } else {
-                    void handleFooterPermissionClick();
-                }
-                mouseBuffer = '';
-                return;
-            }
             if (pointer.x > leftPanelWidth) {
                 if (panelMode === 'plan' && pointer.button === 0) {
                     setPlanExpanded(expanded => !expanded);
@@ -257,13 +291,13 @@ const App = () => {
                 mouseBuffer = '';
                 return;
             }
-            const lineIndex = pointer.y - 9;
+            const lineIndex = pointer.y - layout.chatStartRow;
             const activityId = visibleChatLines[lineIndex]?.activityId;
             if (activityId) {
                 setFocusedChatActivityId(activityId);
                 if (pointer.button === 0) {
                     setSelectedActivityId(activityId);
-                    setExpandedChatActivityId(current => current === activityId ? null : activityId);
+                    setExpandedChatActivityId(current => toggleActivityExpansion(current, activityId));
                     setPanelMode(current => current === 'activity' ? 'workspace' : current);
                 }
             } else if (isThinking && lineIndex >= visibleChatLines.length && lineIndex < visibleChatLines.length + thinkingLineCount) {
@@ -280,7 +314,7 @@ const App = () => {
         return () => {
             process.stdin.off('data', handleMouseInput);
         };
-    }, [isThinking, leftPanelWidth, maxChatScroll, panelMode, pendingQuestion, permissionMode, sandboxTier, showActivitySources, terminalSize.height, terminalSize.width, thinkingLineCount, visibleChatLines, voiceMode]);
+    }, [isThinking, layout.chatStartRow, leftPanelWidth, maxChatScroll, panelMode, pendingQuestion, showActivitySources, terminalSize.width, thinkingLineCount, visibleChatLines]);
 
     const stopVoiceIfRunning = async () => {
         if (voiceShutdownRef.current) return;
@@ -334,32 +368,22 @@ const App = () => {
                 setInput('');
                 return;
             }
-            if (questionCustomMode && key.return) {
-                const answer = input.trim();
-                if (answer) questionSubmitRef.current(answer);
-                return;
-            }
             const questionWheel = mouseWheelDirection(value, terminalSize.width);
             if (key.upArrow || questionWheel > 0) {
-                setSelectedQuestionIndex(index => (
-                    index <= 0 ? pendingQuestion.options.length - 1 : index - 1
-                ));
+                setSelectedQuestionIndex(index => moveQuestionSelection(pendingQuestion, index, -1));
                 return;
             }
             if (key.downArrow || questionWheel < 0) {
-                setSelectedQuestionIndex(index => (
-                    index >= pendingQuestion.options.length - 1 ? 0 : index + 1
-                ));
+                setSelectedQuestionIndex(index => moveQuestionSelection(pendingQuestion, index, 1));
                 return;
             }
-            if (key.return) {
-                const answer = pendingQuestion.options[selectedQuestionIndex];
-                if (answer) {
-                    setQuestionCustomMode(false);
+            if (key.return && !questionCustomMode) {
+                const selected = resolveQuestionSelection(pendingQuestion, selectedQuestionIndex);
+                if (selected?.kind === 'custom') {
                     setInput('');
-                    setPendingQuestion(null);
-                    setPanelMode('workspace');
-                    questionSubmitRef.current(answer);
+                    setQuestionCustomMode(true);
+                } else if (selected?.kind === 'answer') {
+                    questionSubmitRef.current(selected.answer);
                 }
                 return;
             }
@@ -367,15 +391,12 @@ const App = () => {
 
         if (panelMode === 'question' && pendingQuestion && /^[1-9]$/.test(value)) {
             const selectedIndex = Number(value) - 1;
-            if (selectedIndex >= 0 && selectedIndex < pendingQuestion.options.length) {
-                const answer = pendingQuestion.options[selectedIndex];
-                setQuestionCustomMode(false);
-                setInput('');
-                setPendingQuestion(null);
-                setPanelMode('workspace');
-                setSelectedQuestionIndex(0);
-                questionSubmitRef.current(answer);
-            } else if (pendingQuestion.allowCustom !== false && selectedIndex === pendingQuestion.options.length) {
+            const selected = resolveQuestionSelection(pendingQuestion, selectedIndex);
+            if (selected?.kind === 'answer') {
+                setSelectedQuestionIndex(selectedIndex);
+                questionSubmitRef.current(selected.answer);
+            } else if (selected?.kind === 'custom') {
+                setSelectedQuestionIndex(selectedIndex);
                 setInput('');
                 setQuestionCustomMode(true);
             }
@@ -383,8 +404,13 @@ const App = () => {
         }
 
         if (key.escape && isThinking) {
-            chatAbortControllerRef.current?.abort();
+            cancelActiveTurn();
             pushCommand('cancelling current turn...');
+            return;
+        }
+
+        if (key.escape && showNarrowInspector) {
+            setPanelMode('workspace');
             return;
         }
 
@@ -394,6 +420,32 @@ const App = () => {
             } else {
                 setInput('/');
             }
+            return;
+        }
+
+        if (isExplicitInspectorShortcut(value, key.ctrl) && !showCommandPalette) {
+            cycleInspectorPane();
+            return;
+        }
+
+        if (key.tab && !showCommandPalette) {
+            const activityIds = activityIdsFromChatLines(visibleChatLines);
+            // Ctrl+I and Tab are the same ASCII control byte. Ink therefore
+            // reports Ctrl+I as Tab in Windows Terminal. If no trace row can
+            // consume Tab, honor that byte as the documented inspector key.
+            if (activityIds.length === 0) {
+                cycleInspectorPane();
+                return;
+            }
+            const nextId = nextActivityFocus(activityIds, focusedChatActivityId, key.shift);
+            if (!nextId) return;
+            setFocusedChatActivityId(nextId);
+            setSelectedActivityId(nextId);
+            return;
+        }
+
+        if (key.return && !showCommandPalette && input.length === 0 && focusedChatActivityId) {
+            setExpandedChatActivityId(current => toggleActivityExpansion(current, focusedChatActivityId));
             return;
         }
 
@@ -450,7 +502,7 @@ const App = () => {
         return () => { process.stdout.off('resize', handleResize); };
     }, []);
 
-    const loadPanelData = async () => {
+    const refreshPanelData = async () => {
         // `/agents` is a catalog of configured personas and commonly contains
         // idle entries. The Hive panel must show live execution only, so use
         // `/hives` as the source of truth for currently running sub-agents.
@@ -521,7 +573,17 @@ const App = () => {
         }
 
         try {
+            const commandResponse = await fetch(`${API_BASE}/commands`, {headers: API_AUTH_HEADERS});
+            if (!commandResponse.ok) throw new Error(`command registry returned ${commandResponse.status}`);
+            setCommandRegistry(normalizeCommandRegistry(await commandResponse.json()));
+        } catch {
+            // Never invent a second client-side command catalog. Keep the last
+            // verified registry snapshot until the backend is reachable again.
+        }
+
+        try {
             const status = await apiJson('/status');
+            setConnectionState('online');
             setSandboxTier(normalizeSandboxTier(String(status.sandbox_tier || 'no_sandbox')));
             setPermissionMode(normalizePermissionMode(String(status.mode || 'auto')));
             // The status bar shows the ACTIVE provider/model from the backend, not
@@ -529,7 +591,8 @@ const App = () => {
             if (status.model) setModel(String(status.model));
             if (status.provider) setProvider(String(status.provider));
         } catch {
-            // Runtime status is best-effort; avoid painting stale errors into chat.
+            // Keep connection failure visible without adding noisy polling rows to chat.
+            setConnectionState('offline');
         }
 
         if (nextTasks.length === 0) {
@@ -559,6 +622,15 @@ const App = () => {
         }
 
         return {agents: nextAgents, tasks: nextTasks};
+    };
+
+    const loadPanelData = () => {
+        if (panelRefreshRef.current) return panelRefreshRef.current;
+        const refresh = refreshPanelData();
+        panelRefreshRef.current = refresh;
+        return refresh.finally(() => {
+            if (panelRefreshRef.current === refresh) panelRefreshRef.current = null;
+        });
     };
 
     useEffect(() => {
@@ -672,7 +744,7 @@ const App = () => {
             number: activityCounter.current
         };
 
-        setActivityItems(prev => [item, ...prev].slice(0, 20));
+        setActivityItems(prev => [item, ...prev].slice(0, 80));
         setSelectedActivityId(item.id);
 
         return item;
@@ -681,9 +753,14 @@ const App = () => {
     const upsertWorkEventActivity = (event: Record<string, any>, focusPanel = true) => {
         const normalized = withActivityIdentity(activityFromWorkEvent(event));
         const isPlanActivity = normalized.toolName === 'plan';
+        const hiveMember = normalized.kind === 'hive'
+            ? String(event.related_subagent || event.subagent_id || event.worker_id || event.agent_id || '')
+            : '';
         const serverId = isPlanActivity
             ? `plan-${event.run_id || event.turn_id || sessionId}`
-            : toolActivityIdentity(event, sessionId);
+            : hiveMember
+                ? `hive-${event.run_id || event.turn_id || sessionId}-${hiveMember}`
+                : toolActivityIdentity(event, sessionId);
         const id = `work-${serverId}`;
         const sourceType = String(event.event_type || event.type || '').toLowerCase();
         const isLifecycleNoise = /^(run|conversation|message|status|phase)\./.test(sourceType);
@@ -741,6 +818,7 @@ const App = () => {
                         ? {
                             ...existing,
                             ...normalized,
+                            ...mergeActivityTargetFields(existing, normalized),
                             id,
                             number: existing.number,
                             output: isOutputChunk
@@ -758,7 +836,7 @@ const App = () => {
                     item.status = existing.status === 'error' ? 'error' : normalizeActivityStatus(item.status, item.error);
                 }
             }
-            return [item, ...prev.filter(candidate => candidate.id !== id)].slice(0, 20);
+            return [item, ...prev.filter(candidate => candidate.id !== id)].slice(0, 80);
         });
         if (focusPanel) {
             setSelectedActivityId(id);
@@ -780,12 +858,13 @@ const App = () => {
         return true;
     };
 
-    const completeRunningActivities = (status: 'done' | 'error' | 'cancelled') => {
+    const completeRunningActivities = (status: 'done' | 'error' | 'cancelled', reason = '') => {
         setActivityItems(prev => prev.map(activity => (
             activity.status === 'running'
                 ? {
                     ...activity,
-                    status: activity.error ? 'error' : status,
+                    status: activity.error || reason ? 'error' : status,
+                    error: activity.error || reason || undefined,
                     durationMs: activity.durationMs ?? (activity.startedAt ? Date.now() - activity.startedAt : undefined)
                 }
                 : activity
@@ -823,7 +902,8 @@ const App = () => {
     const ensureApiAvailable = async () => {
         if (await apiHasTuiCapabilities()) return true;
 
-        await clearApiPortForRestart();
+        // Never kill an unknown process merely because it owns the default port.
+        // The launcher owns its server; direct TUI use may only start a new one.
         startDetached('python', ['-m', 'server'], PROJECT_ROOT);
 
         for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -856,6 +936,15 @@ const App = () => {
     });
 
     const formatRows = (rows: string[]) => rows.length > 0 ? rows.join('\n') : 'No results.';
+    const providerDiagnosticsRows = (diagnostics: any) => {
+        const active = diagnostics?.active || {};
+        const rows = [`active: ${active.provider || 'unknown'}${active.profile ? `/${active.profile}` : ''} · ${active.model || 'unknown'}`, `fallback attempts: ${Number(diagnostics?.fallback_attempts || 0)}`];
+        const failure = diagnostics?.last_failure;
+        if (failure) rows.push(`last failure: ${failure.provider || 'provider'}${failure.profile ? `/${failure.profile}` : ''} · ${failure.failure_class || 'unknown'}${failure.reason ? ` · ${failure.reason}` : ''}`);
+        const cooldowns = Array.isArray(diagnostics?.cooldowns) ? diagnostics.cooldowns : [];
+        if (cooldowns.length) rows.push(`cooldowns: ${cooldowns.slice(0, 8).map((item: any) => `${item.provider}/${item.profile} ${Math.ceil(Number(item.cooldown_seconds || 0))}s${item.reason ? ` (${item.reason})` : ''}`).join(', ')}`);
+        return rows;
+    };
     const manageJson = (action: string, type: string, name = '', value?: any) => postJson('/manage', {action, type, name, value});
     const formatEnabled = (value: boolean | undefined) => value ? 'enabled' : 'disabled';
     const lastAssistantText = () => [...history].reverse().find(msg => msg.role === 'assistant' && msg.content.trim())?.content.trim() || '';
@@ -900,10 +989,25 @@ const App = () => {
         const normalized = value.trim().toLowerCase();
         if (!normalized.startsWith('/')) return false;
 
-        if (normalized === '/close' || normalized === '/panel') {
+        if (normalized === '/close') {
             setPanelMode('workspace');
             setSelectedAgentId(null);
             setSelectedActivityId(null);
+            return true;
+        }
+
+        if (normalized.startsWith('/panel')) {
+            const requested = normalized.split(/\s+/, 2)[1] as PanelMode | undefined;
+            const valid: PanelMode[] = ['workspace', 'plan', 'hive', 'mcp', 'activity'];
+            if (requested && valid.includes(requested)) {
+                setPanelMode(requested);
+                if (requested !== 'activity') setSelectedActivityId(null);
+                if (requested !== 'hive') setSelectedAgentId(null);
+            } else {
+                setPanelMode('workspace');
+                setSelectedAgentId(null);
+                setSelectedActivityId(null);
+            }
             return true;
         }
 
@@ -951,29 +1055,20 @@ const App = () => {
 
     const handleSlashCommand = async (value: string) => {
         if (!value.trim().startsWith('/')) return false;
-        if (await handlePanelCommand(value)) return true;
 
         const trimmed = value.trim();
         const [rawCommand, ...parts] = trimmed.split(/\s+/);
         const typedCommand = rawCommand.toLowerCase();
-        const exactCommand = commandDefinitionFor(typedCommand);
-        const paletteMatches = commandMatches(typedCommand);
-        const paletteCommand = paletteMatches[Math.min(commandIndex, Math.max(0, paletteMatches.length - 1))];
-        const matchedCommand = exactCommand && typedCommand !== '/' ? exactCommand : paletteCommand || exactCommand;
-        const command = matchedCommand?.name || typedCommand;
+        const matchedCommand = commandDefinitionFor(typedCommand, commandRegistry);
+        if (!matchedCommand) {
+            pushCommand(`Unknown command: ${rawCommand}. Type /help.`);
+            return true;
+        }
+        const command = matchedCommand.name;
         const args = trimmed.slice(rawCommand.length).trim();
 
         try {
-            if (command === '/commands') {
-                pushCommand(formatRows([
-                    'NEXUS commands',
-                    ...COMMANDS.map(item => {
-                        const aliases = item.aliases?.length ? ` (${item.aliases.join(', ')})` : '';
-                        return `${item.name}${aliases} - ${item.description}`;
-                    })
-                ]));
-                return true;
-            }
+            if (await handlePanelCommand(value)) return true;
 
             if (command === '/clear') {
                 setHistory([]);
@@ -1435,6 +1530,42 @@ const App = () => {
             }
 
             if (command === '/memory') {
+                const subcommand = parts[0]?.toLowerCase();
+                if (subcommand === 'stats' || subcommand === 'status') {
+                    const result = await apiJson('/memory/statistics');
+                    const stats = result.statistics || {};
+                    pushCommand(formatRows([
+                        'Memory inspector',
+                        ...Object.entries(stats).map(([key, value]) => `${key}: ${typeof value === 'object' ? JSON.stringify(value) : String(value)}`),
+                        'Use /memory search <query> to inspect matching memory.'
+                    ]));
+                    return true;
+                }
+                if (subcommand === 'search') {
+                    const query = parts.slice(1).join(' ').trim();
+                    if (!query) {
+                        pushCommand('usage: /memory search <query>');
+                        return true;
+                    }
+                    const result = await postJson('/memory/search', {query});
+                    const rows = Array.isArray(result.results) ? result.results : [];
+                    pushCommand(rows.length
+                        ? formatRows(rows.slice(0, 12).map((item: any, index: number) =>
+                            `${index + 1}. ${item.type || 'memory'} | ${cleanPreview(String(item.content || item.text || JSON.stringify(item)), 4)}`
+                        ))
+                        : `No memory matched: ${query}`);
+                    return true;
+                }
+                if (subcommand === 'export') {
+                    const format = parts[1]?.toLowerCase() === 'text' ? 'text' : 'json';
+                    const result = await postJson('/memory/export', {format});
+                    const exportDir = path.join(PROJECT_ROOT, 'workspace', 'exports');
+                    await mkdir(exportDir, {recursive: true});
+                    const target = path.join(exportDir, `memory-${sessionId}.${format === 'text' ? 'txt' : 'json'}`);
+                    await writeFile(target, String(result.data || ''), 'utf8');
+                    pushCommand(`memory exported: ${target}`);
+                    return true;
+                }
                 const targetName = parts[0]?.toLowerCase() === 'claude' ? 'CLAUDE.md' : parts[0]?.toLowerCase() === 'nexus' ? 'NEXUS.md' : 'NEXUS.md';
                 const target = path.join(PROJECT_ROOT, targetName);
                 const action = parts[0]?.toLowerCase() === 'open' || parts[1]?.toLowerCase() === 'open' ? 'open' : 'show';
@@ -1535,7 +1666,7 @@ const App = () => {
             }
 
             if (command === '/config' || command === '/settings') {
-                const configPath = path.join(PROJECT_ROOT, 'configs', 'nexus_config.yaml');
+                const configPath = path.join(PROJECT_ROOT, 'config', 'settings.yml');
                 if (parts[0]?.toLowerCase() === 'set') {
                     const configPathArg = parts[1];
                     const value = parts.slice(2).join(' ');
@@ -1563,9 +1694,10 @@ const App = () => {
 
             if (command === '/providers') {
                 const data = await apiJson('/providers');
-                pushCommand(formatRows((data.providers || []).map((item: any) =>
-                    `${item.group}.${item.id} - ${item.active ? 'active' : 'inactive'} - ${item.model || 'no model'}`
-                )));
+                pushCommand(formatRows([
+                    ...((data.providers || []).map((item: any) => `${item.group}.${item.id} - ${item.active ? 'active' : 'inactive'} - ${item.model || 'no model'}`)),
+                    ...providerDiagnosticsRows(data.diagnostics)
+                ]));
                 return true;
             }
 
@@ -1751,7 +1883,8 @@ const App = () => {
                     `sessions: ${status.session_count}`,
                     `agents: ${status.agent_count}`,
                     `tasks: ${status.task_count}`,
-                    `version: ${status.version}`
+                    `version: ${status.version}`,
+                    ...providerDiagnosticsRows(status.provider_diagnostics)
                 ]));
                 return true;
             }
@@ -1779,7 +1912,7 @@ const App = () => {
                 const sub = parts[0]?.toLowerCase();
                 if (!args || sub === 'status') {
                     const status = await apiJson('/status');
-                    pushCommand(`provider: ${status.provider}`);
+                    pushCommand(formatRows([`provider: ${status.provider}`, ...providerDiagnosticsRows(status.provider_diagnostics)]));
                 } else if (sub === 'list') {
                     const data = await apiJson('/providers');
                     pushCommand(formatRows((data.providers || []).map((item: any) => `${item.group}.${item.id} - ${item.active ? 'active' : 'inactive'} - ${item.model || 'no model'}`)));
@@ -2128,11 +2261,11 @@ const App = () => {
             }
 
             if (command === '/stop') {
-                if (!chatAbortControllerRef.current) {
+                if (!chatAbortControllerRef.current && !activeRunIdRef.current) {
                     pushCommand('no active turn to stop');
                     return true;
                 }
-                chatAbortControllerRef.current.abort();
+                cancelActiveTurn();
                 return true;
             }
 
@@ -2145,7 +2278,7 @@ const App = () => {
                     return true;
                 }
                 if (chatAbortControllerRef.current) {
-                    chatAbortControllerRef.current.abort();
+                    cancelActiveTurn();
                 }
                 void handleSubmit(retryPrompt);
                 return true;
@@ -2193,7 +2326,37 @@ const App = () => {
             }
 
             if (command === '/rewind') {
-                unsupportedCommand(command, 'Checkpoint rewind is not implemented in this local TUI yet. Use git status/diff/log and /reset tasks or /reset nexus for real available recovery paths.');
+                const checkpoints = await apiJson(`/checkpoints?session_id=${encodeURIComponent(sessionId)}`);
+                const items = Array.isArray(checkpoints.checkpoints) ? checkpoints.checkpoints : [];
+                const checkpointId = args.trim();
+                if (!checkpointId) {
+                    pushCommand(items.length
+                        ? formatRows([
+                            'Workspace checkpoints (newest first)',
+                            ...items.slice(0, 12).map((item: any, index: number) =>
+                                `${index + 1}. ${item.checkpoint_id} | ${item.file_count || 0} files | run ${item.run_id || 'unknown'}`
+                            ),
+                            'Use /rewind <checkpoint-id> to restore a checkpoint.'
+                        ])
+                        : 'No workspace checkpoints exist for this session yet.');
+                    return true;
+                }
+                const selected = items.find((item: any) => String(item.checkpoint_id) === checkpointId);
+                if (!selected) {
+                    pushCommand(`Checkpoint not found in this session: ${checkpointId}`);
+                    return true;
+                }
+                const restored = await postJson(`/checkpoints/${encodeURIComponent(checkpointId)}/restore`, {session_id: sessionId});
+                addActivityItem({
+                    kind: 'file',
+                    title: 'Restored workspace checkpoint',
+                    summary: checkpointId,
+                    status: 'done',
+                    detail: String(restored.message || `Restored ${restored.restored || 0} files.`),
+                    toolName: 'rewind'
+                });
+                pushCommand(`restored checkpoint ${checkpointId}: ${restored.message || `${restored.restored || 0} files restored`}`);
+                void loadPanelData();
                 return true;
             }
 
@@ -2228,7 +2391,9 @@ const App = () => {
                 return true;
             }
 
-            pushCommand(`Unknown command: ${rawCommand}. Type /help.`);
+            const result = await postJson('/command', {command, args: trimmed});
+            const output = String(result.output || result.error || '').trim();
+            pushCommand(output || `${command}: completed`);
             return true;
         } catch (error) {
             pushSystem(`COMMAND_ERROR: ${error instanceof Error ? error.message : String(error)}`);
@@ -2236,47 +2401,26 @@ const App = () => {
         }
     };
 
-    const handleFooterSandboxClick = async () => {
-        const requested = nextSandboxTier(sandboxTier);
-        try {
-            const result = await postJson('/sandbox', {tier: requested});
-            setSandboxTier(normalizeSandboxTier(String(result.tier || requested)));
-        } catch (error) {
-            pushSystem(`SANDBOX_ERROR: ${error instanceof Error ? error.message : String(error)}`);
-        }
-    };
-
-    const handleFooterPermissionClick = async () => {
-        const requested = nextPermissionMode(permissionMode);
-        try {
-            const result = await postJson('/permissions', {mode: requested});
-            setPermissionMode(normalizePermissionMode(String(result.mode || requested)));
-        } catch (error) {
-            pushSystem(`PERMISSION_ERROR: ${error instanceof Error ? error.message : String(error)}`);
-        }
-    };
-
-    const handleFooterVoiceClick = async () => {
-        if (voiceMode === 'off') {
-            if (!(await ensureApiAvailable())) {
-                pushSystem('VOICE_ERROR: NEXUS API did not start with voice support');
-                return;
-            }
-            await handleSlashCommand('/voice auto');
-            return;
-        }
-        await handleSlashCommand('/voice off');
-    };
-
     const handleSubmit = async (value: string) => {
         if (!value) return;
+        const normalizedValue = value.trim().toLowerCase();
+        const wasTurnInFlight = turnInFlightRef.current;
+        // A session accepts one live turn. Preserve the draft instead of adding
+        // a second user row that the backend will reject with a confusing 409.
+        if (!canStartTurn(turnInFlightRef.current, value)) {
+            pushCommand('A turn is already running. Press Esc or use /stop before sending another message.');
+            return;
+        }
         if (value.toLowerCase() === 'exit' || value.toLowerCase() === 'quit') {
             await stopVoiceIfRunning();
             exit();
             return;
         }
 
+        turnInFlightRef.current = true;
         if (await handleSlashCommand(value)) {
+            // A live /stop is still waiting for the server stream to finish.
+            if (!wasTurnInFlight) turnInFlightRef.current = false;
             setInput('');
             return;
         }
@@ -2310,6 +2454,8 @@ const App = () => {
         setWorkingPhase('querying');
         const controller = new AbortController();
         chatAbortControllerRef.current = controller;
+        activeRunIdRef.current = null;
+        setActiveRunId(null);
 
         try {
             const response = await fetch(`${API_BASE}/chat`, {
@@ -2378,7 +2524,7 @@ const App = () => {
                                     const fileNameOnly = filename.split(/[/\\]/).pop() || filename;
                                     setTouchedFiles(prev => {
                                         const filtered = prev.filter(f => f.name !== fileNameOnly);
-                                        return [{name: fileNameOnly, status: 'MODIFIED'}, ...filtered.slice(0, 2)];
+                                        return [{name: fileNameOnly, status: 'MODIFIED'}, ...filtered.slice(0, 7)];
                                     });
                                     setActivities(prev => [`Δ Modifying ${fileNameOnly}`, ...prev.slice(0, 2)]);
                                     appendTimeline({kind: 'write', weight: 90, label: fileNameOnly});
@@ -2430,7 +2576,10 @@ const App = () => {
                     });
                 }
 
-                setIsThinking(false);
+                // Keep the run visibly active until the stream reaches its
+                // terminal frame. Individual text/tool chunks are not the end
+                // of a turn, especially when tools execute in parallel.
+                setIsThinking(true);
             };
 
             const processSseFrame = (frame: string) => {
@@ -2452,7 +2601,7 @@ const App = () => {
                     return;
                 }
                 if (eventType === 'done') {
-                    completeRunningActivities('done');
+                    completeRunningActivities('error', 'Stream ended before this operation reported a terminal result.');
                     return;
                 }
                 if (eventType === 'error') {
@@ -2472,9 +2621,26 @@ const App = () => {
                     throw new Error(`Malformed ${eventType} event from NEXUS API`);
                 }
                 if (eventType === 'work_event' || eventType === 'nexus.event') {
-                    const event = adaptCanonicalEvent(payload.event || payload);
+                    const event = canonicalActivityFromSseFrame(frame) || adaptCanonicalEvent(payload.event || payload);
+                    const observedRunId = event.run_id || event.turn_id;
+                    if (observedRunId) {
+                        activeRunIdRef.current = String(observedRunId);
+                        setActiveRunId(String(observedRunId));
+                    }
                     if (!acceptWorkEvent(event)) return;
                     const eventKind = String(event.kind || event.type || '').toLowerCase();
+                    const eventTypeName = String(event.event_type || event.type || '').toLowerCase();
+                    if (eventTypeName === 'run.completed') {
+                        setPlanStatus('done');
+                        setPlanExpanded(false);
+                    } else if (eventTypeName === 'run.failed' || eventTypeName === 'run.cancelled' || eventTypeName === 'run.timed_out') {
+                        setPlanStatus('failed');
+                        setPlanExpanded(false);
+                    }
+                    // Progress narration duplicates real tool lifecycle rows
+                    // and carries no query/path target. Keep only canonical
+                    // tool events in the interactive trace.
+                    if (eventTypeName === 'assistant.progress') return;
                     if (isSyntheticAgentLifecycle(event)) return;
                     const partType = String(event.part_type || event.payload?.part_type || '').toLowerCase();
                     const hasStructuredToolIdentity = Boolean(
@@ -2488,19 +2654,49 @@ const App = () => {
                     // identity but omit a normalized public kind. Keep those
                     // real tool events visible in the activity rail; only
                     // lifecycle noise without a tool identity is filtered.
-                    if (event.visibility !== 'public' || (!PUBLIC_ACTIVITY_KINDS.has(eventKind) && !hasStructuredToolIdentity)) return;
+                    if ((event.visibility && event.visibility !== 'public') || (!PUBLIC_ACTIVITY_KINDS.has(eventKind) && !hasStructuredToolIdentity)) return;
                     const label = String(event.action || event.label || event.kind || 'Agent activity');
                     const status = String(event.status || 'running');
-                    setWorkingPhase(inferWorkingPhaseFromText(`${event.kind || ''} ${label}`) || 'working');
+                    setWorkingPhase(
+                        inferWorkingPhaseFromTool(String(event.tool || event.related_tool || eventKind || 'tool'), event)
+                        || inferWorkingPhaseFromText(`${event.kind || ''} ${label}`)
+                        || 'working'
+                    );
                     appendTimeline({kind: status === 'error' ? 'error' : 'tool', weight: 30, label});
                     setActivities(prev => [`${status === 'error' ? '!' : '⚙'} ${label}`, ...prev.slice(0, 2)]);
+                    if (eventKind === 'file') {
+                        const fileTarget = String(event.target || event.path || event.related_files?.[0] || '').trim();
+                        if (fileTarget) {
+                            const changes = event.changed_lines || event.line_changes || {};
+                            const additions = typeof changes === 'object'
+                                ? Number(changes.added ?? changes.additions ?? event.additions ?? 0)
+                                : Number(event.additions ?? 0);
+                            const deletions = typeof changes === 'object'
+                                ? Number(changes.removed ?? changes.deleted ?? changes.deletions ?? event.deletions ?? 0)
+                                : Number(event.deletions ?? 0);
+                            setTouchedFiles(previous => [{
+                                name: fileTarget,
+                                status: String(event.operation || event.action || status || 'modified').toUpperCase(),
+                                additions: Number.isFinite(additions) ? additions : 0,
+                                deletions: Number.isFinite(deletions) ? deletions : 0
+                            }, ...previous.filter(file => file.name !== fileTarget)].slice(0, 8));
+                        }
+                    }
                     if (eventKind === 'plan') {
                         const items = event.items
+                            || event.steps
                             || event.payload?.items
+                            || event.payload?.steps
                             || event.payload?.payload?.items
+                            || event.payload?.payload?.steps
                             || [];
                         if (Array.isArray(items) && items.length > 0) {
-                            setPlanItems(previous => [...new Set([...previous, ...items.map(String)])]);
+                            const descriptions = items.map((item: unknown) => typeof item === 'string'
+                                ? item
+                                : item && typeof item === 'object'
+                                    ? String((item as Record<string, unknown>).description || (item as Record<string, unknown>).step || (item as Record<string, unknown>).label || '')
+                                    : String(item || '')).filter(Boolean);
+                            setPlanItems(previous => [...new Set([...previous, ...descriptions])]);
                         }
                         setPlanStatus(['error', 'failed'].includes(status.toLowerCase()) ? 'failed' : 'planning');
                         setPlanExpanded(true);
@@ -2508,16 +2704,8 @@ const App = () => {
                         setIsThinking(true);
                         return;
                     }
-                    const eventTypeName = String(event.event_type || event.type || '').toLowerCase();
-                    if (eventTypeName === 'run.completed') {
-                        setPlanStatus('done');
-                        setPlanExpanded(false);
-                    } else if (eventTypeName === 'run.failed' || eventTypeName === 'run.cancelled') {
-                        setPlanStatus('failed');
-                        setPlanExpanded(false);
-                    }
                     upsertWorkEventActivity(event);
-                    setIsThinking(['queued', 'pending', 'running', 'in_progress'].includes(status.toLowerCase()));
+                    setIsThinking(true);
                     return;
                 }
                 processStreamText(String(payload.content || ''));
@@ -2556,7 +2744,7 @@ const App = () => {
                 setPanelMode('question');
                 appendTimeline({kind: 'step', weight: 20, label: 'Question pending'});
             }
-            completeRunningActivities('done');
+            completeRunningActivities('error', 'Stream ended before this operation reported a terminal result.');
             appendTimeline({kind: 'success', weight: 24, label: 'Turn complete'});
         } catch (err) {
             if (err instanceof Error && err.name === 'AbortError') {
@@ -2570,7 +2758,12 @@ const App = () => {
             completeRunningActivities('error');
             appendTimeline({kind: 'error', weight: 90, label: message});
         } finally {
-            if (chatAbortControllerRef.current === controller) chatAbortControllerRef.current = null;
+            if (chatAbortControllerRef.current === controller) {
+                chatAbortControllerRef.current = null;
+                activeRunIdRef.current = null;
+                setActiveRunId(null);
+                turnInFlightRef.current = false;
+            }
             void loadPanelData();
             setIsThinking(false);
             setExpandedThinking(false);
@@ -2579,12 +2772,50 @@ const App = () => {
     };
 
     questionSubmitRef.current = (answer: string) => {
+        const normalized = answer.trim();
+        if (!normalized) return;
         setQuestionCustomMode(false);
-        void handleSubmit(answer);
+        setPendingQuestion(null);
+        setPanelMode('workspace');
+        setSelectedQuestionIndex(0);
+        setInput('');
+        void handleSubmit(normalized);
     };
 
     return (
         <Box flexDirection="row" width={width} height={height} minHeight={height} backgroundColor={THEME.appBg}>
+            {showNarrowInspector ? (
+                <NexusWorkspacePanel
+                    timeline={timeline}
+                    usage={usage}
+                    mode={displayedPanelMode}
+                    agents={agents}
+                    tasks={tasks}
+                    touchedFiles={touchedFiles}
+                    activityItems={activityItems}
+                    pendingQuestion={pendingQuestion}
+                    selectedQuestionIndex={selectedQuestionIndex}
+                    questionCustomMode={questionCustomMode}
+                    planItems={planItems}
+                    planStatus={planStatus}
+                    planExpanded={planExpanded}
+                    mcpConnectedCount={mcpConnectedCount}
+                    mcpServers={mcpServers}
+                    selectedActivityId={selectedActivityId}
+                    selectedAgentId={selectedAgentId}
+                    motionFrame={motionFrame}
+                    voiceMode={voiceMode}
+                    voicePhase={voicePhase}
+                    voiceTranscriptPreview={voiceTranscriptPreview}
+                    voiceReplyPreview={voiceReplyPreview}
+                    width={width}
+                    height={height}
+                    currentTask={currentTask}
+                    isWorking={isThinking}
+                    workingPhase={workingPhase}
+                    elapsedMs={elapsedMs}
+                />
+            ) : (
             <Box
                 flexDirection="column"
                 width={leftPanelWidth}
@@ -2592,8 +2823,21 @@ const App = () => {
                 height={height}
                 backgroundColor={THEME.panelAltBg}
             >
-                <NexusBanner width={chatContentWidth} />
+                <NexusBanner
+                    width={chatContentWidth}
+                    isWorking={isThinking}
+                    phase={workingPhase}
+                    runId={activeRunId}
+                    elapsedMs={elapsedMs}
+                    connectionState={connectionState}
+                />
                 <Box flexDirection="column" height={chatViewportHeight} width={chatContentWidth + 2} paddingX={1} backgroundColor={THEME.panelAltBg}>
+                    {showWelcomeLogo && (
+                        <NexusWelcomeLogo
+                            width={chatContentWidth}
+                            height={chatViewportHeight}
+                        />
+                    )}
                     {visibleChatLines.map(line => (
                         <ChatLineView
                             key={line.key}
@@ -2603,7 +2847,13 @@ const App = () => {
                         />
                     ))}
                     {isThinking && (
-                        <WorkingStatus frame={motionFrame} width={chatContentWidth} phase={workingPhase} />
+                        <WorkingStatus
+                            frame={motionFrame}
+                            width={chatContentWidth}
+                            phase={workingPhase}
+                            activity={activeActivity}
+                            elapsedMs={elapsedMs}
+                        />
                     )}
                     {isThinking && expandedThinking && thinkingDetailRows.map(line => (
                         <ChatLineView
@@ -2615,14 +2865,14 @@ const App = () => {
                     ))}
                 </Box>
 
-                {showCommandPalette && (
+                {showCommandPalette && layout.paletteHeight > 0 && (
                     <CommandPalette
-                        matches={slashMatches}
-                        selectedIndex={Math.min(commandIndex, slashMatches.length - 1)}
+                        matches={slashMatches.slice(0, Math.max(1, layout.paletteHeight - 3))}
+                        selectedIndex={Math.min(commandIndex, Math.max(0, layout.paletteHeight - 4))}
                     />
                 )}
 
-                {voiceMode !== 'off' && (
+                {voiceMode !== 'off' && layout.voiceHeight > 0 && (
                     <Box paddingX={1} paddingY={0} justifyContent="space-between" backgroundColor={THEME.panelAltBg}>
                         <Box>
                             <Text color={voicePhaseColor(voicePhase)} bold>🎙 {voiceMode} · {voicePhaseLabel(voicePhase)} </Text>
@@ -2632,19 +2882,21 @@ const App = () => {
                 )}
 
                 {/* PROMPT BOX */}
-                <Box flexDirection="column" paddingY={1} marginBottom={0} backgroundColor={THEME.inputBg}>
+                <Box flexDirection="column" marginBottom={0} backgroundColor={THEME.inputBg}>
                     <InputComposer
                         value={input}
                         onChange={value => setInput(sanitizeComposerInput(value))}
                         onSubmit={questionCustomMode && pendingQuestion ? (value) => questionSubmitRef.current(value) : handleSubmit}
-                        placeholder={questionCustomMode ? 'Type your answer · Enter to submit · Esc to cancel' : 'Type your message or @path/to/file'}
+                        placeholder={questionCustomMode ? 'Type your answer · Enter to submit · Esc to cancel' : 'Message NEXUS...'}
                         isBusy={isThinking}
-                        showHints={!showCommandPalette}
+                        showHints={layout.showComposerHints && !showCommandPalette}
+                        width={leftPanelWidth}
                     />
                 </Box>
 
                 {/* APP FOOTER */}
                 <StatusBar
+                    width={leftPanelWidth}
                     usage={{tokens: usage.contextTokens, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, contextWindow: usage.contextLimit, model: model ? `${provider}/${model}` : provider || undefined}}
                     sandboxTier={sandboxTier}
                     permissionMode={permissionMode}
@@ -2656,23 +2908,17 @@ const App = () => {
                     activeTool={activityItems.find(activity =>
                         ['running', 'queued', 'pending', 'in_progress', 'working'].includes(activity.status.toLowerCase())
                     )?.toolName || ''}
+                    connectionState={connectionState}
                 />
             </Box>
+            )}
 
             {isWide && (
                 <Box width={sidebarWidth} height={height} backgroundColor={THEME.panelBg}>
                     <NexusWorkspacePanel
                         timeline={timeline}
                         usage={usage}
-                        mode={pendingQuestion
-                            ? 'question'
-                            : planStatus === 'planning' && planItems.length > 0
-                                ? 'plan'
-                            : agents.some(agent => ['active', 'running', 'working', 'busy', 'spawned'].includes(String(agent.status).toLowerCase()))
-                                ? (selectedAgentId ? 'agent' : 'hive')
-                            : mcpConnectedCount > 0
-                                ? 'mcp'
-                                : 'workspace'}
+                        mode={displayedPanelMode}
                         agents={agents}
                         tasks={tasks}
                         touchedFiles={touchedFiles}
@@ -2694,6 +2940,10 @@ const App = () => {
                         voiceReplyPreview={voiceReplyPreview}
                         width={sidebarWidth}
                         height={height}
+                        currentTask={currentTask}
+                        isWorking={isThinking}
+                        workingPhase={workingPhase}
+                        elapsedMs={elapsedMs}
                     />
                 </Box>
             )}

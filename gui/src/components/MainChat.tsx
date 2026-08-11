@@ -32,6 +32,16 @@ type QueuedTask = { id: string; prompt: string; attachments: Attachment[] }
 
 const defaultModelPreferences: ModelPreferences = { thinking: false, effort: 'medium' }
 
+function providerForModel(model: string): string | undefined {
+  const normalized = model.trim().toLowerCase()
+  if (normalized === 'deepseek-chat' || normalized === 'deepseek-reasoner') return 'deepseek'
+  if (normalized.startsWith('nvidia/')) return 'openrouter'
+  if (normalized.startsWith('grok-')) return 'grok'
+  if (normalized === 'llama3') return 'ollama'
+  if (normalized.startsWith('qwen3.5-')) return 'lm_studio'
+  return undefined
+}
+
 function Spinner({ size = 14, className = '' }: { size?: number; className?: string }) {
   return (
     <span className={`inline-block animate-spin ${className}`} style={{ width: size, height: size }}>
@@ -337,7 +347,9 @@ function MessageEntry({ msg }: { msg: Message }) {
   const isUser = msg.role === 'user'
   const [copied, setCopied] = useState(false)
   const hasActivity = !isUser && Boolean(msg.activity?.length)
-  const [activityExpanded, setActivityExpanded] = useState(false)
+  // Codex-style runs keep the public activity narrative visible by default.
+  // The header still lets the user collapse it when they only want the answer.
+  const [activityExpanded, setActivityExpanded] = useState(true)
   const totalWorkDuration = hasActivity ? runDuration(msg.activity!) : undefined
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [restoring, setRestoring] = useState(false)
@@ -627,27 +639,29 @@ function parseSearchResults(output: string): SearchResult[] {
   return results.slice(0, 8)
 }
 
-function ActivityCode({ value }: { value: string }) {
+function ActivityCode({ value, terminal = false }: { value: string; terminal?: boolean }) {
   const output = boundedOutput(value)
+  const wrappedLines = output.value.split('\n').reduce((total, line) => total + Math.max(1, Math.ceil(line.length / 120)), 0)
+  const autoHeight = Math.min(220, Math.max(52, wrappedLines * 17 + 18))
   return (
     <div className="border-t border-border/50 px-2 py-2">
       {output.truncated && <p className="mb-1 text-[10px] text-muted-foreground/60">Showing the last 12,000 characters emitted by this activity.</p>}
-      <div className="max-h-80 overflow-auto rounded bg-background/70">
+      <div className={`overflow-hidden rounded ${terminal ? 'bg-[#0c0c0c]' : 'bg-background/70'}`} style={{ height: `${autoHeight}px` }}>
         <MonacoEditor
-          height="320px"
+          height={`${autoHeight}px`}
           language="plaintext"
           value={output.value}
-          theme="vs"
+          theme={terminal ? 'vs-dark' : 'vs'}
           options={{
             readOnly: true,
             minimap: { enabled: false },
-            fontSize: 11,
-            lineNumbers: 'on',
+            fontSize: terminal ? 12 : 11,
+            lineNumbers: terminal ? 'off' : 'on',
             scrollBeyondLastLine: false,
             automaticLayout: true,
             tabSize: 2,
             wordWrap: 'on',
-            folding: true,
+            folding: !terminal,
             renderWhitespace: 'selection',
             lineHeight: 16,
             padding: { top: 8, bottom: 8 },
@@ -702,59 +716,18 @@ function EventDetails({ event }: { event: TimelineEvent }) {
   }
 
   if (isTerminalEvent(event)) {
+    const prompt = event.cwd ? `${event.cwd}>` : '>'
+    const isFinished = event.status !== 'running' && event.status !== 'pending'
+    const terminalText = [
+      event.command ? `${prompt}${event.command}` : '',
+      output || event.error || '',
+      isFinished ? prompt : '',
+    ].filter(Boolean).join('\n')
     return (
       <div className="border-t border-border/50 px-2 py-2 text-[11px] text-foreground/75">
-        {event.command && (
-          <div className="mb-2 max-h-32 overflow-auto rounded bg-background/70">
-            <MonacoEditor
-              height="120px"
-              language="shell"
-              value={event.command}
-              theme="vs"
-              options={{
-                readOnly: true,
-                minimap: { enabled: false },
-                fontSize: 11,
-                lineNumbers: 'off',
-                scrollBeyondLastLine: false,
-                automaticLayout: true,
-                tabSize: 2,
-                wordWrap: 'on',
-                folding: false,
-                renderWhitespace: 'selection',
-                lineHeight: 16,
-                padding: { top: 8, bottom: 8 },
-              }}
-            />
-          </div>
-        )}
         {event.cwd && <p className="mb-1 text-muted-foreground/70">Workspace: {event.cwd}</p>}
         {event.exitCode !== undefined && <p className="mb-1 text-muted-foreground/70">Exit code: {event.exitCode}</p>}
-        {output && <ActivityCode value={output} />}
-        {event.error && !output && (
-          <div className="mt-1 max-h-32 overflow-auto rounded bg-destructive/5">
-            <MonacoEditor
-              height="120px"
-              language="plaintext"
-              value={event.error}
-              theme="vs"
-              options={{
-                readOnly: true,
-                minimap: { enabled: false },
-                fontSize: 11,
-                lineNumbers: 'off',
-                scrollBeyondLastLine: false,
-                automaticLayout: true,
-                tabSize: 2,
-                wordWrap: 'on',
-                folding: false,
-                renderWhitespace: 'selection',
-                lineHeight: 16,
-                padding: { top: 8, bottom: 8 },
-              }}
-            />
-          </div>
-        )}
+        {terminalText && <ActivityCode value={terminalText} terminal />}
       </div>
     )
   }
@@ -857,6 +830,8 @@ function taskStatusLabel(event: TimelineEvent): { label: string; active: boolean
       return { label: isTimeoutEvent(event) ? 'Timed out' : 'Failed', active: false }
     case 'cancelled':
       return { label: 'Cancelled', active: false }
+    case 'timed_out':
+      return { label: 'Timed out', active: false }
     default:
       return { label: 'Stopped', active: false }
   }
@@ -942,7 +917,7 @@ function ToolEventItem({ event, now }: { event: TimelineEvent; now: number }) {
 
 // Only show public execution evidence. Internal planning and private thinking
 // never enter this feed, and raw output chunks stay with their parent action.
-const EXTERNAL_PREFIXES = ['assistant.progress', 'plan.', 'tool.', 'command.', 'terminal.', 'file.', 'search.', 'web.', 'browse.', 'browser.', 'git.', 'test.', 'skill.', 'plugin.', 'mcp.', 'hive.', 'subagent.', 'code.', 'generate.', 'agent.thinking', 'thinking.', 'thought.', 'approval.', 'retry.', 'error.']
+const EXTERNAL_PREFIXES = ['assistant.progress', 'progress', 'plan.', 'tool.', 'command.', 'terminal.', 'file.', 'search.', 'web.', 'browse.', 'browser.', 'git.', 'test.', 'skill.', 'plugin.', 'mcp.', 'hive.', 'subagent.', 'code.', 'generate.', 'agent.thinking', 'thinking.', 'thought.', 'approval.', 'retry.', 'error.']
 
 // Public activity allowlist. An event whose canonical type is unknown is still
 // shown when the backend labelled it with one of these public work kinds, so a
@@ -998,6 +973,21 @@ function isExternalEvent(event: TimelineEvent): boolean {
   return EXTERNAL_PREFIXES.some(p => event.type.startsWith(p))
 }
 
+function lifecycleBaseType(type: string): string {
+  return type
+    .replace(/\.(stdout|stderr)$/i, '')
+    .replace(/\.(started|completed|failed|cancelled|timed_out)$/i, '')
+}
+
+function mergeActivityOutput(current: TimelineEvent, incoming: TimelineEvent): string | undefined {
+  const currentOutput = eventOutput(current)
+  const incomingOutput = eventOutput(incoming)
+  if (!incomingOutput) return currentOutput || undefined
+  if (!currentOutput || incomingOutput === currentOutput || currentOutput.endsWith(incomingOutput)) return currentOutput || incomingOutput
+  if (incomingOutput.startsWith(currentOutput)) return incomingOutput
+  return `${currentOutput}${incomingOutput}`
+}
+
 /**
  * Deduplicate tool lifecycle events — keep only the latest status per tool.
  * Groups lifecycle events for the same action while preserving each distinct
@@ -1011,11 +1001,7 @@ function deduplicateEvents(events: TimelineEvent[]): TimelineEvent[] {
       map.set(`assistant.progress|${ev.id}`, ev)
       continue
     }
-    const baseType = ev.type
-      .replace('.started', '')
-      .replace('.completed', '')
-      .replace('.failed', '')
-      .replace('.cancelled', '')
+    const baseType = lifecycleBaseType(ev.type)
     const runIdentity = ev.runId || ev.parentId || 'runless'
     const dedupKey = `${runIdentity}|${baseType}|${ev.tool || ev.skill || ev.subagent || ''}|${ev.command || ev.path || ev.query || ev.title || ev.id}`
     const existing = map.get(dedupKey)
@@ -1023,10 +1009,15 @@ function deduplicateEvents(events: TimelineEvent[]): TimelineEvent[] {
       if (!existing) {
         map.set(dedupKey, ev)
       } else if (ev.status !== 'running' && ev.status !== 'pending') {
-        map.set(dedupKey, ev)
+        map.set(dedupKey, { ...ev, output: mergeActivityOutput(existing, ev) })
       } else if (existing.status === 'running' && ev.status === 'running') {
-        map.set(dedupKey, ev)
+        map.set(dedupKey, { ...ev, output: mergeActivityOutput(existing, ev) })
       }
+    } else {
+      // Streaming stdout/stderr records can arrive after the completed
+      // lifecycle record during replay. Keep one row and retain their output.
+      const mergedOutput = mergeActivityOutput(existing, ev)
+      if (mergedOutput && mergedOutput !== existing.output) map.set(dedupKey, { ...existing, output: mergedOutput })
     }
   }
 
@@ -1039,7 +1030,7 @@ function hasRenderableActivity(events: TimelineEvent[]): boolean {
 
 function runDuration(events: TimelineEvent[]): number | undefined {
   const completedRun = events.find(event =>
-    event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled'
+    event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled' || event.type === 'run.timed_out'
   )
   if (completedRun?.durationMs !== undefined) return completedRun.durationMs
   if (completedRun?.startTime !== undefined) {
@@ -1048,7 +1039,7 @@ function runDuration(events: TimelineEvent[]): number | undefined {
 
   const startedRun = events.find(event => event.type === 'run.started')
   const terminalEvent = events.find(event =>
-    event.type === 'message.completed' || event.type === 'message.failed' || event.type === 'run.completed' || event.type === 'run.failed'
+    event.type === 'message.completed' || event.type === 'message.failed' || event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.timed_out'
   )
   if (startedRun && terminalEvent) return Math.max(0, terminalEvent.timestamp - startedRun.timestamp)
   return undefined
@@ -1066,6 +1057,7 @@ function PublicProgress({ event }: { event: TimelineEvent }) {
 
 function EventActivity({ events }: { events: TimelineEvent[] }) {
   const visible = deduplicateEvents(events.filter(isExternalEvent))
+    .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.timestamp - b.timestamp)
   const hasActiveTask = visible.some(isTaskActive)
   const [now, setNow] = useState(() => Date.now())
 
@@ -1081,7 +1073,9 @@ function EventActivity({ events }: { events: TimelineEvent[] }) {
     <div className="mb-3 space-y-2 nexus-event-line" style={{ animation: 'nexus-fade-in 0.25s ease-out' }}>
       {visible.map(ev => (
         <div key={ev.id} className="space-y-1">
-          {ev.type === 'assistant.progress' ? <PublicProgress event={ev} /> : <ToolEventItem event={ev} now={now} />}
+          {ev.type === 'assistant.progress' || ev.type === 'progress'
+            ? <PublicProgress event={ev} />
+            : <ToolEventItem event={ev} now={now} />}
         </div>
       ))}
     </div>
@@ -1417,8 +1411,9 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
       await api.setPermissions(permissionMode, sid!)
       await api.setSandbox(sandboxTier, sandboxRoot)
       const selected = selectedModel ? savedModels.find(item => item.model === selectedModel) : undefined
+      const selectedProvider = selected?.provider || providerForModel(selectedModel)
       if (selectedModel) {
-        await api.setModel(selectedModel, sid!, selected?.provider, selected?.profile)
+        await api.setModel(selectedModel, sid!, selectedProvider, selected?.profile)
       }
       const attachmentNote = task.attachments.length ? `\n\nAttached files in the Nexus workspace:\n${task.attachments.map(item => `- ${item.path}`).join('\n')}` : ''
       const promptWithAttachments = `${task.prompt}${attachmentNote}`
@@ -1434,7 +1429,7 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
       await send(sid!, promptWithAttachments, {
         showThinking: modelOptions.thinking,
         reasoningEffort: modelOptions.effort,
-        provider: selected?.provider,
+        provider: selectedProvider,
         model: selected?.model || selectedModel,
         profile: selected?.profile,
         history,
@@ -1618,7 +1613,7 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
           />
         ) : null}
         <HivePanel events={events} />
-        <BackgroundTasksPanel events={events} sessionId={activeSessionId} onCancel={(runId) => cancel(runId)} />
+        <BackgroundTasksPanel events={events} onCancel={(runId) => cancel(runId)} />
         <QueuePanel tasks={queuedTasks} onSteer={steerQueuedTask} onRemove={removeQueuedTask} onSave={saveQueuedTask} />
         {voiceMode && <VoiceModeIndicator />}
         {screenStream && <div className="mb-2 flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/5 px-2 py-1.5"><video ref={screenPreviewRef} autoPlay muted playsInline className="h-10 w-16 rounded object-cover" /><span className="min-w-0 flex-1 truncate text-[11px] font-medium text-blue-700 dark:text-blue-300">Screen sharing is active</span><button type="button" onClick={stopScreenShare} className="rounded px-2 py-1 text-[10px] font-medium text-blue-700 hover:bg-blue-500/10 dark:text-blue-300">Stop</button></div>}

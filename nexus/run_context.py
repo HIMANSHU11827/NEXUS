@@ -3,9 +3,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
+
+from nexus.runtime import safe_session_id
 
 
 def _safe_id(value: str) -> str:
@@ -42,9 +46,9 @@ class RunContext:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
-    def persist(self) -> None:
+    def _persist_payload(self, payload: Dict[str, Any]) -> None:
+        """Atomically write a payload; caller owns the interprocess lock."""
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        payload = self.to_dict()
         temporary = f"{self.path}.{os.getpid()}.{int(time.time() * 1000)}.tmp"
         with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
@@ -53,23 +57,96 @@ class RunContext:
             os.fsync(handle.fileno())
         os.replace(temporary, self.path)
 
-    def finish(self, status: str, terminal_event: str, error: str = "") -> None:
-        now = time.time()
-        self.status = status
-        self.terminal_event = terminal_event
-        self.error = str(error or "")[:1000]
-        self.updated_at = now
-        self.completed_at = now
-        self.lease_expires_at = None
-        self.persist()
+    def persist(self) -> None:
+        with _run_context_lock(self.path):
+            self._persist_payload(self.to_dict())
 
-    def heartbeat(self, lease_seconds: float = 900.0) -> None:
-        """Renew ownership while a process is actively executing this run."""
+    def finish(self, status: str, terminal_event: str, error: str = "") -> bool:
         now = time.time()
-        self.owner_process_id = os.getpid()
-        self.updated_at = now
-        self.lease_expires_at = now + max(1.0, float(lease_seconds))
-        self.persist()
+        if self.owner_process_id and self.owner_process_id != os.getpid():
+            return False
+        with _run_context_lock(self.path):
+            current = _read_run_context_payload(self.path)
+            if current:
+                if str(current.get("status") or "").lower() != "running":
+                    return False
+                current_owner = int(current.get("owner_process_id") or 0)
+                if current_owner and current_owner != os.getpid():
+                    return False
+                payload = current
+            else:
+                payload = self.to_dict()
+            payload.update({
+                "status": str(status or "failed"),
+                "terminal_event": str(terminal_event or ""),
+                "error": str(error or "")[:1000],
+                "updated_at": now,
+                "completed_at": now,
+                "lease_expires_at": None,
+            })
+            self._persist_payload(payload)
+            for key, value in payload.items():
+                if hasattr(self, key):
+                    setattr(self, key, value)
+            return True
+
+    def heartbeat(self, lease_seconds: float = 900.0) -> bool:
+        """Renew ownership while a process is actively executing this run."""
+        if str(self.status or "").lower() != "running":
+            return False
+        if self.owner_process_id and self.owner_process_id != os.getpid():
+            return False
+        now = time.time()
+        with _run_context_lock(self.path):
+            current = _read_run_context_payload(self.path)
+            if current:
+                if str(current.get("status") or "").lower() != "running":
+                    return False
+                current_owner = int(current.get("owner_process_id") or 0)
+                if current_owner and current_owner != os.getpid():
+                    return False
+                payload = current
+            else:
+                payload = self.to_dict()
+            payload.update({
+                "owner_process_id": os.getpid(),
+                "updated_at": now,
+                "lease_expires_at": now + max(1.0, float(lease_seconds)),
+            })
+            self._persist_payload(payload)
+            self.owner_process_id = os.getpid()
+            self.updated_at = now
+            self.lease_expires_at = payload["lease_expires_at"]
+            return True
+
+@contextmanager
+def _run_context_lock(path: str):
+    """Serialize run-context transitions across threads and processes."""
+    lock_path = f"{path}.lock.sqlite"
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    connection = sqlite3.connect(lock_path, timeout=60.0, isolation_level=None)
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS run_context_mutex "
+            "(id INTEGER PRIMARY KEY CHECK (id = 1))"
+        )
+        connection.execute("INSERT OR IGNORE INTO run_context_mutex(id) VALUES (1)")
+        connection.execute("BEGIN IMMEDIATE")
+        yield
+    finally:
+        try:
+            connection.rollback()
+        finally:
+            connection.close()
+
+
+def _read_run_context_payload(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else {}
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
 
 
 def run_context_path(root: str, session_id: str, run_id: str) -> str:
@@ -77,9 +154,17 @@ def run_context_path(root: str, session_id: str, run_id: str) -> str:
         os.path.abspath(root),
         "logs",
         "run_contexts",
-        _safe_id(session_id),
+        safe_session_id(session_id),
         f"{_safe_id(run_id)}.json",
     )
+
+
+def _session_context_dirs(root: str, session_id: str) -> List[str]:
+    """Return canonical and pre-normalization session directories."""
+    base = os.path.join(os.path.abspath(root), "logs", "run_contexts")
+    canonical = os.path.join(base, safe_session_id(session_id))
+    legacy = os.path.join(base, _safe_id(session_id))
+    return [canonical] if legacy == canonical else [canonical, legacy]
 
 
 def start_run_context(
@@ -97,7 +182,7 @@ def start_run_context(
 ) -> RunContext:
     context = RunContext(
         root=os.path.abspath(root),
-        session_id=_safe_id(session_id),
+        session_id=safe_session_id(session_id),
         run_id=_safe_id(run_id),
         task_id=_safe_id(task_id) if task_id else "",
         provider=str(provider or ""),
@@ -113,20 +198,22 @@ def start_run_context(
 
 
 def load_run_context(root: str, session_id: str, run_id: str) -> Optional[Dict[str, Any]]:
-    path = run_context_path(root, session_id, run_id)
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            loaded = json.load(handle)
-        return loaded if isinstance(loaded, dict) else None
-    except FileNotFoundError:
-        return None
+    for directory in _session_context_dirs(root, session_id):
+        path = os.path.join(directory, f"{_safe_id(run_id)}.json")
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            return loaded if isinstance(loaded, dict) else None
+        except FileNotFoundError:
+            continue
+    return None
 
 
 def list_run_contexts(root: str, session_id: str = "", limit: int = 100) -> List[Dict[str, Any]]:
     base = os.path.join(os.path.abspath(root), "logs", "run_contexts")
     roots = []
     if session_id:
-        roots.append(os.path.join(base, _safe_id(session_id)))
+        roots.extend(_session_context_dirs(root, session_id))
     elif os.path.isdir(base):
         roots.extend(
             os.path.join(base, name)
@@ -181,7 +268,7 @@ def recover_orphaned_runs(
         if lease_expires_at > now:
             continue
         run_id = _safe_id(str(data.get("run_id") or ""))
-        sid = _safe_id(str(data.get("session_id") or session_id or "default"))
+        sid = safe_session_id(str(data.get("session_id") or session_id or "default"))
         if not run_id:
             continue
         context = RunContext(
@@ -237,7 +324,13 @@ def recover_orphaned_runs(
         except FileNotFoundError:
             pass
         if not already_written:
-            context.finish("failed", "run.failed", "process restarted before terminal event")
+            transitioned = context.finish(
+                "failed", "run.failed", "process restarted before terminal event"
+            )
+            if not transitioned:
+                # A live owner may have renewed or completed the run after
+                # the initial scan. Do not emit a stale recovery event.
+                continue
         event["sequence"] = sequence + (0 if already_written else 1)
         if not already_written:
             with open(path, "a", encoding="utf-8", newline="\n") as handle:

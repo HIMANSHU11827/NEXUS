@@ -26,18 +26,18 @@ World simulation modules removed. Planning handled by `planning` tool + `todo.md
 `sandbox/sandbox_manager.py` — `SovereignSandbox`: 3-tier (NO_SANDBOX/NORMAL/DOCKER)
 `safety/laws.py` — `NexusLawKernel`: YAML-based sovereign laws
 `safety/prover.py` — `LogicProver`: shell safety + Python AST + neural-symbolic intent
-`tools/threat_patterns.py` — 55 regex patterns in 3 scopes
+`tools/threat_patterns.py` — 41 regex patterns in 3 scopes
 See also: `sandbox/failure_memory.py`, `plugins/trust.py`, `mcp/security.py`
 
 ## ✅ 4. Provider System — FIXED
 
-`providers/` — 45+ providers, fully implemented:
+`providers/` — 40+ providers, fully implemented:
 - `NexusBaseProvider` ABC with health checks, key validation, streaming
-- `NexusProviderFactory` with 45+ mappings, OAuth integration
+- `NexusProviderFactory` with 40+ mappings, OAuth integration
 - `ModelRouter` with fallback mesh, 8-attempt fallback loop
 - `ProviderHealthRegistry` + `ProviderCapabilityRegistry`
 - `ProviderProfileStore` with cooldown + exponential backoff + 3 rotation strategies
-- Auto-detect (31 env vars) + auto-heal background thread
+- Auto-detect (22 env-key pairs + 4 local providers) + auto-heal background thread
 - OAuth 2.0 / PKCE / Device Code for 9 providers
 - See also: `providers/universal.py` for 25+ OpenAI-compatible providers
 
@@ -57,9 +57,9 @@ See also: `sandbox/failure_memory.py`, `plugins/trust.py`, `mcp/security.py`
 
 ## ✅ 6. Tests — IMPROVED
 
-42+ test files across the project:
-- 126 passed, 1 skipped (latest focused pass)
-- Coverage: boot, auth, evolution forges, gateway, GUI API, loop, MCP, NATE (56 tests), OAuth, plugins, server, skills, threats, tool registry
+150+ test files across the project:
+- Full suite passes (see `LOOP_RESEARCH_REPORT.md` — ~163 tests)
+- Coverage: boot, auth, evolution forges, gateway, GUI API, loop, MCP, NATE, OAuth, plugins, server, skills, threats, tool registry, v5 loop
 - See `tests/` directory
 
 ## ✅ 7. Packaging — IMPROVED

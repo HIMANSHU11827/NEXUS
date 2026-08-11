@@ -46,7 +46,8 @@ function restoreActivity(events: Record<string, unknown>[] | undefined): Timelin
       : payload
     const rawStatus = String(raw.status || 'running')
     const status: TimelineEvent['status'] = rawStatus === 'success' || rawStatus === 'done' || rawStatus === 'completed' || rawStatus === 'ok' ? 'success' : rawStatus === 'failed' || rawStatus === 'error' ? 'failed' : rawStatus === 'cancelled' || rawStatus === 'canceled' ? 'cancelled' : rawStatus === 'blocked' ? 'blocked' : rawStatus === 'skipped' ? 'skipped' : rawStatus === 'pending' ? 'pending' : 'running'
-    const canonicalType = String(raw.event_type || raw.type || 'unknown')
+    const rawCanonicalType = String(raw.event_type || raw.type || 'unknown')
+    const canonicalType = rawCanonicalType === 'progress' ? 'assistant.progress' : rawCanonicalType
     const toolName = raw.related_tool || raw.tool || raw.name || details.tool || details.name
     // `plan.step.*` is lifecycle bookkeeping. Restore the real operation
     // instead, exactly as the live stream does, so a web result never becomes
@@ -83,7 +84,10 @@ function restoreActivity(events: Record<string, unknown>[] | undefined): Timelin
       command: typeof raw.related_command === 'string' ? raw.related_command : typeof details.command === 'string' ? details.command : undefined,
       path: typeof files[0] === 'string' ? files[0] : typeof raw.path === 'string' ? raw.path : undefined,
       cwd: typeof details.cwd === 'string' ? details.cwd : undefined,
-      summary: typeof raw.summary === 'string' ? raw.summary : typeof details.text === 'string' ? details.text : undefined,
+      summary: typeof raw.summary === 'string' ? raw.summary
+        : typeof details.note === 'string' ? details.note
+          : typeof details.text === 'string' ? details.text
+            : typeof details.message === 'string' ? details.message : undefined,
       output: typeof raw.output === 'string' ? raw.output : typeof raw.result === 'string' ? raw.result : typeof details.output === 'string' ? details.output : typeof details.result === 'string' ? details.result : undefined,
       error: raw.error && typeof raw.error === 'object' && typeof (raw.error as Record<string, unknown>).message === 'string' ? String((raw.error as Record<string, unknown>).message) : undefined,
       exitCode: typeof rawExitCode === 'number' ? rawExitCode : undefined,

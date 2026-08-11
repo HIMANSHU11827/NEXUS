@@ -1,35 +1,29 @@
-/**
- * Nexus TUI v3.0 — Workspace Sidebar Panel
- * Right-hand panel: context meter, activity rail, and mode-switching bodies
- * (question, plan, hive, activity, mcp, workspace).
- */
+/** Right-side run inspector for task, live activity, context, and changes. */
 import React from 'react';
 import {Box, Text} from 'ink';
 import {HivePanelBody} from './hive-panel.js';
-import {MCPPanelBody} from './inline-activity.js';
+import {MCPPanelBody, activityKindLabel} from './inline-activity.js';
 import type {McpServerItem} from './inline-activity.js';
-import {TodoPanelBody, WorkspacePanelBody} from './task-list.js';
+import {WorkspacePanelBody} from './task-list.js';
 import {ActivityPanelBody, QuestionPanelBody, PlanPanelBody} from './details-panel.js';
+import {phaseDisplayLabel} from './banner.js';
 import {
     THEME,
-    CONTEXT_BAR_WIDTH,
-    MAX_TIMELINE_ITEMS,
     formatContextPercent,
     formatTokens,
     formatDurationMs,
     compactTaskSubject,
-    timelineColor,
-    timelineGlyph,
+    getFileName,
     statusColor,
-    activityStatusGlyph,
     activityColor,
-    activityGlyph,
     type ActivityItem,
     type AgentInfo,
+    type FileStatus,
     type TimelineEvent,
     type UsageStats,
     type TaskItem,
-    type PendingQuestion
+    type PendingQuestion,
+    type WorkingPhase
 } from './helpers.js';
 
 interface NexusWorkspacePanelProps {
@@ -38,7 +32,7 @@ interface NexusWorkspacePanelProps {
     mode: string;
     agents: AgentInfo[];
     tasks: TaskItem[];
-    touchedFiles: Array<{name: string; status: string}>;
+    touchedFiles: FileStatus[];
     activityItems: ActivityItem[];
     pendingQuestion: PendingQuestion | null;
     selectedQuestionIndex: number;
@@ -53,135 +47,138 @@ interface NexusWorkspacePanelProps {
     motionFrame: number;
     width: number;
     height: number;
+    currentTask?: string;
+    isWorking?: boolean;
+    workingPhase?: WorkingPhase;
+    elapsedMs?: number;
 }
 
-const ContextMeter = React.memo(({usage}: {usage: UsageStats}) => {
-    const rawPercent = usage.contextLimit > 0 ? Math.min(100, (usage.contextTokens / usage.contextLimit) * 100) : 0;
-    const filledCells = rawPercent > 0
-        ? Math.max(1, Math.min(CONTEXT_BAR_WIDTH, Math.round((rawPercent / 100) * CONTEXT_BAR_WIDTH)))
+const SectionLabel = ({children}: {children: React.ReactNode}) => (
+    <Text color="blueBright" bold>{children}</Text>
+);
+
+const Divider = ({width}: {width: number}) => (
+    <Text color={THEME.borderSoft}>{'─'.repeat(Math.max(1, width - 4))}</Text>
+);
+
+const ContextMeter = ({usage, width}: {usage: UsageStats; width: number}) => {
+    const rawPercent = usage.contextLimit > 0
+        ? Math.min(100, (usage.contextTokens / usage.contextLimit) * 100)
         : 0;
-    const emptyCells = CONTEXT_BAR_WIDTH - filledCells;
-    const contextLabel = formatContextPercent(usage.contextTokens, usage.contextLimit);
-    const contextColor = rawPercent >= 85 ? 'red' : rawPercent >= 60 ? 'yellow' : 'green';
+    const barWidth = Math.max(8, Math.min(28, width - 10));
+    const filledCells = rawPercent > 0 ? Math.max(1, Math.round(rawPercent / 100 * barWidth)) : 0;
+    const emptyCells = Math.max(0, barWidth - filledCells);
+    const color = rawPercent >= 85 ? 'red' : rawPercent >= 60 ? 'yellow' : 'green';
 
     return (
-        <Box flexDirection="column" marginBottom={1}>
+        <Box flexDirection="column">
             <Box justifyContent="space-between">
-                <Text color="white" bold>Context</Text>
-                <Text color={contextColor}>{contextLabel}</Text>
+                <SectionLabel>CONTEXT</SectionLabel>
+                <Text color={color}>{formatContextPercent(usage.contextTokens, usage.contextLimit)}</Text>
             </Box>
-
             <Box>
-                <Text color={contextColor}>{'█'.repeat(filledCells)}</Text>
-                <Text color="grey30">{'░'.repeat(emptyCells)}</Text>
+                <Text color={color}>{'█'.repeat(filledCells)}</Text>
+                <Text color="grey">{'░'.repeat(emptyCells)}</Text>
             </Box>
-
-            <Box>
-                <Text color="grey">Tokens </Text>
-                <Text color="grey30">↑ </Text>
-                <Text color="grey">{formatTokens(usage.inputTokens)} </Text>
-                <Text color="grey30">↓ </Text>
-                <Text color="grey">{formatTokens(usage.outputTokens)}</Text>
-                <Text color="grey30"> · total </Text>
-                <Text color="grey">{formatTokens(usage.contextTokens)}</Text>
-            </Box>
+            <Text color="grey">
+                {formatTokens(usage.contextTokens)} / {formatTokens(usage.contextLimit)} tokens
+                {'  '}↑{formatTokens(usage.inputTokens)} ↓{formatTokens(usage.outputTokens)}
+            </Text>
         </Box>
     );
-});
+};
 
-const ActivityRail = React.memo(({
-    timeline,
+const fileStatusGlyph = (status: string) => {
+    const normalized = status.toLowerCase();
+    if (normalized.includes('delete')) return '-';
+    if (normalized.includes('create') || normalized.includes('add')) return '+';
+    return '~';
+};
+
+const WorkspaceSummary = ({
+    currentTask,
+    isWorking,
+    workingPhase,
+    elapsedMs,
     activityItems,
-    selectedActivityId,
-    motionFrame
+    touchedFiles,
+    usage,
+    width,
+    height
 }: {
-    timeline: TimelineEvent[];
+    currentTask: string;
+    isWorking: boolean;
+    workingPhase: WorkingPhase;
+    elapsedMs: number;
     activityItems: ActivityItem[];
-    selectedActivityId: string | null;
-    motionFrame: number;
+    touchedFiles: FileStatus[];
+    usage: UsageStats;
+    width: number;
+    height: number;
 }) => {
-    if (activityItems.length === 0) return null;
-
-    const visibleTimeline = timeline.length > 0 ? timeline.slice(-MAX_TIMELINE_ITEMS) : [
-        {kind: 'step' as const, weight: 1, label: 'Session ready'}
-    ];
-    const activityEvents = visibleTimeline.slice(-CONTEXT_BAR_WIDTH);
-    const latestEvent = activityEvents[activityEvents.length - 1];
-    const running = activityItems.find(activity =>
-        ['running', 'queued', 'pending', 'in_progress', 'working'].includes(activity.status.toLowerCase())
-    );
-    const latestActivity = running || activityItems[0] || null;
-    const activityLabel = latestActivity
-        ? compactTaskSubject(`${latestActivity.toolName || latestActivity.kind} ${latestActivity.status}`, 24)
-        : compactTaskSubject(latestEvent?.label || 'Session ready', 24);
-    const railMarker = (index: number, event: TimelineEvent) => {
-        const isLatest = index === activityEvents.length - 1;
-        if (isLatest && running) return ['●', running.logoColor || activityColor(running.kind)] as const;
-        if (isLatest) return ['●', timelineColor(event.kind)] as const;
-        return [timelineGlyph(event), timelineColor(event.kind)] as const;
-    };
-    const rows = activityItems.slice(0, 5);
+    const live = activityItems.find(item => ['running', 'queued', 'pending', 'in_progress', 'working', 'active'].includes(item.status.toLowerCase()));
+    const recent = activityItems.slice(0, height >= 30 ? 2 : height >= 22 ? 1 : 0);
+    const showContext = height >= 17;
+    const showChanges = height >= 25;
 
     return (
-        <Box flexDirection="column" marginBottom={1}>
-            <Box justifyContent="space-between">
-                <Text color="white" bold>Activity</Text>
-                <Text color={latestActivity ? (latestActivity.logoColor || activityColor(latestActivity.kind)) : timelineColor(latestEvent.kind)}>
-                    {activityLabel}
-                </Text>
-            </Box>
-            <Box>
-                <Text color="grey30">╺</Text>
-                {activityEvents.map((event, index) => {
-                    const [glyph, color] = railMarker(index, event);
-                    return (
-                        <Text key={`${event.kind}-${event.label}-${index}`} color={color}>
-                            {glyph}
-                        </Text>
-                    );
-                })}
-                <Text color="grey30">{'─'.repeat(Math.max(0, CONTEXT_BAR_WIDTH - activityEvents.length))}╸</Text>
-            </Box>
+        <Box flexDirection="column" flexGrow={1}>
+            <SectionLabel>TASK</SectionLabel>
+            <Text color="white" wrap={height < 22 ? 'truncate' : 'wrap'}>{currentTask || 'Ready for your next instruction'}</Text>
 
-            {rows.length > 0 ? (
-                <Box flexDirection="column" marginTop={1}>
-                    {rows.map((activity, index) => {
-                        const selected = activity.id === selectedActivityId;
-                        const isRunning = ['running', 'queued', 'pending', 'in_progress', 'working'].includes(activity.status.toLowerCase());
-                        const pulse = isRunning ? ['·', '∙', '•'][motionFrame % 3] : activityStatusGlyph(activity.status);
-                        const duration = formatDurationMs(activity.durationMs);
-                        const label = compactTaskSubject(activity.summary || activity.title || activity.toolName || activity.kind, 28);
-                        return (
-                            <Box key={activity.id} marginTop={index === 0 ? 0 : 1}>
-                                <Box width={3}>
-                                    <Text color={selected ? 'white' : activity.logoColor || activityColor(activity.kind)} bold={selected}>
-                                        {selected ? '›' : ' '}{activity.logo || activityGlyph(activity.kind)}
-                                    </Text>
-                                </Box>
-                                <Box flexDirection="column" flexGrow={1}>
-                                    <Box justifyContent="space-between">
-                                        <Text color={selected ? 'white' : 'grey'} bold={selected}>{activity.toolName || activity.kind}</Text>
-                                        <Text color={statusColor(activity.status)}>{pulse} {activity.status}</Text>
-                                    </Box>
-                                    <Text color="grey30" wrap="truncate">
-                                        {label}{duration ? ` · ${duration}` : ''}
-                                    </Text>
-                                </Box>
-                            </Box>
-                        );
-                    })}
+            <Box marginY={1}><Divider width={width} /></Box>
+
+            <SectionLabel>ACTIVITY</SectionLabel>
+            <Box justifyContent="space-between">
+                <Text color={isWorking ? 'yellowBright' : 'green'} bold>{isWorking ? '● Working' : '● Ready'}</Text>
+                {isWorking && elapsedMs > 0 && <Text color="grey">{formatDurationMs(elapsedMs)}</Text>}
+            </Box>
+            <Text color="grey" wrap="truncate">{live?.title || phaseDisplayLabel(workingPhase)}</Text>
+            {recent.map(activity => (
+                <Box key={activity.id} marginTop={1} flexDirection="column">
+                    <Box justifyContent="space-between">
+                        <Text color={activity.logoColor || activityColor(activity.kind)} bold>{activityKindLabel(activity.kind)}</Text>
+                        <Text color={statusColor(activity.status)}>{activity.status.toUpperCase()}</Text>
+                    </Box>
+                    <Text color="grey" wrap="truncate">{compactTaskSubject(activity.summary || activity.title || activity.toolName || 'activity', Math.max(12, width - 6))}</Text>
                 </Box>
-            ) : null}
+            ))}
+
+            {showContext && <><Box marginY={1}><Divider width={width} /></Box><ContextMeter usage={usage} width={width} /></>}
+
+            {showChanges && <>
+                <Box marginY={1}><Divider width={width} /></Box>
+                <SectionLabel>CHANGES</SectionLabel>
+                {touchedFiles.length === 0 ? (
+                    <Text color="grey">No files changed yet</Text>
+                ) : (
+                    touchedFiles.slice(0, Math.max(1, Math.min(8, height - 24))).map(file => (
+                    <Box key={file.name} justifyContent="space-between">
+                        <Box>
+                            <Text color={fileStatusGlyph(file.status) === '-' ? 'red' : 'green'}>{fileStatusGlyph(file.status)} </Text>
+                            <Text color="grey" wrap="truncate">{getFileName(file.name)}</Text>
+                        </Box>
+                        {(file.additions != null || file.deletions != null) && (
+                            <Box>
+                                <Text color="green">+{file.additions || 0}</Text>
+                                <Text color="red"> -{file.deletions || 0}</Text>
+                            </Box>
+                        )}
+                    </Box>
+                    ))
+                )}
+                {touchedFiles.length > 0 && <Text color="grey">{touchedFiles.length} file{touchedFiles.length === 1 ? '' : 's'} changed</Text>}
+            </>}
         </Box>
     );
-});
+};
 
-export const NexusWorkspacePanel = React.memo((({
-    timeline,
+export const NexusWorkspacePanel = React.memo(({
     usage,
     mode,
     agents,
     tasks,
+    touchedFiles,
     activityItems,
     pendingQuestion,
     selectedQuestionIndex,
@@ -189,30 +186,22 @@ export const NexusWorkspacePanel = React.memo((({
     planItems,
     planStatus,
     planExpanded,
-    mcpConnectedCount,
     mcpServers,
     selectedActivityId,
     selectedAgentId,
     width,
     height,
-    voiceMode,
-    voicePhase,
-    voiceTranscriptPreview,
-    voiceReplyPreview,
-    motionFrame
+    currentTask = '',
+    isWorking = false,
+    workingPhase = 'thinking',
+    elapsedMs = 0
 }: NexusWorkspacePanelProps & {
     voiceMode: 'off' | 'auto' | 'manual' | 'text';
     voicePhase: string;
     voiceTranscriptPreview: string;
     voiceReplyPreview: string;
 }) => {
-    const selectedActivity = activityItems.find(activity => activity.id === selectedActivityId) || null;
-    const backgroundTaskCount = tasks.filter(task =>
-        ['active', 'running', 'working', 'in_progress', 'background'].includes(task.status.toLowerCase())
-    ).length;
-    const activeHiveCount = agents.filter(agent =>
-        ['active', 'running', 'working', 'busy', 'spawned'].includes(agent.status.toLowerCase())
-    ).length;
+    const selectedActivity = activityItems.find(activity => activity.id === selectedActivityId) || activityItems[0] || null;
 
     return (
         <Box
@@ -225,45 +214,39 @@ export const NexusWorkspacePanel = React.memo((({
             paddingY={1}
             backgroundColor={THEME.panelBg}
         >
-            <Box marginBottom={1}>
-                <Text bold color="white">🐝 NEXUS</Text>
-            </Box>
-
-            <ContextMeter usage={usage} />
-
-            <ActivityRail
-                timeline={timeline}
-                activityItems={activityItems}
-                selectedActivityId={selectedActivityId}
-                motionFrame={motionFrame}
-            />
-
-            {(backgroundTaskCount > 0 || mcpConnectedCount > 0 || activeHiveCount > 0) && (
-                <Box flexDirection="column" marginBottom={1}>
-                    {backgroundTaskCount > 0 && <Text color="cyan">Background tasks  {backgroundTaskCount}</Text>}
-                    {mcpConnectedCount > 0 && <Text color="magentaBright">MCP connected     {mcpConnectedCount}</Text>}
-                    {activeHiveCount > 0 && <Text color="blueBright">Hive agents       {activeHiveCount}</Text>}
-                </Box>
-            )}
-
-            {mode === 'question' ? (
-                <QuestionPanelBody question={pendingQuestion} selectedIndex={selectedQuestionIndex} customActive={questionCustomMode === true} />
-            ) : mode === 'plan' ? (
-                <PlanPanelBody items={planItems} status={planStatus} expanded={planExpanded} />
-            ) : mode === 'hive' || mode === 'agent' ? (
-                <HivePanelBody agents={agents} selectedAgentId={mode === 'agent' ? selectedAgentId : null} tasks={tasks} width={width} />
-            ) : mode === 'activity' ? (
-                <ActivityPanelBody activity={selectedActivity} width={width} />
-            ) : mode === 'mcp' ? (
-                <MCPPanelBody servers={mcpServers} />
-            ) : (
-                <WorkspacePanelBody
-                    tasks={tasks}
-                    agents={agents}
-                    selectedAgentId={selectedAgentId}
+            {mode === 'workspace' ? (
+                <WorkspaceSummary
+                    currentTask={currentTask}
+                    isWorking={isWorking}
+                    workingPhase={workingPhase}
+                    elapsedMs={elapsedMs}
+                    activityItems={activityItems}
+                    touchedFiles={touchedFiles}
+                    usage={usage}
                     width={width}
+                    height={height}
                 />
+            ) : (
+                <Box flexDirection="column" flexGrow={1}>
+                    <Box justifyContent="space-between" marginBottom={1}>
+                        <Text bold color="cyanBright">NEXUS</Text>
+                        <Text color="blueBright" bold>{mode.toUpperCase()}</Text>
+                    </Box>
+                    {mode === 'question' ? (
+                        <QuestionPanelBody question={pendingQuestion} selectedIndex={selectedQuestionIndex} customActive={questionCustomMode === true} width={width} />
+                    ) : mode === 'plan' ? (
+                        <PlanPanelBody items={planItems} status={planStatus} expanded={planExpanded} />
+                    ) : mode === 'hive' || mode === 'agent' ? (
+                        <HivePanelBody agents={agents} selectedAgentId={mode === 'agent' ? selectedAgentId : null} tasks={tasks} width={width} />
+                    ) : mode === 'activity' ? (
+                        <ActivityPanelBody activity={selectedActivity} width={width} />
+                    ) : mode === 'mcp' ? (
+                        <MCPPanelBody servers={mcpServers} />
+                    ) : (
+                        <WorkspacePanelBody tasks={tasks} agents={agents} selectedAgentId={selectedAgentId} width={width} />
+                    )}
+                </Box>
             )}
         </Box>
     );
-}));
+});

@@ -75,8 +75,9 @@ class AnthropicProvider(NexusBaseProvider):
             "messages": [m for m in msgs if m["role"] != "system"]
         }
         self._add_tool_payload(payload, kwargs)
+        response = None
         try:
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=60)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=self.request_timeout(kwargs, 60))
             if response.status_code == 200:
                 data = response.json()
                 content = data.get("content", [])
@@ -100,7 +101,7 @@ class AnthropicProvider(NexusBaseProvider):
         }
         self._add_tool_payload(payload, kwargs)
         try:
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=120)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=self.request_timeout(kwargs, 120))
             if response.status_code == 200:
                 # Anthropic SSE streams: event: content_block_start, content_block_delta, content_block_stop, message_stop
                 # Accumulate tool_use blocks across stream events
@@ -219,6 +220,12 @@ class AnthropicProvider(NexusBaseProvider):
                 yield f"Error: {response.status_code} - {response.text}"
         except Exception as e:
             yield f"Error in Anthropic stream: {str(e)}"
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    logging.debug("Anthropic stream response cleanup failed", exc_info=True)
 
 if __name__ == "__main__":
     p = AnthropicProvider()

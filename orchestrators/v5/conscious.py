@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +214,7 @@ class ConsciousnessLayer:
     async def _introspect(self) -> Dict[str, Any]:
         """Perform introspection on current state."""
         introspection = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "mental_state": self.mental_state.__dict__,
             "self_capabilities": len(self.self_model.capabilities),
             "avg_performance": sum(self.self_model.performance_history) / len(self.self_model.performance_history) if self.self_model.performance_history else 0.0

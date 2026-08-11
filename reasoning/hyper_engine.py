@@ -55,6 +55,9 @@ class ReasoningPlan:
     steps: List[ReasoningStep] = field(default_factory=list)
     uncertainty: float = 0.0
     critiques: List[str] = field(default_factory=list)
+    # Set from the critic's parsed ``should_replan`` signal so callers can
+    # act on it; without this the signal is parsed and then discarded.
+    should_replan: bool = False
     rationale: str = ""
     source: str = "deterministic"
 
@@ -272,6 +275,7 @@ class HyperReasoningEngine:
         # Compute uncertainty BEFORE critique so _deterministic_critique can use it.
         plan.uncertainty = self.estimate_uncertainty(task, plan.steps, [])
         plan.critiques = self.critique(plan)
+        self._apply_critic_signal(plan, task)
         return plan
 
     async def aplan(self, task: str, context: str = "") -> ReasoningPlan:
@@ -280,7 +284,28 @@ class HyperReasoningEngine:
         plan = self._plan_from_llm(task, raw) or self._deterministic_plan(task)
         plan.uncertainty = self.estimate_uncertainty(task, plan.steps, [])
         plan.critiques = await self.acritique(plan)
+        self._apply_critic_signal(plan, task)
         return plan
+
+    def _apply_critic_signal(self, plan: ReasoningPlan, task: str) -> None:
+        """Fold the critic's real output back into the plan.
+
+        The critic's ``critiques`` list and its parsed ``should_replan`` /
+        ``confidence`` signal were previously computed after the only
+        ``estimate_uncertainty`` call, so neither ever influenced the plan
+        returned to callers. Re-scoring here is the read side of that
+        already-stored state; it never raises.
+        """
+        try:
+            signal = getattr(self, "_last_critic_signal", None)
+            plan.should_replan = bool(
+                isinstance(signal, dict) and signal.get("should_replan")
+            )
+            plan.uncertainty = self.estimate_uncertainty(
+                task, plan.steps, plan.critiques
+            )
+        except Exception:  # noqa: BLE001 - scoring must never break planning
+            logger.debug("HyperReasoningEngine: critic signal apply failed", exc_info=True)
 
     @staticmethod
     def _plan_prompt(task: str, context: str = "") -> str:

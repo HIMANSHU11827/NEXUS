@@ -11,6 +11,7 @@ Also exposes the pure diagnostics/compaction helpers used by ``/context``:
 from __future__ import annotations
 
 import json
+import copy
 from typing import Any, Dict, List
 
 from context.persistence import NexusFilePersistence
@@ -112,6 +113,39 @@ def _tool_windows(messages: List[Dict[str, Any]]) -> List[List[int]]:
     return windows
 
 
+_CRITICAL_CONTEXT_TERMS = (
+    "objective", "constraint", "decision", "changed file", "modified file",
+    "error", "failed", "failure", "unresolved", "remaining", "todo", "test",
+)
+
+
+def _critical_excerpts(messages: List[Dict[str, Any]], limit: int = 12) -> List[str]:
+    """Keep small, deterministic excerpts for facts likely needed after compaction."""
+    excerpts: List[str] = []
+    seen: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") in {"tool", "system"}:
+            continue
+        text = str(message.get("content") or message.get("text") or "")
+        for line in text.splitlines():
+            clean = " ".join(line.split()).strip()
+            lowered = clean.lower()
+            if len(clean) < 8 or not any(term in lowered for term in _CRITICAL_CONTEXT_TERMS):
+                continue
+            if len(clean) > 320:
+                marker_positions = [clean.lower().find(term) for term in _CRITICAL_CONTEXT_TERMS if clean.lower().find(term) >= 0]
+                marker = min(marker_positions) if marker_positions else 0
+                start = max(0, min(marker - 100, len(clean) - 320))
+                clean = ("..." if start else "") + clean[start:start + 320]
+            if clean.lower() in seen:
+                continue
+            seen.add(clean.lower())
+            excerpts.append(clean)
+            if len(excerpts) >= max(1, int(limit)):
+                return excerpts
+    return excerpts
+
+
 def compact_messages(
     messages: List[Dict[str, Any]],
     budget_tokens: int,
@@ -139,7 +173,13 @@ def compact_messages(
         m for m in msgs if not (isinstance(m, dict) and m.get("role") == "system")
     ]
 
-    if len(non_system) <= keep_recent and inspect(msgs)["est_tokens"] <= budget_tokens:
+    # ``est_tokens`` is intentionally a rough, floored diagnostic value.  It
+    # cannot be used as a hard admission check: e.g. five characters estimate
+    # to one token while the one-token character envelope is only four
+    # characters.  Use the same hard envelope as ``_fit_budget`` so the fast
+    # path cannot return an oversized recent-only transcript.
+    hard_limit = max(0, int(budget_tokens)) * 4
+    if len(non_system) <= keep_recent and inspect(msgs)["total_chars"] <= hard_limit:
         return msgs, 0
 
     cutoff = max(0, len(non_system) - keep_recent)
@@ -151,7 +191,11 @@ def compact_messages(
 
     head = non_system[:cutoff]
     if not head:
-        return msgs, 0  # everything is already "recent" — nothing to merge
+        # Even when every non-system message is recent, the combined system
+        # prompt and recent tail may exceed the hard budget. The old early
+        # return bypassed _fit_budget entirely and sent oversized requests.
+        fitted = _fit_budget(msgs, budget_tokens)
+        return fitted, max(0, len(msgs) - len(fitted))
     tail = non_system[cutoff:]
 
     head_windows = _tool_windows(head)
@@ -176,6 +220,10 @@ def compact_messages(
         summary_parts.append(f"{role}: {str(text)[:200]}")
         i += 1
 
+    critical = _critical_excerpts(head)
+    if critical:
+        summary_parts.insert(0, "[PRESERVED CRITICAL CONTEXT]")
+        summary_parts[1:1] = [f"- {excerpt}" for excerpt in critical]
     summary_text = "[SUMMARY OF EARLIER CONTEXT]\n" + "\n".join(summary_parts)
     max_summary_chars = max(1, budget_tokens * 4)
     if len(summary_text) > max_summary_chars:
@@ -186,4 +234,42 @@ def compact_messages(
     result.append({"role": "system", "content": summary_text})
     result.extend(kept_head)
     result.extend(tail)
-    return result, dropped
+    fitted = _fit_budget(result, budget_tokens)
+    return fitted, max(dropped, len(result) - len(fitted))
+
+
+def _fit_budget(messages: List[Dict[str, Any]], budget_tokens: int) -> List[Dict[str, Any]]:
+    """Enforce the total budget after summary and recent tail are assembled."""
+    # Compaction must be observationally pure. In particular, the final
+    # system-content trim below must not mutate the caller's live transcript.
+    result = copy.deepcopy(list(messages))
+    limit = max(0, int(budget_tokens)) * 4
+    while result and inspect(result)["total_chars"] > limit:
+        indices = [i for i, message in enumerate(result)
+                   if not (isinstance(message, dict) and message.get("role") == "system")]
+        if not indices:
+            break
+        index = indices[0]
+        remove = {index}
+        if _is_tool_call(result[index]):
+            j = index + 1
+            while j < len(result) and _is_tool_result(result[j]):
+                remove.add(j)
+                j += 1
+        elif index > 0 and _is_tool_result(result[index]) and _is_tool_call(result[index - 1]):
+            remove.add(index - 1)
+        result = [message for i, message in enumerate(result) if i not in remove]
+    if inspect(result)["total_chars"] > limit:
+        remaining = limit - sum(len(_msg_text(message)) for message in result
+                                if not (isinstance(message, dict) and message.get("role") == "system"))
+        for message in result:
+            if isinstance(message, dict) and message.get("role") == "system":
+                content = str(message.get("content") or "")
+                keep = max(0, min(len(content), remaining))
+                suffix = "\n[system context truncated to fit budget]"
+                if keep >= len(suffix):
+                    message["content"] = content[:keep - len(suffix)] + suffix
+                else:
+                    message["content"] = content[:keep]
+                remaining -= keep
+    return result

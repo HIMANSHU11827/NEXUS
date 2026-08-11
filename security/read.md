@@ -12,7 +12,7 @@ Security policies, secret scanning, and release hygiene.
 
 ## Related Security Infrastructure
 - `sandbox/risk.py` — CommandRiskScorer (3 tiers, 8 regex rules)
-- `tools/threat_patterns.py` — Content-level threat detection (55 regex patterns, 3 scopes)
+- `tools/threat_patterns.py` — Content-level threat detection (41 regex patterns, 3 scopes)
 - `plugins/trust.py` — Plugin trust model with install opt-in
 - `safety/` — Sovereign laws + logic prover
 - `mcp/security.py` — MCP security boundary

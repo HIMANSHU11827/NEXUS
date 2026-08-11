@@ -27,6 +27,8 @@ import sys
 from contextlib import suppress
 from typing import Any, Dict, List, Optional, Tuple
 
+from providers.reliability import redact_secrets
+
 
 class _TextToolCall:
     """Duck-typed ToolCall shape for text extraction (no circular import).
@@ -48,6 +50,40 @@ class V5ToolExecutor:
     """Mixin providing real tool execution with security checks."""
 
     COMMAND_ALIASES = ("bash", "run_command", "terminal", "shell", "execute_command")
+
+    async def _record_tool_feedback(self, call, delta: float) -> None:
+        """Record tool outcome without blocking the async execution path."""
+        root = str(getattr(self, "root_dir", "") or "").strip()
+        if not root:
+            return
+        try:
+            from neural.nerve_center import NexusNerveCenter
+
+            nerve = getattr(self, "_feedback_nerve", None)
+            if nerve is None:
+                nerve = await asyncio.to_thread(NexusNerveCenter, root)
+                self._feedback_nerve = nerve
+            await asyncio.to_thread(
+                nerve.reinforce,
+                "tool_execution",
+                str(getattr(call, "name", "unknown") or "unknown"),
+                delta,
+            )
+        except Exception:
+            # Feedback must never change tool execution semantics.
+            logger = getattr(self, "logger", None)
+            if logger is not None:
+                logger.debug("tool feedback recording unavailable", exc_info=True)
+
+    async def _run_tool(self, call) -> str:
+        """Execute a tool and record an auditable success/failure signal."""
+        try:
+            result = await self._run_tool_impl(call)
+        except Exception:
+            await self._record_tool_feedback(call, -1.0)
+            raise
+        await self._record_tool_feedback(call, 1.0)
+        return result
 
     def _current_run_control(self):
         registry = getattr(self, "_run_controls", None)
@@ -72,6 +108,16 @@ class V5ToolExecutor:
         task = asyncio.ensure_future(awaitable)
         try:
             while not task.done():
+                registry = getattr(self, "_run_controls", None)
+                current = str(getattr(self, "_current_turn_id", "") or "")
+                refresh = getattr(registry, "refresh_cancel", None)
+                if callable(refresh) and current:
+                    try:
+                        refresh(current)
+                    except Exception:
+                        logger = getattr(self, "logger", None)
+                        if logger is not None:
+                            logger.debug("could not refresh durable tool cancellation", exc_info=True)
                 if control.cancelled:
                     task.cancel()
                     with suppress(asyncio.CancelledError):
@@ -107,7 +153,7 @@ class V5ToolExecutor:
     # EXECUTION
     # ────────────────────────────────────────────────────────────────────────
 
-    async def _run_tool(self, call) -> str:
+    async def _run_tool_impl(self, call) -> str:
         """Resolve, audit and execute a single tool call for real.
 
         Commands go through risk scoring, the permission system and the
@@ -127,11 +173,15 @@ class V5ToolExecutor:
                 or ""
             )
             if not cmd.strip():
-                raise RuntimeError("Error: empty command")
+                error_text = "Error: empty command"
+                await self._emit_tool_event(call, status="failed", error=error_text)
+                raise RuntimeError(error_text)
 
             sandbox = self.runtime.sandbox
             if sandbox is None:
-                raise RuntimeError("Error: sandbox unavailable")
+                error_text = "Error: sandbox unavailable"
+                await self._emit_tool_event(call, status="failed", error=error_text)
+                raise RuntimeError(error_text)
 
             if self.runtime.risk_scorer is not None:
                 assessment = self.runtime.risk_scorer.assess(cmd)
@@ -179,6 +229,9 @@ class V5ToolExecutor:
             stream_kwargs = {
                 "workdir": call.params.get("cwd") or call.params.get("working_directory"),
             }
+            requested_shell = call.params.get("shell")
+            if requested_shell:
+                stream_kwargs["shell"] = requested_shell
             remaining = self._remaining_run_budget()
             if remaining is not None:
                 stream_kwargs["timeout"] = max(0.001, remaining)
@@ -186,8 +239,9 @@ class V5ToolExecutor:
             try:
                 while True:
                     chunk = await self._next_run_stream_item(iterator)
-                    chunks.append(chunk)
-                    await self._emit_tool_chunk(call, chunk, sequence)
+                    safe_chunk = redact_secrets(chunk)
+                    chunks.append(safe_chunk)
+                    await self._emit_tool_chunk(call, safe_chunk, sequence)
                     sequence += 1
             except StopAsyncIteration:
                 pass
@@ -195,7 +249,24 @@ class V5ToolExecutor:
                 await self._close_stream(iterator)
             result = "".join(chunks)
             exit_code = getattr(sandbox, "last_exit_code", None)
-            if exit_code not in (None, 0):
+            # Preserve the trusted sandbox exit code for the direct-loop
+            # action envelope; returning only text loses verifier identity.
+            self._last_tool_exit_code = exit_code
+            # A sandbox can fail before a child process starts, so the exit
+            # code may be missing. Treat structured sandbox/execution markers
+            # as failures too; otherwise a blocked command is fed back as a
+            # successful tool result and the model cannot repair it.
+            sandbox_failure = any(marker in result for marker in (
+                "[SANDBOX_BLOCK]", "[SANDBOX_TIMEOUT]", "[SANDBOX_ERROR]",
+                "[EXECUTION_ERROR]",
+            ))
+            exit_marker = re.search(r"\[EXIT_CODE\]:\s*(-?\d+)", result)
+            if exit_marker and exit_code in (None, 0):
+                try:
+                    exit_code = int(exit_marker.group(1))
+                except ValueError:
+                    exit_code = -1
+            if exit_code not in (None, 0) or sandbox_failure:
                 error_text = f"Error: command exited with code {exit_code}.\n{result}"
                 await self._emit_tool_event(
                     call, status="error", result=result, error=error_text, exit_code=exit_code
@@ -242,8 +313,22 @@ class V5ToolExecutor:
             raise RuntimeError(error_text)
 
         lint_path = call.params.get("path") or call.params.get("filepath")
+        edit_snapshot = None
         if call.name in {"modifying", "creating"} and lint_path:
-            lint_ok, lint_error = self._lint_source(lint_path)
+            edit_snapshot = await asyncio.to_thread(
+                self._capture_edit_snapshot, lint_path
+            )
+            if edit_snapshot.get("error"):
+                error_text = f"Error: edit snapshot failed: {edit_snapshot['error']}"
+                await self._emit_tool_event(call, status="error", error=error_text)
+                await self._fire_post_tool_hooks(call, "error", error=error_text)
+                await self._mark_tool_lifecycle(call, error=True)
+                raise RuntimeError(error_text)
+            # This is a preflight check only. The authoritative check happens
+            # after the tool writes the candidate content below.
+            lint_ok, lint_error = await asyncio.to_thread(
+                self._lint_source, edit_snapshot["path"]
+            )
             if not lint_ok:
                 error_text = f"Error: edit rejected by lint:\n{lint_error}"
                 await self._emit_tool_event(call, status="error", result="", error=error_text)
@@ -265,6 +350,10 @@ class V5ToolExecutor:
             "session_id": self.session_id,
             "root": self.root_dir,
             "tool_registry": registry,
+            "idempotency_key": str(
+                getattr(getattr(self.runtime, "current_turn", None), "metadata", {})
+                .get("idempotency_key") or ""
+            )[:240],
         }
         control = self._current_run_control()
         remaining = self._remaining_run_budget()
@@ -284,9 +373,12 @@ class V5ToolExecutor:
                 if ToolResult is not None and isinstance(item, ToolResult):
                     text = str(item.output or item.error or "")
                     if not item.success:
-                        failed_error = str(item.error or "Tool execution failed")
+                        failed_error = redact_secrets(
+                            item.error or "Tool execution failed"
+                        )[:4000]
                 else:
                     text = str(item)
+                text = redact_secrets(text)
                 if text:
                     chunks.append(text)
                     await self._emit_tool_chunk(
@@ -297,7 +389,7 @@ class V5ToolExecutor:
                     )
                     sequence += 1
         except Exception as e:
-            error_text = f"Error: tool execution failed: {e}"
+            error_text = f"Error: tool execution failed: {redact_secrets(e)[:4000]}"
             await self._emit_tool_event(call, status="error", error=error_text)
             raise RuntimeError(error_text)
         finally:
@@ -310,6 +402,22 @@ class V5ToolExecutor:
             await self._fire_post_tool_hooks(call, "error", error=error_text)
             await self._mark_tool_lifecycle(call, error=True)
             raise RuntimeError(error_text)
+
+        if edit_snapshot is not None:
+            post_ok, post_error = await asyncio.to_thread(
+                self._lint_source, edit_snapshot["path"]
+            )
+            if not post_ok:
+                rollback_error = await asyncio.to_thread(
+                    self._restore_edit_snapshot, edit_snapshot
+                )
+                error_text = f"Error: edit rejected by post-write lint:\n{post_error}"
+                if rollback_error:
+                    error_text += f"\nRollback failed: {rollback_error}"
+                await self._emit_tool_event(call, status="error", result=result, error=error_text)
+                await self._fire_post_tool_hooks(call, "error", error=error_text)
+                await self._mark_tool_lifecycle(call, error=True)
+                raise RuntimeError(error_text)
         await self._emit_tool_event(call, status="done", result=result)
         await self._fire_post_tool_hooks(call, "done", result=result)
         await self._mark_tool_lifecycle(call, error=False)
@@ -757,8 +865,41 @@ class V5ToolExecutor:
                 except Exception as e:
                     return False, str(e)
             return True, ""
-        except Exception:
-            return True, ""
+        except Exception as exc:
+            # Existing files must fail closed when validation itself cannot
+            # run. Returning success here turns an unavailable quality gate
+            # into a false edit approval.
+            return False, f"lint execution failed: {exc}"
+
+    def _capture_edit_snapshot(self, path: str) -> Dict[str, Any]:
+        """Capture an edit target so failed post-write validation can rollback."""
+        try:
+            raw = os.fspath(path)
+            target = os.path.abspath(
+                os.path.normpath(raw if os.path.isabs(raw) else os.path.join(self.root_dir, raw))
+            )
+            if os.path.isfile(target):
+                with open(target, "rb") as handle:
+                    return {"path": target, "exists": True, "content": handle.read()}
+            return {"path": target, "exists": False, "content": b""}
+        except Exception as exc:
+            return {"path": "", "exists": False, "content": b"", "error": str(exc)}
+
+    @staticmethod
+    def _restore_edit_snapshot(snapshot: Dict[str, Any]) -> str:
+        """Restore a captured edit target; return an error instead of raising."""
+        try:
+            target = str(snapshot.get("path") or "")
+            if not target:
+                return "missing rollback target"
+            if snapshot.get("exists"):
+                with open(target, "wb") as handle:
+                    handle.write(bytes(snapshot.get("content") or b""))
+            elif os.path.exists(target):
+                os.remove(target)
+            return ""
+        except Exception as exc:
+            return str(exc)
 
     def _read_windowed(self, path: str, *, window: int = 100, offset: int = 0) -> str:
         """Return a bounded line window of a file with a location header.
@@ -810,6 +951,20 @@ class V5ToolExecutor:
         except Exception:
             return False
 
+    def _write_code_action_file(self, code: str) -> str:
+        """Write a bounded code-action file under the runtime temp root."""
+        root = os.path.realpath(os.path.abspath(str(self.root_dir or os.getcwd())))
+        tmp_dir = os.path.realpath(os.path.join(root, ".nexus_v5", "tmp"))
+        os.makedirs(tmp_dir, exist_ok=True)
+        turn = str(getattr(self, "_current_turn_id", "") or "default")
+        safe_turn = re.sub(r"[^A-Za-z0-9_.-]+", "_", turn).strip("._")[:120] or "default"
+        file_path = os.path.abspath(os.path.join(tmp_dir, f"code_action_{safe_turn}.py"))
+        if os.path.commonpath([tmp_dir, file_path]) != tmp_dir:
+            raise ValueError("code-action path escaped the temporary workspace")
+        with open(file_path, "w", encoding="utf-8") as fh:
+            fh.write(code)
+        return file_path
+
     async def _execute_code_action(self, code: str, *, workdir: str = "") -> str:
         """Run fenced-python code through the sandbox; never raises.
 
@@ -817,8 +972,8 @@ class V5ToolExecutor:
         ``NEXUS_CODE_ACTION=1`` is set (env wins, "0" disables). Code is
         written to ``<root>/.nexus_v5/tmp/code_action_<turn>.py`` and executed
         via ``sandbox.stream_execute`` when available (output capped at 20000
-        chars), else a 60s subprocess fallback. Non-zero exits append an
-        "Error:" line.
+        chars). If no sandbox is active, it fails closed instead of spawning
+        an unsandboxed interpreter. Non-zero exits append an "Error:" line.
         """
         try:
             if not self._code_action_active():
@@ -826,47 +981,34 @@ class V5ToolExecutor:
             code = str(code or "")
             if not code.strip():
                 return "Error: code-action failed: empty code"
-            tmp_dir = os.path.join(self.root_dir, ".nexus_v5", "tmp")
-            os.makedirs(tmp_dir, exist_ok=True)
-            turn = getattr(self, "_current_turn_id", "") or "default"
-            file_path = os.path.join(tmp_dir, f"code_action_{turn}.py")
-            with open(file_path, "w", encoding="utf-8") as fh:
-                fh.write(code)
-
             sandbox = getattr(getattr(self, "runtime", None), "sandbox", None)
-            if sandbox is not None and hasattr(sandbox, "stream_execute"):
-                chunks: List[str] = []
-                stream_kwargs = {"workdir": workdir or self.root_dir}
-                remaining = self._remaining_run_budget()
-                if remaining is not None:
-                    stream_kwargs["timeout"] = max(0.001, remaining)
-                iterator = sandbox.stream_execute(f'python "{file_path}"', **stream_kwargs)
-                try:
-                    while True:
-                        try:
-                            chunks.append(str(await self._next_run_stream_item(iterator)))
-                        except StopAsyncIteration:
-                            break
-                finally:
-                    await self._close_stream(iterator)
-                output = "".join(chunks)[:20000]
-                exit_code = getattr(sandbox, "last_exit_code", None)
-                if exit_code not in (None, 0):
-                    output += f"\nError: code-action exited with code {exit_code}"
-                return output
+            if sandbox is None or not hasattr(sandbox, "stream_execute"):
+                return "Error: code-action requires an active sandbox"
+            file_path = await asyncio.to_thread(self._write_code_action_file, code)
+
+            chunks: List[str] = []
+            stream_kwargs = {"workdir": workdir or self.root_dir}
             remaining = self._remaining_run_budget()
-            process = subprocess.run(
-                [sys.executable, file_path],
-                capture_output=True,
-                text=True,
-                timeout=min(60.0, remaining) if remaining is not None else 60,
-            )
-            output = (process.stdout or "")[:20000]
-            if process.returncode != 0:
-                output += f"\nError: {process.stderr or 'code-action failed'}"[:20000]
+            if remaining is not None:
+                stream_kwargs["timeout"] = max(0.001, remaining)
+            iterator = sandbox.stream_execute(f'python "{file_path}"', **stream_kwargs)
+            try:
+                while True:
+                    try:
+                        chunks.append(
+                            redact_secrets(await self._next_run_stream_item(iterator))
+                        )
+                    except StopAsyncIteration:
+                        break
+            finally:
+                await self._close_stream(iterator)
+            output = "".join(chunks)[:20000]
+            exit_code = getattr(sandbox, "last_exit_code", None)
+            if exit_code not in (None, 0):
+                output += f"\nError: code-action exited with code {exit_code}"
             return output
         except Exception as e:
-            return f"Error: code-action failed: {e}"
+            return f"Error: code-action failed: {redact_secrets(e)[:2000]}"
 
     # ────────────────────────────────────────────────────────────────────────
     # CANONICALIZATION (V5: _canonicalize_tool_call)

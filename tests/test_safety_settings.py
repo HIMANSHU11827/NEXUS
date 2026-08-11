@@ -1,7 +1,7 @@
 """Tests for the persistent Safety settings system (safety/safety_store.py).
 
 All state is isolated to a temporary config file via ``_CONFIG_PATH``
-monkeypatching, so the real ``config/nexus_config.yaml`` is never modified.
+monkeypatching, so the real ``config/settings.yml`` is never modified.
 Server tests additionally redirect ``server._CONFIG_PATH`` so runtime-preference
 persistence also stays inside the temp file.
 """
@@ -33,7 +33,7 @@ SANDBOX_METADATA_KEYS = {
 @pytest.fixture
 def isolated_store(tmp_path, monkeypatch):
     """Point the Safety store at a throwaway config file, seeded with defaults."""
-    config_path = tmp_path / "nexus_config.yaml"
+    config_path = tmp_path / "settings.yml"
     monkeypatch.setattr(safety_store, "_CONFIG_PATH", config_path)
     monkeypatch.setattr(safety_store, "_STATE", None)
     safety_store._SCAN_COUNTS.update({"blocked": 0, "redacted": 0, "pending": 0, "last_scan": None})
@@ -313,7 +313,7 @@ def safety_server(tmp_path, monkeypatch):
 
     ws_dir = tmp_path / "ws"
     ws_dir.mkdir(exist_ok=True)
-    config_path = tmp_path / "nexus_config.yaml"
+    config_path = tmp_path / "settings.yml"
 
     monkeypatch.setattr(safety_store, "_CONFIG_PATH", config_path)
     monkeypatch.setattr(safety_store, "_STATE", None)

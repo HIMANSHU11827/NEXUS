@@ -126,7 +126,7 @@ def test_command_stream_forwards_requested_timeout_and_surfaces_timeout_error(tm
         def __init__(self, root_dir):
             self.root_dir = root_dir
 
-        async def stream_execute(self, command, workdir=None, timeout=None):
+        async def stream_execute(self, command, workdir=None, timeout=None, shell=None):
             calls.append(timeout)
             yield "[SANDBOX_TIMEOUT]: Execution exceeded 5 seconds."
 

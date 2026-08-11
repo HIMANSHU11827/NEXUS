@@ -20,7 +20,7 @@ import logging
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional
 
-from .persistence import load_state, save_state
+from .persistence import load_state, persistence_status, save_state
 
 
 class LifecycleState(Enum):

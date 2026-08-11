@@ -1,4 +1,6 @@
 import sys
+import asyncio
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -50,6 +52,51 @@ def test_server_chat_cancel_route_aborts_active_loop():
     assert payload["run_id"] == "turn-server-cancel"
     assert payload["event"]["type"] == "run.cancelled"
     _LOOPS.clear()
+
+
+@pytest.mark.asyncio
+async def test_server_cancel_handler_releases_a_live_v5_tool_wait(tmp_path):
+    """The API cancellation boundary must reach the actual cooperative wait."""
+    from nexus.run_control import RunControlRegistry
+    from orchestrators.v5.tools import V5ToolExecutor
+    import server
+
+    store_path = str(tmp_path / "route-cancel.sqlite3")
+    running = RunControlRegistry(store_path=store_path)
+    surface = RunControlRegistry(store_path=store_path)
+    run_id = "route-tool-cancel"
+    running.register(run_id)
+
+    class ActiveLoop:
+        _current_turn_id = run_id
+
+        @staticmethod
+        def request_abort(requested_run_id, reason=""):
+            return surface.request_cancel(requested_run_id, reason or "operator stopped run")
+
+    server._LOOPS["route-tool-session"] = ActiveLoop()
+    host = V5ToolExecutor()
+    host._current_turn_id = run_id
+    host._run_controls = running
+    host.logger = logging.getLogger("test.server.route_cancel")
+
+    async def slow_operation():
+        await asyncio.sleep(2)
+        return "unexpected completion"
+
+    pending = asyncio.create_task(host._await_run_budget(slow_operation()))
+    await asyncio.sleep(0.08)
+    try:
+        response = server.cancel_chat("route-tool-session", turn_id=run_id)
+        assert response["status"] == "cancelled"
+        assert response["run_id"] == run_id
+        with pytest.raises(asyncio.CancelledError, match="operator stopped run"):
+            await asyncio.wait_for(pending, timeout=1.0)
+    finally:
+        server._LOOPS.pop("route-tool-session", None)
+        if not pending.done():
+            pending.cancel()
+            await pending
 
 
 def test_set_model_can_switch_to_an_enabled_named_profile(monkeypatch):
@@ -164,8 +211,42 @@ def test_server_chat_passes_turn_and_max_tokens_to_loop(monkeypatch):
         "max_tokens": 321,
         "turn_id": "turn-server",
         "conversation_history": None,
-        "deadline_seconds": 30.0,
+        "deadline_seconds": 120.0,
     }
+
+
+def test_server_chat_resolves_auto_to_configured_provider_and_model(monkeypatch):
+    import server
+
+    captured = {}
+
+    class FakeLoop:
+        is_running = False
+        model = "auto"
+        work_event_sink = None
+
+        async def stream_run(self, prompt, **kwargs):
+            captured["kwargs"] = kwargs
+            yield {"type": "content", "data": "ok"}
+
+    monkeypatch.setattr(server, "get_loop", lambda _sid: FakeLoop())
+    monkeypatch.setattr(server, "set_active_session", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "configured_provider_defaults", lambda: ("deepseek", "deepseek-chat"))
+
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/api/chat",
+            json={
+                "prompt": "hello",
+                "session_id": "server-auto-provider",
+                "provider": "auto",
+                "model": "auto",
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured["kwargs"]["provider"] == "deepseek"
+    assert captured["kwargs"]["model"] == "deepseek-chat"
 
 
 def test_server_chat_timeout_emits_error_before_one_terminal_marker(monkeypatch):
@@ -206,6 +287,85 @@ def test_server_chat_timeout_emits_error_before_one_terminal_marker(monkeypatch)
     assert "Response timed out after 1 seconds" in response.text
     assert response.text.count("event: error") == 1
     assert captured["abort"] == ("timeout-turn", "deadline_exceeded")
+
+
+def test_server_chat_timeout_marks_workflow_failed(monkeypatch):
+    import asyncio
+    import server
+
+    captured = {}
+
+    class FakeLoop:
+        is_running = False
+        model = "default-model"
+        work_event_sink = None
+
+        def request_abort(self, run_id, reason=""):
+            captured["abort"] = (run_id, reason)
+            return True
+
+        async def stream_run(self, prompt, **kwargs):
+            await asyncio.sleep(2)
+            yield {"type": "content", "data": "late"}
+
+    def fake_complete(*args):
+        captured["complete"] = args
+
+    monkeypatch.setattr(server, "get_loop", lambda _sid: FakeLoop())
+    monkeypatch.setattr(server, "set_active_session", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "complete_chat_workflow", fake_complete)
+
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/api/chat",
+            json={
+                "prompt": "stall",
+                "session_id": "server-timeout-status",
+                "turn_id": "timeout-status-turn",
+                "timeout_seconds": 1,
+                "stream": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured["complete"][-1] == "failed"
+
+
+def test_server_chat_stream_failure_marks_workflow_failed(monkeypatch):
+    import server
+
+    captured = {}
+
+    class FakeLoop:
+        is_running = False
+        model = "default-model"
+        work_event_sink = None
+
+        async def stream_run(self, prompt, **kwargs):
+            raise RuntimeError("provider disconnected")
+            yield  # pragma: no cover - keeps this an async generator
+
+    def fake_complete(*args):
+        captured["complete"] = args
+
+    monkeypatch.setattr(server, "get_loop", lambda _sid: FakeLoop())
+    monkeypatch.setattr(server, "set_active_session", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "complete_chat_workflow", fake_complete)
+
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/api/chat",
+            json={
+                "prompt": "fail",
+                "session_id": "server-stream-status",
+                "turn_id": "stream-status-turn",
+                "stream": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert "provider disconnected" in response.text
+    assert captured["complete"][-1] == "failed"
 
 
 def test_server_chat_uses_resume_workflow_context_and_completes_workflow(monkeypatch):

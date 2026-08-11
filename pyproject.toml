@@ -1,6 +1,6 @@
 [project]
 name = "nexus-ai"
-version = "1.0.0"
+version = "2.1.0"
 description = "NEXUS AI - The Operating System of Intelligence"
 dependencies = [
     "aiohttp>=3.9",
@@ -10,6 +10,7 @@ dependencies = [
     "discord.py>=2.3",
     "fastapi>=0.115",
     "httpx>=0.28",
+    "itsdangerous>=2.0",
     "numpy>=1.26",
     "python-dotenv>=1.0",
     "python-multipart>=0.0.9",
@@ -78,14 +79,11 @@ nexus-help = "nexus:boot"
 point = "nexus:boot"
 nexus-fix = "nexus:boot"
 nexus-mcp = "mcp.server:main"
-nexus-voice = "voice_chat:main"
-
-[tool.setuptools]
-py-modules = ["nexus", "voice_chat", "server"]
+nexus-voice = "voice.voice_chat:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["sandbox*", "authentication*", "context*", "evolution*", "hardware*", "intelligence*", "neural*", "reasoning*", "safety*", "security*", "tasks*", "telemetry*", "voice*", "prompts*", "orchestrators*", "utils*", "tools*", "rag*", "integrations*", "knowledge*", "mcp*", "gateway*", "hive*", "indexer*", "kernel*", "permissions*", "router*", "skills*", "server*"]
+include = ["sandbox*", "authentication*", "context*", "evolution*", "hardware*", "intelligence*", "neural*", "reasoning*", "safety*", "security*", "tasks*", "telemetry*", "voice*", "prompts*", "orchestrators*", "utils*", "tools*", "rag*", "integrations*", "knowledge*", "mcp*", "gateway*", "hive*", "indexer*", "kernel*", "permissions*", "router*", "skills*", "server*", "nexus*"]
 exclude = [
     "tests*",
     "gui*",
@@ -113,5 +111,9 @@ ignore = ["E501", "E402", "E701", "F401", "I001", "E702", "E741"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Repo root on sys.path: local packages (queue/, tools/, ...) shadow stdlib
+# names, so tests only resolved under `python -m pytest`, which injects cwd.
+# Without this the bare `pytest` entrypoint fails collection on 9 modules.
+pythonpath = ["."]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"

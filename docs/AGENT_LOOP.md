@@ -92,4 +92,4 @@ To verify loop behavior, configuration parameters, tool parsing, event lifecycle
 ```powershell
 python -m pytest tests/ -v --tb=short
 ```
-Focused loop tests live under `tests/core/test_loop/` and cover run ownership, cancellation, lifecycle balance, tool parsing, permission blocking, command failures, public work-event chunks, finalizer draining, and verified fallback summaries. Provider, gateway, hive, registry, and server harness tests live in their corresponding `tests/test_main/`, `tests/test_gateway_runtime.py`, `tests/test_tool_registry/`, and `tests/test_server/` modules.
+Focused loop tests live under `tests/v5/` and `tests/core/` (`test_runtime.py`, `test_task_workflow.py`, `test_approval_broker.py`, `core/test_evolution/`) and cover run ownership, cancellation, lifecycle balance, tool parsing, permission blocking, command failures, public work-event chunks, finalizer draining, and verified fallback summaries. Provider, gateway, hive, registry, and server harness tests live in their corresponding `tests/test_main/`, `tests/test_gateway_runtime.py`, `tests/test_tool_registry/`, and `tests/test_server/` modules.

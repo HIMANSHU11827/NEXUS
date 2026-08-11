@@ -38,7 +38,7 @@ class ReplicateProvider(NexusBaseProvider):
              pass
 
         try:
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=30)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=self.request_timeout(kwargs, 30))
             if response.status_code == 201:
                 prediction = response.json()
                 poll_url = prediction["urls"]["get"]

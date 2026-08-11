@@ -104,6 +104,13 @@ class ControlStore:
         """
         with self._connect() as connection:
             connection.executescript(schema)
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(outbox)").fetchall()}
+            if "claimed_by" not in columns:
+                connection.execute("ALTER TABLE outbox ADD COLUMN claimed_by TEXT NOT NULL DEFAULT ''")
+            if "claimed_until" not in columns:
+                connection.execute("ALTER TABLE outbox ADD COLUMN claimed_until REAL")
+            if "last_error" not in columns:
+                connection.execute("ALTER TABLE outbox ADD COLUMN last_error TEXT NOT NULL DEFAULT ''")
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
@@ -176,7 +183,11 @@ class ControlStore:
             if step is None:
                 raise KeyError(f"Step not found: {step_id}")
             blockers = connection.execute("""SELECT 1 FROM step_dependencies d JOIN steps prerequisite ON prerequisite.step_id = d.depends_on_step_id WHERE d.step_id = ? AND prerequisite.status != 'completed' LIMIT 1""", (step_id,)).fetchone()
-            if step["status"] not in {"pending", "ready"} or blockers is not None:
+            # Queue retries reuse the durable step identity but create a new
+            # canonical run attempt. A prior failed attempt is therefore
+            # eligible to transition back to running after dependencies are
+            # rechecked transactionally.
+            if step["status"] not in {"pending", "ready", "failed"} or blockers is not None:
                 raise ValueError(f"Step is not ready: {step_id}")
             existing = connection.execute("SELECT * FROM leases WHERE resource_type = 'step' AND resource_id = ? AND expires_at > ?", (step_id, now)).fetchone()
             if existing is not None:
@@ -206,6 +217,66 @@ class ControlStore:
             self._outbox(connection, "run", run_id, "run.completed", {"task_id": run["task_id"], "plan_id": run["plan_id"], "step_id": run["step_id"], "run_id": run_id})
             return True
 
+    def renew_run(self, *, run_id: str, lease_token: str, lease_seconds: float = 90) -> bool:
+        """Extend a running canonical step lease when its queue lease renews."""
+        now = _now()
+        with self._transaction() as connection:
+            run = connection.execute("SELECT step_id, status FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            if run is None or run["status"] != "running":
+                return False
+            lease = connection.execute("SELECT lease_id FROM leases WHERE resource_type = 'step' AND resource_id = ? AND lease_token = ?", (run["step_id"], lease_token)).fetchone()
+            if lease is None:
+                return False
+            connection.execute("UPDATE leases SET heartbeat_at = ?, expires_at = ? WHERE lease_id = ?", (now, now + max(1.0, float(lease_seconds)), lease["lease_id"]))
+            return True
+
+    def reap_expired_runs(self, limit: int = 100) -> int:
+        """Close canonical runs whose leases expired without a worker result."""
+        now = _now()
+        reaped = 0
+        with self._transaction() as connection:
+            rows = connection.execute(
+                """SELECT r.*, l.lease_id FROM runs r
+                   JOIN leases l ON l.resource_type = 'step' AND l.resource_id = r.step_id
+                   WHERE r.status = 'running' AND l.expires_at <= ?
+                   ORDER BY l.expires_at LIMIT ?""",
+                (now, max(1, min(int(limit), 1000))),
+            ).fetchall()
+            for run in rows:
+                detail = "canonical lease expired before worker completion"
+                connection.execute(
+                    "UPDATE runs SET status = 'failed', ended_at = ?, failure_code = ?, failure_detail = ?, version = version + 1 WHERE run_id = ? AND status = 'running'",
+                    (now, "lease_expired", detail, run["run_id"]),
+                )
+                connection.execute(
+                    "UPDATE steps SET status = 'failed', active_run_id = NULL, updated_at = ?, version = version + 1 WHERE step_id = ? AND active_run_id = ?",
+                    (now, run["step_id"], run["run_id"]),
+                )
+                connection.execute("DELETE FROM leases WHERE lease_id = ?", (run["lease_id"],))
+                self._outbox(
+                    connection, "run", run["run_id"], "run.failed",
+                    {"task_id": run["task_id"], "plan_id": run["plan_id"],
+                     "step_id": run["step_id"], "run_id": run["run_id"],
+                     "error": detail},
+                )
+                reaped += 1
+        return reaped
+
+    def legacy_link(self, *, source_type: str, source_id: str) -> Dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM legacy_links WHERE source_type = ? AND source_id = ?", (source_type[:80], str(source_id)[:240])).fetchone()
+            return dict(row) if row else {}
+
+    def get_run(self, run_id: str) -> Dict[str, Any]:
+        """Return one canonical run for restart reconciliation."""
+        if not run_id:
+            return {}
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM runs WHERE run_id = ?", (str(run_id),)
+            ).fetchone()
+            return dict(row) if row else {}
+
     def fail_run(self, *, run_id: str, lease_token: str, failure_code: str, failure_detail: str = "") -> bool:
         """Close only the currently owned attempt; stale workers are rejected."""
         now = _now()
@@ -224,6 +295,51 @@ class ControlStore:
         with self._connect() as connection:
             rows = connection.execute("SELECT * FROM outbox WHERE published_at IS NULL ORDER BY sequence LIMIT ?", (max(1, min(int(limit), 1000)),)).fetchall()
             return [dict(row) for row in rows]
+
+    def claim_outbox(self, owner: str, *, limit: int = 100, lease_seconds: float = 60.0) -> List[Dict[str, Any]]:
+        """Atomically lease unpublished events for one publisher instance."""
+        owner = str(owner or "").strip()
+        if not owner:
+            raise ValueError("outbox owner is required")
+        now = _now()
+        until = now + max(1.0, float(lease_seconds))
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT event_id FROM outbox WHERE published_at IS NULL AND (claimed_until IS NULL OR claimed_until <= ?) ORDER BY sequence LIMIT ?",
+                (now, max(1, min(int(limit), 1000))),
+            ).fetchall()
+            claimed: List[Dict[str, Any]] = []
+            for row in rows:
+                updated = connection.execute(
+                    "UPDATE outbox SET claimed_by = ?, claimed_until = ?, delivery_attempts = delivery_attempts + 1 WHERE event_id = ? AND published_at IS NULL AND (claimed_until IS NULL OR claimed_until <= ?)",
+                    (owner, until, row["event_id"], now),
+                )
+                if updated.rowcount:
+                    item = self._row(connection.execute("SELECT * FROM outbox WHERE event_id = ?", (row["event_id"],)).fetchone()) or {}
+                    try:
+                        item["payload"] = json.loads(item.get("payload_json") or "{}")
+                    except (TypeError, ValueError):
+                        item["payload"] = {}
+                    claimed.append(item)
+            return claimed
+
+    def mark_outbox_published(self, event_id: str, owner: str) -> bool:
+        """Acknowledge one event only when this publisher owns its lease."""
+        with self._transaction() as connection:
+            cur = connection.execute(
+                "UPDATE outbox SET published_at = ?, claimed_by = '', claimed_until = NULL WHERE event_id = ? AND published_at IS NULL AND claimed_by = ?",
+                (_now(), str(event_id), str(owner)),
+            )
+            return cur.rowcount > 0
+
+    def release_outbox(self, event_id: str, owner: str, error: str = "") -> bool:
+        """Release a failed lease for retry and retain the last error."""
+        with self._transaction() as connection:
+            cur = connection.execute(
+                "UPDATE outbox SET claimed_by = '', claimed_until = NULL, last_error = ? WHERE event_id = ? AND published_at IS NULL AND claimed_by = ?",
+                (str(error or "")[:1000], str(event_id), str(owner)),
+            )
+            return cur.rowcount > 0
 
     def link_legacy_record(self, *, source_type: str, source_id: str, task_id: str, plan_id: str = "", step_id: str = "", run_id: str = "") -> Dict[str, Any]:
         """Attach a legacy queue/WorkItem record to canonical workflow IDs.

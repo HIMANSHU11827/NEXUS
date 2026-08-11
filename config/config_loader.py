@@ -7,6 +7,10 @@ Supports YAML and JSON formats.
 import json
 import logging
 import os
+import sqlite3
+import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict
 
@@ -16,6 +20,27 @@ logger = logging.getLogger(__name__)
 
 _ROOT = Path(__file__).resolve().parent
 _CONFIG_DIR = _ROOT  # YAML/JSON config files live alongside config_loader.py
+
+
+@contextmanager
+def _config_write_lock():
+    """Serialize configuration writes across threads and worker processes."""
+    os.makedirs(_CONFIG_DIR, exist_ok=True)
+    lock_path = _CONFIG_DIR / ".nexus-config.lock.sqlite"
+    connection = sqlite3.connect(str(lock_path), timeout=60.0, isolation_level=None)
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS config_mutex "
+            "(id INTEGER PRIMARY KEY CHECK (id = 1))"
+        )
+        connection.execute("INSERT OR IGNORE INTO config_mutex(id) VALUES (1)")
+        connection.execute("BEGIN IMMEDIATE")
+        yield
+    finally:
+        try:
+            connection.rollback()
+        finally:
+            connection.close()
 
 
 class NexusConfigLoader:
@@ -33,6 +58,7 @@ class NexusConfigLoader:
         if hasattr(self, "_initialized"):
             return
         self._initialized = True
+        self._write_lock = threading.RLock()
         self._load_all()
 
     def _load_all(self):
@@ -89,6 +115,59 @@ class NexusConfigLoader:
     @property
     def data(self) -> Dict[str, Any]:
         return dict(self._cache)
+
+    @data.setter
+    def data(self, value: Dict[str, Any]) -> None:
+        if not isinstance(value, dict):
+            raise TypeError("configuration data must be a mapping")
+        self._cache = dict(value)
+
+    def save(self) -> bool:
+        """Persist cached YAML/JSON configuration atomically.
+
+        Existing files determine each key's format. Unknown cache keys are not
+        written as arbitrary paths, preventing configuration injection through
+        a user-controlled mapping key.
+        """
+        try:
+            with self._write_lock, _config_write_lock():
+                for key, value in self._cache.items():
+                    if not isinstance(key, str) or not key or Path(key).name != key:
+                        continue
+                    yaml_path = _CONFIG_DIR / f"{key}.yml"
+                    yaml_alt_path = _CONFIG_DIR / f"{key}.yaml"
+                    json_path = _CONFIG_DIR / f"{key}.json"
+                    if yaml_path.exists():
+                        path, writer = yaml_path, yaml.safe_dump
+                    elif yaml_alt_path.exists():
+                        path, writer = yaml_alt_path, yaml.safe_dump
+                    elif json_path.exists():
+                        path, writer = json_path, json.dump
+                    else:
+                        continue
+
+                    fd, temporary = tempfile.mkstemp(
+                        dir=str(_CONFIG_DIR), prefix=f".{key}-", suffix=".tmp"
+                    )
+                    try:
+                        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                            if writer is json.dump:
+                                writer(value, handle, ensure_ascii=False, indent=2)
+                            else:
+                                writer(value, handle, sort_keys=False, allow_unicode=True)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                        os.replace(temporary, path)
+                    finally:
+                        try:
+                            if os.path.exists(temporary):
+                                os.unlink(temporary)
+                        except OSError:
+                            pass
+            return True
+        except (OSError, TypeError, ValueError, yaml.YAMLError, json.JSONDecodeError) as exc:
+            logger.warning("Failed to persist configuration: %s", exc)
+            return False
 
     def reload(self):
         self._cache.clear()

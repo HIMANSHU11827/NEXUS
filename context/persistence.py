@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
+
+from nexus.runtime import safe_session_id
 
 
 __version__ = "14.0.0"
@@ -30,10 +33,16 @@ class NexusFilePersistence:
     # ─── Path helpers ────────────────────────────────────────────────
 
     def _session_path(self, session_id: str) -> str:
-        return os.path.join(self.archive_dir, f"{session_id}.json")
+        return os.path.join(self.archive_dir, f"{safe_session_id(session_id)}.json")
 
     def _checkpoint_path(self, session_id: str, checkpoint_id: str) -> str:
-        return os.path.join(self.archive_dir, f"{session_id}.{checkpoint_id}.json")
+        safe_checkpoint = re.sub(
+            r"[^A-Za-z0-9_.-]", "_", os.path.basename(str(checkpoint_id or ""))
+        ).strip("._")[:120] or "checkpoint"
+        return os.path.join(
+            self.archive_dir,
+            f"{safe_session_id(session_id)}.{safe_checkpoint}.json",
+        )
 
     # ─── Persistence API ─────────────────────────────────────────────
 
@@ -50,14 +59,18 @@ class NexusFilePersistence:
         """
         if checkpoint_id is None:
             checkpoint_id = time.strftime("%Y%m%d%H%M%S")
+        normalized_session = safe_session_id(session_id)
+        normalized_checkpoint = re.sub(
+            r"[^A-Za-z0-9_.-]", "_", os.path.basename(str(checkpoint_id or ""))
+        ).strip("._")[:120] or "checkpoint"
         payload = {
-            "session_id": session_id,
-            "checkpoint_id": checkpoint_id,
+            "session_id": normalized_session,
+            "checkpoint_id": normalized_checkpoint,
             "ts": time.time(),
             "metadata": metadata or {},
             "messages": messages,
         }
-        path = self._checkpoint_path(session_id, checkpoint_id)
+        path = self._checkpoint_path(normalized_session, normalized_checkpoint)
         self._atomic_write(path, payload)
         return path
 

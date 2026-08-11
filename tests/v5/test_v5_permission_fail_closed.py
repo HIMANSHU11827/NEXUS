@@ -53,3 +53,29 @@ def test_command_execution_denies_when_permission_system_missing():
         assert executor.events[-1][1]["status"] == "blocked"
 
     asyncio.run(scenario())
+
+
+def test_command_sandbox_marker_is_a_failed_tool_result():
+    class Granted:
+        granted = True
+        reason = "allowed"
+
+    class FailingSandbox:
+        last_exit_code = None
+
+        async def stream_execute(self, *args, **kwargs):
+            yield "[SANDBOX_BLOCK]: workspace-only path rejection"
+
+    async def scenario():
+        executor = _Executor()
+        executor.runtime.permissions = type("Permissions", (), {"check": lambda *args, **kwargs: Granted()})()
+        executor.runtime.sandbox = FailingSandbox()
+        executor._emit_tool_chunk = lambda *args, **kwargs: asyncio.sleep(0)
+        executor._fire_post_tool_hooks = lambda *args, **kwargs: asyncio.sleep(0)
+        executor._mark_tool_lifecycle = lambda *args, **kwargs: asyncio.sleep(0)
+        call = _TextToolCall("terminal", {"command": "echo test"}, "c3")
+        with pytest.raises(RuntimeError, match="SANDBOX_BLOCK"):
+            await executor._run_tool(call)
+        assert executor.events[-1][1]["status"] == "error"
+
+    asyncio.run(scenario())

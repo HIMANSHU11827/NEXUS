@@ -123,6 +123,17 @@ class V5Planner:
         steps = await self._llm_plan_with_enforcement(perceived)
         if steps:
             goal = str(getattr(perceived, "original_input", "") or "").strip()
+            # Connect the optional Hive safety gate to the live planning
+            # boundary.  Keep it behind active mode for compatibility.
+            gate = getattr(self, "_gate_plan", None)
+            active_mode = getattr(self, "_active_mode_enabled", None)
+            if callable(gate) and callable(active_mode) and active_mode():
+                steps = await gate(steps, goal)
+                if not steps:
+                    self.logger.warning(
+                        "Plan rejected by active Hive review; skipping persistence"
+                    )
+                    return []
             await self._persist_plan_via_tool(goal, steps)
             try:
                 await self._emit_plan_event(
@@ -180,6 +191,7 @@ class V5Planner:
                 "action": "create",
                 "goal": goal,
                 "plan_spec": spec,
+                "session_id": str(getattr(self, "session_id", "default") or "default"),
             },
         )
         try:
@@ -200,10 +212,9 @@ class V5Planner:
         renders, and awaits the decision. Every other permission mode
         passes through immediately.
 
-        Fail-open semantics: a missing broker or any plumbing failure logs a
-        warning and returns ``True`` - approval plumbing must never freeze
-        the loop. A broker that exists but loses the surface is the
-        broker's own timeout path (deny), not ours.
+        Approval mode is fail-closed: a missing broker or broken approval
+        plumbing must not silently authorize side effects. Other permission
+        modes pass through immediately.
 
         Args:
             goal: The user's original request text.
@@ -219,9 +230,9 @@ class V5Planner:
             if broker is None:
                 self.logger.warning(
                     "Plan approval requested but no approval broker is "
-                    "available; proceeding without gate"
+                    "available; blocking execution"
                 )
-                return True
+                return False
             descriptions = [
                 str(step.get("description") or "").strip()
                 for step in steps or []
@@ -243,8 +254,8 @@ class V5Planner:
             decision = await broker.wait(request.request_id)
             return decision in ("allow", "allow_always")
         except Exception as exc:
-            self.logger.warning("Plan approval gate failed open: %s", exc)
-            return True
+            self.logger.warning("Plan approval gate failed closed: %s", exc)
+            return False
 
     def _planning_system_prompt(self) -> str:
         available = ""

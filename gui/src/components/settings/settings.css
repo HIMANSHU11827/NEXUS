@@ -1,0 +1,273 @@
+/* Shared visual language for the NEXUS settings control center. */
+.settings-overlay {
+  background:
+    radial-gradient(circle at 14% 10%, hsl(var(--primary) / 0.12), transparent 28%),
+    hsl(var(--foreground) / 0.28);
+}
+
+.settings-modal {
+  border-color: hsl(var(--border) / 0.8);
+  border-radius: 26px;
+  box-shadow: 0 30px 90px hsl(var(--foreground) / 0.18), 0 8px 24px hsl(var(--foreground) / 0.08);
+}
+
+.settings-sidebar {
+  background:
+    linear-gradient(180deg, hsl(var(--secondary) / 0.72), hsl(var(--background) / 0.96) 68%),
+    hsl(var(--background));
+}
+
+.settings-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.4rem 0.5rem 0.9rem;
+}
+
+.settings-brand-mark {
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  border-radius: 0.75rem;
+  color: hsl(var(--primary-foreground));
+  background: linear-gradient(145deg, hsl(var(--primary)), hsl(var(--primary) / 0.65));
+  box-shadow: 0 7px 18px hsl(var(--primary) / 0.22);
+}
+
+.settings-nav-item {
+  position: relative;
+  min-height: 2.35rem;
+  border: 1px solid transparent;
+}
+
+.settings-nav-item.is-active {
+  border-color: hsl(var(--primary) / 0.18);
+  background: hsl(var(--background) / 0.95);
+  box-shadow: 0 5px 14px hsl(var(--foreground) / 0.06);
+}
+
+.settings-nav-item.is-active::before {
+  position: absolute;
+  left: -0.45rem;
+  width: 0.18rem;
+  height: 1.15rem;
+  border-radius: 999px;
+  background: hsl(var(--primary));
+  content: '';
+}
+
+.settings-header {
+  background: linear-gradient(180deg, hsl(var(--background) / 0.98), hsl(var(--background) / 0.86));
+  box-shadow: 0 1px 0 hsl(var(--border) / 0.5);
+}
+
+.settings-purpose-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.35rem;
+  border: 1px solid hsl(var(--primary) / 0.18);
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+  background: hsl(var(--primary) / 0.08);
+  color: hsl(var(--primary));
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.settings-scroll {
+  background:
+    radial-gradient(circle at 92% 2%, hsl(var(--primary) / 0.08), transparent 22%),
+    hsl(var(--background));
+}
+
+.settings-page-frame {
+  position: relative;
+  padding-bottom: 2rem;
+}
+
+.settings-page {
+  --settings-accent: var(--primary);
+  --settings-accent-soft: var(--primary);
+  position: relative;
+}
+
+.settings-page::before {
+  display: block;
+  width: 3.5rem;
+  height: 0.22rem;
+  margin-bottom: 1.1rem;
+  border-radius: 999px;
+  background: linear-gradient(90deg, hsl(var(--settings-accent)), hsl(var(--settings-accent-soft) / 0.35));
+  content: '';
+}
+
+/* Each settings destination gets a restrained accent so the page purpose is
+   visible at a glance without creating a separate visual language per screen. */
+.settings-page--appearance { --settings-accent: 262 83% 58%; --settings-accent-soft: 190 90% 55%; }
+.settings-page--notifications { --settings-accent: 38 92% 50%; --settings-accent-soft: 14 86% 55%; }
+.settings-page--shortcuts { --settings-accent: 221 83% 53%; --settings-accent-soft: 190 90% 55%; }
+.settings-page--workspace { --settings-accent: 173 80% 36%; --settings-accent-soft: 200 86% 48%; }
+.settings-page--memory { --settings-accent: 239 76% 61%; --settings-accent-soft: 280 77% 62%; }
+.settings-page--safety { --settings-accent: 152 70% 38%; --settings-accent-soft: 184 73% 42%; }
+.settings-page--providers { --settings-accent: 217 91% 60%; --settings-accent-soft: 267 82% 63%; }
+.settings-page--voice { --settings-accent: 187 78% 42%; --settings-accent-soft: 217 91% 60%; }
+.settings-page--config { --settings-accent: 270 78% 58%; --settings-accent-soft: 217 91% 60%; }
+.settings-page--evolution { --settings-accent: 145 63% 42%; --settings-accent-soft: 84 70% 45%; }
+.settings-page--skills { --settings-accent: 263 83% 58%; --settings-accent-soft: 323 74% 58%; }
+.settings-page--tools { --settings-accent: 30 89% 52%; --settings-accent-soft: 5 78% 55%; }
+.settings-page--plugins { --settings-accent: 326 74% 52%; --settings-accent-soft: 263 83% 58%; }
+.settings-page--mcp { --settings-accent: 197 87% 45%; --settings-accent-soft: 160 67% 46%; }
+.settings-page--hive { --settings-accent: 46 91% 49%; --settings-accent-soft: 25 90% 55%; }
+.settings-page--gateway { --settings-accent: 201 90% 47%; --settings-accent-soft: 264 82% 61%; }
+.settings-page--cron { --settings-accent: 262 83% 58%; --settings-accent-soft: 221 83% 53%; }
+.settings-page--billing { --settings-accent: 161 72% 40%; --settings-accent-soft: 187 78% 42%; }
+.settings-page--about { --settings-accent: 221 83% 53%; --settings-accent-soft: 263 83% 58%; }
+
+.settings-page-frame::before {
+  position: absolute;
+  top: -0.4rem;
+  right: 0;
+  width: 10rem;
+  height: 10rem;
+  border: 1px solid hsl(var(--primary) / 0.08);
+  border-radius: 999px;
+  pointer-events: none;
+  content: '';
+}
+
+.settings-page > div:first-child > h3,
+.settings-page > form > div:first-child > h3 {
+  font-size: 1.2rem;
+  letter-spacing: -0.02em;
+}
+
+.settings-page > div:first-child > p,
+.settings-page > form > div:first-child > p {
+  max-width: 48rem;
+  line-height: 1.55;
+}
+
+.settings-page .rounded-lg.border.bg-card,
+.settings-page .rounded-xl.border,
+.settings-page .rounded-lg.border {
+  border-color: hsl(var(--border) / 0.78);
+  border-radius: 1rem;
+  box-shadow: 0 8px 22px hsl(var(--foreground) / 0.035);
+}
+
+.settings-page .rounded-lg.border.bg-card:hover,
+.settings-page .rounded-xl.border:hover {
+  border-color: hsl(var(--primary) / 0.28);
+}
+
+.settings-page .rounded-lg.border.bg-card,
+.settings-page .rounded-xl.border,
+.settings-page .rounded-lg.border {
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.settings-page .rounded-lg.border.bg-card:focus-within,
+.settings-page .rounded-xl.border:focus-within,
+.settings-page .rounded-lg.border:focus-within {
+  border-color: hsl(var(--settings-accent) / 0.5);
+  box-shadow: 0 0 0 3px hsl(var(--settings-accent) / 0.11), 0 8px 22px hsl(var(--foreground) / 0.035);
+}
+
+.settings-page--appearance .rounded-xl.border {
+  overflow: hidden;
+  transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+}
+
+.settings-page--appearance .rounded-xl.border:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 26px hsl(var(--foreground) / 0.08);
+}
+
+.settings-page--appearance .bg-secondary {
+  border-color: hsl(var(--primary) / 0.34);
+  box-shadow: 0 10px 24px hsl(var(--primary) / 0.1);
+}
+
+.settings-page .flex.gap-2.border-b {
+  gap: 0.25rem;
+  padding: 0.25rem;
+  border: 1px solid hsl(var(--border) / 0.7);
+  border-radius: 0.9rem;
+  background: hsl(var(--secondary) / 0.52);
+  overflow-x: auto;
+}
+
+.settings-page .flex.gap-2.border-b > button {
+  border: 0;
+  border-radius: 0.65rem;
+  padding: 0.5rem 0.8rem;
+  white-space: nowrap;
+}
+
+.settings-page .flex.gap-2.border-b > button.border-b-2 {
+  background: hsl(var(--background));
+  color: hsl(var(--settings-accent));
+  box-shadow: 0 2px 8px hsl(var(--foreground) / 0.08);
+}
+
+.settings-page kbd {
+  min-width: 1.8rem;
+  border-radius: 0.45rem;
+  padding: 0.28rem 0.42rem;
+  text-align: center;
+  box-shadow: inset 0 -1px 0 hsl(var(--foreground) / 0.12);
+}
+
+.settings-page input[type='checkbox'] {
+  accent-color: hsl(var(--settings-accent));
+}
+
+.settings-page input[type='range'] {
+  accent-color: hsl(var(--settings-accent));
+}
+
+.settings-page button:not(:disabled):hover {
+  border-color: hsl(var(--settings-accent) / 0.38);
+}
+
+.settings-page .text-primary {
+  color: hsl(var(--settings-accent));
+}
+
+.settings-page--providers section > .divide-y,
+.settings-page--providers section > .rounded-lg.border,
+.settings-page--workspace .rounded-lg.border,
+.settings-page--memory .rounded-lg.border,
+.settings-page--safety .rounded-lg.border,
+.settings-page--voice .rounded-lg.border,
+.settings-page--evolution .rounded-lg.border,
+.settings-page--configuration .rounded-lg.border {
+  background: hsl(var(--card) / 0.72);
+}
+
+.settings-page input:not([type='checkbox']):not([type='range']),
+.settings-page select,
+.settings-page textarea {
+  border-radius: 0.7rem;
+  border-color: hsl(var(--border) / 0.9);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.settings-page input:not([type='checkbox']):not([type='range']):focus,
+.settings-page select:focus,
+.settings-page textarea:focus {
+  border-color: hsl(var(--ring));
+  box-shadow: 0 0 0 3px hsl(var(--ring) / 0.14);
+}
+
+.settings-page button.bg-foreground {
+  border-radius: 0.7rem;
+  box-shadow: 0 5px 12px hsl(var(--foreground) / 0.12);
+}
+
+@media (max-width: 767px) {
+  .settings-modal { border-radius: 0; }
+  .settings-page-frame::before { display: none; }
+}

@@ -30,7 +30,7 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ class Plan:
     steps: List[PlanStep]
     confidence: float
     alternative_plans: List['Plan'] = field(default_factory=list)
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     goal: str = ""
     approved: bool = True
 
@@ -290,7 +290,7 @@ class PAORREnhanced:
         # Generate main plan
         steps, steps_raw = await self._request_plan_steps(perceived)
         main_plan = Plan(
-            plan_id=f"plan_{datetime.utcnow().timestamp()}",
+            plan_id=f"plan_{datetime.now(timezone.utc).timestamp()}",
             steps=steps,
             confidence=self._calculate_plan_confidence(steps)
         )
@@ -339,10 +339,11 @@ class PAORREnhanced:
         return [], []
 
     async def _run_approval_gate(self, steps_raw: List[Dict[str, Any]], goal: str) -> bool:
-        """Consult the plan-level approval gate; fail-open on any error.
+        """Consult the plan-level approval gate; fail closed on any error.
 
-        A missing gate or a broken gate always resolves to approved so the
-        approval plumbing can never freeze or break the loop.
+        A missing gate means this compatibility layer is not configured and
+        therefore passes through. Once a gate is configured, an exception is
+        an unknown authorization outcome and must not authorize side effects.
 
         Args:
             steps_raw: Raw step dicts produced by the external planner.
@@ -356,8 +357,8 @@ class PAORREnhanced:
         try:
             return bool(await self.approval_gate(steps_raw, goal))
         except Exception as e:
-            self.logger.warning(f"Plan approval gate failed open: {e}")
-            return True
+            self.logger.warning(f"Plan approval gate failed closed: {e}")
+            return False
 
     def _build_steps_from_planner(self, steps_raw: Any) -> List[PlanStep]:
         """Convert raw planner step dicts into PlanStep objects.
@@ -501,6 +502,10 @@ class PAORREnhanced:
                         output="",
                         error=str(result)
                     ))
+                    # Executor exceptions are terminal evidence for this
+                    # attempt.  Leaving the step unfinished makes the ready
+                    # scheduler run it forever and can duplicate side effects.
+                    finished_steps.add(step.step_id)
                     await self._call_plan_emitter(
                         "failed", _step_index(step), step.description, plan.plan_id
                     )
@@ -570,7 +575,7 @@ class PAORREnhanced:
         """
         self.logger.debug(f"Executing step: {step.step_id}")
 
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
 
         tool = step.tool or step.resources.get("tool")
         params = step.params or step.resources.get("params") or {}
@@ -631,7 +636,7 @@ class PAORREnhanced:
                 error = "no tool executor or registry is available"
                 success = False
 
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc)
         duration = (end_time - start_time).total_seconds()
 
         return ActionResult(

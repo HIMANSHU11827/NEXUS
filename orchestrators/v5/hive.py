@@ -261,6 +261,7 @@ class V5Hive:
             async def _spawn_and_consolidate() -> str:
                 sub_id, _agents = await engine.spawn_hive([(t, p) for t, p in subs])
                 spawn_state["hive_id"] = str(sub_id or "")
+                spawn_state["agents"] = list(_agents or [])
                 self._hive_remember_spawn(sub_id, _agents)
                 return await engine.consolidate_hive(
                     sub_id, timeout=timeout_seconds, llm_call=llm
@@ -290,8 +291,29 @@ class V5Hive:
                 return None
 
             hive_id = spawn_state.get("hive_id", "")
+            consolidated_text = str(consolidated or "").strip()
+            if consolidated_text.upper().startswith(("HIVE FAILED:", "QUORUM NOT REACHED:")):
+                reason = "hive consolidation rejected: " + consolidated_text.splitlines()[0][:240]
+                self._hive_mark_group_done(hive_id, status="failed", reason=reason)
+                await self._hive_mark_turn_failed(reason)
+                return None
             if consolidated:
-                self._hive_mark_group_done(hive_id, status="succeeded")
+                spawned_agents = list(spawn_state.get("agents") or [])
+                failed_agents = []
+                for agent in spawned_agents:
+                    agent_status = str(getattr(agent, "status", "") or "").lower()
+                    if agent_status in {"failed", "timeout", "cancelled", "canceled", "error"}:
+                        failed_agents.append(str(getattr(agent, "agent_id", "") or ""))
+                        self._hive_update_subagent_state(
+                            str(getattr(agent, "agent_id", "") or ""),
+                            status="cancelled" if agent_status in {"cancelled", "canceled"} else agent_status,
+                        )
+                self._hive_mark_group_done(
+                    hive_id,
+                    status="succeeded",
+                    partial=bool(failed_agents),
+                    failed_agents=failed_agents,
+                )
                 emitter = getattr(self, "_emit_runtime_event", None)
                 if callable(emitter):
                     try:
@@ -300,7 +322,11 @@ class V5Hive:
                             f"Hive completed {len(subs)} sub-agents",
                             "success",
                             event_id=f"hive_{hive_id}",
-                            payload={"subtasks": len(subs)},
+                            payload={
+                                "subtasks": len(subs),
+                                "partial": bool(failed_agents),
+                                "failed_agents": failed_agents,
+                            },
                         )
                     except Exception as e:
                         self._hive_log().debug(
@@ -360,9 +386,48 @@ class V5Hive:
                 setattr(perceived, "context_summary", f"{current}\n\n{block}")
             else:
                 setattr(perceived, "context_summary", block)
+            self._hive_preserve_in_memory_context(block)
             self._hive_log().info("[HIVE] injected consolidated hive context")
         except Exception as e:
             self._hive_log().warning(f"[HIVE] failed to inject hive context: {e}")
+
+    def _hive_preserve_in_memory_context(self, block: str) -> None:
+        """Keep the ``[HIVE_RESULT]`` block alive across the context rebuild.
+
+        ``core.py`` reads ``perceived.context_summary`` right after
+        ``_inject_hive_context`` (core.py:1930-1931) but then *reassigns*
+        ``context_summary`` from the turn's cached memory snapshot
+        (core.py:1936-1953) before handing it to the direct model/tool loop
+        (core.py:2050-2051).  That reassignment silently dropped the
+        consolidated sub-agent result, so ``consolidate_hive`` output never
+        reached the model when a memory manager was configured.
+
+        Folding the block into the cached snapshot's ``knowledge_context``
+        (one of the six fields that rebuild joins) makes the merge survive.
+        Purely additive, idempotent, and guaranteed not to raise.
+        """
+        try:
+            if not block:
+                return
+            turn = getattr(getattr(self, "runtime", None), "current_turn", None)
+            metadata = getattr(turn, "metadata", None)
+            if not isinstance(metadata, dict):
+                return
+            ctx = metadata.get("_memory_context")
+            if ctx is None or not hasattr(ctx, "knowledge_context"):
+                return
+            existing = str(getattr(ctx, "knowledge_context", "") or "")
+            if _HIVE_RESULT_MARKER in existing:
+                return
+            setattr(
+                ctx,
+                "knowledge_context",
+                f"{existing}\n\n{block}".strip() if existing else block,
+            )
+        except Exception as e:
+            self._hive_log().debug(
+                "[HIVE] context preservation skipped (ignored): %s", e
+            )
 
     # ─────────────────────────────────────────────────────────────────────
     # FEEDBACK (V5: orchestrators/loop.py:3057-3073)
@@ -387,8 +452,12 @@ class V5Hive:
                 "timestamp": time.time(),
             }
             fb_path = os.path.join(hive_dir, f"feedback_{self.session_id}.json")
-            with open(fb_path, "w", encoding="utf-8") as f:
-                json.dump(feedback, f, indent=2)
+
+            def _write_feedback() -> None:
+                with open(fb_path, "w", encoding="utf-8") as f:
+                    json.dump(feedback, f, indent=2)
+
+            await asyncio.to_thread(_write_feedback)
         except Exception as e:
             self._hive_log().warning(f"[HIVE] failed to write hive feedback: {e}")
 
@@ -514,7 +583,14 @@ class V5Hive:
     ) -> None:
         """Move every agent of a hive to a terminal state (never raises)."""
         try:
+            states = self._hive_load_subagent_states()
+            terminal_failures = {"failed", "timeout", "cancelled", "canceled", "error"}
             for sub_id in self._hive_groups().get(str(hive_id), {}).get("agents", []):
+                prior = str(states.get(str(sub_id), {}).get("status") or "").lower()
+                if str(status).lower() in {"success", "succeeded"} and prior in terminal_failures:
+                    # A successful consolidation does not erase a worker's
+                    # independently recorded failure/cancellation.
+                    continue
                 self._hive_update_subagent_state(sub_id, status=status, **extra)
         except Exception as e:
             self._hive_log().debug(

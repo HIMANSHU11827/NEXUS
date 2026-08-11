@@ -262,6 +262,52 @@ class V5Evolution:
         except Exception:
             self.logger.warning("[EVOLVE] _evolve_memory_crystallize failed", exc_info=True)
 
+    async def _evolve_record_experience(self, task_desc: str, success: bool) -> None:
+        """Step 6: close the meta-learning loop by recording the real outcome.
+
+        Before this existed, ``MetaLearningLayer.record_experience`` was never
+        called anywhere in production: ``optimize()`` read a strategy table
+        that only tests ever wrote to, so the "learning" loop had a live read
+        end and a dead write end. Each finished turn now contributes one real
+        experience, which is what makes ``_select_strategy`` and the adaptive
+        learning rate reflect actual behaviour. Fully guarded; never raises.
+        """
+        meta = getattr(self, "meta_learning", None)
+        record = getattr(meta, "record_experience", None)
+        if not callable(record):
+            return
+        try:
+            from datetime import datetime
+
+            from .meta import Experience
+
+            turn = getattr(getattr(self, "runtime", None), "current_turn", None)
+            strategy = str(
+                (getattr(turn, "metadata", {}) or {}).get("strategy") or "direct_loop"
+            )
+            verified = bool(getattr(self, "_last_run_verified", False))
+            # Outcome is graded, not binary: a run that succeeded *and* passed
+            # verification is worth more than an unverified success, so a
+            # strategy that merely looks finished cannot outrank one that is
+            # actually evidenced.
+            outcome = 1.0 if (success and verified) else (0.6 if success else 0.0)
+            await asyncio.to_thread(
+                record,
+                Experience(
+                    task_id=str(getattr(turn, "turn_id", "") or self.session_id),
+                    strategy=strategy,
+                    outcome=outcome,
+                    timestamp=datetime.now(),
+                    context={
+                        "task": str(task_desc or "")[:300],
+                        "verified": verified,
+                        "session_id": str(getattr(self, "session_id", "") or ""),
+                    },
+                ),
+            )
+        except Exception:
+            self.logger.warning("[EVOLVE] _evolve_record_experience failed", exc_info=True)
+
     async def _maybe_run_curator(self) -> None:
         """Step 5: idle-run the SkillCurator.
 
@@ -299,6 +345,7 @@ class V5Evolution:
             self._evolve_gap_forge(),
             self._evolve_memory_crystallize(messages),
             self._maybe_run_curator(),
+            self._evolve_record_experience(task_desc, success),
             return_exceptions=True,
         )
 

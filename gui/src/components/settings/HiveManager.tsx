@@ -2,6 +2,10 @@ import { useState, type FormEvent } from 'react'
 import { UsersRound, Brain, CheckCircle2, Play, Square, Info } from 'lucide-react'
 import { api, type HiveItem } from '../../lib/api'
 
+function hiveCompleted(hive: HiveItem): boolean {
+  return ['completed', 'success', 'succeeded'].includes(String(hive.status || '').toLowerCase()) && !hive.partial
+}
+
 export function HiveManager({ response, pending, onToggle, onChanged, onError }: { response?: { enabled: boolean; personas: string[]; hives: HiveItem[] }; pending: boolean; onToggle: (enabled: boolean) => void; onChanged: () => void; onError: (message: string) => void }) {
   const [activeTab, setActiveTab] = useState<'overview' | 'create' | 'activity' | 'personas' | 'settings'>('overview')
   const [agents, setAgents] = useState([{ task: '', persona: 'WORKER' }])
@@ -20,14 +24,14 @@ export function HiveManager({ response, pending, onToggle, onChanged, onError }:
   const cancel = async (id: string) => { try { await api.cancelHive(id); onChanged() } catch (err) { onError(err instanceof Error ? err.message : 'Could not cancel the hive.') } }
   const resume = async (id: string) => { try { await api.resumeHive(id); onChanged() } catch (err) { onError(err instanceof Error ? err.message : 'Could not resume the hive.') } }
 
-  // Mock statistics for demonstration
   const stats = {
     totalHives: hives.length,
     runningHives: hives.filter(h => h.status === 'running').length,
-    completedHives: hives.filter(h => h.status === 'completed').length,
+    completedHives: hives.filter(hiveCompleted).length,
+    partialHives: hives.filter(h => Boolean(h.partial) || ['partial', 'degraded'].includes(String(h.status || '').toLowerCase())).length,
     totalAgents: hives.reduce((sum, h) => sum + h.agents.length, 0),
     avgAgentsPerHive: hives.length > 0 ? (hives.reduce((sum, h) => sum + h.agents.length, 0) / hives.length).toFixed(1) : 0,
-    successRate: hives.length > 0 ? ((hives.filter(h => h.status === 'completed').length / hives.length) * 100).toFixed(0) : 0,
+    successRate: hives.length > 0 ? ((hives.filter(hiveCompleted).length / hives.length) * 100).toFixed(0) : 0,
   }
 
   const personaDescriptions: Record<string, string> = {
@@ -109,7 +113,7 @@ export function HiveManager({ response, pending, onToggle, onChanged, onError }:
                 <p className="text-xs font-medium text-muted-foreground">Success Rate</p>
               </div>
               <p className="mt-2 text-2xl font-bold">{stats.successRate}%</p>
-              <p className="mt-1 text-xs text-muted-foreground">{stats.completedHives} completed</p>
+              <p className="mt-1 text-xs text-muted-foreground">{stats.completedHives} completed · {stats.partialHives} partial</p>
             </div>
           </div>
 
@@ -355,14 +359,7 @@ export function HiveManager({ response, pending, onToggle, onChanged, onError }:
                         </span>
                       </div>
                       <p className="mt-1 text-xs text-muted-foreground">{personaDescriptions[persona] || 'Specialized agent role for specific tasks'}</p>
-                      <div className="mt-3 flex gap-2">
-                        <button className="text-xs text-blue-600 hover:text-blue-700 underline">
-                          View capabilities
-                        </button>
-                        <button className="text-xs text-muted-foreground hover:text-foreground underline">
-                          Customize
-                        </button>
-                      </div>
+                      <p className="mt-3 text-xs text-muted-foreground">Persona metadata is reported by the Hive runtime. Persona editing is not exposed by the current API.</p>
                     </div>
                   </div>
                 </div>
@@ -371,28 +368,8 @@ export function HiveManager({ response, pending, onToggle, onChanged, onError }:
           </div>
 
           <div className="rounded-lg border border-border bg-card p-6">
-            <h4 className="text-sm font-semibold mb-4">Create Custom Persona</h4>
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs font-medium block mb-1">Persona Name</label>
-                <input
-                  type="text"
-                  placeholder="e.g., CODE_REVIEWER"
-                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-medium block mb-1">Description</label>
-                <textarea
-                  rows={3}
-                  placeholder="Describe the persona's role and capabilities..."
-                  className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                />
-              </div>
-              <button className="rounded-md bg-foreground px-4 py-2 text-sm text-background">
-                Add Persona
-              </button>
-            </div>
+            <h4 className="text-sm font-semibold mb-2">Persona management</h4>
+            <p className="text-xs text-muted-foreground">The current Hive API reports available personas and accepts a persona when creating a hive, but does not provide create, edit, capability-inspection, or persistence endpoints for custom personas.</p>
           </div>
         </div>
       )}
@@ -401,89 +378,13 @@ export function HiveManager({ response, pending, onToggle, onChanged, onError }:
       {activeTab === 'settings' && (
         <div className="space-y-4">
           <div className="rounded-lg border border-border bg-card p-6">
-            <h4 className="text-sm font-semibold mb-4">Hive Runtime Configuration</h4>
-            <div className="space-y-4">
-              <label className="flex items-center gap-3">
-                <input type="checkbox" defaultChecked className="rounded border-border" />
-                <span className="text-sm">Auto-start Hive agents on server boot</span>
-              </label>
-              <label className="flex items-center gap-3">
-                <input type="checkbox" defaultChecked className="rounded border-border" />
-                <span className="text-sm">Enable agent collaboration via blackboard</span>
-              </label>
-              <label className="flex items-center gap-3">
-                <input type="checkbox" defaultChecked={false} className="rounded border-border" />
-                <span className="text-sm">Log all agent communications</span>
-              </label>
-              <label className="flex items-center gap-3">
-                <input type="checkbox" defaultChecked className="rounded border-border" />
-                <span className="text-sm">Allow agents to spawn sub-agents</span>
-              </label>
-            </div>
+            <h4 className="text-sm font-semibold">Hive runtime controls</h4>
+            <p className="mt-2 text-sm text-muted-foreground">The running server exposes Hive enablement, creation, cancellation, resumption, and reported activity. It does not expose persisted boot, collaboration, logging, concurrency, timeout, or assignment-policy settings.</p>
+            <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-100">Those controls are intentionally omitted instead of appearing as editable values that would not be saved.</div>
           </div>
-
           <div className="rounded-lg border border-border bg-card p-6">
-            <h4 className="text-sm font-semibold mb-4">Resource Limits</h4>
-            <div className="space-y-4">
-              <div>
-                <label className="text-xs font-medium block mb-1">Max concurrent agents</label>
-                <input
-                  type="number"
-                  defaultValue={10}
-                  min="1"
-                  max="50"
-                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-medium block mb-1">Agent timeout (seconds)</label>
-                <input
-                  type="number"
-                  defaultValue={300}
-                  min="30"
-                  max="3600"
-                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-medium block mb-1">Max hive duration (minutes)</label>
-                <input
-                  type="number"
-                  defaultValue={60}
-                  min="5"
-                  max="480"
-                  className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm"
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-border bg-card p-6">
-            <h4 className="text-sm font-semibold mb-4">Agent Behavior</h4>
-            <div className="space-y-4">
-              <div>
-                <label className="text-xs font-medium block mb-1">Default collaboration model</label>
-                <select className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm">
-                  <option value="blackboard">Blackboard (shared memory)</option>
-                  <option value="message">Message passing</option>
-                  <option value="hybrid">Hybrid approach</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-xs font-medium block mb-1">Task assignment strategy</label>
-                <select className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm">
-                  <option value="manual">Manual assignment</option>
-                  <option value="auto">Automatic based on persona</option>
-                  <option value="dynamic">Dynamic reassignment</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex justify-end">
-            <button className="rounded-md bg-foreground px-4 py-2 text-sm text-background">
-              Save Settings
-            </button>
+            <h4 className="text-sm font-semibold">Available actions</h4>
+            <p className="mt-2 text-xs text-muted-foreground">Use Overview to start or stop the runtime, Create Hive to submit work, and Activity to cancel or resume reported hives.</p>
           </div>
         </div>
       )}

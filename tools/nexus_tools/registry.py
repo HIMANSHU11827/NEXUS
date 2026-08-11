@@ -132,6 +132,16 @@ class ToolEntry:
             **(self.constitution if isinstance(self.constitution, dict) else {}),
             **(runtime if isinstance(runtime, dict) else {}),
         }
+        explicit_read_only = self.execution.get(
+            "read_only",
+            self.execution.get(
+                "readOnly",
+                schema.get("read_only", schema.get("readOnly")),
+            ),
+        )
+        self._explicit_read_only = (
+            None if explicit_read_only is None else _policy_bool(explicit_read_only)
+        )
         self.enabled = _policy_bool(self.execution.get("enabled", schema.get("enabled", True)), True)
         self.intent = self.execution.get("intent", "")
         self.rules = _policy_list(self.execution.get("rules", schema.get("rules", [])))
@@ -158,6 +168,17 @@ class ToolEntry:
             self.execution.get("max_output_chars", schema.get("max_output_chars", DEFAULT_MAX_OUTPUT_CHARS)),
             DEFAULT_MAX_OUTPUT_CHARS,
             0,
+        )
+        # Retrying a read-only operation is generally safe, but retrying a
+        # side-effecting operation can duplicate writes, sends, or external
+        # mutations after an ambiguous timeout.  Such retries require an
+        # explicit schema-level opt-in.
+        self.retry_side_effects = _policy_bool(
+            self.execution.get(
+                "retry_side_effects",
+                self.execution.get("retrySideEffects", False),
+            ),
+            False,
         )
         self._semaphore = asyncio.Semaphore(self.max_parallel)
         self._cooldown_lock = asyncio.Lock()
@@ -215,6 +236,8 @@ class ToolEntry:
         return {"available": True, "reason": "ready", "missing_env": []}
 
     def is_read_only(self, params=None) -> bool:
+        if self._explicit_read_only is not None:
+            return self._explicit_read_only
         if self.instance and hasattr(self.instance, "is_read_only"):
             try:
                 # support both no-args and args signatures
@@ -225,8 +248,29 @@ class ToolEntry:
             except Exception:
                 logger.warning("tools/nexus_tools/registry.py:56 is_read_only: suppressed error", exc_info=True)
                 pass
-        name_lower = self.name.lower()
-        return any(x in name_lower for x in ("read", "view", "search", "grep", "glob", "get", "find", "list", "status", "health"))
+        name_tokens = set(re.findall(r"[a-z0-9]+", self.name.lower()))
+        # Mutating verbs take precedence over read-like substrings.  Without
+        # this guard, names such as ``get_or_create`` or ``list_and_delete``
+        # could be treated as read-only and automatically retried.
+        if name_tokens & {
+            "create", "update", "write", "delete", "remove", "send", "post",
+            "put", "patch", "execute", "run", "set", "save", "clear", "reset",
+            "move", "copy", "rename", "upload", "install", "cancel", "start",
+            "stop",
+        }:
+            return False
+        return bool(name_tokens & {
+            "read", "view", "search", "grep", "glob", "get", "find", "list",
+            "status", "health", "inspect", "query", "check", "show",
+        })
+
+    def retries_allowed(self, params=None) -> bool:
+        """Return whether configured transient retries are safe by default.
+
+        A tool may explicitly opt into retries for side effects when its
+        adapter provides its own idempotency guarantee.
+        """
+        return self.is_read_only(params) or self.retry_side_effects
 
     def is_concurrency_safe(self) -> bool:
         if "parallel" in self.execution:
@@ -696,7 +740,15 @@ class ToolRegistry:
         call_id = getattr(result, "tool_call_id", None) or None
         return self._maybe_persist(entry, result, call_id)
 
-    def list_tools(self, include_unavailable: bool = False) -> Dict[str, Any]:
+    def list_tools(self, include_unavailable: bool = False) -> Dict[str, Dict[str, Any]]:
+        """Return structured tool summaries keyed by canonical tool name.
+
+        Callers that need names may iterate the mapping or use ``.keys()``;
+        callers that expose diagnostics should consume the summary fields
+        rather than reconstructing availability from the handler object.
+        Unavailable tools are omitted by default and included when explicitly
+        requested for diagnostics/UI inventory.
+        """
         result = {}
         for name, entry in self._tools.items():
             availability = entry.availability()
@@ -715,10 +767,12 @@ class ToolRegistry:
                     "rules": entry.rules,
                     "conditions": entry.conditions,
                     "one_time_use": entry.one_time_use,
+                    "read_only": entry.is_read_only(),
                     "max_per_task": entry.max_per_task,
                     "parallel": entry.is_concurrency_safe(),
                     "max_parallel": entry.max_parallel,
                     "cooldown_ms": entry.cooldown_ms,
+                    "retry_side_effects": entry.retry_side_effects,
                 },
             }
         return result
@@ -733,7 +787,15 @@ class ToolRegistry:
         cancel_token = params.pop("_cancel_token", None)
         self._prepare_execution(entry, params)
 
-        max_retries = _policy_int(entry.execution.get("max_retries", 0), 0, 0)
+        configured_retries = _policy_int(entry.execution.get("max_retries", 0), 0, 0)
+        max_retries = configured_retries if entry.retries_allowed(params) else 0
+        if configured_retries and not max_retries:
+            logger.warning(
+                "Tool '%s' has %d configured retry/retries suppressed because it is side-effecting; "
+                "set execution.retry_side_effects=true only when the adapter is idempotent",
+                entry.name,
+                configured_retries,
+            )
         retry_delay_ms = _policy_int(entry.execution.get("retry_delay_ms", 1000), 1000, 0)
         attempts = 0
 
@@ -798,7 +860,14 @@ class ToolRegistry:
         cancel_token = params.pop("_cancel_token", None)
         self._prepare_execution(entry, params)
 
-        max_retries = _policy_int(entry.execution.get("max_retries", 0), 0, 0)
+        configured_retries = _policy_int(entry.execution.get("max_retries", 0), 0, 0)
+        max_retries = configured_retries if entry.retries_allowed(params) else 0
+        if configured_retries and not max_retries:
+            logger.warning(
+                "Tool '%s' stream retries suppressed because it is side-effecting; "
+                "set execution.retry_side_effects=true only when the adapter is idempotent",
+                entry.name,
+            )
         retry_delay_ms = _policy_int(entry.execution.get("retry_delay_ms", 1000), 1000, 0)
         attempts = 0
 
@@ -1062,8 +1131,11 @@ class ToolRegistry:
                 # Wire lifecycle hooks so the registry can park (deregister) a
                 # degraded server's tools and re-register them after a lazy
                 # reconnect — no phantom calls to a dead transport.
-                client.degraded_cb = lambda: self._deregister_mcp_tools(server_name)
-                client.recover_cb = lambda tool_defs: self._register_mcp_tools(
+                # Bind loop values now.  Late-bound closures would make every
+                # server's lifecycle callback target the final server in the
+                # config, parking/restoring the wrong tool set on reconnect.
+                client.degraded_cb = lambda server_name=server_name: self._deregister_mcp_tools(server_name)
+                client.recover_cb = lambda tool_defs, server_name=server_name, client=client, requires_env=requires_env: self._register_mcp_tools(
                     server_name, client, tool_defs, requires_env=requires_env,
                 )
                 # Keep tools for healthy / degraded-unprobed servers; drop for

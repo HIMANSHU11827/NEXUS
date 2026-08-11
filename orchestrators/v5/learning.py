@@ -16,17 +16,23 @@ All methods are defensive: they never raise and always log via
 
 from __future__ import annotations
 
+import asyncio
 import datetime
+import hashlib
 import json
 import math
 import os
 import time
+import uuid
 from typing import Any, Dict
+
+from providers.reliability import redact_secrets
 
 _DESCRIPTION_LIMIT = 200
 _ERROR_LIMIT = 500
 _SIGNAL_LIMIT = 300
 _LEARNINGS_CAP = 200
+_DIGEST_CHAR_LIMIT = 2000  # hard ceiling on the [LEARNING] block
 _INPUT_LIMIT = 500
 _RESPONSE_LIMIT = 200
 
@@ -80,7 +86,11 @@ class V5Learning:
         """Record failed tool actions into ``runtime.failures``.
 
         Each failed action (dict or ActionResult object) becomes one
-        ``{"type": "tool_failure", ...}`` entry. Returns the number of
+        ``{"type": "tool_failure", ...}`` entry. Entries are deduped by
+        ``(description, error)`` and the stored list is capped at
+        ``_LEARNINGS_CAP`` entries (oldest dropped) so a repeatedly
+        failing tool cannot flood the bounded digest window or let
+        session memory grow without bound. Returns the number of
         failures recorded.
         """
         failures = self._runtime_storage("failures")
@@ -92,14 +102,55 @@ class V5Learning:
         for action in actions:
             if not self._action_failed(action):
                 continue
+            desc = str(self._action_get(action, "description") or "")[:_DESCRIPTION_LIMIT]
+            err = str(self._action_get(action, "error") or "")[:_ERROR_LIMIT]
+            # Dedup: skip an identical failure already recorded this session.
+            if any(
+                f.get("type") == "tool_failure"
+                and f.get("description") == desc
+                and f.get("error") == err
+                for f in failures
+            ):
+                continue
             failures.append({
                 "type": "tool_failure",
-                "description": str(self._action_get(action, "description") or "")[:_DESCRIPTION_LIMIT],
-                "error": str(self._action_get(action, "error") or "")[:_ERROR_LIMIT],
+                "description": desc,
+                "error": err,
                 "turn_id": self._current_turn_id or self.session_id,
             })
             recorded += 1
+            # Close the durable failure-memory loop: each distinct failed
+            # action is persisted so MemoryManager._prefetch_failures can
+            # surface it as a PREVENTIVE VACCINE on a later turn. Without
+            # this, FailureMemory.record() had zero callers and the vaccine
+            # system always returned empty.
+            self._persist_failure_memory(desc, err)
+        if len(failures) > _LEARNINGS_CAP:
+            del failures[: len(failures) - _LEARNINGS_CAP]
         return recorded
+
+    def _persist_failure_memory(self, description: str, error: str) -> None:
+        """Best-effort durable write of a distinct tool failure.
+        Never raises; a persistence failure must not break the turn."""
+        try:
+            root_dir = getattr(self, "root_dir", None)
+            if not root_dir:
+                return
+            from sandbox.failure_memory import FailureMemory
+            fm = FailureMemory(root_dir)
+            # De-dupe against what is already persisted so the vaccine
+            # window is not flooded by the same repeated failure.
+            existing = {r.get("error") for r in fm.recent(limit=200)}
+            if error in existing:
+                return
+            fm.record(
+                task=str(getattr(self, "_current_turn_id", "") or getattr(self, "session_id", "")),
+                tool="",
+                error=error,
+                context={"description": description},
+            )
+        except Exception as e:
+            self.logger.debug(f"[LEARNING] durable failure-memory write skipped: {e}")
 
     def _collect_reflection_signals(self, result: Dict[str, Any]) -> int:
         """Append deduplicated reflection signals to ``runtime.learnings``.
@@ -157,6 +208,8 @@ class V5Learning:
         ``self._replay_logged`` so the orchestrator can report the status.
         """
         self._replay_logged = False
+        self._replay_entry_id = ""
+        self._replay_record_sha256 = ""
         try:
             root_dir = getattr(self, "root_dir", None)
             if not root_dir:
@@ -167,18 +220,23 @@ class V5Learning:
                 "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "turn_id": str(getattr(turn, "turn_id", "") or ""),
                 "session_id": getattr(self, "session_id", ""),
-                "input": str(getattr(perceived, "original_input", ""))[:_INPUT_LIMIT],
+                "input": redact_secrets(str(getattr(perceived, "original_input", ""))[:_INPUT_LIMIT]),
                 "success": bool(result.get("success", False)),
                 "n_actions": len(actions),
                 "n_failed": sum(1 for action in actions if self._action_failed(action)),
-                "response_preview": str(result.get("response") or "")[:_RESPONSE_LIMIT],
+                "response_preview": redact_secrets(str(result.get("response") or "")[:_RESPONSE_LIMIT]),
                 "plan_steps": self._count_plan_steps(result),
             }
+            entry["entry_id"] = f"replay_{uuid.uuid4().hex[:24]}"
+            entry_bytes = json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            entry["record_sha256"] = hashlib.sha256(entry_bytes).hexdigest()
             replay_dir = os.path.join(root_dir, _REPLAY_DIR_NAME)
             os.makedirs(replay_dir, exist_ok=True)
             with open(os.path.join(replay_dir, _REPLAY_FILE_NAME), "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry) + "\n")
             self._replay_logged = True
+            self._replay_entry_id = entry["entry_id"]
+            self._replay_record_sha256 = entry["record_sha256"]
         except Exception as e:
             self.logger.debug(f"[LEARNING] turn replay log failed: {e}")
 
@@ -200,7 +258,9 @@ class V5Learning:
         except Exception as e:
             self.logger.warning(f"[LEARNING] reflection-signal collection failed: {e}")
         try:
-            self._log_turn_replay(perceived, result, turn)
+            # Blocking disk write must not stall the event loop
+            # (this is awaited during turn finalization).
+            await asyncio.to_thread(self._log_turn_replay, perceived, result, turn)
         except Exception as e:
             self.logger.warning(f"[LEARNING] turn replay logging failed: {e}")
         replay_status = "logged" if getattr(self, "_replay_logged", False) else "not logged"
@@ -209,6 +269,45 @@ class V5Learning:
             f"{failures} failure(s), {learnings} learning(s), replay {replay_status}"
         )
 
+    def learning_signals_digest(self, limit: int = 6) -> str:
+        """Render the collected per-turn learning signals as a bounded,
+        model-readable block.
+
+        This is the *read* half of the learning loop: ``_collect_turn_signals``
+        writes ``runtime.failures`` / ``runtime.learnings`` every turn, but
+        nothing injected them into the prompt, so past failures and
+        reflections never influenced future behavior. Callers append the
+        non-empty result to the context summary so the model can avoid
+        repeating known-bad actions.
+        """
+        runtime = getattr(self, "runtime", None)
+        if runtime is None:
+            return ""
+        failures = []
+        for f in (getattr(runtime, "failures", None) or []):
+            if not isinstance(f, dict):
+                continue
+            label = str(f.get("description") or f.get("error") or "tool failure")[:120]
+            failures.append("- " + label)
+        learnings = []
+        for l in (getattr(runtime, "learnings", None) or []):
+            if not isinstance(l, dict):
+                continue
+            signal = str(l.get("signal") or "").strip()
+            if signal:
+                learnings.append("- " + signal[:160])
+        parts = []
+        if failures:
+            parts.append("Known tool failures (avoid repeating):\n" + "\n".join(failures[-limit:]))
+        if learnings:
+            parts.append("Past reflections (apply if relevant):\n" + "\n".join(learnings[-limit:]))
+        digest = "\n\n".join(parts)
+        # Hard ceiling: even with many distinct signals the block stays
+        # bounded so it cannot materially breach the context budget it
+        # is appended to (see core.py injection, post memory-merge).
+        if len(digest) > _DIGEST_CHAR_LIMIT:
+            digest = digest[:_DIGEST_CHAR_LIMIT].rstrip() + "\n...[truncated]"
+        return digest
     # ─── Episodic memory stream ──────────────────────────────────────
 
     @staticmethod

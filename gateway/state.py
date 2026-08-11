@@ -15,10 +15,13 @@ Guarantees:
 import json
 import logging
 import os
+import sqlite3
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +35,31 @@ class GatewayStateStore:
 
     def __init__(self, path: Optional[str] = None):
         self.path = os.path.abspath(path or DEFAULT_STATE_FILE)
+        self._lock = threading.RLock()
+
+    @contextmanager
+    def _process_lock(self) -> Iterator[None]:
+        """Serialize lifecycle snapshots across threads and processes."""
+        lock_path = self.path + ".lock.sqlite3"
+        Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(lock_path, timeout=60.0, isolation_level=None)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            yield
+            connection.execute("COMMIT")
+        except Exception:
+            try:
+                connection.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            connection.close()
 
     def load(self) -> Dict[str, dict]:
         """Return the persisted per-platform states (empty dict on any failure)."""
         try:
-            with open(self.path, "r", encoding="utf-8") as fh:
+            with self._lock, self._process_lock(), open(self.path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             if isinstance(data, dict):
                 platforms = data.get("platforms", {})
@@ -59,17 +82,34 @@ class GatewayStateStore:
                 "updated_at": time.time(),
                 "platforms": platform_states,
             }
-            # Atomic write: same-directory temp file + rename.
-            fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    json.dump(payload, fh, indent=2)
-                os.replace(tmp_path, self.path)
-            finally:
-                if os.path.exists(tmp_path):
+            with self._lock, self._process_lock():
+                # Atomic write: same-directory temp file + rename.  Flush the
+                # file and parent directory so a successful save survives a
+                # process or OS crash after the rename.
+                fd, tmp_path = tempfile.mkstemp(
+                    prefix=".gateway-state-", suffix=".tmp", dir=str(path.parent)
+                )
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                        json.dump(payload, fh, indent=2)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    os.replace(tmp_path, self.path)
                     try:
-                        os.unlink(tmp_path)
-                    except OSError:  # pragma: no cover - raced cleanup
+                        directory_fd = os.open(str(path.parent), os.O_RDONLY)
+                        try:
+                            os.fsync(directory_fd)
+                        finally:
+                            os.close(directory_fd)
+                    except OSError:
+                        # Directory fsync is unavailable on some platforms;
+                        # the atomic replacement remains valid there.
                         pass
+                finally:
+                    if os.path.exists(tmp_path):
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:  # pragma: no cover - raced cleanup
+                            pass
         except Exception:  # degrade softly — persistence must never crash the loop
             logger.warning("gateway/state.py save: suppressed error", exc_info=True)

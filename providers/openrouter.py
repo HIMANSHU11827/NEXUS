@@ -129,6 +129,7 @@ class OpenRouterProvider(NexusBaseProvider):
             self._add_tool_payload(payload, kwargs)
             if self.thinking:
                 payload["thinking"] = {}
+            response = None
             try:
                 response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=timeout)
                 if response.status_code == 200:
@@ -202,5 +203,11 @@ class OpenRouterProvider(NexusBaseProvider):
                     continue
                 yield f"Error in stream: {redact_secrets(e)[:500]}"
                 return
+            finally:
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        logger.debug("OpenRouter stream response cleanup failed", exc_info=True)
 
 

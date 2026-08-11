@@ -23,6 +23,12 @@ python -m nexus --shell     # Legacy compatibility shell
 - First-run wizard with interactive menu (msvcrt-based keyboard navigation)
 - Export/import system (config + full system with ZIP)
 - `events.py` — `CanonicalEvent` dataclass + `EVENT_TYPES` (50 event types) + `infer_event_type()` heuristic
-- `commands.py` — `CommandRegistry` singleton with 30+ built-in slash commands
+- `commands.py` — `CommandRegistry` singleton with 42 built-in slash commands
 - `runtime.py` — `ChatRunRequest`, session/turn ID sanitization, provider normalization
 - `run_context.py` — `RunContext` durable identity + `start_run_context()` / `list_run_contexts()`
+- `control_plane.py` — `PlanStep` / `PlanVersion` plan data model; `create_plan_version()`, `create_checklist_plan()`, `transition_step()`, `project_plan_event()` (persisted to `.nexus_v5/plans/`)
+- `control_store.py` — `ControlStore`: session-scoped control-state persistence
+- `work_items.py` — `WorkItem` data model; `create_work_item()`, `reconcile_checklist_work_item()`, `project_work_item_event()`, `replay_work_item_event_log()`
+- `observer.py` — `follow_events()` event tailing + `run_observer()` CLI observer
+- `run_control.py` — `RunControl` / `RunControlRegistry`: per-turn deadline/control tracking
+- `task_workflow.py` — `start_task_workflow()` / `complete_task_workflow()` orchestration helpers

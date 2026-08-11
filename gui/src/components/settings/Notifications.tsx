@@ -3,6 +3,12 @@ import { useState } from 'react'
 export function NotificationSettings() {
   const [enabled, setEnabled] = useState(() => localStorage.getItem('nexus-notifications') === 'enabled')
   const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem('nexus-notification-sound') === 'enabled')
+  const [types, setTypes] = useState(() => ({
+    taskCompletion: localStorage.getItem('nexus-notification-task-completion') !== 'disabled',
+    errorAlerts: localStorage.getItem('nexus-notification-error-alerts') !== 'disabled',
+    newMessages: localStorage.getItem('nexus-notification-new-messages') === 'enabled',
+  }))
+  const [volume, setVolume] = useState(() => Number(localStorage.getItem('nexus-notification-volume') || 50))
   const [message, setMessage] = useState('')
   const [activeTab, setActiveTab] = useState<'general' | 'sound'>('general')
   
@@ -25,6 +31,23 @@ export function NotificationSettings() {
     setSoundEnabled(next)
     localStorage.setItem('nexus-notification-sound', next ? 'enabled' : 'disabled')
     setMessage(next ? 'Notification sounds enabled.' : 'Notification sounds disabled.')
+  }
+
+  const updateType = (key: keyof typeof types) => {
+    const next = !types[key]
+    setTypes(current => ({ ...current, [key]: next }))
+    const storageKey = {
+      taskCompletion: 'nexus-notification-task-completion',
+      errorAlerts: 'nexus-notification-error-alerts',
+      newMessages: 'nexus-notification-new-messages',
+    }[key]
+    localStorage.setItem(storageKey, next ? 'enabled' : 'disabled')
+    setMessage('Notification preferences saved on this device.')
+  }
+
+  const updateVolume = (value: number) => {
+    setVolume(value)
+    localStorage.setItem('nexus-notification-volume', String(value))
   }
 
   const supported = typeof window !== 'undefined' && 'Notification' in window
@@ -66,15 +89,15 @@ export function NotificationSettings() {
           <p className="mt-1 text-xs text-muted-foreground">Choose which events trigger notifications.</p>
           <div className="mt-3 space-y-3">
             <label className="flex items-center gap-3">
-              <input type="checkbox" defaultChecked className="rounded border-border" />
+              <input type="checkbox" checked={types.taskCompletion} onChange={() => updateType('taskCompletion')} className="rounded border-border" />
               <span className="text-sm">Task completion</span>
             </label>
             <label className="flex items-center gap-3">
-              <input type="checkbox" defaultChecked className="rounded border-border" />
+              <input type="checkbox" checked={types.errorAlerts} onChange={() => updateType('errorAlerts')} className="rounded border-border" />
               <span className="text-sm">Error alerts</span>
             </label>
             <label className="flex items-center gap-3">
-              <input type="checkbox" defaultChecked={false} className="rounded border-border" />
+              <input type="checkbox" checked={types.newMessages} onChange={() => updateType('newMessages')} className="rounded border-border" />
               <span className="text-sm">New messages</span>
             </label>
           </div>
@@ -98,7 +121,10 @@ export function NotificationSettings() {
           <p className="text-sm font-medium">Volume</p>
           <p className="mt-1 text-xs text-muted-foreground">Adjust notification sound volume.</p>
           <div className="mt-3">
-            <input type="range" min="0" max="100" defaultValue="50" className="w-full" />
+            <div className="flex items-center gap-3">
+              <input type="range" min="0" max="100" value={volume} onChange={event => updateVolume(Number(event.target.value))} className="w-full" aria-label="Notification volume" />
+              <span className="w-10 text-right text-xs tabular-nums text-muted-foreground">{volume}%</span>
+            </div>
           </div>
         </div>
       </div>

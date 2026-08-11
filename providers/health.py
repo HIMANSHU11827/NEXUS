@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import os
+import sqlite3
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -17,6 +21,7 @@ from providers.reliability import (
 # A provider marked unhealthy is excluded from the mesh only for this long;
 # without a decay window a single transient failure banned it permanently.
 DEGRADED_TTL_SECONDS = 60.0
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -45,35 +50,151 @@ class ProviderHealth:
 
 
 class ProviderHealthRegistry:
-    """In-memory provider telemetry with normalized errors."""
+    """Provider telemetry with optional cross-process SQLite persistence."""
 
-    def __init__(self) -> None:
+    def __init__(self, store_path: Optional[str] = None) -> None:
         self._health: Dict[str, ProviderHealth] = {}
+        self._lock = threading.RLock()
+        self._store_path = os.path.abspath(store_path) if store_path else ""
+        if self._store_path:
+            try:
+                os.makedirs(os.path.dirname(self._store_path), exist_ok=True)
+                with self._connect() as connection:
+                    connection.execute(
+                        """CREATE TABLE IF NOT EXISTS provider_health (
+                            provider_id TEXT PRIMARY KEY,
+                            healthy INTEGER NOT NULL,
+                            latency_ms REAL,
+                            last_error TEXT NOT NULL DEFAULT '',
+                            checked_at REAL NOT NULL,
+                            capability_json TEXT NOT NULL DEFAULT '{}'
+                        )"""
+                    )
+            except Exception:
+                logger.warning("provider health persistence unavailable", exc_info=True)
+                self._store_path = ""
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self._store_path, timeout=5.0)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("PRAGMA journal_mode=WAL")
+        return connection
+
+    @staticmethod
+    def _from_row(row: sqlite3.Row) -> ProviderHealth:
+        try:
+            raw_capability = json.loads(str(row["capability_json"] or "{}"))
+            capability = ProviderCapability(**{
+                key: raw_capability[key]
+                for key in ProviderCapability.__dataclass_fields__
+                if key in raw_capability
+            })
+        except Exception:
+            capability = ProviderCapability()
+        return ProviderHealth(
+            provider_id=str(row["provider_id"]),
+            healthy=bool(row["healthy"]),
+            latency_ms=row["latency_ms"],
+            last_error=str(row["last_error"] or ""),
+            checked_at=float(row["checked_at"] or 0.0),
+            capability=capability,
+        )
+
+    def _persist_locked(self, record: ProviderHealth) -> None:
+        if not self._store_path:
+            return
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """INSERT INTO provider_health
+                    (provider_id, healthy, latency_ms, last_error, checked_at, capability_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(provider_id) DO UPDATE SET
+                      healthy=excluded.healthy,
+                      latency_ms=excluded.latency_ms,
+                      last_error=excluded.last_error,
+                      checked_at=excluded.checked_at,
+                      capability_json=excluded.capability_json
+                    WHERE excluded.checked_at >= provider_health.checked_at""",
+                    (
+                        record.provider_id,
+                        int(record.healthy),
+                        record.latency_ms,
+                        record.last_error,
+                        record.checked_at,
+                        json.dumps(asdict(record.capability), sort_keys=True),
+                    ),
+                )
+        except Exception:
+            logger.debug("provider health persistence write failed", exc_info=True)
+
+    def _read_persisted_locked(self, provider_id: str) -> Optional[ProviderHealth]:
+        if not self._store_path:
+            return None
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT * FROM provider_health WHERE provider_id=?",
+                    (str(provider_id),),
+                ).fetchone()
+            return self._from_row(row) if row is not None else None
+        except Exception:
+            logger.debug("provider health persistence read failed", exc_info=True)
+            return None
 
     def mark_success(self, provider_id: str, latency_ms: float, capability: Optional[ProviderCapability] = None) -> None:
-        self._health[provider_id] = ProviderHealth(
-            provider_id=provider_id,
-            healthy=True,
-            latency_ms=latency_ms,
-            capability=capability or self._health.get(provider_id, ProviderHealth(provider_id, True)).capability,
-        )
+        with self._lock:
+            previous = self._health.get(provider_id) or self._read_persisted_locked(provider_id)
+            record = ProviderHealth(
+                provider_id=provider_id,
+                healthy=True,
+                latency_ms=latency_ms,
+                capability=capability or (previous.capability if previous else ProviderCapability()),
+            )
+            self._health[provider_id] = record
+            self._persist_locked(record)
 
     def mark_failure(self, provider_id: str, error: Exception | str, capability: Optional[ProviderCapability] = None) -> None:
-        self._health[provider_id] = ProviderHealth(
-            provider_id=provider_id,
-            healthy=False,
-            last_error=self.normalize_error(error),
-            capability=capability or self._health.get(provider_id, ProviderHealth(provider_id, False)).capability,
-        )
+        with self._lock:
+            previous = self._health.get(provider_id) or self._read_persisted_locked(provider_id)
+            record = ProviderHealth(
+                provider_id=provider_id,
+                healthy=False,
+                last_error=self.normalize_error(error),
+                capability=capability or (previous.capability if previous else ProviderCapability()),
+            )
+            self._health[provider_id] = record
+            self._persist_locked(record)
 
     def get(self, provider_id: str) -> Optional[ProviderHealth]:
-        return self._health.get(provider_id)
+        with self._lock:
+            local = self._health.get(provider_id)
+            persisted = self._read_persisted_locked(provider_id)
+            if persisted is not None and (local is None or persisted.checked_at >= local.checked_at):
+                self._health[provider_id] = persisted
+                return persisted
+            return local
 
     def all(self) -> List[Dict[str, Any]]:
-        return [h.to_dict() for h in self._health.values()]
+        with self._lock:
+            records = dict(self._health)
+            if self._store_path:
+                try:
+                    with self._connect() as connection:
+                        rows = connection.execute("SELECT * FROM provider_health").fetchall()
+                    for row in rows:
+                        persisted = self._from_row(row)
+                        current = records.get(persisted.provider_id)
+                        if current is None or persisted.checked_at >= current.checked_at:
+                            records[persisted.provider_id] = persisted
+                except Exception:
+                    logger.debug("provider health persistence snapshot failed", exc_info=True)
+            return [h.to_dict() for h in records.values()]
 
     def is_degraded(self, provider_id: str) -> bool:
-        health = self._health.get(provider_id)
+        with self._lock:
+            health = self.get(provider_id)
         if not health or health.healthy:
             return False
         return (time.time() - health.checked_at) < DEGRADED_TTL_SECONDS

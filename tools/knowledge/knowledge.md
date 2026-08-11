@@ -11,7 +11,7 @@ action and the substring fallback in `query` are described accurately above;
 no embeddings are computed by this tool.
 
 ## Parameters
-- `action` (string, required): query | store | list | delete
+- `action` (string, required): list | store | query
 - `query` (string, optional): Search query
 - `title` (string, optional): Entry title
 - `content` (string, optional): Entry content

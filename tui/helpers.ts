@@ -93,6 +93,8 @@ export interface Message {
 export interface FileStatus {
     name: string;
     status: string;
+    additions?: number;
+    deletions?: number;
 }
 
 export type TimelineKind = 'read' | 'write' | 'tool' | 'success' | 'error' | 'text' | 'step';
@@ -126,15 +128,22 @@ export interface TaskItem {
     startedAt?: number;
 }
 
-export type ActivityKind = 'file' | 'run' | 'mcp' | 'terminal' | 'tool' | 'search' | 'todo' | 'skill' | 'plugin' | 'hive' | 'config' | 'settings' | 'compact';
+export type ActivityKind =
+    | 'tool' | 'command' | 'file' | 'test' | 'search' | 'browser'
+    | 'mcp' | 'skill' | 'plugin' | 'hive' | 'agent' | 'worker' | 'provider'
+    | 'rag' | 'approval' | 'error' | 'retry' | 'plan' | 'todo'
+    | 'memory' | 'background' | 'compact' | 'config' | 'settings' | 'run' | 'terminal';
 
 export const PUBLIC_ACTIVITY_KINDS = new Set([
     'plan', 'todo', 'tool', 'command', 'file', 'test', 'search', 'browser',
     'mcp', 'skill', 'plugin', 'hive', 'agent', 'worker', 'provider', 'rag',
-    'approval', 'error', 'retry', 'config', 'settings', 'compact'
+    'approval', 'guardrail', 'error', 'retry', 'completion', 'config', 'settings', 'compact'
 ]);
 export const CHAT_ACTIVITY_KINDS = new Set<ActivityKind>([
-    'file', 'run', 'search', 'mcp', 'skill', 'plugin', 'hive', 'tool', 'todo', 'config', 'settings', 'compact'
+    'tool', 'command', 'file', 'test', 'search', 'browser', 'mcp', 'skill',
+    'plugin', 'hive', 'agent', 'worker', 'provider', 'rag', 'approval',
+    'error', 'retry', 'plan', 'todo', 'memory', 'background', 'compact',
+    'config', 'settings', 'run', 'terminal'
 ]);
 
 export const adaptCanonicalEvent = (input: Record<string, any>): Record<string, any> => {
@@ -144,6 +153,8 @@ export const adaptCanonicalEvent = (input: Record<string, any>): Record<string, 
     const family = eventType.includes('.') ? eventType.split('.')[0] : '';
     const kind = family === 'web' ? 'search'
         : ['subagent', 'handoff'].includes(family) ? 'hive'
+        : family === 'guardrail' ? 'approval'
+        : family === 'completion' ? 'run'
         : ['plan', 'phase'].includes(family) ? 'plan'
         : ['run', 'conversation', 'message', 'status'].includes(family) ? 'agent'
         : family;
@@ -194,6 +205,17 @@ export interface ActivityItem {
     maxParallel?: number;
     cooldownMs?: number;
 }
+
+export const mergeActivityTargetFields = (
+    existing: ActivityItem,
+    incoming: Omit<ActivityItem, 'id' | 'number'>
+) => ({
+    summary: String(incoming.summary || '').trim() || existing.summary,
+    command: String(incoming.command || '').trim() || existing.command,
+    files: incoming.files?.filter(Boolean).length ? incoming.files : existing.files,
+    operation: String(incoming.operation || '').trim() || existing.operation,
+    detail: String(incoming.detail || '').trim() || existing.detail
+});
 
 export type PanelMode = 'workspace' | 'hive' | 'agent' | 'activity' | 'question' | 'plan' | 'mcp';
 
@@ -327,147 +349,67 @@ export const RUN_TOOLS = new Set(['bash', 'shell', 'exec', 'run', 'run_command',
 export const SEARCH_TOOLS = new Set(['search', 'web_search', 'websearch', 'browser_search', 'grep', 'warpgrep']);
 export const TODO_TOOLS = new Set(['todo', 'todo_write', 'task', 'task_update', 'update_plan', 'plan']);
 
-export const COMMANDS = [
-    {name: '/add-dir', description: 'Add extra working directory'},
-    {name: '/agents', description: 'Switch or list agents', aliases: ['/agent']},
-    {name: '/api', description: 'Check or start TUI API'},
-    {name: '/advisor', description: 'Show advisor feature status'},
-    {name: '/back', description: 'Return right panel to default'},
-    {name: '/background', description: 'Show background session support', aliases: ['/bg']},
-    {name: '/batch', description: 'Start multi-agent batch workflow'},
-    {name: '/build', description: 'Build GUI or compile TUI'},
-    {name: '/branch', description: 'Show current git branch'},
-    {name: '/btw', description: 'Ask a side note without special handling'},
-    {name: '/cat', description: 'Preview a workspace file'},
-    {name: '/cd', description: 'Move TUI working directory'},
-    {name: '/chrome', description: 'Show Chrome integration status'},
-    {name: '/check', description: 'Run focused checks', aliases: ['/test', '/tests']},
-    {name: '/claude-api', description: 'Show Claude API migration support'},
-    {name: '/clear', description: 'Clear visible TUI history'},
-    {name: '/close', description: 'Close right panel detail', aliases: ['/panel']},
-    {name: '/code-review', description: 'Review current git diff'},
-    {name: '/color', description: 'Show color/theme control'},
-    {name: '/commands', description: 'Show command list', aliases: ['/help', '/']},
-    {name: '/compact', description: 'Compact visible TUI history'},
-    {name: '/config', description: 'Show runtime config sections'},
-    {name: '/conversations', description: 'List saved conversations', aliases: ['/sessions']},
-    {name: '/context', description: 'Show context usage'},
-    {name: '/copy', description: 'Copy assistant response to clipboard'},
-    {name: '/debug', description: 'Show debug diagnostics'},
-    {name: '/deep-research', description: 'Run research prompt through chat'},
-    {name: '/delete-session', description: 'Delete a conversation'},
-    {name: '/desktop', description: 'Show desktop handoff support', aliases: ['/app']},
-    {name: '/disable', description: 'Disable tool, skill, MCP, plugin, provider, or feature', aliases: ['/off']},
-    {name: '/diff', description: 'Show git diff summary'},
-    {name: '/doctor', description: 'Run Nexus health checks'},
-    {name: '/docs', description: 'Show important docs'},
-    {name: '/effort', description: 'Set reasoning effort mode'},
-    {name: '/enable', description: 'Enable tool, skill, MCP, plugin, provider, or feature', aliases: ['/on']},
-    {name: '/env', description: 'Show safe env summary'},
-    {name: '/exit', description: 'Exit the TUI', aliases: ['/quit']},
-    {name: '/export', description: 'Export conversation to a text file'},
-    {name: '/fast', description: 'Toggle fast mode hint'},
-    {name: '/feedback', description: 'Show feedback/report path', aliases: ['/bug', '/share']},
-    {name: '/fewer-permission-prompts', description: 'Inspect permission rules'},
-    {name: '/features', description: 'List runtime feature flags'},
-    {name: '/files', description: 'Search workspace files'},
-    {name: '/focus', description: 'Show focus view support'},
-    {name: '/fork', description: 'Fork work to multi-agent flow'},
-    {name: '/git', description: 'Show git status', aliases: ['/gst', '/gstatus']},
-    {name: '/goal', description: 'Set, show, or clear active Nexus goal'},
-    {name: '/gui', description: 'Start, open, or inspect GUI'},
-    {name: '/health', description: 'Show API and runtime health'},
-    {name: '/heapdump', description: 'Write local Node heap info'},
-    {name: '/hive', description: 'Open hive or worker detail'},
-    {name: '/history', description: 'Load current conversation history'},
-    {name: '/hooks', description: 'Show configured hooks'},
-    {name: '/ide', description: 'Open project in VS Code', aliases: ['/editor']},
-    {name: '/init', description: 'Initialize project memory files'},
-    {name: '/insights', description: 'Summarize local session history'},
-    {name: '/install-github-app', description: 'Show GitHub app setup support'},
-    {name: '/install-slack-app', description: 'Show Slack app setup support'},
-    {name: '/keybindings', description: 'Open keybinding notes'},
-    {name: '/login', description: 'Show auth environment status'},
-    {name: '/logout', description: 'Clear local provider override'},
-    {name: '/logs', description: 'Show recent Nexus logs'},
-    {name: '/log', description: 'Show recent git commits'},
-    {name: '/loop', description: 'Show scheduler loop support', aliases: ['/proactive']},
-    {name: '/ls', description: 'List workspace files'},
-    {name: '/memory', description: 'Show or open project memory'},
-    {name: '/mcp', description: 'Show MCP configuration', aliases: ['/mcps', '/mpc']},
-    {name: '/mobile', description: 'Show mobile handoff support', aliases: ['/ios', '/android']},
-    {name: '/mode', description: 'Switch permission mode', aliases: ['/permissions', '/allowed-tools']},
-    {name: '/model', description: 'Switch model', aliases: ['/models']},
-    {name: '/multi-agent', description: 'Start multi-agent workflow', aliases: ['/multi_agent']},
-    {name: '/new', description: 'Create new conversation'},
-    {name: '/open', description: 'Open work row detail', aliases: ['/detail']},
-    {name: '/open-gui', description: 'Open GUI in browser'},
-    {name: '/output-style', description: 'Show output style config'},
-    {name: '/passes', description: 'Show passes support'},
-    {name: '/paste', description: 'Attach image from Windows clipboard'},
-    {name: '/plugins', description: 'List enabled plugins', aliases: ['/plugin']},
-    {name: '/plan', description: 'Switch to ask permission mode'},
-    {name: '/providers', description: 'Show configured providers'},
-    {name: '/provider', description: 'Set provider override', aliases: ['/connect']},
-    {name: '/pwd', description: 'Show workspace path'},
-    {name: '/powerup', description: 'Show feature lessons support'},
-    {name: '/privacy-settings', description: 'Show privacy settings support'},
-    {name: '/radio', description: 'Show radio support'},
-    {name: '/recap', description: 'Show compact session recap'},
-    {name: '/readme', description: 'Preview README'},
-    {name: '/reload', description: 'Reload runtime, session, tasks, skills, plugins, tools, or MCP', aliases: ['/reload-plugins', '/reload-skills']},
-    {name: '/rename', description: 'Rename current conversation'},
-    {name: '/reset', description: 'Reset Nexus runtime or tasks'},
-    {name: '/resume', description: 'Resume conversation', aliases: ['/load']},
-    {name: '/review', description: 'Review current git diff'},
-    {name: '/rewind', description: 'Show rewind/checkpoint support', aliases: ['/checkpoint', '/undo']},
-    {name: '/remote-control', description: 'Show remote control support', aliases: ['/rc']},
-    {name: '/remote-env', description: 'Show remote environment support'},
-    {name: '/run', description: 'Run command through Nexus API'},
-    {name: '/run-skill-generator', description: 'Show run skill generator support'},
-    {name: '/sandbox', description: 'Switch command sandbox tier'},
-    {name: '/scheduler', description: 'Show scheduler feature state'},
-    {name: '/schedule', description: 'Show scheduler feature state', aliases: ['/routines']},
-    {name: '/scroll-speed', description: 'Show scroll speed support'},
-    {name: '/security-review', description: 'Review current diff for security risks'},
-    {name: '/setup-bedrock', description: 'Show Bedrock provider setup help'},
-    {name: '/setup-vertex', description: 'Show Vertex provider setup help'},
-    {name: '/settings', description: 'Alias for config'},
-    {name: '/simplify', description: 'Review diff for simplification'},
-    {name: '/skills', description: 'List installed skills', aliases: ['/skill']},
-    {name: '/sources', description: 'Toggle activity source URLs'},
-    {name: '/status', description: 'Show kernel status'},
-    {name: '/statusline', description: 'Show status line settings'},
-    {name: '/stickers', description: 'Show sticker support'},
-    {name: '/stop', description: 'Stop current thinking stream'},
-    {name: '/retry', description: 'Retry the last user prompt verbatim'},
-    {name: '/tasks', description: 'List tasks', aliases: ['/bashes']},
-    {name: '/team-onboarding', description: 'Generate local onboarding recap'},
-    {name: '/teleport', description: 'Show teleport support', aliases: ['/tp']},
-    {name: '/terminal-setup', description: 'Show terminal keybinding setup'},
-    {name: '/theme', description: 'Show theme settings'},
-    {name: '/todo', description: 'Create or update todo item'},
-    {name: '/tools', description: 'List registered tools', aliases: ['/tool']},
-    {name: '/tui', description: 'Show terminal UI renderer'},
-    {name: '/ultraplan', description: 'Draft a high-effort plan prompt'},
-    {name: '/ultrareview', description: 'Alias for code review'},
-    {name: '/upgrade', description: 'Show upgrade support'},
-    {name: '/evolution', description: 'Show evolution feature state'},
-    {name: '/reminders', description: 'Show reminders feature state'},
-    {name: '/tree', description: 'Show workspace tree'},
-    {name: '/usage', description: 'Show token usage', aliases: ['/cost', '/stats']},
-    {name: '/usage-credits', description: 'Show usage credits support'},
-    {name: '/version', description: 'Show versions'},
-    {name: '/voice', description: 'Show or toggle voice mode'},
-    {name: '/where', description: 'Show active paths'},
-    {name: '/work', description: 'Show recent work events'}
-];
+export interface CommandDefinition {
+    name: string;
+    description: string;
+    category: string;
+    aliases: string[];
+    args: Record<string, string>;
+}
 
-export const commandDefinitionFor = (value: string) => COMMANDS.find(command =>
-    command.name === value || command.aliases?.includes(value)
+const normalizeCommandName = (value: unknown): string => {
+    const name = String(value || '').trim().toLowerCase();
+    if (!name) return '';
+    return name.startsWith('/') ? name : `/${name}`;
+};
+
+/** Convert the server registry response into safe, consistently shaped palette rows. */
+export const normalizeCommandRegistry = (payload: unknown): CommandDefinition[] => {
+    const rows = Array.isArray(payload)
+        ? payload
+        : Array.isArray((payload as {commands?: unknown[]})?.commands)
+            ? (payload as {commands: unknown[]}).commands
+            : [];
+    const seen = new Set<string>();
+    const commands: CommandDefinition[] = [];
+    for (const row of rows) {
+        if (!row || typeof row !== 'object') continue;
+        const item = row as Record<string, unknown>;
+        const name = normalizeCommandName(item.name);
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        const aliases = Array.isArray(item.aliases)
+            ? item.aliases.map(normalizeCommandName).filter(Boolean)
+            : [];
+        const rawArgs = item.args && typeof item.args === 'object' && !Array.isArray(item.args)
+            ? item.args as Record<string, unknown>
+            : {};
+        commands.push({
+            name,
+            description: String(item.description || ''),
+            category: String(item.category || 'general'),
+            aliases: [...new Set(aliases)],
+            args: Object.fromEntries(Object.entries(rawArgs).map(([key, value]) => [key, String(value)]))
+        });
+    }
+    return commands.sort((left, right) => left.name.localeCompare(right.name));
+};
+
+export const commandDefinitionFor = (value: string, commands: CommandDefinition[]) => commands.find(command =>
+    command.name === value.toLowerCase() || command.aliases.includes(value.toLowerCase())
 );
-
 export const estimateTokens = (value: string) => Math.ceil(value.replace(/\s+/g, ' ').trim().length / 4);
+
+/** A session can have only one live agent turn. Stop and cancel remain available. */
+export const canStartTurn = (turnInFlight: boolean, value: string): boolean => {
+    if (!turnInFlight) return true;
+    const command = value.trim().toLowerCase();
+    return command === '/stop' || command === '/cancel';
+};
+// One shared, restrained active-state animation. This replaces the previous
+// phase-specific node chains, diamonds, gears, and pulsing glyphs.
+export const CLAUDE_SPINNER_FRAMES = ['·', '*', '+', '*'];
+for (const state of Object.values(WORKING_STATES)) state.frames = CLAUDE_SPINNER_FRAMES;
 
 export const formatTokens = (value: number) => {
     if (value >= 1000000) return `${(value / 1000000).toFixed(1)}M`;
@@ -559,12 +501,12 @@ const editDistance = (left: string, right: string) => {
     return matrix[left.length][right.length];
 };
 
-export const commandMatches = (query: string) => {
+export const commandMatches = (query: string, commands: CommandDefinition[]) => {
     const normalized = query.toLowerCase();
     if (!normalized.startsWith('/')) return [];
-    if (normalized === '/') return COMMANDS.slice(0, 10);
+    if (normalized === '/') return commands.slice(0, 10);
 
-    return COMMANDS
+    return commands
         .map(command => {
             const names = [command.name, ...(command.aliases || [])];
             const score = Math.min(...names.map(name => {
@@ -611,7 +553,15 @@ export const inferActivityKind = (toolName: string, params: Record<string, any>)
     const normalized = toolName.toLowerCase();
     const blob = `${normalized} ${JSON.stringify(params || {})}`.toLowerCase();
 
-    if (blob.includes('compact') || blob.includes('memory')) return 'compact';
+    if (blob.includes('approval') || blob.includes('permission')) return 'approval';
+    if (blob.includes('retry')) return 'retry';
+    if (blob.includes('test') || blob.includes('pytest') || blob.includes('vitest')) return 'test';
+    if (blob.includes('browser')) return 'browser';
+    if (blob.includes('rag')) return 'rag';
+    if (blob.includes('provider')) return 'provider';
+    if (blob.includes('background')) return 'background';
+    if (blob.includes('compact')) return 'compact';
+    if (blob.includes('memory')) return 'memory';
     if (blob.includes('settings') || blob.includes('theme') || blob.includes('statusline') || blob.includes('output-style')) return 'settings';
     if (blob.includes('config') || /\.(ya?ml|json|jsnol|toml|env)\b/.test(blob)) return 'config';
     if (blob.includes('hive') || blob.includes('worker') || blob.includes('agent')) return 'hive';
@@ -692,6 +642,14 @@ export const activityColor = (kind: ActivityKind) => {
     if (kind === 'file') return 'grey';
     if (kind === 'search') return 'blueBright';
     if (kind === 'todo') return 'green';
+    if (kind === 'plan') return 'yellowBright';
+    if (kind === 'test') return 'greenBright';
+    if (kind === 'browser') return 'cyanBright';
+    if (kind === 'approval' || kind === 'retry') return 'yellowBright';
+    if (kind === 'error') return 'red';
+    if (kind === 'provider') return 'magentaBright';
+    if (kind === 'rag' || kind === 'memory') return 'blueBright';
+    if (kind === 'background') return 'grey';
     if (kind === 'run' || kind === 'terminal') return 'cyan';
     if (kind === 'mcp') return 'magenta';
     if (kind === 'skill') return 'yellowBright';
@@ -707,6 +665,16 @@ export const activityGlyph = (kind: ActivityKind) => {
     if (kind === 'file') return '✎';
     if (kind === 'search') return '⌕';
     if (kind === 'todo') return '☑';
+    if (kind === 'plan') return '☰';
+    if (kind === 'test') return '#';
+    if (kind === 'browser') return '@';
+    if (kind === 'approval') return '!';
+    if (kind === 'error') return '!';
+    if (kind === 'retry') return '~';
+    if (kind === 'provider') return 'P';
+    if (kind === 'rag') return 'R';
+    if (kind === 'memory') return 'M';
+    if (kind === 'background') return '~';
     if (kind === 'run' || kind === 'terminal') return '▹';
     if (kind === 'mcp') return '◇';
     if (kind === 'skill') return '✦';
@@ -1050,7 +1018,11 @@ export const compactDetailPreview = (value: unknown, lines = 10, chars = 1200) =
 export const formatDurationMs = (value?: number) => {
     if (value == null || !Number.isFinite(value) || value < 0) return '';
     if (value < 1000) return `${Math.round(value)}ms`;
-    return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)}s`;
+    const seconds = Math.round(value / 1000);
+    if (seconds < 60) return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)}s`;
+    const minutes = Math.floor(seconds / 60);
+    const remainder = seconds % 60;
+    return `${minutes}m ${String(remainder).padStart(2, '0')}s`;
 };
 
 export const normalizeActivityStatus = (status: unknown, error?: unknown) => {
@@ -1330,7 +1302,7 @@ export const activityFromTool = (toolName: string, params: Record<string, any>):
 
     if (TODO_TOOLS.has(normalized) || normalized.includes('todo')) {
         return {
-            kind: 'todo',
+            kind: 'plan',
             title: 'Updated todo list',
             summary: query || command || toolName,
             status: 'running',
@@ -1575,14 +1547,51 @@ export interface ChatLine {
     bold?: boolean;
     activityId?: string;
     activity?: ActivityItem;
+    backgroundColor?: string;
+    focused?: boolean;
+    expanded?: boolean;
 }
+
+/** Parse the canonical activity envelope exactly as it arrives over SSE. */
+export const canonicalActivityFromSseFrame = (frame: string): Record<string, any> | null => {
+    const normalized = frame.replace(/\r/g, '');
+    const lines = normalized.split('\n');
+    const eventType = lines.find(line => line.startsWith('event:'))?.slice(6).trim() || 'message';
+    if (eventType !== 'work_event' && eventType !== 'nexus.event') return null;
+    const raw = lines
+        .filter(line => line.startsWith('data:'))
+        .map(line => line.replace(/^data:\s?/, ''))
+        .join('\n');
+    if (!raw) return null;
+    const payload = JSON.parse(raw);
+    return adaptCanonicalEvent(payload.event || payload);
+};
 
 export const activityFromWorkEvent = (event: Record<string, any>): Omit<ActivityItem, 'id' | 'number'> => {
     event = adaptCanonicalEvent(event);
     const eventKind = String(event.kind || event.type || 'tool').toLowerCase();
     const toolName = String(event.tool || event.name || event.server || eventKind);
-    const target = String(event.target || event.path || event.command || event.query || toolName);
     const details = event.args || event.arguments || event.input;
+    const detailObject = details && typeof details === 'object' && !Array.isArray(details) ? details : {};
+    const target = String([
+        event.target,
+        event.query,
+        event.path,
+        event.file,
+        event.file_path,
+        event.command,
+        event.url,
+        event.source_url,
+        detailObject.target,
+        detailObject.query,
+        detailObject.path,
+        detailObject.file,
+        detailObject.file_path,
+        detailObject.command,
+        detailObject.url,
+        event.related_files?.[0],
+        event.related_command
+    ].find(value => value != null && String(value).trim()) || '');
     const output = cleanPreview(event.output || event.stdout || event.chunk || event.result || '', 30) || undefined;
     const error = cleanPreview(event.error || event.stderr || event.preview_error || '', 16) || undefined;
     const sourceValues = [
@@ -1594,8 +1603,41 @@ export const activityFromWorkEvent = (event: Record<string, any>): Omit<Activity
         target,
         output
     ];
+    const inferredKind = inferActivityKind(toolName, event);
+    const explicitKinds = new Set<ActivityKind>([
+        'tool', 'command', 'file', 'test', 'search', 'browser', 'mcp', 'skill',
+        'plugin', 'hive', 'agent', 'worker', 'provider', 'rag', 'approval',
+        'error', 'retry', 'plan', 'todo', 'memory', 'background', 'compact',
+        'config', 'settings', 'run', 'terminal'
+    ]);
+    const resolvedKind: ActivityKind = ['hive', 'agent', 'worker'].includes(eventKind)
+        ? 'hive'
+        : eventKind === 'command'
+            ? 'terminal'
+            : explicitKinds.has(eventKind as ActivityKind)
+                ? eventKind as ActivityKind
+                : inferredKind;
+    const friendlyTitles: Partial<Record<ActivityKind, string>> = {
+        plan: 'Planning work',
+        terminal: 'Running terminal command',
+        run: 'Running command',
+        file: 'Working with files',
+        test: 'Running verification',
+        search: 'Searching',
+        browser: 'Using browser',
+        hive: 'Coordinating Hive agents',
+        approval: 'Waiting for approval',
+        retry: 'Retrying operation',
+        error: 'Operation failed',
+        skill: 'Using skill',
+        mcp: 'Calling MCP tool',
+        provider: 'Contacting provider',
+        rag: 'Retrieving context',
+        memory: 'Reading memory',
+        compact: 'Compacting context'
+    };
     const common = {
-        title: String(event.action || event.title || event.label || 'Agent activity'),
+        title: String(event.action || event.title || event.label || friendlyTitles[resolvedKind] || 'Agent activity'),
         summary: target,
         status: normalizeActivityStatus(event.status, error),
         detail: [
@@ -1611,15 +1653,26 @@ export const activityFromWorkEvent = (event: Record<string, any>): Omit<Activity
         sources: sourceValues.flatMap(value => Array.isArray(value) ? value.map(String) : extractUrls(value)),
         toolName
     };
-    if (eventKind === 'file') return {...common, kind: 'file', files: target ? [target] : [], operation: String(event.operation || event.action || '')};
-    if (eventKind === 'command') return {...common, kind: 'run', command: String(event.command || target)};
-    if (eventKind === 'search' || eventKind === 'browser' || eventKind === 'rag') return {...common, kind: 'search', command: String(event.query || target)};
-    if (eventKind === 'plan') {
-        const items = Array.isArray(event.items) ? event.items.map(String) : [];
+    if (resolvedKind === 'file') return {...common, kind: 'file', files: target ? [target] : [], operation: String(event.operation || event.action || '')};
+    if (resolvedKind === 'terminal' || resolvedKind === 'run' || resolvedKind === 'command') {
+        return {...common, kind: resolvedKind === 'command' ? 'terminal' : resolvedKind, command: String(event.command || target || '') || undefined};
+    }
+    if (resolvedKind === 'search' || resolvedKind === 'browser' || resolvedKind === 'rag') {
+        return {...common, kind: resolvedKind, command: String(event.query || target || '') || undefined};
+    }
+    if (resolvedKind === 'plan') {
+        const rawItems = Array.isArray(event.items) ? event.items : Array.isArray(event.steps) ? event.steps : [];
+        const items = rawItems
+            .map((item: unknown) => typeof item === 'string'
+                ? item
+                : item && typeof item === 'object'
+                    ? String((item as Record<string, unknown>).description || (item as Record<string, unknown>).step || (item as Record<string, unknown>).label || '')
+                    : String(item || ''))
+            .filter(Boolean);
         const planName = items.length > 1 ? 'Advanced Planning' : 'Simple Planning';
         return {
             ...common,
-            kind: 'todo',
+            kind: 'plan',
             title: planName,
             summary: `${items.length || 1} step${items.length === 1 ? '' : 's'}`,
             detail: items.length > 0
@@ -1628,10 +1681,6 @@ export const activityFromWorkEvent = (event: Record<string, any>): Omit<Activity
             toolName: 'plan'
         };
     }
-    if (eventKind === 'todo') return {...common, kind: 'todo', preview: cleanPreview(event.preview || event.result || '', 120) || undefined};
-    if (eventKind === 'mcp') return {...common, kind: 'mcp'};
-    if (eventKind === 'skill') return {...common, kind: 'skill'};
-    if (eventKind === 'plugin') return {...common, kind: 'plugin'};
-    if (['hive', 'agent', 'worker'].includes(eventKind)) return {...common, kind: 'hive'};
-    return {...common, kind: 'tool'};
+    if (resolvedKind === 'todo') return {...common, kind: 'todo', preview: cleanPreview(event.preview || event.result || '', 120) || undefined};
+    return {...common, kind: resolvedKind};
 };

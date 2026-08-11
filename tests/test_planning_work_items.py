@@ -66,3 +66,44 @@ def test_planner_checklist_cannot_mark_active_run_applied(tmp_path):
         event=_run_event("run.failed", task_id="task-a"),
     )
     assert load_work_item(str(tmp_path), "s3", "task-a").status == "failed"
+
+
+def test_planning_persistence_does_not_block_event_loop(tmp_path, monkeypatch):
+    tool = PlanningTool(str(tmp_path))
+    original = tool._execute_sync
+
+    def slow_persistence(*args, **kwargs):
+        import time
+
+        time.sleep(0.08)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tool, "_execute_sync", slow_persistence)
+
+    async def run_with_heartbeat():
+        ticks = 0
+
+        async def heartbeat():
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        heartbeat_task = asyncio.create_task(heartbeat())
+        try:
+            result = await tool.execute(
+                action="create",
+                goal="Fix the loop",
+                plan_spec={"plan_type": "simple", "steps": [
+                    "Inspect code", "Implement fix", "Run tests",
+                ]},
+                session_id="heartbeat",
+            )
+        finally:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+        return result, ticks
+
+    result, ticks = asyncio.run(run_with_heartbeat())
+    assert result.success is True
+    assert ticks >= 4

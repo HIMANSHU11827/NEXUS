@@ -1,6 +1,6 @@
 import React from 'react';
 import {Box, Text} from 'ink';
-import {getTheme, activityColor, activityGlyph} from './theme.js';
+import {getTheme, activityColor, activityGlyph, TRANSCRIPT_SURFACE_BG} from './theme.js';
 
 export interface InlineActivityItem {
     kind?: string;
@@ -16,13 +16,12 @@ export interface InlineActivityItem {
     sources?: string[];
     output?: string;
     error?: string;
+    startedAt?: number;
     durationMs?: number;
     logo?: string;
     logoColor?: string;
     number?: number;
 }
-
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 const cleanToolName = (raw: unknown): string => String(raw || '')
     .replace(/^mcp_server__/, '')
@@ -31,8 +30,27 @@ const cleanToolName = (raw: unknown): string => String(raw || '')
     .replace(/^hive__/, '')
     .replace(/^plugin__/, '');
 
+const humanize = (raw: unknown): string => cleanToolName(raw)
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const compactTarget = (raw: unknown): string => {
+    const value = String(raw || '').trim().replace(/^['"]|['"]$/g, '');
+    if (!value) return '';
+    try {
+        const url = new URL(value.startsWith('www.') ? `https://${value}` : value);
+        return url.hostname.replace(/^www\./, '');
+    } catch {
+        return value;
+    }
+};
+
+const isGenericSearchTarget = (raw: unknown): boolean =>
+    /^(?:web[ _-]?)?search(?:ing)?$/i.test(String(raw || '').trim());
+
 const mcpPair = (toolName: unknown): {server: string; tool: string} => {
-    const name = String(toolName || '').trim();
+    const name = cleanToolName(toolName).trim();
     if (!name) return {server: '', tool: 'mcp'};
     const parts = name.split(/__|::|\/|\|/).filter(Boolean);
     if (parts.length > 1) {
@@ -55,8 +73,29 @@ const isCancelled = (status?: string) =>
 const isBlocked = (status?: string) =>
     ['blocked', 'denied', 'rejected'].includes(String(status || '').toLowerCase());
 
+export const activityKindLabel = (kind?: string): string => {
+    const labels: Record<string, string> = {
+        plan: 'PLAN', todo: 'PLAN', terminal: 'TERMINAL', run: 'TERMINAL', command: 'TERMINAL',
+        file: 'FILE', test: 'TEST', search: 'SEARCH', browser: 'WEB', hive: 'HIVE',
+        agent: 'AGENT', worker: 'AGENT', approval: 'APPROVAL', error: 'ERROR', retry: 'RETRY',
+        mcp: 'MCP', skill: 'SKILL', plugin: 'PLUGIN', provider: 'MODEL', rag: 'CONTEXT',
+        memory: 'MEMORY', compact: 'CONTEXT', background: 'BACKGROUND', config: 'CONFIG',
+        settings: 'SETTINGS', tool: 'TOOL'
+    };
+    return labels[String(kind || 'tool').toLowerCase()] || 'TOOL';
+};
+
+export const activityStatusWord = (status?: string): string => {
+    if (isBlocked(status)) return 'WAIT';
+    if (isCancelled(status)) return 'STOP';
+    if (isError(status)) return 'FAIL';
+    if (isRunning(status)) return 'LIVE';
+    return 'DONE';
+};
+
 const formatCompactDuration = (ms?: number): string => {
-    if (!ms || ms < 1000) return '';
+    if (!ms || ms <= 0) return '';
+    if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`;
     const totalSeconds = Math.round(ms / 1000);
     if (totalSeconds < 60) return `${totalSeconds}s`;
     const minutes = Math.floor(totalSeconds / 60);
@@ -64,100 +103,29 @@ const formatCompactDuration = (ms?: number): string => {
     return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
 };
 
-const runningLabel = (a: InlineActivityItem): string => {
-    const kind = String(a.kind || 'tool');
-    const name = cleanToolName(a.toolName);
-    const entity = a.summary && String(a.summary) !== name && String(a.summary) !== String(a.toolName)
-        ? String(a.summary)
-        : name || 'tool';
-    switch (kind) {
-        case 'run':
-        case 'terminal':
-            return `Running ${a.command || entity}`;
-        case 'file':
-            return entity ? `Reading ${entity}` : 'Reading file';
-        case 'search':
-            return entity ? `Searching "${entity}"` : 'Searching';
-        case 'mcp': {
-            const {server, tool} = mcpPair(a.toolName);
-            return `Calling ${server ? `${server}:${tool}` : tool}`;
-        }
-        case 'skill':
-            return `Running skill ${entity}`;
-        case 'plugin':
-            return `Loading plugin ${entity}`;
-        case 'todo':
-            return 'Updating todos';
-        case 'compact':
-            return 'Compacting context';
-        default:
-            return `${name}${a.detail ? ` ${String(a.detail).split('\n')[0].trim()}` : ''}`;
+const compactActivityName = (activity: InlineActivityItem): string => {
+    if (activity.kind === 'mcp') {
+        const {server, tool} = mcpPair(activity.toolName);
+        return server ? `${humanize(server)}/${humanize(tool)}` : humanize(tool) || 'mcp';
     }
+    return humanize(activity.toolName) || humanize(activity.kind) || 'tool';
 };
 
-const doneLabel = (a: InlineActivityItem): string => {
-    const kind = String(a.kind || 'tool');
-    const name = cleanToolName(a.toolName);
-    const summary = String(a.summary || '');
-    const command = String(a.command || '');
-    switch (kind) {
-        case 'run':
-        case 'terminal':
-            return `$ ${command || summary || name}`;
-        case 'file': {
-            const op = String(a.operation || '').toLowerCase();
-            const entity = summary || name;
-            const verb = op.includes('write')
-                ? 'Write'
-                : op.includes('delete')
-                    ? 'Delete'
-                    : op.includes('patch') || op.includes('edit') || op.includes('modify')
-                        ? 'Edit'
-                        : 'Read';
-            const extra = Array.isArray(a.files) && a.files.length > 1 ? ` +${a.files.length - 1}` : '';
-            return `${verb} ${entity}${extra}`;
-        }
-        case 'search':
-            return summary ? `Search "${summary}"` : 'Search';
-        case 'mcp': {
-            const {server, tool} = mcpPair(a.toolName);
-            return `MCP ${server ? `${server}:${tool}` : tool}`;
-        }
-        case 'skill':
-            return `Skill ${name}`;
-        case 'plugin':
-            return `Plugin ${name}`;
-        case 'todo':
-            return 'Todos updated';
-        case 'compact':
-            return 'Context compacted';
-        default: {
-            let label = name || 'tool';
-            const detailFirst = String(a.detail || '').trim().split('\n')[0];
-            if (detailFirst) label += ` ${detailFirst}`;
-            return label;
-        }
-    }
+const compactActivityTarget = (activity: InlineActivityItem, name: string): string => {
+    const raw = activity.command || activity.summary || activity.files?.[0] || '';
+    if (!raw) return '';
+    const target = activity.kind === 'file'
+        ? String(raw).split(/[/\\]/).filter(Boolean).pop() || String(raw)
+        : compactTarget(raw);
+    if (!target || humanize(target).toLowerCase() === humanize(name).toLowerCase()) return '';
+    const escapedName = humanize(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const withoutRepeatedName = target.replace(new RegExp(`^${escapedName}\\s*(?:[·—:|-])\\s*`, 'i'), '').trim();
+    if (activity.kind === 'search' && isGenericSearchTarget(target)) return '';
+    return withoutRepeatedName || target;
 };
 
-const hiveLabel = (a: InlineActivityItem): string => {
-    const name = cleanToolName(a.toolName);
-    const summary = String(a.summary || '');
-    const title = String(a.title || '');
-    const agent = name || summary || title || 'worker';
-    const desc = summary && summary !== agent ? summary : title && title !== agent ? title : '';
-    let label = agent;
-    if (desc) label += ` — ${desc}`;
-    if (isRunning(String(a.status))) {
-        const current = String(a.operation || a.preview || a.detail || '').trim().split('\n')[0];
-        if (current) label += `  ↳ ${current}`;
-    }
-    return label;
-};
-
-const InlineActivityBody = ({activity, frame, maxLabel}: {
+const InlineActivityBody = ({activity, maxLabel}: {
     activity: InlineActivityItem;
-    frame: number;
     maxLabel: number;
 }) => {
     const theme = getTheme();
@@ -165,69 +133,38 @@ const InlineActivityBody = ({activity, frame, maxLabel}: {
     const status = String(activity.status || '');
     const running = isRunning(status);
     const error = isError(status);
-    const done = !running && !error;
-    const icon = activity.logo || activityGlyph(kind);
     const color = activity.logoColor || activityColor(kind);
-    const statusChar = error
-        ? (isCancelled(status) ? '−' : '×')
-        : running
-            ? SPINNER_FRAMES[Math.abs(frame) % SPINNER_FRAMES.length]
-            : done
-                ? '✓'
-                : '';
-    const statusColor = error
-        ? theme.statusError
-        : running
-            ? theme.statusRunning
-            : done
-                ? theme.statusDone
-                : theme.textDim;
-    const baseLabel = kind === 'hive' ? hiveLabel(activity) : running ? runningLabel(activity) : doneLabel(activity);
-    const label = isBlocked(status)
-        ? `Blocked · ${baseLabel}`
-        : isCancelled(status)
-            ? `Cancelled · ${baseLabel}`
-            : error
-                ? `Failed · ${baseLabel}`
-                : baseLabel;
-    const suffix = done && activity.durationMs ? formatCompactDuration(activity.durationMs) : '';
-    const fixedWidth = iconLength(icon) + 1 + (statusChar ? 1 : 0) + (suffix ? suffix.length + 2 : 0);
-    let trimmedLabel = label;
-    const budget = Math.max(10, maxLabel - fixedWidth);
-    if (trimmedLabel.length > budget) {
-        trimmedLabel = trimmedLabel.slice(0, Math.max(1, budget - 1)) + '…';
-    }
+    const name = compactActivityName(activity);
+    const target = compactActivityTarget(activity, name);
+    const duration = formatCompactDuration(
+        activity.durationMs ?? (running && activity.startedAt ? Date.now() - activity.startedAt : undefined)
+    );
+    let label = [name, target, duration].filter(Boolean).join(' · ');
+    const budget = Math.max(8, maxLabel - 2);
+    if (label.length > budget) label = `${label.slice(0, Math.max(1, budget - 1))}…`;
+    // Status is conveyed by the row itself: failed/blocked/cancelled is wholly
+    // red, active uses the tool color, and completed work stays quiet grey.
+    const rowColor = error ? theme.statusError : running ? color : 'grey';
 
     return (
-        <>
-            <Text color={color} bold>{icon} </Text>
-            {statusChar ? <Text color={statusColor}>{statusChar} </Text> : null}
-            <Text
-                color={error ? theme.statusError : running ? color : 'grey'}
-                bold={running || error}
-                wrap="truncate"
-            >
-                {trimmedLabel}
-            </Text>
-            {suffix && <Text color="grey30">  {suffix}</Text>}
-        </>
+        <Text color={rowColor} bold={running || error} wrap="truncate">{label}</Text>
     );
 };
 
-const iconLength = (icon: string) => {
-    for (const char of icon) {
-        if (char.charCodeAt(0) > 0x1f000) return 2;
-    }
-    return icon.length;
-};
-
-export const InlineActivity = React.memo(({activity, width, frame}: {
+export const InlineActivity = React.memo(({activity, width, focused = false, expanded = false}: {
     activity: InlineActivityItem;
     width: number;
     frame: number;
+    focused?: boolean;
+    expanded?: boolean;
 }) => (
-    <Box width={width} minWidth={1}>
-        <InlineActivityBody activity={activity} frame={frame} maxLabel={width} />
+    <Box
+        width={width}
+        minWidth={1}
+        backgroundColor={TRANSCRIPT_SURFACE_BG}
+    >
+        <Text color={isError(activity.status) ? getTheme().statusError : focused ? getTheme().secondary : 'grey'} bold={focused || isError(activity.status)}>{expanded ? 'v' : '›'} </Text>
+        <InlineActivityBody activity={activity} maxLabel={Math.max(1, width - 2)} />
     </Box>
 ));
 

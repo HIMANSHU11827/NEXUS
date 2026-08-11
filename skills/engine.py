@@ -750,7 +750,7 @@ created_at: {time.time()}
     # ─── Config ────────────────────────────────────────────────
 
     def _disabled_skill_ids(self):
-        config_path = Path(self._root) / "config" / "nexus_config.yaml"
+        config_path = Path(self._root) / "config" / "settings.yml"
         if not config_path.exists():
             return set()
         try:

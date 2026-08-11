@@ -96,29 +96,36 @@ class CommandCodeProvider(NexusBaseProvider):
         if not self._cmd_path:
             return "Error: Command Code CLI not found. Install with `npm i -g command-code`."
         timeout = int(kwargs.get("timeout", 120))
+        process = None
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 [self._cmd_path, "-p", "--skip-onboarding"],
-                input=prompt,
-                capture_output=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout,
                 env={**os.environ, "PYTHONHOME": ""},
+                **self.process_group_kwargs(),
             )
-            output = (result.stdout or "").strip()
-            if result.returncode != 0:
-                err = (result.stderr or "").strip() or f"exit code {result.returncode}"
+            output, error_output = process.communicate(input=prompt, timeout=timeout)
+            output = (output or "").strip()
+            if process.returncode != 0:
+                err = (error_output or "").strip() or f"exit code {process.returncode}"
                 logger.error("Command Code CLI error: %s", err)
                 return f"Error: Command Code CLI failed: {err}"
             return output or "Error: Command Code returned empty response."
         except subprocess.TimeoutExpired:
+            self.terminate_process_tree(process)
             return f"Error: Command Code CLI timed out after {timeout}s."
         except FileNotFoundError:
             return "Error: Command Code CLI executable not found."
         except Exception as e:
             return f"Error: Failed to invoke Command Code CLI: {str(e)}"
+        finally:
+            if process is not None and process.poll() is None:
+                self.terminate_process_tree(process)
 
     def validate_api_key(self) -> bool:
         key = (self.api_key or os.environ.get("COMMANDCODE_API_KEY", "")).strip()
@@ -168,6 +175,7 @@ class CommandCodeProvider(NexusBaseProvider):
             payload = {"model": model_name, "messages": msgs, "stream": True}
             self.headers["Authorization"] = f"Bearer {self.api_key}"
             self._add_tool_payload(payload, kwargs)
+            response = None
             try:
                 response = self.session.post(
                     self.endpoint,
@@ -219,12 +227,19 @@ class CommandCodeProvider(NexusBaseProvider):
             except Exception as e:
                 yield f"\nError in Command Code stream: {str(e)}"
                 return
+            finally:
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        logger.debug("Command Code stream response cleanup failed", exc_info=True)
 
         full = self._build_prompt(prompt, system_prompt, messages)
         if not self._cmd_path:
             yield "Error: Command Code CLI not found."
             return
         timeout = int(kwargs.get("timeout", 300))
+        proc = None
         try:
             proc = subprocess.Popen(
                 [self._cmd_path, "-p", "--skip-onboarding"],
@@ -235,6 +250,7 @@ class CommandCodeProvider(NexusBaseProvider):
                 encoding="utf-8",
                 errors="replace",
                 env={**os.environ, "PYTHONHOME": ""},
+                **self.process_group_kwargs(),
             )
             if proc.stdin:
                 proc.stdin.write(full)
@@ -247,9 +263,12 @@ class CommandCodeProvider(NexusBaseProvider):
                 err = (proc.stderr.read() or "").strip()
                 yield f"\nError: Command Code CLI failed: {err or f'exit code {proc.returncode}'}"
         except subprocess.TimeoutExpired:
-            proc.kill()
+            self.terminate_process_tree(proc)
             yield f"\nError: Command Code CLI timed out after {timeout}s."
         except Exception as e:
             yield f"\nError in Command Code stream: {str(e)}"
+        finally:
+            if proc is not None and proc.poll() is None:
+                self.terminate_process_tree(proc)
 
 

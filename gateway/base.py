@@ -6,6 +6,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Awaitable, Callable, List, Optional
 
+from providers.reliability import redact_secrets
+
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
@@ -59,6 +61,13 @@ class SendResult:
     success: bool
     message_id: Optional[str] = None
     error: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        # Adapter implementations are third-party-facing and frequently pass
+        # through exception text. Normalize once at the shared boundary so
+        # credentials cannot escape through logs, ledgers, or API consumers.
+        if self.error:
+            self.error = redact_secrets(self.error)[:1000]
 
 class BasePlatformAdapter(ABC):
     """
@@ -118,11 +127,32 @@ class BasePlatformAdapter(ABC):
                 attempts += 1
                 delay = min(backoff_base * (2 ** (attempts - 1)), backoff_cap)
                 self.health = HEALTH_UNAVAILABLE
-                self.last_error = str(exc)
+                safe_error = redact_secrets(exc)
+                self.last_error = safe_error
                 logger.warning(
-                    "%s poll stopped (%s); re-arming in %.1fs", self.platform, exc, delay
+                    "%s poll stopped (%s); re-arming in %.1fs",
+                    self.platform,
+                    safe_error,
+                    delay,
                 )
                 await asyncio.sleep(delay)
+
+    async def _cancel_task(self, task: Optional[asyncio.Task]) -> None:
+        """Cancel and join an owned adapter task without leaking exceptions."""
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.warning(
+                "%s background task failed during shutdown",
+                self.platform,
+                exc_info=True,
+            )
 
     @abstractmethod
     async def connect(self) -> bool:

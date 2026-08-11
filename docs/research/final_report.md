@@ -1,5 +1,10 @@
 # Nexus AI — Final Audit & Fix Report
 
+> **Historical report** — paths and versions reflect the state at audit time
+> (older layout: `orchestrators/loop.py`, `architect.py`, `shell/`). Current
+> layout: `orchestrators/v5/core.py` (NexusLoop), no `shell/` directory; GUI is
+> React 18.3.1 + Vite 5.3.3 + TypeScript 5.5.3.
+
 ## 1. Project Verification
 
 **Windows project folder**: `C:\Users\himan\Desktop\NEXUS AI` — **Verified** ✓
@@ -7,7 +12,7 @@
 - 30+ Python packages, 20+ directory modules
 - Editable pip install works (`pip install -e .`)
 - FastAPI server imports OK, starts on port 8000
-- GUI build passes (React 19 + Vite + TypeScript 6)
+- GUI build passes (React 18.3.1 + Vite 5.3.3 + TypeScript 5.5.3)
 - All 31 agent loop tests pass
 
 ## 2. Architecture Map
@@ -26,7 +31,7 @@ skills/              Skill system with SKILL.md format (canonical + legacy)
 memory/              Multi-source MemoryManager
 sandbox/             3-tier command sandbox + deterministic risk scoring
 shell/               Legacy Rich shell
-gui/                 React 19 + Vite + TypeScript 6 GUI
+gui/                 React 18.3.1 + Vite 5.3.3 + TypeScript 5.5.3 GUI
 tui/                 Ink-based TUI + headless Node.js TUI
 ```
 

@@ -78,7 +78,7 @@ class VLMProvider(NexusBaseProvider):
         payload = {"model": self.model, "messages": msgs}
         self._add_tool_payload(payload, kwargs)
         try:
-            response = self.session.post(self.endpoint, json=payload, headers={"Authorization": f"Bearer {self.api_key}"}, timeout=60)
+            response = self.session.post(self.endpoint, json=payload, headers={"Authorization": f"Bearer {self.api_key}"}, timeout=self.request_timeout(kwargs, 60))
             if response.status_code == 200:
                 data = response.json()
                 message = data["choices"][0].get("message", {})

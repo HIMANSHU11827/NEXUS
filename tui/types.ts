@@ -86,6 +86,8 @@ export interface TaskItem {
 export interface FileStatus {
     name: string;
     status: string;
+    additions?: number;
+    deletions?: number;
 }
 
 export interface TimelineEntry {

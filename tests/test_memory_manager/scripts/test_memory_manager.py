@@ -104,6 +104,25 @@ class TestMemoryManager:
         assert data[0]["role"] == "user"
         assert data[1]["role"] == "assistant"
 
+    def test_concurrent_session_syncs_merge_and_replace_atomically(self, tmp_path):
+        import asyncio
+        first = MemoryManager(str(tmp_path), session_id="concurrent", max_session_lines=8)
+        second = MemoryManager(str(tmp_path), session_id="concurrent", max_session_lines=8)
+
+        async def run():
+            await asyncio.gather(
+                first.sync_all("first user", "first response"),
+                second.sync_all("second user", "second response"),
+            )
+
+        asyncio.run(run())
+        path = tmp_path / "logs" / "sessions" / "concurrent.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        contents = {item.get("content") for item in data}
+        assert {"first user", "first response", "second user", "second response"} <= contents
+        first.shutdown()
+        second.shutdown()
+
     def test_sync_empty_does_nothing(self, mm):
         import asyncio
         asyncio.run(mm.sync_all("", ""))
@@ -201,6 +220,37 @@ class TestVerifiedMemoryGate:
         assert open(learned, encoding="utf-8").read().strip() == "seed"
         forge_dir = os.path.join(mm.root, "data", "memory_forge")
         assert not os.path.isdir(forge_dir) or not os.listdir(forge_dir)
+
+    def test_sync_all_persists_redacted_tool_provenance_once(self, mm):
+        import asyncio
+        learned = self._learned_file(mm)
+        tool_results = [{
+            "tool": "terminal",
+            "call_id": "call-7",
+            "output": "Bearer super-secret-value; result=ok",
+            "success": True,
+        }]
+        provenance = {
+            "session_id": "gate_sesh",
+            "turn_id": "turn-7",
+            "task_id": "task-7",
+            "provider_run_evidence_path": "C:/workspace/provider_run_evidence/openai/gpt/turn-7.json",
+        }
+        for _ in range(2):
+            asyncio.run(mm.sync_all(
+                "user asks", "response", verified_actions=[{"verified": True}],
+                tool_results=tool_results, provenance=provenance,
+            ))
+        evidence_path = os.path.join(mm.root, ".nexus_v5", "memory_evidence.jsonl")
+        with open(evidence_path, encoding="utf-8") as f:
+            records = [json.loads(line) for line in f if line.strip()]
+        assert len(records) == 1
+        record = records[0]
+        assert record["provenance"]["turn_id"] == "turn-7"
+        assert record["call_id"] == "call-7"
+        assert "super-secret-value" not in json.dumps(record)
+        learned_text = open(learned, encoding="utf-8").read()
+        assert learned_text.count(record["memory_id"]) == 1
 
     def test_prefetch_session_skips_unverified_assistant_claims(self, mm):
         import asyncio

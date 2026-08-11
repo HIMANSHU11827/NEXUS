@@ -32,10 +32,19 @@ T = TypeVar("T")
 _SECRET_PATTERNS = [
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{8,}"),
     re.compile(r"\bsk-[A-Za-z0-9._\-]{8,}"),
+    re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9._\-]{8,}"),
     re.compile(r"\bgsk_[A-Za-z0-9._\-]{8,}"),
     re.compile(r"\bhf_[A-Za-z0-9._\-]{8,}"),
+    re.compile(r"\b(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]{12,}"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{12,}"),
+    re.compile(r"\b(?:npm_|pypi-)[A-Za-z0-9._\-]{12,}"),
     re.compile(r"\bAIza[A-Za-z0-9._\-]{10,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(
+        r"(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
+    ),
     re.compile(r"(?i)\b(api[_-]?key|access[_-]?token|authorization)\b\s*[:=]\s*[\"']?[A-Za-z0-9._\-]{8,}[\"']?"),
+    re.compile(r"(?i)\b(?:token|secret|password)\b\s*[:=]\s*[\"']?[A-Za-z0-9._\-+/=]{16,}[\"']?"),
     re.compile(r"(?i)([?&](?:key|api_key|access_token)=)[A-Za-z0-9._\-]{8,}"),
 ]
 
@@ -63,6 +72,7 @@ def redact_secrets(text: Any) -> str:
 
 class FailureClass(str, Enum):
     AUTH_ERROR = "auth_error"
+    BILLING_QUOTA = "billing_quota"
     RATE_LIMIT = "rate_limit"
     TEMPORARY_OUTAGE = "temporary_outage"
     CONTEXT_OVERFLOW = "context_overflow"
@@ -104,6 +114,7 @@ class Classification:
 # class -> (retryable, strategy)
 _CLASS_POLICY: Dict[FailureClass, Any] = {
     FailureClass.AUTH_ERROR: (False, Strategy.FAIL_FAST),
+    FailureClass.BILLING_QUOTA: (False, Strategy.FALLBACK_PROVIDER),
     FailureClass.RATE_LIMIT: (True, Strategy.BACKOFF),
     FailureClass.TEMPORARY_OUTAGE: (True, Strategy.RETRY),
     FailureClass.CONTEXT_OVERFLOW: (False, Strategy.FALLBACK_MODEL),
@@ -119,7 +130,7 @@ _CLASS_POLICY: Dict[FailureClass, Any] = {
 _STATUS_MAP: Dict[int, FailureClass] = {
     400: FailureClass.INVALID_REQUEST,
     401: FailureClass.AUTH_ERROR,
-    402: FailureClass.AUTH_ERROR,
+    402: FailureClass.BILLING_QUOTA,
     403: FailureClass.AUTH_ERROR,
     404: FailureClass.MODEL_MISSING,
     408: FailureClass.TIMEOUT,
@@ -168,6 +179,17 @@ def _classify_text(text: str) -> Optional[FailureClass]:
     if "context length" in low or "context_length" in low or "too many tokens" in low \
             or "maximum context" in low or "reduce the length" in low or "context window" in low:
         return FailureClass.CONTEXT_OVERFLOW
+    if (
+        "billing" in low
+        or "payment required" in low
+        or "insufficient credits" in low
+        or "credits exhausted" in low
+        or "quota exceeded" in low
+        or "quota exhausted" in low
+        or "spending limit" in low
+        or "billing limit" in low
+    ):
+        return FailureClass.BILLING_QUOTA
     if "rate limit" in low or "rate_limit" in low or "quota" in low or "too many requests" in low:
         return FailureClass.RATE_LIMIT
     if "unauthorized" in low or "invalid api key" in low or "authentication" in low \
@@ -255,7 +277,7 @@ def classify_failure(
                        FailureClass.TEMPORARY_OUTAGE):
             refined = _classify_text(raw_text)
             if refined in (FailureClass.CONTEXT_OVERFLOW, FailureClass.MODEL_MISSING,
-                           FailureClass.UNSUPPORTED_FEATURE):
+                           FailureClass.UNSUPPORTED_FEATURE, FailureClass.BILLING_QUOTA):
                 failure = refined
 
     if failure is None:
@@ -559,7 +581,14 @@ def call_with_reliability(
     breaker = breakers.get(p_id) if (breakers is not None and provider_form) else None
     provider_label = p_id or "gateway/tool"
 
-    if inspect.iscoroutinefunction(fn):
+    # ``inspect.iscoroutinefunction`` does not recognize an object whose
+    # asynchronous behavior is implemented by ``async __call__``. Treat such
+    # callable instances like async functions so retries are awaited instead
+    # of leaking a coroutine object through the synchronous path.
+    is_async_callable = inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(
+        getattr(fn, "__call__", None)
+    )
+    if is_async_callable:
         async def _async_call() -> T:
             last: Optional[Classification] = None
             for attempt in range(1, max(1, rp.max_attempts) + 1):
@@ -574,9 +603,13 @@ def call_with_reliability(
                     return result
                 except CircuitOpenError:
                     raise
+                except asyncio.CancelledError:
+                    # Cancellation is caller control flow, not a provider
+                    # failure. Never convert it into a retry or ProviderCallError.
+                    raise
                 except ProviderCallError as exc:
                     classification = exc.classification
-                except BaseException as exc:  # noqa: BLE001 - classified below
+                except Exception as exc:
                     status = getattr(getattr(exc, "response", None), "status_code", None)
                     headers = getattr(getattr(exc, "response", None), "headers", None)
                     classification = classify_failure(exc, status_code=status, headers=headers)
@@ -627,7 +660,7 @@ def call_with_reliability(
             raise
         except ProviderCallError as exc:
             classification = exc.classification
-        except BaseException as exc:  # noqa: BLE001 - classified below
+        except Exception as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
             headers = getattr(getattr(exc, "response", None), "headers", None)
             classification = classify_failure(exc, status_code=status, headers=headers)

@@ -44,6 +44,25 @@ class _MockHiveEngine:
         return "mock_hive", agents
 
 
+class _MetadataEntry:
+    def __init__(self, read_only):
+        self._read_only = read_only
+
+    def is_read_only(self, params=None):
+        return self._read_only
+
+
+class _MetadataRegistry:
+    def __init__(self, entries):
+        self._entries = entries
+
+    def get(self, name):
+        return self._entries.get(name)
+
+    def list_tools(self, include_unavailable=True):
+        return list(self._entries)
+
+
 class _ActiveLoopHost(V5ActiveLoop):
     """Minimal host for unit-testing the mixin in isolation."""
 
@@ -136,6 +155,28 @@ def test_classify_plan_risk_high():
     assert len(concerns) == 1
 
 
+def test_classify_plan_risk_covers_mutating_aliases_and_actions():
+    host = _ActiveLoopHost()
+    risk, concerns = host._classify_plan_risk([
+        {"description": "create file", "tool": "creating"},
+        {"description": "delete memory", "tool": "memory", "params": {"action": "delete"}},
+    ])
+    assert risk == 2
+    assert len(concerns) == 2
+
+
+def test_classify_plan_risk_uses_tool_metadata_for_new_mutating_tools():
+    host = _ActiveLoopHost()
+    host.tool_registry = _MetadataRegistry({
+        "workspace_writer": _MetadataEntry(False),
+    })
+    risk, concerns = host._classify_plan_risk([
+        {"description": "write workspace", "tool": "workspace_writer", "params": {}},
+    ])
+    assert risk == 1
+    assert "workspace_writer" in concerns[0]
+
+
 # ── Plan gating tests (items #21–#25) ───────────────────────────────────
 
 @pytest.mark.asyncio
@@ -187,6 +228,50 @@ async def test_gate_plan_hive_approves():
 
 
 @pytest.mark.asyncio
+async def test_gate_plan_ignores_block_substring_without_block_verdict():
+    """Narrative text containing 'blocking' must not veto a plan."""
+    host = _ActiveLoopHost(
+        hive_on=True,
+        hive_engine=_MockHiveEngine(verdict_map={
+            "REVIEWER": "VERDICT: APPROVE\nCONCERNS: no blocking issues",
+            "PLANNER": "VERDICT: APPROVE\nSUGGESTION: good plan",
+        }),
+    )
+    steps = [{"description": "read", "tool": "reading", "params": {}}]
+
+    assert await host._gate_plan(steps, "read task") == steps
+
+
+@pytest.mark.asyncio
+async def test_gate_plan_fails_closed_for_high_risk_missing_reviewer_verdict():
+    """A high-risk plan is blocked when the reviewer protocol is missing."""
+    host = _ActiveLoopHost(
+        hive_on=True,
+        hive_engine=_MockHiveEngine(verdict_map={
+            "REVIEWER": "Unable to assess this plan",
+            "PLANNER": "VERDICT: APPROVE\nSUGGESTION: fine",
+        }),
+    )
+    steps = [{"description": "delete data", "tool": "bash", "params": {}}]
+
+    assert await host._gate_plan(steps, "delete data") == []
+
+
+@pytest.mark.asyncio
+async def test_gate_plan_fails_closed_for_high_risk_review_exception():
+    """Unexpected review errors must not open a high-risk execution path."""
+    host = _ActiveLoopHost(hive_on=True)
+
+    async def fail_review(_steps, _user_input):
+        raise RuntimeError("review service unavailable")
+
+    host._hive_review_plan = fail_review
+    steps = [{"description": "run command", "tool": "bash", "params": {}}]
+
+    assert await host._gate_plan(steps, "run command") == []
+
+
+@pytest.mark.asyncio
 async def test_gate_plan_empty_steps_passthrough():
     """Empty steps are passed through without gating."""
     host = _ActiveLoopHost(hive_on=True)
@@ -211,7 +296,7 @@ async def test_self_repair_returns_repair_plan():
     result = {"success": False, "actions": [{"success": False, "error": "boom"}]}
     P = type("P", (), {"original_input": "fix it"})
     repair = await host._hive_self_repair(result, P())
-    assert repair == repair_plan
+    assert repair == [{**repair_plan[0], "params": {}}]
 
 
 @pytest.mark.asyncio
@@ -232,6 +317,38 @@ async def test_self_repair_disabled_when_hive_off():
     P = type("P", (), {"original_input": "x"})
     repair = await host._hive_self_repair({"success": False}, P())
     assert repair is None
+
+
+@pytest.mark.asyncio
+async def test_hive_recovery_plan_normalizes_and_drops_unknown_steps():
+    """Recovery JSON must be normalized before reaching the execution path."""
+    host = _ActiveLoopHost(hive_on=True)
+    host.tool_registry = _MetadataRegistry({"reading": _MetadataEntry(True)})
+    reviewed = await host._review_hive_recovery_plan([
+        None,
+        {"tool": "reading", "params": "not-an-object"},
+        {"description": "unknown", "tool": "not_registered"},
+        {"description": "read safely", "tool": "reading", "params": {"path": "a"}},
+    ], "read safely")
+    assert reviewed == [{
+        "description": "read safely",
+        "tool": "reading",
+        "params": {"path": "a"},
+    }]
+
+
+@pytest.mark.asyncio
+async def test_hive_recovery_plan_is_blocked_when_safety_gate_rejects():
+    host = _ActiveLoopHost(hive_on=True)
+
+    async def reject(_steps, _user_input):
+        return []
+
+    host._gate_plan = reject
+    reviewed = await host._review_hive_recovery_plan([
+        {"description": "delete data", "tool": "deleting"},
+    ], "delete data")
+    assert reviewed == []
 
 
 # ── Stall-driven replan tests (items #30–#31) ───────────────────────────
@@ -262,5 +379,5 @@ async def test_replan_on_stall_triggered():
         host._ledger_record({"description": "same step", "tool": "reading"}, False)
     P = type("P", (), {"original_input": "task"})
     replan = await host._hive_replan_on_stall(P())
-    assert replan == new_plan
+    assert replan == [{**new_plan[0], "params": {}}]
 

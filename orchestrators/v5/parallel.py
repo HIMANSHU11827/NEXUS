@@ -22,6 +22,8 @@ import asyncio
 import json
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from providers.reliability import redact_secrets
+
 
 class _ToolCall:
     """Minimal duck-typed call object: ``_run_tool`` only needs .name/.params/.call_id."""
@@ -51,18 +53,18 @@ class V5ParallelExecutor:
     def _normalise_result(result: Any) -> Tuple[bool, str, Optional[str]]:
         """Preserve structured tool failure/success results exactly."""
         if isinstance(result, Exception):
-            return False, "", str(result)
+            return False, "", redact_secrets(result)[:4000]
         if isinstance(result, dict) and "success" in result:
             return (
                 bool(result.get("success")),
                 str(result.get("output") or ""),
-                str(result.get("error") or "") or None,
+                redact_secrets(result.get("error") or "")[:4000] or None,
             )
         if hasattr(result, "success"):
             return (
                 bool(getattr(result, "success", False)),
                 str(getattr(result, "output", "") or ""),
-                str(getattr(result, "error", "") or "") or None,
+                redact_secrets(getattr(result, "error", "") or "")[:4000] or None,
             )
         return True, str(result), None
 
@@ -85,9 +87,14 @@ class V5ParallelExecutor:
             return False
         return name in self._READ_ONLY_TOOLS
 
-    @staticmethod
-    def _step_action(index: int, description: str, result: Any) -> Dict[str, Any]:
-        """Build one ACTION dict in ``_fallback_execute`` shape."""
+    def _step_action(self, index: int, description: str, result: Any) -> Dict[str, Any]:
+        """Build one ACTION dict in ``_fallback_execute`` shape.
+
+        Must stay an instance method: the body calls ``self._normalise_result``,
+        so a ``@staticmethod`` decorator here makes every call site
+        (``_run_steps_parallel``) raise ``NameError: name 'self' is not
+        defined`` on the first tool step.
+        """
         success, output, error = self._normalise_result(result)
         return {
             "step_id": f"step_{index}",
@@ -315,7 +322,7 @@ class V5ParallelExecutor:
                 result["error"] = error
             return result
         except Exception as e:  # noqa: BLE001
-            return {"index": index, "success": False, "error": str(e)}
+            return {"index": index, "success": False, "error": redact_secrets(e)[:4000]}
 
     # ─────────────────────────────────────────────────────────────────────
     # STALL DETECTION + REPLAN HINT (Magentic-One lesson)

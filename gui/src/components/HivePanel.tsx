@@ -8,11 +8,12 @@ interface HivePanelProps {
   onCancel?: (id: string) => void
 }
 
-type HiveState = 'running' | 'completed' | 'failed' | 'unknown'
+type HiveState = 'running' | 'completed' | 'failed' | 'partial' | 'unknown'
 
 function hiveStateColor(state: HiveState): string {
   if (state === 'running') return 'text-emerald-500'
   if (state === 'completed') return 'text-blue-500'
+  if (state === 'partial') return 'text-amber-500'
   if (state === 'failed') return 'text-destructive'
   return 'text-muted-foreground'
 }
@@ -20,6 +21,7 @@ function hiveStateColor(state: HiveState): string {
 function HiveStateIcon({ state }: { state: HiveState }) {
   if (state === 'running') return <Loader2 size={12} className="shrink-0 animate-spin text-emerald-500" aria-hidden="true" />
   if (state === 'completed') return <CheckCircle2 size={12} className="shrink-0 text-blue-500" aria-hidden="true" />
+  if (state === 'partial') return <Clock size={12} className="shrink-0 text-amber-500" aria-hidden="true" />
   if (state === 'failed') return <Square size={12} className="shrink-0 text-destructive" aria-hidden="true" />
   return <Clock size={12} className="shrink-0 text-muted-foreground" aria-hidden="true" />
 }
@@ -28,7 +30,25 @@ const STATE_LABEL: Record<HiveState, string> = {
   running: 'Running',
   completed: 'Completed',
   failed: 'Failed',
+  partial: 'Partial',
   unknown: 'Unknown',
+}
+
+function normalizeHiveState(hive: HiveItem): HiveState {
+  const status = String(hive.status || '').toLowerCase()
+  if (hive.partial || status === 'partial' || status === 'degraded') return 'partial'
+  if (status === 'running' || status === 'paused') return 'running'
+  if (status === 'success' || status === 'succeeded' || status === 'completed') return 'completed'
+  if (status === 'failed' || status === 'error' || status === 'cancelled' || status === 'canceled') return 'failed'
+  return 'unknown'
+}
+
+function normalizeAgentStatus(status: string): 'completed' | 'running' | 'failed' | 'other' {
+  const value = String(status || '').toLowerCase()
+  if (['completed', 'success', 'succeeded'].includes(value)) return 'completed'
+  if (['running', 'pending', 'paused'].includes(value)) return 'running'
+  if (['failed', 'error', 'cancelled', 'canceled', 'timeout'].includes(value)) return 'failed'
+  return 'other'
 }
 
 export default function HivePanel({ events = [], onCancel }: HivePanelProps) {
@@ -45,7 +65,7 @@ export default function HivePanel({ events = [], onCancel }: HivePanelProps) {
     ).filter(event => event.type !== 'TASK_COMPLETE' && event.type !== 'task_complete')
   }, [events])
 
-  const runningHives = useMemo(() => hives.filter(h => h.status === 'running'), [hives])
+  const runningHives = useMemo(() => hives.filter(h => normalizeHiveState(h) === 'running'), [hives])
   const runningSubAgents = useMemo(() => subAgentEvents.filter(e => e.status === 'running' || e.status === 'pending'), [subAgentEvents])
 
   useEffect(() => {
@@ -71,7 +91,7 @@ export default function HivePanel({ events = [], onCancel }: HivePanelProps) {
 
   const totalCount = runningHives.length + runningSubAgents.length
 
-  if (totalCount === 0) return null
+  if (hives.length === 0 && subAgentEvents.length === 0) return null
 
   return (
     <div className="mb-1 border border-border bg-secondary/25 text-[11px] text-muted-foreground">
@@ -83,18 +103,18 @@ export default function HivePanel({ events = [], onCancel }: HivePanelProps) {
       >
         {panelExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         <span className="flex w-3 shrink-0 items-center justify-center"><UsersRound size={12} className="text-purple-500" aria-hidden="true" /></span>
-        <span className="font-medium text-foreground/85">Hive{totalCount > 0 ? ` (${totalCount})` : ''}</span>
+        <span className="font-medium text-foreground/85">Hive{totalCount > 0 ? ` (${totalCount} active)` : ''}</span>
       </button>
       {panelExpanded && (
         <div className="border-t border-border">
           <div className="flex items-center gap-2 px-3 py-1.5">
-            <span className="min-w-0 truncate text-[10px] text-muted-foreground/70">Hives and sub-agents are executing tasks.</span>
+            <span className="min-w-0 truncate text-[10px] text-muted-foreground/70">Live and recent sub-agent execution status.</span>
           </div>
           <div>
             {hives.map(hive => {
-              const state: HiveState = (hive.status === 'running' ? 'running' : hive.status === 'completed' ? 'completed' : hive.status === 'failed' ? 'failed' : 'unknown')
+              const state = normalizeHiveState(hive)
               const isRunning = state === 'running'
-              const completedAgents = hive.agents.filter(a => a.status === 'completed').length
+              const completedAgents = hive.agents.filter(a => ['completed', 'success', 'succeeded'].includes(String(a.status || '').toLowerCase())).length
               const totalAgents = hive.agents.length
               return (
                 <div key={hive.id} className="border-t border-border/60 first:border-t-0">
@@ -118,20 +138,20 @@ export default function HivePanel({ events = [], onCancel }: HivePanelProps) {
                       )}
                     </span>
                   </div>
-                  {isRunning && hive.agents.length > 0 && (
+                  {hive.agents.length > 0 && (
                     <div className="border-t border-border/50 bg-background/40 px-3 py-1.5 text-[10px] text-muted-foreground/70">
                       {hive.agents.map((agent, idx) => (
                         <div key={idx} className="flex items-center gap-2 py-0.5">
                           <span className={`w-5 h-5 flex items-center justify-center rounded-full text-[9px] font-bold ${
-                            agent.status === 'completed' ? 'bg-emerald-100 text-emerald-600' :
-                            agent.status === 'running' ? 'bg-blue-100 text-blue-600' :
-                            agent.status === 'failed' ? 'bg-red-100 text-red-600' :
+                            normalizeAgentStatus(agent.status) === 'completed' ? 'bg-emerald-100 text-emerald-600' :
+                            normalizeAgentStatus(agent.status) === 'running' ? 'bg-blue-100 text-blue-600' :
+                            normalizeAgentStatus(agent.status) === 'failed' ? 'bg-red-100 text-red-600' :
                             'bg-gray-100 text-gray-600'
                           }`}>
                             {agent.persona[0]}
                           </span>
                           <span className="flex-1 truncate">{agent.persona}</span>
-                          <span className={`capitalize ${agent.status === 'completed' ? 'text-emerald-600' : agent.status === 'running' ? 'text-blue-600' : agent.status === 'failed' ? 'text-destructive' : 'text-muted-foreground'}`}>
+                          <span className={`capitalize ${normalizeAgentStatus(agent.status) === 'completed' ? 'text-emerald-600' : normalizeAgentStatus(agent.status) === 'running' ? 'text-blue-600' : normalizeAgentStatus(agent.status) === 'failed' ? 'text-destructive' : 'text-muted-foreground'}`}>
                             {agent.status}
                           </span>
                         </div>

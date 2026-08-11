@@ -35,10 +35,11 @@ Nexus AI is a local-first autonomous AI agent framework with a Python backend an
 ## Tools
 
 - **tools/** - Registry-discovered tools organized in subdirectories:
-  - `bash/`, `code_search/`, `creating/`, `deep_research/`, `deleting/`, `git_ops/`, `hive/`, `knowledge/`, `memory/`, `modifying/`, `planning/`, `reading/`, `reasoning/`, `shortcuts/`, `system/`, `task/`, `terminal/`, `test_runner/`, `web_search/`
-  - Each tool has a `<name>.jsnol` metadata file and handler scripts
-- **tools/nexus_tools/registry.py** - `ToolRegistry` for tool discovery and management
-- **tools/threat_patterns.py** - Threat pattern detection for security
+  - Implemented (18): `code_search/`, `creating/`, `deep_research/`, `deleting/`, `git_ops/`, `hive/`, `knowledge/`, `memory/`, `modifying/`, `planning/`, `reading/`, `reasoning/`, `shortcuts/`, `system/`, `task/`, `terminal/`, `test_runner/`, `web_search/`
+  - Unimplemented stubs (13): `bash_timeout_control/`, `browser_open/`, `fault_tolerant_command_runner/`, `file_path_resolver/`, `live_news_tool/`, `long_running_command_handler/`, `news_aggregator_live/`, `nexus_codebase_research/`, `safe_file_path_tracking/`, `sandbox_path_validation/`, `sandbox_path_validator/`, `workspace_path_guard/`, `workspace_path_validation/` — registered via `.json` metadata but marked `unavailable`
+  - Each tool has a `<name>.jsnol` metadata file and handler scripts (stub tools use `.json` only)
+- **tools/nexus_tools/registry.py** - `ToolRegistry` for tool discovery and management (note: `bash` is retired — `terminal` is the only command-execution tool)
+- **tools/threat_patterns.py** - Threat pattern detection for security (41 regex patterns, 3 scopes)
 
 ## Interfaces
 
@@ -48,9 +49,9 @@ Three user interfaces, all feeding into the same agent runtime:
 |-----------|---------|------------|------|
 | **TUI** | `python -m nexus` | Ink + `gui.api` backend | 8000 |
 | **Rich shell** | `python -m nexus --shell` | Rich | in-process |
-| **GUI** | `python -m nexus --gui` | React 19 + Vite + `gui.api` | 8000/5173 |
+| **GUI** | `python -m nexus --gui` | React 18 + Vite + `gui.api` | 8000/5173 |
 | **Server** | `python -m nexus --server` | standalone FastAPI `server:app` | 8000 |
-| **Gateway** | `python -m nexus --gateway` | Telegram, Discord, WhatsApp, Slack | external |
+| **Gateway** | `python -m nexus --gateway` | 21 platforms (Telegram, Discord, WhatsApp, Slack, Teams, WeCom, etc.) | external |
 
 All interfaces share sessions via `utils/session_bus.py`:
 - `workspace/active_session.json` - Active session tracking
@@ -59,7 +60,7 @@ All interfaces share sessions via `utils/session_bus.py`:
 
 ## Support Systems
 
-- **memory/** - Persistent JSON-based memory storage (per artifact/session)
+- **memory/** - Multi-source `MemoryManager` (JSONL + in-memory hybrid) with parallel prefetch/sync and verified-evidence gating
 - **sandbox/** - `CommandRiskScorer` with 3 tiers: NO_SANDBOX / NORMAL / DOCKER
 - **rag/** - BM25 + hybrid vector retrieval with Atlas deep indexing
 - **knowledge/** - Knowledge store with SQLite index and RAG index files
@@ -79,7 +80,7 @@ All interfaces share sessions via `utils/session_bus.py`:
 - **mcp/** - MCP stdio client/server and tool adapter. Security boundary rejects workspace-root escape, bounds result limits.
 - **plugins/** - Plugin discovery/execution with trust model. Remote installation disabled by default.
 - **skills/** - Skill definitions with `SKILL.md` format and `SkillRegistry`.
-- **evolution/** - 18+ submodules: tool_forge, skill_forge, plugin_forge, memory_forge, knowledge_forge, logs, status, ledger, nudge, intent, self_improvement, sop, ensemble, version.
+- **evolution/** - 20 submodules: tool_forge, skill_forge, plugin_forge, memory_forge, knowledge_forge, logs, status, ledger, nudge, intent, self_improvement, sop, ensemble, version, local_trainer, omni_kernel, hyper_kernel, researcher, curator, horizons.
 - **voice/** - Voice mode (whisper.cpp ggml-tiny-q5_1.bin + KittenTTS Nano int8)
 
 ## Event Flow
@@ -95,6 +96,6 @@ All interfaces share sessions via `utils/session_bus.py`:
 ## Key Dependencies
 
 - Python: FastAPI, uvicorn, aiohttp, httpx, rich, pyyaml, python-dotenv, numpy, faiss-cpu, sentence-transformers, psutil, cryptography
-- GUI: React 19, Vite 8, TypeScript 6, Tailwind, Framer Motion, Lucide React
+- GUI: React 18.3.1, Vite 5.3.3, TypeScript 5.5.3, Tailwind, Framer Motion, Lucide React (TUI uses React 19 + Ink 7)
 - Voice: torch, transformers, sounddevice, pywhispercpp, KittenTTS
 - Optional: playwright (browser), opencv-python + mediapipe (vision)

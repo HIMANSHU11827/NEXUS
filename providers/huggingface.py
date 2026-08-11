@@ -26,7 +26,7 @@ class HuggingFaceProvider(NexusBaseProvider):
         target_url = f"{self.endpoint}/{self.model}"
         payload = {"inputs": f"{system_prompt}\n\n{prompt}"}
         try:
-            response = self.session.post(target_url, json=payload, headers=self.headers, timeout=30)
+            response = self.session.post(target_url, json=payload, headers=self.headers, timeout=self.request_timeout(kwargs, 30))
             if response.status_code == 200:
                 result = response.json()
                 if isinstance(result, list) and len(result) > 0:

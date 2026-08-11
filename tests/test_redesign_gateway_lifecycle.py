@@ -34,7 +34,9 @@ from gateway.base import (
     BasePlatformAdapter,
     SendResult,
 )
-from gateway.supervisor import GatewaySupervisor
+from gateway.supervisor import GatewaySupervisor, PlatformRuntime
+from gateway.delivery import DeliveryLedger
+from gateway.run import GatewayRunner
 
 # Fast timing so backoff / shutdown are test-friendly but still exercise the
 # same exponential-backoff and crash-loop paths as production defaults.
@@ -47,6 +49,77 @@ FAST_CONFIG = {
     "tick_interval": 0.01,
     "shutdown_timeout": 1.0,
 }
+
+
+async def test_supervisor_starts_and_stops_durable_delivery_worker(tmp_path):
+    class Runner:
+        def __init__(self):
+            self.started = False
+            self.stopped = False
+
+        def add_adapter(self, _adapter):
+            return None
+
+        def start_delivery_loop(self):
+            self.started = True
+
+        async def stop_delivery_loop(self):
+            self.stopped = True
+
+    runner = Runner()
+    supervisor = GatewaySupervisor(
+        config=FAST_CONFIG,
+        state_file=str(tmp_path / "state.json"),
+        runner=runner,
+    )
+    supervisor.register_runtime(FakeAdapter("test"))
+    await supervisor.start_all()
+    assert runner.started is True
+    await supervisor.stop_all()
+    assert runner.stopped is True
+
+
+async def test_supervisor_redacts_adapter_connect_errors():
+    class SecretFailAdapter(FakeAdapter):
+        async def connect(self) -> bool:
+            raise RuntimeError("provider URL contains sk-secret-value")
+
+    adapter = SecretFailAdapter("secret")
+    runtime = PlatformRuntime(adapter, FAST_CONFIG)
+    await runtime.connect_once(now=100.0)
+
+    assert runtime.last_error is not None
+    assert "sk-secret-value" not in runtime.last_error
+
+
+async def test_supervisor_delivery_worker_drains_restart_queue(tmp_path):
+    ledger = DeliveryLedger(db_path=str(tmp_path / "delivery.sqlite3"))
+    runner = GatewayRunner(delivery_ledger=ledger)
+    runner.DELIVERY_LOOP_INTERVAL_SECONDS = 0.01
+    adapter = FakeAdapter("telegram")
+    runner.add_adapter(adapter)
+    supervisor = GatewaySupervisor(
+        config=FAST_CONFIG,
+        state_file=str(tmp_path / "state.json"),
+        runner=runner,
+    )
+    supervisor.register_runtime(adapter)
+    item = ledger.enqueue(
+        idempotency_key="restart-response-1",
+        platform="telegram",
+        chat_id="chat",
+        text="queued after restart",
+    )
+
+    await supervisor.start_all()
+    try:
+        for _ in range(20):
+            if ledger.get(item["delivery_id"])["status"] == "sent":
+                break
+            await asyncio.sleep(0.01)
+        assert ledger.get(item["delivery_id"])["status"] == "sent"
+    finally:
+        await supervisor.stop_all()
 
 
 class FakeAdapter(BasePlatformAdapter):
@@ -238,6 +311,65 @@ async def test_stop_all_disconnects_gracefully(tmp_path):
     # stop_all is idempotent.
     await sv.stop_all()
     assert adapter.state == STATE_STOPPED
+
+
+async def test_overlapping_manual_ticks_do_not_double_connect(tmp_path):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowAdapter(FakeAdapter):
+        async def connect(self) -> bool:
+            self.connect_calls += 1
+            started.set()
+            await release.wait()
+            return True
+
+    adapter = SlowAdapter("telegram")
+    sv = GatewaySupervisor(config=FAST_CONFIG, state_file=str(tmp_path / "state.json"))
+    sv.register_runtime(adapter)
+    await sv.start_all()
+
+    first = asyncio.create_task(sv._tick_once())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    second = asyncio.create_task(sv._tick_once())
+    await asyncio.sleep(0)
+    assert adapter.connect_calls == 1
+
+    release.set()
+    await asyncio.gather(first, second)
+    assert adapter.connect_calls == 1
+    assert adapter.state == STATE_RUNNING
+    await sv.stop_all()
+
+
+async def test_shutdown_waits_for_inflight_connect_before_persisting_stopped(tmp_path):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowAdapter(FakeAdapter):
+        async def connect(self) -> bool:
+            self.connect_calls += 1
+            started.set()
+            await release.wait()
+            return True
+
+    adapter = SlowAdapter("telegram")
+    state_file = str(tmp_path / "state.json")
+    sv = GatewaySupervisor(config=FAST_CONFIG, state_file=state_file)
+    sv.register_runtime(adapter)
+    await sv.start_all()
+
+    tick = asyncio.create_task(sv._tick_once())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    stopping = asyncio.create_task(sv.stop_all())
+    await asyncio.sleep(0)
+    assert not stopping.done()
+
+    release.set()
+    await asyncio.gather(tick, stopping)
+    assert adapter.state == STATE_STOPPED
+    persisted = json.loads(Path(state_file).read_text(encoding="utf-8"))
+    assert persisted["platforms"]["telegram"]["state"] == STATE_STOPPED
 
 
 # --------------------------------------------------------------------------- #

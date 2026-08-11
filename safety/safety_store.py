@@ -33,7 +33,7 @@ except Exception:  # pragma: no cover - PyYAML is a hard dependency in practice
     yaml = None
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_CONFIG_PATH = _PROJECT_ROOT / "config" / "nexus_config.yaml"
+_CONFIG_PATH = _PROJECT_ROOT / "config" / "settings.yml"
 
 _LOCK = threading.RLock()
 _STATE: Optional[Dict[str, Any]] = None
@@ -1642,13 +1642,17 @@ def _command_policy_for(action: str) -> tuple:
     """Return (category_id, risk, reason) for a command action."""
     lowered = str(action or "").strip().lower()
     rules = [
+        # High-risk matches must precede the broad read-command rule below.
+        # Otherwise `type .env` and `echo ok && type .env` are classified as
+        # safe before credential/chaining checks get a chance to run.
+        (r"\b(get-content|type|cat|head|tail)\b.*(\.env|\.pem|\.key|id_rsa|credential|secret)", "credential_access", "Critical"),
+        (r"\b(env|printenv|set)\b", "credential_access", "Critical"),
+        (r"(?:(?<=\s)|^)(?:&&|\|\||;)(?=\s|$)", "command_chaining", "Medium"),
         (r"^\s*(dir|ls|pwd|date|echo|type|cat|head|tail|rg|grep|findstr|where)\b", "safe_commands", "Safe"),
         (r"\b(rm|Remove-Item|del|erase)\b.*(-[rR][a-zA-Z]*[fF]|-recurse)", "destructive_commands", "Critical"),
         (r"\b(git\s+clean|git\s+reset\s+--hard)\b", "destructive_commands", "Critical"),
         (r"\b(rmdir|Remove-Item)\b.*/\s*[sq]", "destructive_commands", "Critical"),
         (r"\b(rm -rf\s+/|del /s /q)\b", "destructive_commands", "Critical"),
-        (r"\b(Get-Content|type|cat)\b.*(\.env|\.pem|\.key|id_rsa|credential|secret)", "credential_access", "Critical"),
-        (r"\b(env|printenv|set)\b", "credential_access", "Critical"),
         (r"\b(sudo|runas|gsudo|elevat(e|ion)|Start-Process.*-Verb\s+RunAs)\b", "privilege_escalation", "Critical"),
         (r"\b(shutdown|reboot|Restart-Computer|Stop-Computer)\b", "system_shutdown", "Critical"),
         (r"\b(restart|Restart-Computer)\b", "system_restart", "Critical"),
@@ -1667,7 +1671,6 @@ def _command_policy_for(action: str) -> tuple:
         (r"\b(Start-Process.*-WindowStyle\s+Hidden|powershell\.exe\s+-WindowStyle\s+Hidden|start\s+/b)\b", "hidden_background_execution", "High"),
         (r"\.\.(?:\\|/)+", "path_traversal", "Critical"),
         (r"\b(cd\s+\.\.|\$env:)\b", "unresolved_variables", "Medium"),
-        (r"\b(&&|\|\||;)\b", "command_chaining", "Medium"),
         (r"\b\|\s*(Select-Object|Out-String|ConvertTo-Json|more|less)\b|\b(\|)\b", "command_pipelines", "Medium"),
         (r"[>]{1,2}\s*[^\s]", "output_redirection", "Medium"),
         (r"\b(start|Start-Process|Start-Job|scheduled)\b", "detached_processes", "High"),

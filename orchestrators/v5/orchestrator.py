@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 from pathlib import Path
 
 from .core import NexusLoopV5, V5Runtime, V5TurnContext, V5LoopState
+from nexus.runtime import safe_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +23,8 @@ class V5Orchestrator:
 
     def __init__(self, root_dir: str, session_id: str = "default"):
         self.root_dir = root_dir
-        self.session_id = session_id
-        self.v5_loop = NexusLoopV5(root_dir, session_id)
+        self.session_id = safe_session_id(session_id)
+        self.v5_loop = NexusLoopV5(root_dir, self.session_id)
         self.logger = logging.getLogger("nexus.v5.orchestrator")
         
         # Integration with existing NEXUS kernel

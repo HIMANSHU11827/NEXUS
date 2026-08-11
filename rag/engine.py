@@ -21,15 +21,69 @@ if sys.version_info[:2] == (3, 14):
 import json
 import math
 import re
+import sqlite3
+import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
 from rag.turbo_vector import NexusTurboVectorEngine
 from utils.singleton import ThreadSafeSingleton
 
 
+@contextmanager
+def _rag_interprocess_lock(index_path: str):
+    """Serialize shared-vault index transactions across worker processes."""
+    lock_path = f"{index_path}.lock.sqlite"
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    connection = sqlite3.connect(lock_path, timeout=60.0, isolation_level=None)
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS rag_index_mutex "
+            "(id INTEGER PRIMARY KEY CHECK (id = 1))"
+        )
+        connection.execute("INSERT OR IGNORE INTO rag_index_mutex(id) VALUES (1)")
+        connection.execute("BEGIN IMMEDIATE")
+        yield
+    finally:
+        try:
+            connection.rollback()
+        finally:
+            connection.close()
+
+
 class NexusAtlasRAG(ThreadSafeSingleton):
+    _vault_instances: Dict[str, Any] = {}
+    _vault_lock = threading.RLock()
+
+    @classmethod
+    def _default_vault(cls) -> str:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.abspath(os.path.join(root, "knowledge"))
+
+    @classmethod
+    def _vault_key(cls, vault_path: Optional[str] = None) -> str:
+        return os.path.abspath(vault_path or cls._default_vault())
+
+    def __new__(cls, vault_path: Optional[str] = None):
+        """Return one isolated engine per persistent vault."""
+        key = cls._vault_key(vault_path)
+        with cls._vault_lock:
+            instance = cls._vault_instances.get(key)
+            if instance is None:
+                instance = object.__new__(cls)
+                cls._vault_instances[key] = instance
+            return instance
+
+    @classmethod
+    def _reset_instance(cls, vault_path: Optional[str] = None) -> None:
+        """Reset one vault or all vaults, retaining maintenance support."""
+        with cls._vault_lock:
+            if vault_path is None:
+                cls._vault_instances.clear()
+            else:
+                cls._vault_instances.pop(cls._vault_key(vault_path), None)
     """
     NEXUS RAG ENGINE 3.1 — DYNAMIC DELTA-INDEXING (SINGLETON)
     """
@@ -49,7 +103,10 @@ class NexusAtlasRAG(ThreadSafeSingleton):
         if getattr(self, "_initialized", False):
             return
         self._initialized = True
-        self._lock = threading.Lock()
+        # GUI ingestion can index files from multiple worker threads. Keep
+        # one re-entrant lock so batch indexing and document writes are atomic
+        # with respect to the shared singleton state.
+        self._lock = threading.RLock()
         self._inverted_index: Dict[str, List[str]] = {}
         
         try:
@@ -59,8 +116,7 @@ class NexusAtlasRAG(ThreadSafeSingleton):
             self.turbo_engine = None
 
         if vault_path is None:
-            _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            vault_path = os.path.join(_root, "knowledge")
+            vault_path = self._default_vault()
         
         self.root = os.path.dirname(os.path.abspath(vault_path))
         self.vault = os.path.abspath(vault_path)
@@ -72,6 +128,7 @@ class NexusAtlasRAG(ThreadSafeSingleton):
             self._avg_dl = self._calculate_avg_dl()
             self._idf_cache: Dict[str, float] = {}
             self._rebuild_idf_cache(self._doc_store)
+            self._rebuild_turbo_cache_unlocked()
         except (MemoryError, Exception) as e:
             print(f"[RAG_ERROR]: Failed to load index: {e}")
             self._doc_store = {}
@@ -82,7 +139,8 @@ class NexusAtlasRAG(ThreadSafeSingleton):
 
     def _cleanup_stale_entries(self):
         """Removes documents from the store that no longer exist on disk."""
-        with self._lock:
+        with self._lock, _rag_interprocess_lock(self._index_path):
+            self._reload_persisted_index_unlocked()
             stale_files = set()
             for doc_id, doc in self._doc_store.items():
                 file_path = doc.get("file")
@@ -96,7 +154,7 @@ class NexusAtlasRAG(ThreadSafeSingleton):
                     del self._doc_store[doc_id]
                     if self.turbo_engine:
                         self.turbo_engine.remove_document(doc_id)
-                self._save_index()
+                self._save_index_unlocked()
                 print(f"[RAG_CLEANUP]: Removed {len(stale_files)} stale entries.")
 
     def _calculate_avg_dl(self) -> float:
@@ -118,11 +176,42 @@ class NexusAtlasRAG(ThreadSafeSingleton):
         return {}
 
     def _save_index(self) -> None:
+        with _rag_interprocess_lock(self._index_path):
+            self._save_index_unlocked()
+
+    def _save_index_unlocked(self) -> None:
         """Save index to disk and rebuild caches."""
-        with open(self._index_path, "w", encoding="utf-8") as f:
-            json.dump(self._doc_store, f)
+        index_dir = os.path.dirname(self._index_path) or "."
+        fd, temporary_path = tempfile.mkstemp(
+            dir=index_dir, prefix=".rag-index-", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                fd = -1
+                json.dump(self._doc_store, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary_path, self._index_path)
+        finally:
+            if fd != -1:
+                os.close(fd)
+            try:
+                if os.path.exists(temporary_path):
+                    os.unlink(temporary_path)
+            except OSError:
+                pass
         self._rebuild_idf_cache(self._doc_store)
         self._avg_dl = self._calculate_avg_dl()
+
+    def _reload_persisted_index_unlocked(self) -> None:
+        """Adopt the latest disk store while holding the process mutex."""
+        persisted = self._load_index()
+        if not isinstance(persisted, dict):
+            return
+        self._doc_store = persisted
+        self._rebuild_idf_cache(self._doc_store)
+        self._avg_dl = self._calculate_avg_dl()
+        self._rebuild_turbo_cache_unlocked()
 
     def _tokenize(self, text: str) -> List[str]:
         """Tokenize text, preserving important code symbols."""
@@ -155,6 +244,18 @@ class NexusAtlasRAG(ThreadSafeSingleton):
         for term, df in df_map.items():
             self._idf_cache[term] = math.log((N - df + 0.5) / (df + 0.5) + 1.0)
 
+    def _rebuild_turbo_cache_unlocked(self) -> None:
+        """Reconstruct the process-local vector cache from persisted documents."""
+        if not self.turbo_engine:
+            return
+        self.turbo_engine.clear()
+        for doc_id, doc in self._doc_store.items():
+            self.turbo_engine.add_document(
+                doc_id,
+                doc.get("content", ""),
+                {"file": doc.get("file")},
+            )
+
     def _idf(self, term: str) -> float:
         """Get IDF score for a term."""
         return self._idf_cache.get(term, math.log(len(self._doc_store) + 1.0))
@@ -167,6 +268,12 @@ class NexusAtlasRAG(ThreadSafeSingleton):
         return chunks
 
     def store_document(self, filename: str, content: str, mtime: float = 0.0, save: bool = True) -> None:
+        """Store one document under the shared RAG mutation lock."""
+        with self._lock, _rag_interprocess_lock(self._index_path):
+            self._reload_persisted_index_unlocked()
+            self._store_document_unlocked(filename, content, mtime, save)
+
+    def _store_document_unlocked(self, filename: str, content: str, mtime: float = 0.0, save: bool = True) -> None:
         """Store a document in the RAG index.
         When indexing a whole workspace, pass save=False and call _save_index() once
         afterwards — otherwise each file triggers a full JSON dump + IDF rebuild (O(N^2)).
@@ -202,9 +309,17 @@ class NexusAtlasRAG(ThreadSafeSingleton):
                 self.turbo_engine.add_document(chunk_id, chunk, {"file": filename})
 
         if save:
-            self._save_index()
+            self._save_index_unlocked()
 
     def index_workspace(
+        self, root_dir: Optional[str] = None, file_path: Optional[str] = None
+    ) -> str:
+        """Index workspace files as one serialized mutation transaction."""
+        with self._lock, _rag_interprocess_lock(self._index_path):
+            self._reload_persisted_index_unlocked()
+            return self._index_workspace_unlocked(root_dir, file_path)
+
+    def _index_workspace_unlocked(
         self, root_dir: Optional[str] = None, file_path: Optional[str] = None
     ) -> str:
         """Index workspace files into RAG store."""
@@ -225,7 +340,7 @@ class NexusAtlasRAG(ThreadSafeSingleton):
                     with open(
                         abs_path, "r", encoding="utf-8", errors="ignore"
                     ) as f_obj:
-                        self.store_document(rel, f_obj.read(), mtime)
+                        self._store_document_unlocked(rel, f_obj.read(), mtime)
                         return f"Surgical update complete: {rel}"
                 except Exception as e:
                     return f"Error indexing {file_path}: {e}"
@@ -244,18 +359,24 @@ class NexusAtlasRAG(ThreadSafeSingleton):
                             with open(
                                 path, "r", encoding="utf-8", errors="ignore"
                             ) as f_obj:
-                                self.store_document(rel, f_obj.read(), mtime, save=False)
+                                self._store_document_unlocked(rel, f_obj.read(), mtime, save=False)
                                 count += 1
                         except (OSError, IOError):
                             pass
 
         if count > 0:
-            self._save_index()
+            self._save_index_unlocked()
 
         print(f"[RAG_3.3]: BM25 Index Complete. {count} files updated.")
         return f"Refreshed {count} documents."
 
     def ensure_indexed(self) -> None:
+        """Build the curated knowledge index in one shared-vault transaction."""
+        with self._lock, _rag_interprocess_lock(self._index_path):
+            self._reload_persisted_index_unlocked()
+            self._ensure_indexed_unlocked()
+
+    def _ensure_indexed_unlocked(self) -> None:
         """Lazily build a *curated* knowledge index once, on first retrieval.
 
         We deliberately do NOT os.walk the entire repo (33k+ files incl. .venv —
@@ -294,14 +415,21 @@ class NexusAtlasRAG(ThreadSafeSingleton):
                     text = fh.read()
                 if not text.strip():
                     continue
-                self.store_document(rel, text, os.path.getmtime(p), save=False)
+                self._store_document_unlocked(
+                    rel, text, os.path.getmtime(p), save=False
+                )
             except Exception:
                 # skip binary / undecodable files silently
                 continue
         if self._doc_store:
-            self._save_index()
+            self._save_index_unlocked()
 
     def retrieve_as_text(self, query: str, top_k: int = 5) -> str:
+        """Retrieve under the shared RAG read/write lock."""
+        with self._lock:
+            return self._retrieve_as_text_unlocked(query, top_k)
+
+    def _retrieve_as_text_unlocked(self, query: str, top_k: int = 5) -> str:
         """Retrieve top-k relevant documents for a query using BM25 with inverted index."""
         if not self._doc_store:
             self.ensure_indexed()
@@ -351,6 +479,11 @@ class NexusAtlasRAG(ThreadSafeSingleton):
         return "\n\n---\n\n".join(parts)
 
     def hybrid_search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """Run hybrid retrieval under the shared RAG read/write lock."""
+        with self._lock:
+            return self._hybrid_search_unlocked(query, top_k)
+
+    def _hybrid_search_unlocked(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """Return structured hybrid keyword + vector results.
 
         BM25 is the primary reliable path. If the vector engine is available,
@@ -412,20 +545,27 @@ class NexusAtlasRAG(ThreadSafeSingleton):
 
     def rebuild_index(self) -> str:
         """Clear and rebuild the persistent index from the project root."""
-        self._doc_store = {}
-        self._inverted_index = {}
-        self._idf_cache = {}
-        if self.turbo_engine:
-            self.turbo_engine.clear()
-        return self.index_workspace()
+        with self._lock, _rag_interprocess_lock(self._index_path):
+            self._doc_store = {}
+            self._inverted_index = {}
+            self._idf_cache = {}
+            if self.turbo_engine:
+                self.turbo_engine.clear()
+            return self._index_workspace_unlocked()
 
     def cleanup_memory(self) -> int:
         """Remove stale indexed chunks whose source file no longer exists."""
-        before = len(self._doc_store)
-        self._cleanup_stale_entries()
-        return before - len(self._doc_store)
+        with self._lock:
+            before = len(self._doc_store)
+            self._cleanup_stale_entries()
+            return before - len(self._doc_store)
 
     def turbo_search(self, query: str, top_k: int = 5) -> str:
+        """Retrieve semantic matches under the shared RAG read lock."""
+        with self._lock:
+            return self._turbo_search_unlocked(query, top_k)
+
+    def _turbo_search_unlocked(self, query: str, top_k: int = 5) -> str:
         """
         Retrieves relevant documents using Turbo Quant Technology (Vector Search).
         Provides semantic awareness beyond keyword matching.

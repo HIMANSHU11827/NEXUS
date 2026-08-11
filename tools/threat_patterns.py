@@ -152,6 +152,13 @@ def scan_content(
                     )
                 )
 
+    # Enforcement, not advice: an ``"all"``-scope hit (classic prompt
+    # injection, exfiltration, eval/exec injection) is block-worthy in every
+    # scan scope. Callers gate on ``.blocked``; leaving it always False made
+    # every ``.blocked`` check dead code.  ``"context"``/``"strict"`` hits stay
+    # warn-only, matching the existing caller policy.
+    result.blocked = any(t.scope == "all" for t in result.threats)
+
     return result
 
 

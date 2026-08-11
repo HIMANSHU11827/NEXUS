@@ -14,8 +14,12 @@ def test_provider_yml_uses_env_placeholders_not_raw_keys():
 
 def test_secret_scanner_detects_raw_keys_and_ignores_env_placeholders(tmp_path):
     (tmp_path / "unsafe.yml").write_text("api_key: sk-" + "a" * 24, encoding="utf-8")
+    (tmp_path / "stripe.yml").write_text("api_key: sk_" + "live_" + "b" * 24, encoding="utf-8")
     (tmp_path / "safe.yml").write_text("api_key: ${DEEPSEEK_API_KEY}", encoding="utf-8")
 
     findings = SecretScanner(str(tmp_path)).scan()
 
-    assert [finding.path for finding in findings] == ["unsafe.yml"]
+    assert sorted((finding.path, finding.kind) for finding in findings) == [
+        ("stripe.yml", "stripe_live_key"),
+        ("unsafe.yml", "generic_sk_key"),
+    ]

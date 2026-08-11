@@ -450,7 +450,8 @@ export function useStreamChat(sessionId?: string | null) {
 
       if (!res.ok) {
         const body = await res.json().catch(() => ({ detail: res.statusText }))
-        setState(s => ({ ...s, isProcessing: false, error: body.detail || `Request failed: ${res.status}` }))
+        const detail = body?.detail || body?.message || body?.error?.message || body?.error || res.statusText
+        setState(s => ({ ...s, isProcessing: false, error: typeof detail === 'string' ? detail : `Request failed: ${res.status}` }))
         return
       }
 
@@ -492,7 +493,11 @@ export function useStreamChat(sessionId?: string | null) {
                 ? { ...payload.payload, ...payload }
                 : payload
               const toolName = raw.related_tool || raw.tool || raw.name || details.tool || details.name
-              const canonicalType = String(raw.event_type || raw.type || 'unknown')
+              const rawCanonicalType = String(raw.event_type || raw.type || 'unknown')
+              // The backend's public progress contract is assistant.progress.
+              // Accept the older generic progress spelling during upgrades so
+              // persisted/live runs do not lose their explanatory updates.
+              const canonicalType = rawCanonicalType === 'progress' ? 'assistant.progress' : rawCanonicalType
               // A plan step is bookkeeping for a real tool call. Render it as
               // that actual operation (search, terminal, file, etc.) so a
               // web search never appears as a misleading second Plan card.
@@ -532,7 +537,7 @@ export function useStreamChat(sessionId?: string | null) {
                 command: raw.related_command || raw.command || details.command,
                 path: raw.related_files?.[0] || raw.path || details.path,
                 cwd: raw.cwd || details.cwd,
-                summary: raw.summary || raw.display?.summary || details.text,
+                summary: raw.summary || raw.display?.summary || details.note || details.text || details.message,
                 output: raw.output || raw.result || details.output || details.result || details.preview,
                 error: raw.error?.message,
                 exitCode: typeof rawExitCode === 'number' ? rawExitCode : undefined,

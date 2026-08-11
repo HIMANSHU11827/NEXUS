@@ -12,6 +12,8 @@ All network/model calls are monkeypatched; nothing here touches the network.
 import asyncio
 import json
 import os
+import time
+import threading
 
 from orchestrators.v5.core import NexusLoopV5
 from orchestrators.v5.direct_loop import (
@@ -78,6 +80,149 @@ def test_oversized_tool_result_archive_degrades_to_original_on_error(tmp_path):
         content, "fixture_tool", "turn-x", 1, str(tmp_path)
     )
     assert bounded == content
+
+
+def test_async_tool_result_archiving_does_not_block_event_loop(monkeypatch, tmp_path):
+    original = V5DirectModelToolLoop._bounded_tool_result
+
+    def slow_bounded(cls, content, tool_name, turn_id, call_slot, root_dir=""):
+        time.sleep(0.08)
+        return original.__func__(cls, content, tool_name, turn_id, call_slot, root_dir)
+
+    monkeypatch.setattr(
+        V5DirectModelToolLoop, "_bounded_tool_result",
+        classmethod(slow_bounded),
+    )
+
+    async def exercise():
+        ticks = 0
+        finished = asyncio.Event()
+
+        async def heartbeat():
+            nonlocal ticks
+            while not finished.is_set():
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        task = asyncio.create_task(heartbeat())
+        result = await V5DirectModelToolLoop._bounded_tool_result_async(
+            "z" * (MAX_TOOL_RESULT_CHARS + 1), "fixture", "turn", 0, str(tmp_path)
+        )
+        finished.set()
+        await task
+        return result, ticks
+
+    result, ticks = asyncio.run(exercise())
+    assert "persisted to" in result
+    assert ticks >= 3
+
+
+def test_async_direct_message_persistence_does_not_block_event_loop(monkeypatch, tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="async-persist-test")
+    original = loop._write_session_bus
+
+    def slow_write(*args, **kwargs):
+        time.sleep(0.08)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(loop, "_write_session_bus", slow_write)
+
+    async def exercise():
+        ticks = 0
+        finished = asyncio.Event()
+
+        async def heartbeat():
+            nonlocal ticks
+            while not finished.is_set():
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        task = asyncio.create_task(heartbeat())
+        await loop._persist_direct_message_async(
+            {"role": "tool", "name": "fixture", "tool_call_id": "call-1", "content": "ok"},
+            "turn-1",
+        )
+        finished.set()
+        await task
+        return ticks
+
+    ticks = asyncio.run(exercise())
+    assert ticks >= 3
+    assert any(item.get("tool_call_id") == "call-1" for item in loop.runtime.memory)
+
+
+def test_async_turn_message_persistence_does_not_block_event_loop(monkeypatch, tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="async-turn-persist-test")
+    original = loop._write_session_bus
+
+    def slow_write(*args, **kwargs):
+        time.sleep(0.08)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(loop, "_write_session_bus", slow_write)
+
+    async def exercise():
+        ticks = 0
+        finished = asyncio.Event()
+
+        async def heartbeat():
+            nonlocal ticks
+            while not finished.is_set():
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        task = asyncio.create_task(heartbeat())
+        await loop._persist_turn_message_async("user", "hello", "turn-2")
+        finished.set()
+        await task
+        return ticks
+
+    ticks = asyncio.run(exercise())
+    assert ticks >= 3
+    assert any(item.get("turn_id") == "turn-2" for item in loop.runtime.memory)
+
+
+def test_session_bus_replacement_uses_cross_process_mutex(tmp_path):
+    first = NexusLoopV5(str(tmp_path), session_id="shared-session")
+    second = NexusLoopV5(str(tmp_path), session_id="shared-session")
+    first.runtime.memory = [{"role": "user", "content": "first"}]
+    second.runtime.memory = [{"role": "user", "content": "second"}]
+    path = os.path.join(str(tmp_path), "logs", "sessions", "shared-session.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    entered = first._session_bus_interprocess_lock(path)
+    entered.__enter__()
+    completed = threading.Event()
+
+    def write_from_other_process():
+        second._write_session_bus()
+        completed.set()
+
+    worker = threading.Thread(target=write_from_other_process, daemon=True)
+    worker.start()
+    try:
+        assert not completed.wait(0.08)
+    finally:
+        entered.__exit__(None, None, None)
+    worker.join(timeout=2.0)
+    assert completed.is_set()
+    assert os.path.isfile(path + ".lock.sqlite")
+    assert json.loads(open(path, encoding="utf-8").read()) == second.runtime.memory
+
+
+def test_v5_session_id_cannot_escape_session_directory(tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="../../outside.json")
+
+    assert loop.session_id == "outside"
+    loop._persist_turn_message("user", "safe", "turn-safe")
+
+    expected = tmp_path / "logs" / "sessions" / "outside.json"
+    escaped = tmp_path.parent / "outside.json"
+    assert expected.exists()
+    assert not escaped.exists()
+
+    loop.load_memory("../../reloaded.json")
+    assert loop.session_id == "reloaded"
+    assert loop.runtime.session_id == "reloaded"
 
 
 # ─────────────────────────────────────────────────────────────────────────

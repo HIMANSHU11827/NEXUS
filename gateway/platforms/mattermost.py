@@ -63,9 +63,9 @@ class MattermostAdapter(BasePlatformAdapter):
             return False
 
     async def disconnect(self):
-        if self._ws_task:
-            self._ws_task.cancel()
-            self._ws_task = None
+        ws_task = self._ws_task
+        self._ws_task = None
+        await self._cancel_task(ws_task)
         if self._client:
             await self._client.aclose()
             self._client = None

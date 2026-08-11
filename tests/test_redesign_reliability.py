@@ -27,6 +27,7 @@ from gateway.run import GatewayRunner, IngressDedupe, dedupe_key_for_event
 from providers.health import ComponentBreakerRegistry
 from providers.reliability import (
     BreakerState,
+    FailureClass,
     ProviderCallError,
     RetryPolicy,
     bounded_tool_retry,
@@ -35,6 +36,20 @@ from providers.reliability import (
 )
 from queue.driver import QueueDriver
 from queue.store import TaskQueue
+
+
+def test_billing_and_quota_failures_do_not_retry_like_transient_rate_limits():
+    billing = classify_failure(body="402 payment required: credits exhausted")
+    quota = classify_failure(body="429 quota exceeded for this project")
+    rate_limit = classify_failure(body="429 too many requests; retry later")
+
+    assert billing.failure_class is FailureClass.BILLING_QUOTA
+    assert billing.retryable is False
+    assert billing.strategy.value == "fallback_provider"
+    assert quota.failure_class is FailureClass.BILLING_QUOTA
+    assert quota.retryable is False
+    assert rate_limit.failure_class is FailureClass.RATE_LIMIT
+    assert rate_limit.retryable is True
 
 
 # --------------------------------------------------------------------------- #
@@ -197,8 +212,9 @@ class _FakeAdapter(BasePlatformAdapter):
         self.typing_calls += 1
 
 
-async def test_handle_message_skips_duplicate_message_ids(monkeypatch):
+async def test_handle_message_skips_duplicate_message_ids(monkeypatch, tmp_path):
     import gateway.run as gateway_run
+    from gateway.delivery import DeliveryLedger
     from utils import session_bus
 
     class FakeLoop:
@@ -220,7 +236,7 @@ async def test_handle_message_skips_duplicate_message_ids(monkeypatch):
 
     gateway_run.ingress_dedupe.clear()
 
-    runner = GatewayRunner()
+    runner = GatewayRunner(delivery_ledger=DeliveryLedger(db_path=str(tmp_path / "delivery.sqlite3")))
     adapter = _FakeAdapter("telegram")
     runner.add_adapter(adapter)
 
@@ -326,6 +342,34 @@ def test_call_with_reliability_provider_form_preserved():
     result = call_with_reliability("prov", generate, messages=[], policy=policy)
     assert result == "response"
     assert calls["n"] == 2
+
+
+async def test_call_with_reliability_preserves_async_cancellation():
+    calls = {"n": 0}
+
+    async def cancelled():
+        calls["n"] += 1
+        raise asyncio.CancelledError("operator stopped provider call")
+
+    with pytest.raises(asyncio.CancelledError, match="operator stopped"):
+        await call_with_reliability(
+            "prov",
+            cancelled,
+            policy=RetryPolicy(max_attempts=3, base_delay=0.01, jitter=0.0),
+        )
+    assert calls["n"] == 1
+
+
+async def test_call_with_reliability_awaits_async_callable_instances():
+    class AsyncCallable:
+        async def __call__(self):
+            return "ok"
+
+    result = await call_with_reliability(
+        AsyncCallable(),
+        retry_policy=RetryPolicy(max_attempts=1, base_delay=0),
+    )
+    assert result == "ok"
 
 
 # --------------------------------------------------------------------------- #

@@ -72,6 +72,7 @@ class V5ModelCaller:
         profile: Optional[str] = None,
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
         tools: Optional[List[Dict]] = None,
         tool_choice: Optional[str] = None,
     ) -> str:
@@ -96,6 +97,8 @@ class V5ModelCaller:
             kwargs["model"] = model
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        if timeout is not None:
+            kwargs["timeout"] = max(0.001, float(timeout))
         if tools is not None:
             kwargs["tools"] = tools
         if tool_choice is not None:
@@ -137,6 +140,7 @@ class V5ModelCaller:
                     profile=profile,
                     model=model,
                     max_tokens=max_tokens,
+                    timeout=effective_timeout,
                     tools=tools,
                     tool_choice=tool_choice,
                 ),
@@ -190,6 +194,7 @@ class V5ModelCaller:
         if callable(trigger):
             await trigger("pre_llm_call", messages, dict(kwargs))
         effective_timeout = self._effective_model_timeout(timeout)
+        kwargs.setdefault("timeout", max(0.001, float(effective_timeout)))
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(self._call_model_raw, messages, **kwargs), timeout=effective_timeout
@@ -279,6 +284,7 @@ class V5ModelCaller:
         profile: Optional[str] = None,
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        timeout: float = 90.0,
         tools: Optional[List[Dict]] = None,
         tool_choice: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
@@ -310,6 +316,7 @@ class V5ModelCaller:
                     kwargs["profile"] = profile
                 if model:
                     kwargs["model"] = model
+                kwargs["timeout"] = max(0.001, self._effective_model_timeout(timeout))
                 if tools is not None:
                     kwargs["tools"] = tools
                 if tool_choice is not None:
@@ -339,9 +346,20 @@ class V5ModelCaller:
 
         try:
             while True:
-                control = None
+                # Model streams can remain inside this loop for the entire
+                # turn. Use the canonical abort check here so durable
+                # cross-process cancellations are refreshed, not only checked
+                # at the surrounding phase boundaries.
                 registry = getattr(self, "_run_controls", None)
                 current = str(getattr(self, "_current_turn_id", "") or "")
+                check_abort = getattr(self, "_check_abort", None)
+                if callable(check_abort):
+                    check_abort()
+                elif registry is not None and current:
+                    refresh = getattr(registry, "refresh_cancel", None)
+                    if callable(refresh):
+                        refresh(current)
+                control = None
                 if registry is not None and current:
                     control = registry.get(current)
                 if control is not None:

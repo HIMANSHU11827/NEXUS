@@ -1,8 +1,11 @@
 import json
+import logging
 import os
 from typing import Dict, Iterator, List, Optional
 
 from providers.base import NexusBaseProvider
+
+logger = logging.getLogger(__name__)
 
 
 class FireworksProvider(NexusBaseProvider):
@@ -52,8 +55,9 @@ class FireworksProvider(NexusBaseProvider):
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs}
         self._add_tool_payload(payload, kwargs)
+        response = None
         try:
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=30)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=self.request_timeout(kwargs, 30))
             if response.status_code == 200:
                 data = response.json()
                 message = data["choices"][0].get("message", {})
@@ -69,8 +73,9 @@ class FireworksProvider(NexusBaseProvider):
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": self.model, "messages": msgs, "stream": True}
         self._add_tool_payload(payload, kwargs)
+        response = None
         try:
-            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=30)
+            response = self.session.post(self.endpoint, json=payload, headers=self.headers, stream=True, timeout=self.request_timeout(kwargs, 30))
             if response.status_code == 200:
                 streamed_tool_calls = {}
                 for line in response.iter_lines():
@@ -99,3 +104,9 @@ class FireworksProvider(NexusBaseProvider):
                 yield f"Error: {response.status_code}"
         except Exception as e:
             yield f"Error in Fireworks stream: {str(e)}"
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    logger.debug("Fireworks stream response cleanup failed", exc_info=True)

@@ -61,6 +61,17 @@ The FastAPI server provides all REST endpoints consumed by the React GUI. Most a
 | `/api/providers/instance/{id}` | DELETE | Remove provider instance |
 | `/api/model` | GET/POST | Get/set active model |
 
+### Provider setup and troubleshooting
+
+Use this sequence when operating the local GUI or TUI:
+
+1. Start the backend with `python -m nexus --server` (the GUI composer shows this command when the backend is unavailable).
+2. If provider/settings sections report `Not authenticated`, configure a dashboard token as `NEXUS_DASHBOARD_TOKEN` for the server and give the TUI process the same token. The browser GUI currently has no visible token-entry screen, so its authenticated-session/login path must be provisioned separately; the provider API key is separate from the dashboard token.
+3. Use the GUI **Settings → Providers** or the TUI `/provider` and `/model` commands to manage or select providers after authentication succeeds. Use `/providers` for the list and `/status` or `/health` to diagnose the runtime.
+4. Provider fallback is runtime behavior; inspect the active provider/model and run evidence when diagnosing a fallback. The settings screen does not currently display the full fallback chain or cooldown reason.
+
+The GUI’s “Backend connected” indicator means the local API is reachable; it does not guarantee that authenticated provider inventory/configuration requests will succeed.
+
 ### Tools & Registry
 | Route | Method | Purpose |
 |-------|--------|---------|

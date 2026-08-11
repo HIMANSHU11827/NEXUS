@@ -18,8 +18,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
+
+from .durable_background import DurableBackgroundStore
+from providers.reliability import redact_secrets
 
 
 logger = logging.getLogger(__name__)
@@ -76,6 +80,20 @@ class V5BackgroundRunner:
         ``background.started`` event is emitted. Returns the task, or None
         when creation fails (e.g. no running loop). Never raises.
         """
+        # A coroutine object is single-use. Retrying it would await the same
+        # object again and silently turn a recoverable retry into a failed
+        # background task. Require a callable factory whenever retries are
+        # requested so each attempt gets a fresh coroutine.
+        if retries and inspect.isawaitable(coro) and not callable(coro):
+            logger.warning(
+                "[BACKGROUND] retries require a callable coroutine factory for %s",
+                name or "task",
+            )
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return None
         try:
             task = asyncio.create_task(self._run_bg_wrapper(coro, name, retries, on_done))
         except Exception as e:
@@ -96,6 +114,8 @@ class V5BackgroundRunner:
                     meta.pop(task_id, None)
                     for lane_tasks in lanes.values():
                         lane_tasks.discard(task_id)
+                if owned_ids:
+                    self._notify_priority_lane_waiters()
             except Exception:
                 logger.debug("[BACKGROUND] task metadata cleanup failed", exc_info=True)
 
@@ -176,7 +196,7 @@ class V5BackgroundRunner:
                             label,
                             "running",
                             event_id=f"bg_{label}_r{attempt}",
-                            payload={"name": label, "attempt": attempt, "error": str(e)[:200]},
+                            payload={"name": label, "attempt": attempt, "error": redact_secrets(e)[:200]},
                         )
                     except Exception:
                         pass
@@ -192,7 +212,7 @@ class V5BackgroundRunner:
                         label,
                         "failed",
                         event_id=f"bg_{label}_f{counters.get('failed', 0)}",
-                        payload={"name": label, "error": str(e)[:300]},
+                        payload={"name": label, "error": redact_secrets(e)[:300]},
                     )
                 except Exception:
                     pass
@@ -216,6 +236,224 @@ class V5BackgroundRunner:
             return stats
         except Exception:
             return {}
+
+    def _durable_background_store(self) -> DurableBackgroundStore:
+        """Return the process-shared SQLite ledger for opted-in jobs."""
+        store = getattr(self, "_v5_durable_background_store", None)
+        if store is None:
+            root = getattr(self, "root_dir", None) or getattr(self, "_project_root", None) or os.getcwd()
+            store = DurableBackgroundStore(str(root))
+            self._v5_durable_background_store = store
+        return store
+
+    def register_durable_background_factory(self, factory_key: str, factory) -> bool:
+        """Register a restart-safe factory under a stable key.
+
+        The callable is deliberately process-local; only ``factory_key`` is
+        persisted. A new process must register the key before recovery.
+        """
+        if not str(factory_key or "").strip() or not callable(factory):
+            return False
+        factories = getattr(self, "_v5_durable_background_factories", None)
+        if factories is None:
+            factories = {}
+            self._v5_durable_background_factories = factories
+        factories[str(factory_key)] = factory
+        # Registration is the safe point at which a fresh process can
+        # rehydrate jobs for this factory; unregistered jobs remain pending.
+        try:
+            self.recover_durable_background_tasks()
+        except Exception:
+            logger.debug("[BACKGROUND] durable recovery after registration failed", exc_info=True)
+        return True
+
+    def _schedule_durable_background_record(self, record: Dict[str, Any]) -> str:
+        store = self._durable_background_store()
+        task_id = str(record.get("task_id") or "")
+        factory_key = str(record.get("factory_key") or "")
+        factory = getattr(self, "_v5_durable_background_factories", {}).get(factory_key)
+        if not task_id or not callable(factory):
+            return ""
+        owner_token = uuid.uuid4().hex
+        claim_state = {"claimed": False}
+        result_state = {"value": ""}
+
+        async def attempt_factory():
+            claimed = store.claim(task_id, owner_token)
+            if not claimed and claim_state["claimed"]:
+                # In-process retry: the row stays 'running' under our own
+                # owner_token between attempts, so ``claim`` legitimately
+                # returns False. Treat the still-owned row as claimed instead
+                # of silently no-opping the retry and stranding the ledger.
+                row = store.get(task_id) or {}
+                claimed = (
+                    str(row.get("status") or "") == "running"
+                    and str(row.get("owner_token") or "") == owner_token
+                )
+            claim_state["claimed"] = claimed
+            if not claimed:
+                return None
+            awaitable = factory()
+            if not inspect.isawaitable(awaitable):
+                result_state["value"] = awaitable
+                return awaitable
+            stop_heartbeat = asyncio.Event()
+
+            async def renew_heartbeat() -> None:
+                # The watchdog is conservative: a job gets several heartbeat
+                # intervals before it can be reclaimed, and normal long jobs
+                # remain alive without needing to know about this mechanism.
+                interval = max(1.0, min(30.0, float(record.get("timeout_s") or 30.0) / 3.0))
+                while not stop_heartbeat.is_set():
+                    try:
+                        await asyncio.wait_for(stop_heartbeat.wait(), timeout=interval)
+                    except asyncio.TimeoutError:
+                        store.heartbeat(task_id, owner_token=owner_token)
+
+            heartbeat_task = asyncio.create_task(renew_heartbeat())
+            try:
+                result = await awaitable
+                result_state["value"] = result
+                return result
+            finally:
+                stop_heartbeat.set()
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
+
+        async def finished(error=None):
+            if not claim_state["claimed"]:
+                return
+            if error is None:
+                # Persist the terminal value for restart-safe inspection, but
+                # keep the ledger under the same redaction contract as runtime
+                # events and error diagnostics.
+                store.complete(
+                    task_id,
+                    redact_secrets(result_state["value"])[:2000],
+                    owner_token=owner_token,
+                )
+            else:
+                store.fail(
+                    task_id,
+                    redact_secrets(error)[:2000],
+                    owner_token=owner_token,
+                )
+
+        return self._submit_task_priority(
+            str(record.get("name") or factory_key),
+            attempt_factory,
+            priority=int(record.get("priority", 0) or 0),
+            timeout_s=float(record.get("timeout_s") or 0.0),
+            retries=int(record.get("max_retries", 0) or 0),
+            lane=str(record.get("lane") or "default"),
+            task_id=task_id,
+            on_done=finished,
+        )
+
+    def submit_durable_background(
+        self,
+        factory_key: str,
+        factory,
+        *,
+        name: str = "",
+        priority: int = 0,
+        timeout_s: float = 300.0,
+        retries: int = 0,
+        lane: str = "default",
+    ) -> str:
+        """Persist and start a restartable background job.
+
+        ``factory_key`` must be registered again by a fresh process before
+        calling :meth:`recover_durable_background_tasks`.
+        """
+        key = str(factory_key or "").strip()
+        if not key or not callable(factory) or not self.register_durable_background_factory(key, factory):
+            return ""
+        task_id = f"durable_{key}_{uuid.uuid4().hex[:10]}"
+        store = self._durable_background_store()
+        store.create(
+            task_id, key, str(name or key), max_retries=int(retries or 0),
+            timeout_s=float(timeout_s or 0.0) or None,
+            priority=int(priority or 0), lane=str(lane or "default"),
+        )
+        record = store.get(task_id) or {}
+        scheduled = self._schedule_durable_background_record(record)
+        if not scheduled:
+            store.fail(task_id, "background task could not be scheduled")
+            return ""
+        return task_id
+
+    def recover_durable_background_tasks(self) -> List[str]:
+        """Requeue persisted pending/interrupted jobs with registered factories."""
+        store = self._durable_background_store()
+        if not getattr(self, "_v5_durable_recovery_initialized", False):
+            store.recover_running()
+            self._v5_durable_recovery_initialized = True
+        active = set(self._v5_runner_task_by_id())
+        recovered: List[str] = []
+        records = store.list(("pending", "interrupted"))
+        # Rehydrate in the same ordering used for live admission.  The lane
+        # gate still arbitrates execution, but deterministic scheduling here
+        # makes restart behavior observable and prevents creation-time order
+        # from defeating persisted priority.
+        records.sort(key=lambda record: (
+            int(record.get("priority", 0) or 0),
+            str(record.get("lane") or "default"),
+            float(record.get("created_at", 0.0) or 0.0),
+            str(record.get("task_id") or ""),
+        ))
+        for record in records:
+            task_id = str(record.get("task_id") or "")
+            if not task_id or task_id in active:
+                continue
+            if self._schedule_durable_background_record(record):
+                recovered.append(task_id)
+        return recovered
+
+    async def watchdog_durable_background_tasks(
+        self,
+        stale_after: float = 300.0,
+        *,
+        cancel_timeout: float = 5.0,
+    ) -> List[str]:
+        """Reclaim and restart durable jobs whose heartbeat stopped.
+
+        The stale job is cancelled before its stable task id is scheduled
+        again, preventing an old completion callback from racing the new
+        attempt. Cancellation is bounded: a task which ignores cancellation
+        must not freeze the watchdog or block recovery of unrelated jobs. In
+        that case the still-live task remains visible in the runner's active
+        map, so the stable task id is not scheduled a second time until the
+        old task actually exits. Unknown factory keys remain interrupted and
+        are not run.
+        """
+        store = self._durable_background_store()
+        stale_ids = store.recover_stalled(stale_after)
+        if not stale_ids:
+            return []
+        by_id = self._v5_runner_task_by_id()
+        active_tasks = [by_id.get(task_id) for task_id in stale_ids if by_id.get(task_id) is not None]
+        for task in active_tasks:
+            if task is not None and not task.done():
+                task.cancel()
+        if active_tasks:
+            # Do not let a non-cooperative task turn the watchdog into another
+            # stuck background task. ``asyncio.wait`` does not cancel the
+            # still-pending tasks when its timeout expires; they remain fenced
+            # by owner_token and are deliberately left in the active map.
+            done, pending = await asyncio.wait(
+                active_tasks,
+                timeout=max(0.01, float(cancel_timeout)),
+            )
+            if done:
+                await asyncio.gather(*done, return_exceptions=True)
+            if pending:
+                logger.warning(
+                    "[BACKGROUND] stale durable task cancellation exceeded %.2fs; "
+                    "deferring reschedule until the old task exits",
+                    max(0.01, float(cancel_timeout)),
+                )
+        return self.recover_durable_background_tasks()
 
     async def _drain_runner_tasks(self) -> None:
         """Wait for all in-flight background tasks to finish (cooperative).
@@ -268,6 +506,147 @@ class V5BackgroundRunner:
             self._v5_idle_lanes_set = idle
         return idle
 
+    def _priority_lane_limits(self) -> Dict[str, Optional[int]]:
+        """Return configured lane admission limits.
+
+        A lane is serial by default.  This makes priority meaningful at the
+        admission boundary instead of only when the runner drains at close;
+        callers that need parallel work can opt into a larger limit (or
+        ``None`` for unbounded admission) with
+        :meth:`configure_priority_lane`.
+        """
+        limits = getattr(self, "_v5_priority_lane_limits", None)
+        if limits is None:
+            limits = {}
+            self._v5_priority_lane_limits = limits
+        return limits
+
+    def configure_priority_lane(
+        self,
+        lane: str,
+        max_concurrency: Optional[int] = 1,
+        *,
+        max_wait_admissions: Optional[int] = 8,
+    ) -> Optional[int]:
+        """Configure bounded admission for a priority lane.
+
+        ``None`` means unbounded admission; positive integers bound the
+        number of active attempts in the lane.  ``max_wait_admissions`` is
+        the bounded-aging threshold: once a task has waited through that
+        many admissions, FIFO age takes precedence over numeric priority.
+        The default for an
+        unconfigured lane is one, which prevents low-priority work from
+        monopolizing a lane before higher-priority work can be admitted.
+        Returns the normalized value, or ``None`` for invalid input.
+        """
+        try:
+            safe_lane = str(lane or "default")
+            if max_concurrency is None:
+                value = None
+            else:
+                value = max(1, int(max_concurrency))
+            self._priority_lane_limits()[safe_lane] = value
+            fairness = getattr(self, "_v5_priority_lane_fairness", None)
+            if fairness is None:
+                fairness = {}
+                self._v5_priority_lane_fairness = fairness
+            fairness[safe_lane] = (
+                None if max_wait_admissions is None
+                else max(1, int(max_wait_admissions))
+            )
+            self._notify_priority_lane_waiters()
+            return value
+        except Exception:
+            return None
+
+    def _priority_lane_state(self) -> Dict[str, Any]:
+        state = getattr(self, "_v5_priority_lane_state", None)
+        if state is None:
+            state = {"active": {}, "running": {}, "admissions": {}}
+            self._v5_priority_lane_state = state
+        return state
+
+    def _priority_lane_condition(self):
+        condition = getattr(self, "_v5_priority_lane_condition", None)
+        if condition is None:
+            condition = asyncio.Condition()
+            self._v5_priority_lane_condition = condition
+        return condition
+
+    def _notify_priority_lane_waiters(self) -> None:
+        """Wake admission waiters without making cleanup callbacks raise."""
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._notify_priority_lane_waiters_async())
+        except Exception:
+            pass
+
+    async def _notify_priority_lane_waiters_async(self) -> None:
+        try:
+            async with self._priority_lane_condition():
+                self._priority_lane_condition().notify_all()
+        except Exception:
+            pass
+
+    async def _acquire_priority_lane(self, task_id: str, lane: str) -> bool:
+        """Wait until ``task_id`` is the next admitted task in ``lane``."""
+        safe_lane = str(lane or "default")
+        limit = self._priority_lane_limits().get(safe_lane, 1)
+        if limit is None:
+            return True
+        state = self._priority_lane_state()
+        condition = self._priority_lane_condition()
+        async with condition:
+            while True:
+                meta = self._task_meta().get(task_id)
+                if meta is None:
+                    return False
+                running = state["running"].setdefault(safe_lane, set())
+                active = int(state["active"].get(safe_lane, 0) or 0)
+                pending = [
+                    candidate for candidate in self._lane_tasks(safe_lane)
+                    if candidate not in running
+                ]
+                fairness = getattr(self, "_v5_priority_lane_fairness", {}).get(safe_lane, 8)
+                admission_count = int(state["admissions"].get(safe_lane, 0) or 0)
+                if fairness is not None:
+                    aged = [
+                        candidate for candidate in pending
+                        if admission_count - int(
+                            self._task_meta().get(candidate, {}).get("admission_epoch", admission_count)
+                        ) >= int(fairness)
+                    ]
+                else:
+                    aged = []
+                if aged:
+                    candidate = min(
+                        aged,
+                        key=lambda item: int(self._task_meta().get(item, {}).get("seq", 0) or 0),
+                    )
+                else:
+                    candidate = pending[0] if pending else ""
+                if active < int(limit) and pending and candidate == task_id:
+                    running.add(task_id)
+                    state["active"][safe_lane] = active + 1
+                    state["admissions"][safe_lane] = admission_count + 1
+                    return True
+                await condition.wait()
+
+    async def _release_priority_lane(self, task_id: str, lane: str) -> None:
+        safe_lane = str(lane or "default")
+        state = self._priority_lane_state()
+        try:
+            async with self._priority_lane_condition():
+                running = state["running"].setdefault(safe_lane, set())
+                if task_id in running:
+                    running.discard(task_id)
+                    state["active"][safe_lane] = max(
+                        0, int(state["active"].get(safe_lane, 0) or 0) - 1
+                    )
+                self._priority_lane_condition().notify_all()
+        except Exception:
+            pass
+
     def _task_seq(self) -> int:
         """Bump and return the lazy submission sequence counter. Never raises."""
         try:
@@ -304,6 +683,8 @@ class V5BackgroundRunner:
         timeout_s: float = 300.0,
         retries: int = 0,
         lane: str = "default",
+        task_id: str = "",
+        on_done=None,
     ) -> str:
         """Submit a priority/lane/timed background task; the task id, or "" on failure.
 
@@ -317,7 +698,7 @@ class V5BackgroundRunner:
         try:
             safe_lane = str(lane or "default")
             safe_name = str(name or "task")
-            task_id = f"bg_{safe_name}_{uuid.uuid4().hex[:8]}"
+            task_id = str(task_id or f"bg_{safe_name}_{uuid.uuid4().hex[:8]}")
             seq = self._task_seq()
             meta = self._task_meta()
             meta[task_id] = {
@@ -327,13 +708,32 @@ class V5BackgroundRunner:
                 "retries": int(retries or 0),
                 "lane": safe_lane,
                 "seq": seq,
+                "admission_epoch": int(
+                    self._priority_lane_state()["admissions"].get(safe_lane, 0) or 0
+                ),
             }
             self._task_lanes().setdefault(safe_lane, set()).add(task_id)
             wrapped = self._timeout_wrapped_coro(coro, float(timeout_s or 0.0))
-            task = self._run_background(wrapped, name=safe_name, retries=int(retries or 0))
+
+            async def admitted_attempt():
+                admitted = await self._acquire_priority_lane(task_id, safe_lane)
+                if not admitted:
+                    return None
+                try:
+                    return await wrapped()
+                finally:
+                    await self._release_priority_lane(task_id, safe_lane)
+
+            task = self._run_background(
+                admitted_attempt,
+                name=safe_name,
+                retries=int(retries or 0),
+                on_done=on_done,
+            )
             if task is None:
                 meta.pop(task_id, None)
                 self._task_lanes().get(safe_lane, set()).discard(task_id)
+                self._notify_priority_lane_waiters()
                 return ""
             self._v5_runner_task_by_id()[task_id] = task
             return task_id

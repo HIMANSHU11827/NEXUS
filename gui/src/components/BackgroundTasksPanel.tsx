@@ -23,7 +23,6 @@ interface PanelTask {
 interface BackgroundTasksPanelProps {
   events: TimelineEvent[]
   onCancel: (runId: string) => void
-  sessionId: string | null
 }
 
 type DurableWorkItemStatus = 'planned' | 'running' | 'waiting' | 'applied' | 'failed' | 'cancelled'
@@ -450,17 +449,12 @@ function TaskDetails({ task, now, onCancel }: { task: PanelTask; now: number; on
   )
 }
 
-export default function BackgroundTasksPanel({ events, onCancel, sessionId }: BackgroundTasksPanelProps) {
+export default function BackgroundTasksPanel({ events, onCancel }: BackgroundTasksPanelProps) {
   const [panelExpanded, setPanelExpanded] = useState(true)
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({})
   const [now, setNow] = useState(() => Date.now())
 
   const { tasks } = useMemo(() => buildTasks(events), [events])
-  const durableRefreshKey = useMemo(() => {
-    const activeRuns = tasks.map(task => runIdOf(task.event)).sort().join('|')
-    return `${activeRuns}:${tasks.length}`
-  }, [tasks])
-
   // One shared per-second timer for every row. Stopped as soon as no active
   // task remains; torn down on unmount so nothing leaks.
   useEffect(() => {
@@ -489,7 +483,6 @@ export default function BackgroundTasksPanel({ events, onCancel, sessionId }: Ba
   const activeCount = tasks.length
   return (
     <>
-      <DurableWorkItems sessionId={sessionId} refreshKey={durableRefreshKey.length} onCancel={onCancel} />
       {activeCount > 0 && <div className="mb-1 border border-border bg-secondary/25 text-[11px] text-muted-foreground">
         <button
           type="button"
@@ -543,3 +536,7 @@ export default function BackgroundTasksPanel({ events, onCancel, sessionId }: Ba
     </>
   )
 }
+
+// Durable work is intentionally hidden from the chat composer for now.
+// Keep the implementation available for a future dedicated work view.
+void DurableWorkItems

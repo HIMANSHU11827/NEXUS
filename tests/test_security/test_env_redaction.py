@@ -19,6 +19,51 @@ def _run(coro):
 
 
 class TestSystemEnvRedaction:
+    def test_audit_has_an_explicit_entry_budget(self, tmp_path):
+        for index in range(5):
+            (tmp_path / f"file-{index}.txt").write_text("x", encoding="utf-8")
+
+        result = _run(SystemTool(root_dir=str(tmp_path)).execute(
+            action="audit", max_entries=3
+        ))
+
+        assert result.success is True
+        assert "limited to 3" in result.output
+        assert "Audit: 3 entries found" in result.output
+
+    def test_system_diagnostics_do_not_block_event_loop(self, tmp_path, monkeypatch):
+        tool = SystemTool(root_dir=str(tmp_path))
+        original = tool._execute_sync
+
+        def slow_diagnostics(*args, **kwargs):
+            import time
+
+            time.sleep(0.08)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(tool, "_execute_sync", slow_diagnostics)
+
+        async def run_with_heartbeat():
+            ticks = 0
+
+            async def heartbeat():
+                nonlocal ticks
+                while True:
+                    ticks += 1
+                    await asyncio.sleep(0.01)
+
+            heartbeat_task = asyncio.create_task(heartbeat())
+            try:
+                result = await tool.execute(action="info")
+            finally:
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
+            return result, ticks
+
+        result, ticks = _run(run_with_heartbeat())
+        assert result.success is True
+        assert ticks >= 4
+
     def test_env_redacts_api_keys_and_tokens(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-real_value_123456789")
         monkeypatch.setenv("GOOGLE_API_KEY", "AIza_fake_metadata_value")

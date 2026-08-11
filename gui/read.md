@@ -6,18 +6,25 @@ React 18 + Vite + TypeScript frontend with Tailwind CSS.
 
 ## Structure
 - `src/App.tsx` — Root component orchestrating sidebar, chat, editor, terminal, settings
-- `src/components/MainChat.tsx` — Core chat component (~1600 lines) with SSE streaming
-- `src/components/SettingsPanel.tsx` — Settings modal (515 lines)
-- `src/components/FileExplorer.tsx` — Workspace file browser (413 lines)
+- `src/components/MainChat.tsx` — Core chat component (~1650 lines) with SSE streaming
+- `src/components/SettingsPanel.tsx` — Settings modal (~230 lines)
+- `src/components/FileExplorer.tsx` — Workspace file browser (~420 lines)
 - `src/components/ActivityTimeline.tsx` — Thinking/event visualization
 - `src/components/TerminalPanel.tsx` — Terminal drawer
 - `src/components/ChatHistory.tsx` — Session sidebar
 - `src/components/ApprovalPanel.tsx` — Co-Pilot approval UI
 - `src/components/MonacoEditor.tsx` — File editor wrapper
-- `src/hooks/useStreamChat.ts` — SSE chat streaming hook (413 lines)
-- `src/lib/api.ts` — API client (60+ endpoints)
+- `src/components/BackgroundTasksPanel.tsx` — Background task management (~510 lines)
+- `src/components/HivePanel.tsx` — Sub-agent hive view
+- `src/components/QueuePanel.tsx` — Task queue view
+- `src/components/SafetySettings.tsx` — Safety/security settings (~540 lines)
+- `src/components/WorkspaceSettings.tsx` — Workspace configuration (~350 lines)
+- `src/components/ClaudeAnimation.tsx`, `CodeAnimation.tsx`, `ThinkingAnimation.tsx`, `SecondLogoAnimation.tsx` — animated logo/loading components
+- `src/components/settings/` — 18 sub-panels: About, ConfigurationPanel, GatewayManager, HiveManager, McpManager, Memory, PluginManager, Providers, ScheduledJobsManager, SkillsManager, ToolsManager, Voice, KeyboardShortcuts, Appearance, Billing, Evolution, Notifications, LiveData
+- `src/hooks/useStreamChat.ts` — SSE chat streaming hook (~790 lines)
+- `src/lib/api.ts` — API client (60+ endpoints, ~800 lines)
 - `src/lib/store.ts` — Zustand state management
-- `api.py` — FastAPI backend (2800+ lines) co-located for GUI functionality
+- `api.py` — FastAPI backend (4700+ lines) co-located for GUI functionality
 
 ## Key Features
 - Markdown rendering with tables, code blocks, headings

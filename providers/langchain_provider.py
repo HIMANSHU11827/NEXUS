@@ -12,7 +12,7 @@ from config.config_loader import NexusConfigLoader
 def get_nexus_llm(temperature: float = 0.7, streaming: bool = True) -> ChatOpenAI:
     """
     Returns a LangChain-compatible LLM pointed at whatever provider
-    is configured in nexus_config.yaml — no hardcoding required.
+    is configured in settings.yml — no hardcoding required.
     """
     loader = NexusConfigLoader()
     config = loader.get_provider_config("local", "lm_studio")

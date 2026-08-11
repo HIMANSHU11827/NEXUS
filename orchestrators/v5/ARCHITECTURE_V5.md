@@ -214,7 +214,7 @@ V5 mixin modules composed into `NexusLoopV5` (see `core.py` class bases; MRO = 2
 - `evolution.py` — `_handle_evolution_gaps` on tool failures; `_start_background_finalization` when run() finishes (core.py:579)
 - `cron.py` — `_schedule_task` API: scheduled tasks run via a thread→async bridge
 - `lifecycle.py` — `_lifecycle_mark` called by tools.py/skill.py/cron.py to track tool/skill state transitions
-- `background_runner.py` — `_run_background` runs evolution's forges fire-and-forget with retry/backoff
+- `background_runner.py` — `_run_background` runs fire-and-forget work with retry/backoff; `submit_durable_background` adds SQLite lifecycle persistence and explicit factory-based startup rehydration
 
 **Security/config — initialized at loop boot (core.py:289-295):**
 - `config.py` — `_init_config()` loads config once at `__init__`, seeds runtime

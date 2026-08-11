@@ -1,8 +1,11 @@
 import json
+import logging
 import os
 from typing import Dict, Iterator, List, Optional
 
 from providers.base import NexusBaseProvider
+
+logger = logging.getLogger(__name__)
 
 
 class GoogleGeminiProvider(NexusBaseProvider):
@@ -96,8 +99,9 @@ class GoogleGeminiProvider(NexusBaseProvider):
         payload = self._payload(prompt, system_prompt, messages, kwargs)
         model = self._request_model(kwargs)
         payload["model"] = model
+        response = None
         try:
-            response = self.session.post(self._endpoint_for_model(model), json=payload, headers=self.headers, timeout=60)
+            response = self.session.post(self._endpoint_for_model(model), json=payload, headers=self.headers, timeout=self.request_timeout(kwargs, 60))
             if response.status_code == 200:
                 data = response.json()
                 if "candidates" in data and len(data["candidates"]) > 0:
@@ -114,7 +118,7 @@ class GoogleGeminiProvider(NexusBaseProvider):
         payload["model"] = model
         try:
             stream_url = self._endpoint_for_model(model, streaming=True)
-            response = self.session.post(stream_url, json=payload, headers=self.headers, stream=True, timeout=60)
+            response = self.session.post(stream_url, json=payload, headers=self.headers, stream=True, timeout=self.request_timeout(kwargs, 60))
             if response.status_code == 200:
                 for line in response.iter_lines():
                     if line:
@@ -139,3 +143,9 @@ class GoogleGeminiProvider(NexusBaseProvider):
                 yield f"Error: {response.status_code}"
         except Exception as e:
             yield f"Error in Gemini stream: {e}"
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    logger.debug("Gemini stream response cleanup failed", exc_info=True)

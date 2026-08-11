@@ -1,8 +1,56 @@
 from nexus.run_context import (
+    RunContext,
     load_run_context,
     recover_orphaned_runs,
     start_run_context,
 )
+
+
+def test_terminal_run_context_heartbeat_does_not_reopen_lease(tmp_path):
+    context = start_run_context(
+        root=str(tmp_path), session_id="heartbeat", run_id="terminal",
+        prompt="done", lease_seconds=10,
+    )
+    context.finish("completed", "run.completed")
+    before = context.to_dict()
+    context.heartbeat(lease_seconds=999)
+    after = context.to_dict()
+    assert after["status"] == "completed"
+    assert after["lease_expires_at"] is None
+    assert after["updated_at"] == before["updated_at"]
+
+
+def test_stale_heartbeat_cannot_reopen_a_terminal_run(tmp_path):
+    live = start_run_context(
+        root=str(tmp_path), session_id="race", run_id="run-1",
+        prompt="work", lease_seconds=60,
+    )
+    stale = RunContext(**{
+        key: value for key, value in live.to_dict().items()
+        if key in RunContext.__dataclass_fields__
+    })
+    assert live.finish("completed", "run.completed") is True
+
+    assert stale.heartbeat(lease_seconds=999) is False
+    saved = load_run_context(str(tmp_path), "race", "run-1")
+    assert saved["status"] == "completed"
+    assert saved["lease_expires_at"] is None
+
+
+def test_stale_owner_cannot_finish_or_heartbeat_live_run(tmp_path):
+    live = start_run_context(
+        root=str(tmp_path), session_id="owner", run_id="run-1",
+        prompt="work", lease_seconds=60,
+    )
+    stale = RunContext(**{
+        key: value for key, value in live.to_dict().items()
+        if key in RunContext.__dataclass_fields__
+    })
+    stale.owner_process_id = live.owner_process_id + 100000
+
+    assert stale.heartbeat(lease_seconds=999) is False
+    assert stale.finish("failed", "run.failed") is False
+    assert load_run_context(str(tmp_path), "owner", "run-1")["status"] == "running"
 from nexus.work_items import create_work_item, load_work_item, project_work_item_event
 
 

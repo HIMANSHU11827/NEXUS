@@ -70,6 +70,22 @@ class TestToolEntry:
         entry = ToolEntry(name="update_record", schema={}, instance=None)
         assert not entry.is_read_only()
 
+    def test_is_read_only_mutating_verb_overrides_read_like_name(self):
+        assert not ToolEntry(name="get_or_create", schema={}, instance=None).is_read_only()
+        assert not ToolEntry(name="list_and_delete", schema={}, instance=None).is_read_only()
+
+    def test_is_read_only_explicit_schema_metadata_takes_precedence(self):
+        assert ToolEntry(
+            name="update_record",
+            schema={"execution": {"read_only": True}},
+            instance=None,
+        ).is_read_only()
+        assert not ToolEntry(
+            name="search_records",
+            schema={"read_only": False},
+            instance=None,
+        ).is_read_only()
+
     def test_is_read_only_delegates_to_instance(self):
         mock = MagicMock()
         mock.is_read_only.return_value = False
@@ -129,6 +145,28 @@ def test_registry_summary_explains_unavailable_tools(tmp_path):
     assert summary["availability_reason"] == "missing_env"
     assert summary["missing_env"] == ["DEMO_KEY"]
     assert summary["has_handler"] is False
+
+
+def test_registry_list_tools_exposes_structured_contract(tmp_path):
+    tool_dir = tmp_path / "project" / "tools" / "demo" / "scripts"
+    tool_dir.mkdir(parents=True)
+    (tool_dir.parent / "demo.jsnol").write_text(
+        '{"name":"demo","version":"2.0.0","description":"Demo tool",'
+        '"params":{"value":{"type":"string"}},'
+        '"execution":{"max_parallel":3,"timeout_ms":1200}}',
+        encoding="utf-8",
+    )
+
+    from tools.nexus_tools.registry import ToolRegistry
+
+    summary = ToolRegistry(str(tmp_path / "project")).list_tools(include_unavailable=True)["demo"]
+
+    assert summary["version"] == "2.0.0"
+    assert summary["description"] == "Demo tool"
+    assert summary["available"] is False
+    assert summary["has_handler"] is False
+    assert summary["constitution"]["max_parallel"] == 3
+    assert summary["constitution"]["cooldown_ms"] == 0
 
 
 def test_registry_discovers_active_skills_as_model_tools(tmp_path):

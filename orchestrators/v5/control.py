@@ -77,6 +77,12 @@ class V5Control:
         registry = getattr(self, "_run_controls", None)
         current = str(getattr(self, "_current_turn_id", "") or "")
         if registry is not None and current:
+            refresh = getattr(registry, "refresh_cancel", None)
+            if callable(refresh):
+                try:
+                    refresh(current)
+                except Exception:
+                    self.logger.debug("could not refresh durable cancellation", exc_info=True)
             control = registry.get(current)
             if control is not None:
                 return control.cancelled

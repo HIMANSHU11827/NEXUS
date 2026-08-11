@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 __version__ = "2.0.0"
+import asyncio
 import os
 import platform
 import re
@@ -28,6 +29,10 @@ class SystemTool(BaseTool):
         return value
 
     async def execute(self, action: str, target: Optional[str] = None, **kwargs) -> ToolResult:
+        """Run diagnostic filesystem/process inspection off the event loop."""
+        return await asyncio.to_thread(self._execute_sync, action, target, **kwargs)
+
+    def _execute_sync(self, action: str, target: Optional[str] = None, **kwargs) -> ToolResult:
         try:
             if action == "info":
                 info = [
@@ -45,8 +50,19 @@ class SystemTool(BaseTool):
 
             elif action == "audit":
                 root = Path(self.root_dir or ".")
-                files = list(root.rglob("*"))
-                return ToolResult(success=True, output=f"Audit: {len(files)} files found in {root}")
+                max_entries = max(1, min(int(kwargs.get("max_entries", 10000)), 100000))
+                ignored = {".git", ".venv", "node_modules", "__pycache__", ".cache", ".pytest_cache"}
+                count = 0
+                truncated = False
+                for current, dirs, files in os.walk(root, followlinks=False):
+                    dirs[:] = [name for name in dirs if name not in ignored]
+                    count += len(dirs) + len(files)
+                    if count >= max_entries:
+                        count = max_entries
+                        truncated = True
+                        break
+                suffix = f" (limited to {max_entries})" if truncated else ""
+                return ToolResult(success=True, output=f"Audit: {count} entries found in {root}{suffix}")
 
             elif action == "disk":
                 usage = shutil.disk_usage(target or "/")

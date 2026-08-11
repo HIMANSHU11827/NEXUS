@@ -8,30 +8,29 @@ Custom local-first autonomous AI agent framework. Python backend + React/TypeScr
 ## Project Structure
 - `nexus/` — Boot loader, canonical event system (`CanonicalEvent`, ~50 `EVENT_TYPES`)
 - `server/` — FastAPI HTTP/SSE server (port 8000, v2.1.0)
-- `orchestrators/` — `loop.py` (NexusLoop, 3555 lines — rebuilt, stable)
-- `providers/` — 45+ LLM provider implementations with OAuth and fallback
-- `tools/` — 19 registered tools with `.jsnol` metadata discovery (BaseTool + ToolRegistry)
+- `orchestrators/` — `orchestrators/v5/core.py` (V5 `NexusLoop` — direct model/tool loop, stable)
+- `providers/` — 40+ LLM provider implementations with OAuth and fallback
+- `tools/` — 18 implemented tools + 13 unimplemented stubs, `.jsnol`/`.json` metadata discovery (BaseTool + ToolRegistry)
 - `hive/` — Sub-agent engine (`NexusHiveEngine`) — spawn, consolidate, blackboard
 - `gui/` — React 18 + Vite + TypeScript GUI (port 5173) — rebuilt from scratch
-- `tui/` — Ink-based TUI (React 19, 5000+ lines) launched by default
-- `shell/` — Legacy Rich-based compatibility shim
+- `tui/` — Ink-based TUI (React 19, v3.0 redesign, 133 slash commands) launched by default
 - `mcp/` — MCP stdio client/server integration (NEXUSMCPServer + MCPClient + MCPTool)
 - `plugins/` — Plugin system with lifecycle hooks, trust model, tool registration
-- `skills/` — Skill registry with SKILL.md frontmatter format (6 installed skills)
+- `skills/` — Skill registry with SKILL.md frontmatter format (69 skills, 14 categories)
 - `memory/` — Multi-source MemoryManager with parallel prefetch + sync
 - `sandbox/` — 3-tier command sandbox (NO_SANDBOX/NORMAL/DOCKER) + risk scoring
-- `kernel/` — Central singleton with 19 lazy-loaded subsystems
+- `kernel/` — Central singleton with 20 lazy-loaded subsystems
 - `rag/` — BM25 + SimHash hybrid retrieval with Atlas deep indexing
 - `safety/` — Sovereign laws + logic prover + threat pattern scanning
 - `voice/` — Full voice pipeline (STT with 4 backends + KittenTTS + VAD)
-- `gateway/` — 10-platform messaging gateway (Telegram, Discord, WhatsApp, Slack, etc.)
+- `gateway/` — 21-platform messaging gateway (Telegram, Discord, WhatsApp, Slack, etc.)
 - `evolution/` — Self-improvement system with 6 forges + VersionManager
 - `intelligence/` — MoE Router + NATE 5-layer fused tool engine
 - `reasoning/` — HyperReasoningEngine (planner/critic/verifier)
 - `authentication/` — OAuth 2.0 (Google, GitHub) + token auth + gateway auth
 - `security/` — Secret scanner + release hygiene
 - `config/` — YAML/JSON/env configuration with NexusConfigLoader
-- `tests/` — 42+ test files (126/127 passing)
+- `tests/` — 150+ test files
 
 ## Windows Setup
 ```powershell
@@ -62,7 +61,7 @@ Canonical events in `nexus/events.py`. ~50 event types covering run, message, pl
 ## Security Notes
 - Command risk scoring in `sandbox/risk.py`
 - 3-tier sandbox: NO_SANDBOX / NORMAL / DOCKER
-- Threat pattern detection in `tools/threat_patterns.py` (55 regex patterns, 3 scopes)
+- Threat pattern detection in `tools/threat_patterns.py` (41 regex patterns, 3 scopes)
 - Plugin trust model in `plugins/trust.py`
 - Sovereign safety laws in `safety/laws.py` + LogicProver
 - No unsafe defaults; ask before destructive commands
@@ -70,9 +69,8 @@ Canonical events in `nexus/events.py`. ~50 event types covering run, message, pl
 ## Known Limitations
 - `orchestrators/architect.py` and `mission_control.py` removed (legacy) — planning uses `todo.md` + `planning` tool
 - `intelligence/moa.py` (MixtureOfArchitects) and `intelligence/local_brain.py` (NexusLocalBrain) are stubs
-- `tools/reasoning/` handler is a template stub — needs real LLM-based chain-of-thought implementation
-- `tools/system/` is partial — `disk` and `process` actions not implemented
-- `evolution/` has some stub modules: `ensemble`, `omni_kernel`, `researcher` (constructors only)
+- 13 tool directories are unimplemented stubs — registered but marked `unavailable` by `ToolRegistry`
+- `bash` tool is retired — `terminal` is the only command-execution tool
 - No WebSocket yet — uses SSE + polling
 
 ## Permanent Multi-Agent Workflow Rule

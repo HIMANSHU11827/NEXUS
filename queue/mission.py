@@ -33,7 +33,7 @@ import logging
 import os
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .store import TaskQueue
 
@@ -81,6 +81,7 @@ class Milestone:
     last_error: str = ""
     last_queued_task_id: Optional[int] = None
     done_at: Optional[float] = None
+    verification: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -178,10 +179,47 @@ class MissionRunner:
         queue: Optional[TaskQueue] = None,
         root: Optional[str] = None,
         store: Optional[MissionStore] = None,
+        completion_verifier: Optional[Callable[[Dict[str, Any]], Any]] = None,
     ):
         self.root = root or os.environ.get("NEXUS_ROOT") or os.getcwd()
         self.queue = queue or TaskQueue(root=self.root)
         self.store = store or MissionStore(root=self.root)
+        # Optional synchronous acceptance hook.  Queue success proves only
+        # that the worker returned; this hook proves the milestone's output
+        # meets its acceptance contract.  Exceptions fail closed.
+        self.completion_verifier = completion_verifier
+
+    def _verify_completion(
+        self,
+        mission: Mission,
+        milestone: Milestone,
+        task: Dict[str, Any],
+        detail: str,
+    ) -> Tuple[bool, str]:
+        verifier = self.completion_verifier
+        if verifier is None:
+            return True, ""
+        context = {
+            "goal": mission.goal,
+            "mission_id": mission.id,
+            "milestone_index": milestone.index,
+            "milestone": milestone.task_desc,
+            "task": task,
+            "summary": detail,
+        }
+        try:
+            result = verifier(context)
+        except Exception as exc:
+            return False, f"completion verifier error: {exc}"
+        if isinstance(result, dict):
+            verified = result.get("verified", result.get("accepted", False))
+            reason = str(result.get("reason", result.get("detail", "")))
+        else:
+            verified = result
+            reason = ""
+        if isinstance(verified, bool) and verified:
+            return True, reason
+        return False, reason or "completion verifier rejected milestone"
 
     # ---------------------------------------------------------------- #
     # creation / decomposition
@@ -228,14 +266,28 @@ class MissionRunner:
     # queueing
     # ---------------------------------------------------------------- #
     def _queue_task(self, mission: Mission, ms: Milestone, revision: str) -> int:
-        task_id = self.queue.enqueue(
-            ms.task_desc,
-            priority=5,
-            max_attempts=3,
-            mission=mission.id,
-            milestone=ms.index,
-            revision=revision,
-        )
+        idempotency_key = f"mission:{mission.id}:milestone:{ms.index}:revision:{revision}"
+        enqueue_once = getattr(self.queue, "enqueue_once", None)
+        if callable(enqueue_once):
+            task_id = enqueue_once(
+                ms.task_desc,
+                idempotency_key=idempotency_key,
+                priority=5,
+                max_attempts=3,
+                mission=mission.id,
+                milestone=ms.index,
+                revision=revision,
+            )
+        else:
+            task_id = self.queue.enqueue(
+                ms.task_desc,
+                priority=5,
+                max_attempts=3,
+                idempotency_key=idempotency_key,
+                mission=mission.id,
+                milestone=ms.index,
+                revision=revision,
+            )
         ms.status = "queued"
         ms.last_queued_task_id = task_id
         ms.attempts += 1
@@ -305,6 +357,46 @@ class MissionRunner:
         if milestone_idx < 0 or milestone_idx >= len(mission.milestones):
             return None
         ms = mission.milestones[milestone_idx]
+
+        task_id = task.get("id")
+        if task_id is not None and ms.last_queued_task_id is not None and task_id != ms.last_queued_task_id:
+            log.warning("ignoring stale mission result task=%s active=%s", task_id, ms.last_queued_task_id)
+            return None
+        expected_revision = f"r{ms.replans}"
+        if meta.get("revision") and str(meta.get("revision")) != expected_revision:
+            log.warning("ignoring stale mission revision=%s active=%s", meta.get("revision"), expected_revision)
+            return None
+
+        # Queue delivery can be duplicated or a late worker result can arrive
+        # after the milestone has already reached a terminal state.  The
+        # completed task keeps its last task id/revision, so identity checks
+        # alone do not make reconciliation idempotent: a late failure would
+        # otherwise reopen a done milestone and enqueue replacement work.
+        if ms.status in ("done", "blocked"):
+            log.info(
+                "ignoring duplicate terminal mission result mission=%s milestone=%d status=%s",
+                mission.id,
+                ms.index,
+                ms.status,
+            )
+            return mission
+
+        if outcome == "success":
+            verified, verification_reason = self._verify_completion(
+                mission, ms, task, detail
+            )
+            ms.verification = {
+                "configured": self.completion_verifier is not None,
+                "verified": verified,
+                "reason": verification_reason,
+                "checked_at": time.time(),
+            }
+            if not verified:
+                # Treat an unaccepted result as a real failure so it follows
+                # the existing durable replan/block path.  Never mark a
+                # milestone done merely because the queue task succeeded.
+                outcome = "failure"
+                detail = f"milestone completion verification failed: {verification_reason}"
 
         if outcome == "success":
             ms.status = "done"

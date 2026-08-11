@@ -4,12 +4,13 @@ __version__ = "2.1.0"
 
 import re
 import json
+import asyncio
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
 from nexus.control_plane import create_checklist_plan
-from tools.planning.scripts.planning import PlanningTool
+from tools.planning.scripts.planning import PlanningTool, plan_transaction
 from nexus.work_items import reconcile_checklist_work_item
 
 
@@ -126,6 +127,38 @@ class TaskTool(BaseTool):
         return f"{row['id']}: [{row['status']}] {row['title']}"
 
     async def execute(
+        self,
+        action: str,
+        id: Optional[str] = None,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        status: Optional[str] = None,
+        **kwargs,
+    ) -> ToolResult:
+        """Run plan-backed task persistence outside the event-loop thread."""
+        return await asyncio.to_thread(
+            self._execute_sync,
+            action,
+            id,
+            title,
+            description,
+            status,
+            **kwargs,
+        )
+
+    def _execute_sync(
+        self,
+        action: str,
+        id: Optional[str] = None,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        status: Optional[str] = None,
+        **kwargs,
+    ) -> ToolResult:
+        with plan_transaction(self.root_dir):
+            return self._execute_sync_unlocked(action, id, title, description, status, **kwargs)
+
+    def _execute_sync_unlocked(
         self,
         action: str,
         id: Optional[str] = None,

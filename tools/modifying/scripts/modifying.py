@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 __version__ = "2.0.0"
+import asyncio
 import os
 
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
@@ -45,6 +46,12 @@ class ModifyingTool(BaseTool):
     description = "Edit text in an existing file"
 
     async def execute(self, path: str, old_string: str, new_string: str = "", replace_all: bool = False, **kwargs) -> ToolResult:
+        """Edit a file without blocking the event loop on file I/O."""
+        return await asyncio.to_thread(
+            self._execute_sync, path, old_string, new_string, replace_all, **kwargs
+        )
+
+    def _execute_sync(self, path: str, old_string: str, new_string: str = "", replace_all: bool = False, **kwargs) -> ToolResult:
         try:
             full = os.path.normpath(os.path.join(self.root_dir, path)) if self.root_dir and not os.path.isabs(path) else os.path.normpath(path)
             if self.root_dir and os.path.commonpath([os.path.abspath(self.root_dir), full]) != os.path.abspath(self.root_dir):
