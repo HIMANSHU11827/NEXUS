@@ -538,13 +538,14 @@ class NexusKernel(ThreadSafeSingleton):
 # defers to _component(), which provides memoization + fault isolation.
 for _name in list(_SUBSYSTEMS):
     def _make_subsystem_property(name: str, loader_fn: Callable) -> property:
-        @property
+        # Configure the getter before wrapping it; property instances do not
+        # expose a writable __name__ attribute.
         def subsystem(self) -> Any:  # noqa: N805 — bound property getter
             return self._component(name)
         subsystem.__name__ = name
         doc = getattr(loader_fn, "__doc__", None)
         subsystem.__doc__ = doc or f"Lazily-loaded, fault-isolated subsystem: '{name}'."
-        return subsystem
+        return property(subsystem)
 
     setattr(NexusKernel, _name, _make_subsystem_property(_name, _SUBSYSTEMS[_name]["loader"]))
 
