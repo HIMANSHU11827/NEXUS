@@ -113,8 +113,8 @@ def _episodic_query_relevance(entry: Any, query: str) -> float:
     if not query_tokens:
         return 0.0
     searchable = " ".join(
-        str(entry.get(field) or "")
-        for field in (
+        str(entry.get(key) or "")
+        for key in (
             "input",
             "output",
             "error",

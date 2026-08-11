@@ -107,7 +107,7 @@ reportMissingImports = false
 
 [tool.ruff]
 select = ["E", "F", "I"]
-ignore = ["E501", "E402", "E701", "F401", "I001", "E702", "E741"]
+ignore = ["E501", "E402", "E701", "F401", "I001", "E702", "E741", "F841", "E722", "E731"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

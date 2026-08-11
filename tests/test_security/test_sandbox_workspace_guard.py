@@ -58,7 +58,7 @@ class TestSandboxWorkspaceGuard:
         monkeypatch.setenv("OUTSIDE_HOME_XYZZY", str(tmp_path))
 
         sandbox = SovereignSandbox(str(ws))
-        cmd = f"cat ${{OUTSIDE_HOME_XYZZY}}/outside_secret.txt"
+        cmd = "cat ${OUTSIDE_HOME_XYZZY}/outside_secret.txt"
         block = sandbox._validate_workspace_scope(cmd, str(ws))
         assert block is not None
         assert "[SANDBOX_BLOCK]" in block

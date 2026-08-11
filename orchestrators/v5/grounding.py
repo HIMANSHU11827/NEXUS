@@ -6,7 +6,9 @@ knowledge (RAG), workstyle, prompt files, tool descriptions.
 
 from __future__ import annotations
 
-import asyncio, logging, os
+import asyncio
+import logging
+import os
 from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)

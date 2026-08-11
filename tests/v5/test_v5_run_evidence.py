@@ -20,7 +20,7 @@ def test_canonical_event_summaries_exclude_payload_and_bound_history():
         "sequence": 0, "parent_id": "", "related_tool": "terminal",
     }]
     assert "payload" not in summaries[0]
-from orchestrators.v5.events import V5EventEmitter, summarize_work_event, summarize_work_events
+from orchestrators.v5.events import summarize_work_event, summarize_work_events
 
 
 def test_run_evidence_is_bounded_and_redacted(tmp_path):

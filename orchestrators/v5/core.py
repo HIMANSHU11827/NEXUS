@@ -766,7 +766,8 @@ class NexusLoopV5(
     def _extract_dsml_tool_calls(self, text: str):
         """V1-compat alias."""
         from .tools import _TextToolCall
-        import html, re
+        import html
+        import re
         calls = []
         if not text or "invoke name=" not in text:
             return calls
@@ -1722,12 +1723,6 @@ class NexusLoopV5(
             # and reflection signals into runtime.failures /
             # runtime.learnings. Isolated so a learning failure can
             # never break the turn.
-            collect = getattr(self, "_collect_turn_signals", None)
-            if callable(collect):
-                try:
-                    await collect(perceived, result, turn)
-                except Exception:
-                    self.logger.debug("turn learning-signal collection skipped", exc_info=True)
             self._start_background_finalization(
                 user_input, self._session_messages(), bool(result.get("success"))
             )

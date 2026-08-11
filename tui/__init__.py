@@ -7,12 +7,16 @@ breaking scripts and integrations that import the old Rich shell API.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import uuid
 from typing import Any
 
 from rich.console import Console
+from rich import box
+from rich.panel import Panel
+from rich.table import Table
 
 console = Console()
 

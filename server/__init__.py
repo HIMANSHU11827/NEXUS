@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import sys
 import shutil
 import socket
 import sqlite3
@@ -4651,7 +4652,7 @@ async def voice_stream(request: Request):
                         yield f"data: {json.dumps({'type': 'transcription', 'text': text})}\n\n"
                     
                     # Send heartbeat
-                    yield f": keepalive\n\n"
+                    yield ": keepalive\n\n"
                     
                 except Exception as e:
                     yield f"data: {json.dumps({'type': 'error', 'message': _voice_failure('stream', e)})}\n\n"

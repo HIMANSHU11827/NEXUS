@@ -2359,6 +2359,9 @@ async def run_work_command(request: Request):
     sid = safe_session_id(data.get("session_id", "default"))
     turn_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(data.get("turn_id", "")).strip())[:120]
     command = str(data.get("command") or data.get("target") or "").strip()
+    profile = str(data.get("profile") or "pwsh").strip().lower()
+    if profile not in {"pwsh", "cmd", "bash", "wsl"}:
+        raise HTTPException(status_code=400, detail="Unsupported terminal profile")
     if not command:
         raise HTTPException(status_code=400, detail="Command is required")
     if len(command) > 4000:

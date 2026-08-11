@@ -173,7 +173,7 @@ class ContextManager:
         assistant_messages = [m for m in messages if m.get("role") == "assistant"]
         
         summary_parts = [
-            f"Compacted conversation:",
+            "Compacted conversation:",
             f"- {len(user_messages)} user messages",
             f"- {len(assistant_messages)} assistant responses",
             f"- Last topic: {messages[-1].get('content', '')[:100] if messages else 'None'}"

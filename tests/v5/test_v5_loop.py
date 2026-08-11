@@ -43,7 +43,7 @@ async def test_v5_basic():
     
     # Check runtime state
     runtime_state = loop.get_runtime_state()
-    print(f"\nRuntime State:")
+    print("\nRuntime State:")
     print(f"  Session ID: {runtime_state['session_id']}")
     print(f"  Turn Count: {runtime_state['turn_count']}")
     print(f"  Meta-Learning: {runtime_state['meta_learning_enabled']}")
@@ -110,7 +110,7 @@ async def test_v5_paorr():
     if reflection:
         print(f"Reflection Success: {reflection.success if hasattr(reflection, 'success') else reflection.get('success', False)}")
     else:
-        print(f"Reflection Success: False")
+        print("Reflection Success: False")
     
     print("\n✓ PAORR test passed")
     return True

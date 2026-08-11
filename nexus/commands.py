@@ -686,7 +686,7 @@ async def _cmd_context(ctx: CommandContext) -> CommandResult:
     ]
     return CommandResult(
         output="\n".join(lines),
-        formatted=f"[bold]Context Usage[/bold]\n" + "\n".join(formatted_lines),
+        formatted="[bold]Context Usage[/bold]\n" + "\n".join(formatted_lines),
         data={"messages": len(messages), "est_tokens": est_tokens, "window": window, "percent": round(pct, 1)},
     )
 
@@ -870,7 +870,7 @@ async def _cmd_hooks(ctx: CommandContext) -> CommandResult:
     lines = [f"  {event:<20} {len(hook_reg.get_hooks(event))} handler(s)" for event in HookRegistry.PLUGIN_EVENTS]
     return CommandResult(
         output=f"Plugin hooks ({sum(len(hook_reg.get_hooks(e)) for e in HookRegistry.PLUGIN_EVENTS)}):\n" + "\n".join(lines),
-        formatted=f"[bold]Plugin Hooks[/bold]\n" + "\n".join(
+        formatted="[bold]Plugin Hooks[/bold]\n" + "\n".join(
             f"  [cyan]{event:<20}[/cyan] [white]{len(hook_reg.get_hooks(event))!s:>6}[/white] handler(s)"
             for event in HookRegistry.PLUGIN_EVENTS
         ),

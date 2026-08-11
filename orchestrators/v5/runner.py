@@ -6,7 +6,10 @@ verification, timing. /verbose toggles detail. Uses unified registry.
 
 from __future__ import annotations
 
-import asyncio, os, time, traceback
+import asyncio
+import os
+import time
+import traceback
 from typing import Any
 
 from rich.console import Console

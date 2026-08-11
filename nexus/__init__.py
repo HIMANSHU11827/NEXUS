@@ -962,7 +962,7 @@ def boot():
 
     if args.mission:
         _print_banner(console)
-        console.print(f"[bold green]Starting 24/7 Mission...[/bold green]")
+        console.print("[bold green]Starting 24/7 Mission...[/bold green]")
         console.print(f"[dim]Goal: {args.mission}[/dim]")
         console.print("[dim]Milestones run through the durable queue until the goal is complete, resuming after any restart.[/dim]")
         from queue.mission import MissionRunner
