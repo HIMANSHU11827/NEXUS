@@ -32,6 +32,7 @@ replay_pid*.log
 .nexus_v5_meta_learning.json
 .cache/
 context_archive/
+graphify-out/
 *.lock.sqlite
 *.lock.sqlite3
 lifecycle/skill_lifecycle_state.json
