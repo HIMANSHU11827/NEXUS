@@ -19,7 +19,7 @@ def mission_root(tmp_path):
 
 
 def make_runner(mission_root, tmp_path):
-    q = __import__("queue.store", fromlist=["TaskQueue"]).TaskQueue(
+    q = __import__("queues.store", fromlist=["TaskQueue"]).TaskQueue(
         db_path=str(tmp_path / "queue.db"), root=str(tmp_path)
     )
     return MissionRunner(queue=q, root=str(tmp_path), store=MissionStore(root=mission_root))
@@ -119,7 +119,7 @@ def test_completion_verifier_rejects_queue_success_and_replans(tmp_path, mission
         calls.append(context)
         return {"verified": False, "reason": "artifact missing"}
 
-    q = __import__("queue.store", fromlist=["TaskQueue"]).TaskQueue(
+    q = __import__("queues.store", fromlist=["TaskQueue"]).TaskQueue(
         db_path=str(tmp_path / "queue.db"), root=str(tmp_path)
     )
     runner = MissionRunner(
@@ -142,7 +142,7 @@ def test_completion_verifier_rejects_queue_success_and_replans(tmp_path, mission
 
 
 def test_completion_verifier_accepts_only_explicit_true(tmp_path, mission_root):
-    q = __import__("queue.store", fromlist=["TaskQueue"]).TaskQueue(
+    q = __import__("queues.store", fromlist=["TaskQueue"]).TaskQueue(
         db_path=str(tmp_path / "queue.db"), root=str(tmp_path)
     )
     runner = MissionRunner(
@@ -163,7 +163,7 @@ def test_completion_verifier_accepts_only_explicit_true(tmp_path, mission_root):
 
 
 def test_completion_verifier_exception_fails_closed(tmp_path, mission_root):
-    q = __import__("queue.store", fromlist=["TaskQueue"]).TaskQueue(
+    q = __import__("queues.store", fromlist=["TaskQueue"]).TaskQueue(
         db_path=str(tmp_path / "queue.db"), root=str(tmp_path)
     )
 
@@ -227,7 +227,7 @@ def test_end_to_end_mission_completes_via_driver(tmp_path, mission_root):
 
     from queues.driver import QueueDriver
 
-    q = __import__("queue.store", fromlist=["TaskQueue"]).TaskQueue(
+    q = __import__("queues.store", fromlist=["TaskQueue"]).TaskQueue(
         db_path=str(tmp_path / "q.db"), root=str(tmp_path)
     )
     runner = MissionRunner(queue=q, root=str(tmp_path), store=MissionStore(root=mission_root))

@@ -423,10 +423,34 @@ class ToolRegistry:
         except Exception:
             logger.warning("Tool runtime context binding failed for %s", entry.name, exc_info=True)
 
+    def _tool_scan_dirs(self):
+        """Resolve the directories that contain built-in tool packages.
+
+        After the restructure, tools live in ``extensions/tools/built_in/<name>/``
+        (the canonical location). Historically they lived in a top-level
+        ``tools/`` directory. Scan both so discovery works regardless of which
+        ``root`` a caller passes and survives the layout migration.
+        """
+        dirs = []
+        try:
+            from extensions.tools import built_in as _bt
+
+            canonical = os.path.dirname(os.path.abspath(_bt.__file__))
+            if canonical and os.path.isdir(canonical):
+                dirs.append(canonical)
+        except Exception:
+            pass
+        legacy = os.path.join(self.root, "tools")
+        if os.path.isdir(legacy) and legacy not in dirs:
+            dirs.append(legacy)
+        return dirs
+
     def _discover(self):
-        tools_dir = os.path.join(self.root, "tools")
-        if not os.path.isdir(tools_dir):
-            return
+        for tools_dir in self._tool_scan_dirs():
+            if os.path.isdir(tools_dir):
+                self._discover_in(tools_dir)
+
+    def _discover_in(self, tools_dir):
         for name in os.listdir(tools_dir):
             if name.startswith(("_", ".")) or name == "nexus_tools":
                 continue

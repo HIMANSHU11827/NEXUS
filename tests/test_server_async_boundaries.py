@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def _function(name: str):
-    tree = ast.parse(Path("server/__init__.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("apps/api/__init__.py").read_text(encoding="utf-8"))
     return next(
         node for node in tree.body
         if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == name
@@ -40,7 +40,7 @@ def test_session_rename_has_no_inline_file_write():
 
 
 def test_async_runtime_preference_routes_offload_persistence():
-    tree = ast.parse(Path("server/__init__.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("apps/api/__init__.py").read_text(encoding="utf-8"))
     offenders = []
     for node in tree.body:
         if not isinstance(node, ast.AsyncFunctionDef):
@@ -89,7 +89,7 @@ def test_workspace_and_mcp_config_routes_offload_configuration_io():
         "_save_nexus_config",
         "_sync_mcp_servers_file",
     }
-    tree = ast.parse(Path("server/__init__.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("apps/api/__init__.py").read_text(encoding="utf-8"))
     offenders = []
     for node in tree.body:
         if not isinstance(node, ast.AsyncFunctionDef) or node.name not in names:
@@ -101,7 +101,7 @@ def test_workspace_and_mcp_config_routes_offload_configuration_io():
 
 
 def test_protected_path_routes_use_reload_mutate_save_transaction():
-    tree = ast.parse(Path("server/__init__.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("apps/api/__init__.py").read_text(encoding="utf-8"))
     for name in {"workspace_protected_add", "workspace_protected_remove"}:
         node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
         assert any(
@@ -127,7 +127,7 @@ def test_protected_path_routes_use_reload_mutate_save_transaction():
 
 
 def test_task_mutations_offload_durable_persistence():
-    tree = ast.parse(Path("server/__init__.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("apps/api/__init__.py").read_text(encoding="utf-8"))
     for name in {"create_task", "update_task"}:
         node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
         assert any(
@@ -184,7 +184,7 @@ def test_server_chat_disconnect_requests_run_abort_before_producer_cleanup():
 
 
 def test_runtime_preferences_use_shared_config_transaction():
-    tree = ast.parse(Path("server/__init__.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("apps/api/__init__.py").read_text(encoding="utf-8"))
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_save_runtime_preferences")
     assert any(
         isinstance(call, ast.Call)
@@ -202,7 +202,7 @@ def test_runtime_preferences_use_shared_config_transaction():
 
 
 def test_plugin_settings_use_reload_mutate_save_transaction():
-    tree = ast.parse(Path("server/__init__.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("apps/api/__init__.py").read_text(encoding="utf-8"))
     node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "manage_runtime")
     assert any(
         isinstance(call, ast.Call)

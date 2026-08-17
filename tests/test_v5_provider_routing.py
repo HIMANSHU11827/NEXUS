@@ -32,7 +32,7 @@ def test_response_builder_strips_deepseek_dsml_tool_envelope():
         "The grep isn't finding matches. Let me inspect the server file.\n"
         "<｜｜DSML｜｜tool_calls>"
         "<｜｜DSML｜｜invoke name=\"reading\">"
-        "<｜｜DSML｜｜parameter name=\"path\" string=\"true\">server/__init__.py"
+        "<｜｜DSML｜｜parameter name=\"path\" string=\"true\">apps/api/__init__.py"
         "</｜｜DSML｜｜parameter>"
         "</｜｜DSML｜｜invoke>"
         "</｜｜DSML｜｜tool_calls>"

@@ -221,6 +221,6 @@ def test_default_delete_semantics_remain_clear_not_remove(tmp_path, monkeypatch)
 
 
 def test_api_session_modules_import_shared_store():
-    for module_path in (Path("server/__init__.py"), Path("apps/web/api.py")):
+    for module_path in (Path("apps/api/__init__.py"), Path("apps/web/api.py")):
         source = module_path.read_text(encoding="utf-8")
         assert "from nexus.session_store import atomic_write_json, session_write_lock" in source

@@ -40,17 +40,19 @@ class SkillRegistry:
     def _candidates(self) -> Iterable[tuple[Path, str]]:
         canonical = self.root / ".opencode" / "skills"
         legacy = self.root / "skills"
-        if canonical.is_dir():
-            for path in sorted(canonical.rglob("*")):
-                if path.is_file() and (path.name == "SKILL.md" or (path.parent == canonical and path.suffix.lower() == ".md")):
-                    if path.name not in {"README.md", "read.md"}:
-                        yield path, "opencode"
-        if legacy.is_dir():
-            for path in sorted(legacy.rglob("*")):
+        # Canonical built-in skills location after the restructure:
+        # extensions/skills/built_in/. This package always contains the shipped
+        # SKILL.md skills regardless of the caller's root, so discovery never
+        # regresses when the top-level ``skills/`` shim is the only thing on disk.
+        bundled = Path(__file__).resolve().parent
+        for base, source in ((canonical, "opencode"), (legacy, "legacy"), (bundled, "bundled")):
+            if not base.is_dir():
+                continue
+            for path in sorted(base.rglob("*")):
                 if path.is_file() and path.name not in {"README.md", "read.md"} and (
-                    path.name == "SKILL.md" or (path.parent == legacy and path.suffix.lower() == ".md")
+                    path.name == "SKILL.md" or (path.parent == base and path.suffix.lower() == ".md")
                 ):
-                    yield path, "legacy"
+                    yield path, source
 
     @staticmethod
     def _fallback_frontmatter(text: str) -> Dict[str, Any]:

@@ -27,7 +27,7 @@ class FakeAdapter(BasePlatformAdapter):
 
 
 def test_gateway_main_exports_run():
-    module = importlib.import_module("gateway.main")
+    module = importlib.import_module("gateways.main")
 
     assert callable(module.run)
 
@@ -42,13 +42,13 @@ def test_gateway_package_exports_every_platform_adapter():
     assert adapter_class_names  # sanity: the map is populated
 
     for name in adapter_class_names:
-        assert name in gateway.__all__, f"{name} missing from gateways.__all__"
-        cls = getattr(gateway, name)
+        assert name in gateways.__all__, f"{name} missing from gateways.__all__"
+        cls = getattr(gateways, name)
         assert cls is getattr(platforms, name), f"{name} resolves differently"
 
 
 def test_webhook_stop_cleans_up_and_returns(monkeypatch):
-    module = importlib.import_module("gateway.webhook_server")
+    module = importlib.import_module("gateways.webhook_server")
 
     class Runner:
         def __init__(self):
@@ -138,7 +138,7 @@ def test_gateway_adapter_factory_loads_only_requested_optional_module(monkeypatc
 
     def tracked_import(name):
         imported.append(name)
-        if name == "gateway.platforms.slack":
+        if name == "gateways.platforms.slack":
             raise RuntimeError("slack should stay lazy")
         return real_import(name)
 
@@ -147,7 +147,7 @@ def test_gateway_adapter_factory_loads_only_requested_optional_module(monkeypatc
     adapter = platforms.get_adapter("telegram")
 
     assert adapter.platform == "telegram"
-    assert imported == ["gateway.platforms.telegram"]
+    assert imported == ["gateways.platforms.telegram"]
 
 
 def test_register_all_uses_setup_wizard_gateway_env_names(monkeypatch):
