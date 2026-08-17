@@ -204,7 +204,7 @@ def test_registry_discovers_nested_skill_tree(tmp_path):
 def test_registry_accepts_mcp_servers_list_and_normalizes_schema(tmp_path, monkeypatch):
     import json
 
-    config_dir = tmp_path / "config"
+    config_dir = tmp_path / "configure"
     config_dir.mkdir()
     (config_dir / "mcp_servers.json").write_text(
         json.dumps({"servers": [{"name": "demo", "command": "demo-mcp", "args": []}]}),

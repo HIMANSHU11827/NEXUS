@@ -102,7 +102,7 @@ async def test_server_cancel_handler_releases_a_live_v5_tool_wait(tmp_path):
 def test_set_model_can_switch_to_an_enabled_named_profile(tmp_path, monkeypatch):
     import server
 
-    monkeypatch.setattr(server, "_CONFIG_PATH", str(tmp_path / "config" / "settings.yml"))
+    monkeypatch.setattr(server, "_CONFIG_PATH", str(tmp_path / "configure" / "settings.yml"))
 
     class Profile:
         model_id = "deepseek-v4-flash"
@@ -144,7 +144,7 @@ def test_set_model_rejects_an_unavailable_profile(monkeypatch):
 def test_saved_models_route_matches_gui_picker_contract(tmp_path, monkeypatch):
     import server
 
-    config_dir = tmp_path / "config"
+    config_dir = tmp_path / "configure"
     config_dir.mkdir()
     provider_path = config_dir / "provider.yml"
     provider_path.write_text(

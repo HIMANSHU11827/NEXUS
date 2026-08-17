@@ -396,8 +396,8 @@ def test_skill_master_active_prompt_honors_disabled_skill_config(tmp_path):
     disabled.mkdir(parents=True)
     (enabled / "SKILL.md").write_text("---\nid: enabled\nname: enabled\n---\nENABLED_PROMPT", encoding="utf-8")
     (disabled / "SKILL.md").write_text("---\nid: disabled\nname: disabled\n---\nDISABLED_PROMPT", encoding="utf-8")
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "settings.yml").write_text(
+    (tmp_path / "configure").mkdir()
+    (tmp_path / "configure" / "settings.yml").write_text(
         "disabled_skills:\n  - disabled\n",
         encoding="utf-8",
     )
@@ -419,8 +419,8 @@ def test_skill_master_active_prompt_honors_inactive_custom_skill_config(tmp_path
     skill_root = tmp_path / ".opencode" / "skills" / "reviewer"
     skill_root.mkdir(parents=True)
     (skill_root / "SKILL.md").write_text("---\nid: reviewer\nname: reviewer\n---\nREVIEW_PROMPT", encoding="utf-8")
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "settings.yml").write_text(
+    (tmp_path / "configure").mkdir()
+    (tmp_path / "configure" / "settings.yml").write_text(
         "custom_skill_configs:\n  reviewer:\n    active: false\n",
         encoding="utf-8",
     )

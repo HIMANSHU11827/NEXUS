@@ -1,7 +1,7 @@
 import asyncio
 
-import gateway.platforms.slack as slack_module
-from gateway.platforms.slack import SlackAdapter
+import gateways.platforms.slack as slack_module
+from gateways.platforms.slack import SlackAdapter
 
 
 class _WebClient:

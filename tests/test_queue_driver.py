@@ -7,9 +7,9 @@ import time
 
 import pytest
 
-from queue.driver import LeaseOwnershipError, QueueDriver
-from queue.mission import Mission, MissionRunner, Milestone
-from queue.store import STATE_CANCELLED, TaskQueue
+from queues.driver import LeaseOwnershipError, QueueDriver
+from queues.mission import Mission, MissionRunner, Milestone
+from queues.store import STATE_CANCELLED, TaskQueue
 
 
 class _MemoryQueue(TaskQueue):

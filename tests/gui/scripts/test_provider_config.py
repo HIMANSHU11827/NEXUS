@@ -22,7 +22,7 @@ def test_provider_config_uses_project_config_path_and_creates_file(tmp_path, mon
             },
         )
 
-    config_path = tmp_path / "config" / "settings.yml"
+    config_path = tmp_path / "configure" / "settings.yml"
     assert response.status_code == 200
     assert response.json()["status"] == "success"
     assert config_path.exists()
@@ -38,7 +38,7 @@ def test_provider_config_does_not_overwrite_key_with_mask_placeholder(tmp_path, 
 
     monkeypatch.setattr(api, "_ROOT", str(tmp_path))
     monkeypatch.setattr(api, "require_config_write_allowed", lambda _request: None)
-    config_path = tmp_path / "config" / "settings.yml"
+    config_path = tmp_path / "configure" / "settings.yml"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
         yaml.safe_dump(
@@ -100,7 +100,7 @@ def test_concurrent_provider_config_updates_preserve_both_instances(tmp_path, mo
         results = list(pool.map(configure, ("first", "second")))
 
     assert all(result["status"] == "success" for result in results)
-    saved = yaml.safe_load((tmp_path / "config" / "settings.yml").read_text(encoding="utf-8"))
+    saved = yaml.safe_load((tmp_path / "configure" / "settings.yml").read_text(encoding="utf-8"))
     routes = saved["providers"]["cloud"]
     assert routes["first"]["model"] == "model/first"
     assert routes["second"]["model"] == "model/second"

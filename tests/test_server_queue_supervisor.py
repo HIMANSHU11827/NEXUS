@@ -5,7 +5,7 @@ import asyncio
 
 def test_embedded_queue_supervisor_restarts_after_driver_failure(monkeypatch, tmp_path):
     import server
-    import queue.driver as queue_driver
+    import queues.driver as queue_driver
 
     instances = []
 
@@ -58,7 +58,7 @@ def test_health_reports_embedded_worker_readiness(monkeypatch):
 
 def test_embedded_queue_supervisor_retries_constructor_failure(monkeypatch, tmp_path):
     import server
-    import queue.driver as queue_driver
+    import queues.driver as queue_driver
 
     attempts = []
 
@@ -129,8 +129,8 @@ def test_prometheus_metrics_exposes_runtime_health_and_quarantine(monkeypatch, t
 
 def test_embedded_queue_supervisor_quarantines_repeated_crashes(monkeypatch, tmp_path):
     import server
-    import queue.driver as queue_driver
-    from queue.status import read_incident
+    import queues.driver as queue_driver
+    from queues.status import read_incident
 
     class CrashingDriver:
         def __init__(self, **kwargs):

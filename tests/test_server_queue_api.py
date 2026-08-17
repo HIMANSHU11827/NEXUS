@@ -1,4 +1,4 @@
-from queue.store import TaskQueue
+from queues.store import TaskQueue
 
 
 def test_queue_snapshot_is_session_scoped_and_does_not_expose_lease_tokens(monkeypatch, tmp_path):

@@ -12,8 +12,8 @@ import time
 
 import pytest
 
-from queue.driver import QueueDriver
-from queue.store import TaskQueue
+from queues.driver import QueueDriver
+from queues.store import TaskQueue
 
 
 class _Loop:

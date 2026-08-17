@@ -1,4 +1,4 @@
-from config.profiles import create_profile, get_profile_path, switch_profile
+from configure.profiles import create_profile, get_profile_path, switch_profile
 from utils.nexus_path import get_profiles_root
 
 

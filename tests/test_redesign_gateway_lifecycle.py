@@ -22,8 +22,8 @@ import json
 import time
 from pathlib import Path
 
-import gateway.supervisor as sup
-from gateway.base import (
+import gateways.supervisor as sup
+from gateways.base import (
     HEALTH_DISABLED,
     HEALTH_HEALTHY,
     HEALTH_UNAVAILABLE,
@@ -35,9 +35,9 @@ from gateway.base import (
     BasePlatformAdapter,
     SendResult,
 )
-from gateway.supervisor import GatewaySupervisor, PlatformRuntime
-from gateway.delivery import DeliveryLedger
-from gateway.run import GatewayRunner
+from gateways.supervisor import GatewaySupervisor, PlatformRuntime
+from gateways.delivery import DeliveryLedger
+from gateways.run import GatewayRunner
 
 # Fast timing so backoff / shutdown are test-friendly but still exercise the
 # same exponential-backoff and crash-loop paths as production defaults.

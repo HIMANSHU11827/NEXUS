@@ -21,9 +21,9 @@ def fail(message: str) -> None:
 
 
 def main() -> int:
-    config_path = ROOT / "config" / "settings.yml"
+    config_path = ROOT / "configure" / "settings.yml"
     if not config_path.is_file() or config_path.stat().st_size == 0:
-        fail("config/settings.yml is missing or empty")
+        fail("configure/settings.yml is missing or empty")
 
     try:
         import yaml
@@ -32,7 +32,7 @@ def main() -> int:
     except Exception as exc:  # pragma: no cover - depends on environment
         fail(f"could not parse config/settings.yml: {exc}")
     if not isinstance(config, dict):
-        fail("config/settings.yml must contain a mapping")
+        fail("configure/settings.yml must contain a mapping")
 
     runtime = config.get("runtime")
     security = config.get("security")
@@ -78,7 +78,7 @@ def main() -> int:
 
     try:
         tracked = subprocess.check_output(
-            ["git", "ls-files", "config/.env", "config/*.secret"],
+            ["git", "ls-files", "configure/.env", "configure/*.secret"],
             cwd=ROOT,
             text=True,
             stderr=subprocess.DEVNULL,

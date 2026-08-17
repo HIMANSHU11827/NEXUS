@@ -401,7 +401,7 @@ class NexusAtlasRAG(ThreadSafeSingleton):
             if os.path.isfile(p):
                 targets.append(p)
         # config/ directory
-        cfg_dir = os.path.join(self.root, "config")
+        cfg_dir = os.path.join(self.root, "configure")
         if os.path.isdir(cfg_dir):
             for fn in sorted(os.listdir(cfg_dir)):
                 if fn.endswith((".md", ".txt", ".yml", ".yaml", ".json")):

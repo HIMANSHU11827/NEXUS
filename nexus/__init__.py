@@ -64,7 +64,7 @@ def _setup_environment() -> str:
     # Support both the legacy config/.env and the repository-root .env while
     # allowing explicitly injected process settings to win.
     load_dotenv(os.path.join(project_root, ".env"), override=False)
-    load_dotenv(os.path.join(project_root, "config", ".env"), override=False)
+    load_dotenv(os.path.join(project_root, "configure", ".env"), override=False)
 
     if os.name == "nt":
         venv_scripts = os.path.join(project_root, ".venv", "Scripts")
@@ -92,15 +92,15 @@ def _setup_environment() -> str:
 
 
 def _check_first_run(project_root: str) -> bool:
-    setup_complete = os.path.join(project_root, "config", ".setup_complete")
+    setup_complete = os.path.join(project_root, "configure", ".setup_complete")
     if os.path.exists(setup_complete):
         return False
 
-    first_run_flag = os.path.join(project_root, "config", ".first_run")
+    first_run_flag = os.path.join(project_root, "configure", ".first_run")
     if os.path.exists(first_run_flag):
         return True
 
-    env_path = os.path.join(project_root, "config", ".env")
+    env_path = os.path.join(project_root, "configure", ".env")
     if not os.path.exists(env_path):
         return True
     try:
@@ -114,7 +114,7 @@ def _check_first_run(project_root: str) -> bool:
 
 def _mark_setup_complete(project_root: str, mode: str = "manual") -> None:
     import json
-    config_dir = os.path.join(project_root, "config")
+    config_dir = os.path.join(project_root, "configure")
     os.makedirs(config_dir, exist_ok=True)
     first_run_flag = os.path.join(config_dir, ".first_run")
     complete_path = os.path.join(config_dir, ".setup_complete")
@@ -140,7 +140,7 @@ def _quick_configure(project_root: str) -> None:
         save_provider_yml,
     )
 
-    config_dir = os.path.join(project_root, "config")
+    config_dir = os.path.join(project_root, "configure")
     os.makedirs(config_dir, exist_ok=True)
 
     env = load_env(project_root)
@@ -308,7 +308,7 @@ def _print_banner(console):
 
 
 def _reset_config(project_root: str):
-    config_dir = os.path.join(project_root, "config")
+    config_dir = os.path.join(project_root, "configure")
     for fname in [".env", "provider.yml", "settings.yml", "system.yml"]:
         path = os.path.join(config_dir, fname)
         if os.path.exists(path):
@@ -325,7 +325,7 @@ def _reset_config(project_root: str):
 
 def _get_user_data_dirs(project_root: str):
     return {
-        "config": os.path.join(project_root, "config"),
+        "configure": os.path.join(project_root, "configure"),
         "memory": os.path.join(project_root, "memory"),
         "knowledge": os.path.join(project_root, "knowledge"),
         "workspace": os.path.join(project_root, "workspace"),
@@ -377,7 +377,7 @@ def _import_full_system(project_root: str, import_path: str):
 def _export_config(project_root: str, output_path: str):
     import json
     import zipfile
-    config_dir = os.path.join(project_root, "config")
+    config_dir = os.path.join(project_root, "configure")
     with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for fname in os.listdir(config_dir):
             fpath = os.path.join(config_dir, fname)
@@ -391,7 +391,7 @@ def _export_config(project_root: str, output_path: str):
 
 def _import_config(project_root: str, import_path: str):
     import zipfile
-    config_dir = os.path.join(project_root, "config")
+    config_dir = os.path.join(project_root, "configure")
     with zipfile.ZipFile(import_path, "r") as zf:
         zf.extractall(config_dir)
     from tui.setup_wizard import run
@@ -900,7 +900,7 @@ def boot():
     if args.gateway:
         _print_banner(console)
         console.print("[bold green]Starting Gateway...[/bold green]")
-        from gateway.main import run as run_gateway
+        from gateways.main import run as run_gateway
         run_gateway()
         return
 
@@ -977,8 +977,8 @@ def boot():
         console.print("[bold green]Starting 24/7 Mission...[/bold green]")
         console.print(f"[dim]Goal: {args.mission}[/dim]")
         console.print("[dim]Milestones run through the durable queue until the goal is complete, resuming after any restart.[/dim]")
-        from queue.mission import MissionRunner
-        from queue.driver import run_forever
+        from queues.mission import MissionRunner
+        from queues.driver import run_forever
         runner = MissionRunner(root=project_root)
         runner.create_mission(args.mission)
         try:
@@ -992,7 +992,7 @@ def boot():
         console.print("[bold green]Starting 24/7 Autonomous Queue Driver...[/bold green]")
         console.print("[dim]Tasks are pulled from the durable queue and executed forever.[/dim]")
         console.print("[dim]Enqueue with:  python -m queue.enqueue \"your task\"[/dim]")
-        from queue.driver import run_forever
+        from queues.driver import run_forever
         try:
             asyncio.run(run_forever(workers=1, missions=True))
         except KeyboardInterrupt:

@@ -153,7 +153,7 @@ class NexusSkillMaster:
         ]
 
     def _disabled_skill_ids(self) -> set:
-        config_path = Path(self._root) / "config" / "settings.yml"
+        config_path = Path(self._root) / "configure" / "settings.yml"
         if not config_path.exists():
             return set()
         try:

@@ -19,11 +19,11 @@ import types
 
 import pytest
 
-import gateway.platforms.telegram as tg_module
-import gateway.platforms.discord as dc_module
-from gateway.base import MessageEvent, MessageType, SendResult
-from gateway.platforms.discord import DiscordAdapter
-from gateway.platforms.telegram import TelegramAdapter
+import gateways.platforms.telegram as tg_module
+import gateways.platforms.discord as dc_module
+from gateways.base import MessageEvent, MessageType, SendResult
+from gateways.platforms.discord import DiscordAdapter
+from gateways.platforms.telegram import TelegramAdapter
 
 
 # --------------------------------------------------------------------------- #

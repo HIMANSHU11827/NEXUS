@@ -232,7 +232,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     try:
-        from config.config_loader import NexusConfigLoader
+        from configure.config_loader import NexusConfigLoader
         config = NexusConfigLoader().get("provider", {}) or {}
         report = run_soak(mode=args.mode, providers=args.provider, reps=args.reps, config=config)
     except ValueError as exc:

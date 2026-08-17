@@ -2,7 +2,7 @@ import json
 
 
 def test_config_loader_data_setter_and_save_round_trip(tmp_path, monkeypatch):
-    import config.config_loader as module
+    import configure.config_loader as module
 
     monkeypatch.setattr(module, "_CONFIG_DIR", tmp_path)
     (tmp_path / "settings.yml").write_text("mode: safe\n", encoding="utf-8")

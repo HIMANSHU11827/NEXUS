@@ -24,7 +24,7 @@ DECISIONS_LOG_FILE = os.path.join(_DECISION_LOG_DIR, "decisions.jsonl")
 # Per-agent allow/deny rules live in the NEXUS config dir.  Absent file == empty
 # rules; a malformed file degrades to empty rules, never an exception.
 _NEXUS_CONFIG_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config"
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configure"
 )
 DEFAULT_AGENT_RULES_FILE = os.path.join(_NEXUS_CONFIG_DIR, "permission_agents.yml")
 

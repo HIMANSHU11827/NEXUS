@@ -57,7 +57,7 @@ class NexusMoERouter:
         if isinstance(provider_cfg, dict):
             manual = provider_cfg.get("task_routing", {}) or {}
 
-        config_dir = Path(__file__).resolve().parent.parent / "config"
+        config_dir = Path(__file__).resolve().parent.parent / "configure"
         auto_path = config_dir / "task_routing_auto.yml"
         auto = {}
         if auto_path.exists():

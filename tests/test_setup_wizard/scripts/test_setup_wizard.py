@@ -9,7 +9,7 @@ import pytest
 
 @pytest.fixture
 def td_with_config(tmp_path):
-    config_dir = tmp_path / "config"
+    config_dir = tmp_path / "configure"
     config_dir.mkdir()
     return str(tmp_path)
 
@@ -82,7 +82,7 @@ class TestSetupWizardRun:
     def test_run_creates_config(self):
         """Integration test: run() with simulated inputs creates expected files."""
         with tempfile.TemporaryDirectory() as td:
-            config_dir = Path(td) / "config"
+            config_dir = Path(td) / "configure"
             config_dir.mkdir()
 
 
@@ -92,7 +92,7 @@ class TestSetupWizardRun:
             pass
 
     def test_save_provider_yml_round_trips_explicit_config(self, tmp_path):
-        config_dir = tmp_path / "config"
+        config_dir = tmp_path / "configure"
         config_dir.mkdir()
         td = str(tmp_path)
 
@@ -146,7 +146,7 @@ class TestSetupWizardRun:
     def test_configure_system_permission_and_log_options(self, tmp_path, monkeypatch):
         import tui.setup_wizard as wizard
 
-        config_dir = tmp_path / "config"
+        config_dir = tmp_path / "configure"
         config_dir.mkdir()
 
         selects = iter([0, 0, 0, 0])
@@ -181,7 +181,7 @@ class TestSetupWizardRun:
         assert env == {"DEEPSEEK_API_KEY": "sk-test"}
         assert cfg["default_provider"] == "deepseek"
         assert cfg["providers"]["deepseek"]["api_key"] == "${DEEPSEEK_API_KEY}"
-        assert not (tmp_path / "config" / "settings.yml").exists()
+        assert not (tmp_path / "configure" / "settings.yml").exists()
 
     def test_save_env_writes_private_file_permissions(self, tmp_path):
         import os
@@ -195,7 +195,7 @@ class TestSetupWizardRun:
 
         wizard.save_env(str(tmp_path), {"DEEPSEEK_API_KEY": "sk-test"})
 
-        mode = (tmp_path / "config" / ".env").stat().st_mode & 0o777
+        mode = (tmp_path / "configure" / ".env").stat().st_mode & 0o777
         assert mode & 0o077 == 0
 
     def test_configure_oauth_provider_uses_login_flow(self, tmp_path, monkeypatch):
@@ -225,7 +225,7 @@ class TestSetupWizardRun:
         assert env == {}
         assert cfg["providers"]["github_copilot"]["auth_type"] == "oauth"
         assert cfg["providers"]["github_copilot"]["oauth_provider"] == "github-copilot"
-        assert not (tmp_path / "config" / "settings.yml").exists()
+        assert not (tmp_path / "configure" / "settings.yml").exists()
 
     def test_configure_gateways_reuses_existing_token(self, tmp_path, monkeypatch):
         import tui.setup_wizard as wizard
@@ -299,4 +299,4 @@ class TestSetupWizardRun:
 
         assert (tmp_path / ".nexus" / "USER.md").exists()
         assert (tmp_path / ".nexus" / "workspace" / "README.md").exists()
-        assert (tmp_path / "config" / ".env").exists()
+        assert (tmp_path / "configure" / ".env").exists()

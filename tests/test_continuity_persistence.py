@@ -5,7 +5,7 @@ import os
 from memory import MemoryManager
 from memory.continuity import inspect_continuity
 from nexus.run_context import start_run_context
-from queue.store import TaskQueue
+from queues.store import TaskQueue
 from orchestrators.v5.grounding import V5ContextGrounding
 
 

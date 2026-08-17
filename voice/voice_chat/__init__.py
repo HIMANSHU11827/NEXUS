@@ -21,7 +21,7 @@ import warnings
 
 from dotenv import load_dotenv
 
-load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "config", ".env"))
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configure", ".env"))
 
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -38,7 +38,7 @@ import signal
 import subprocess
 import threading
 
-from config.config_loader import NexusConfigLoader
+from configure.config_loader import NexusConfigLoader
 from voice import VoiceAssistant, VoiceSettings
 
 

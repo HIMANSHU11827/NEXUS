@@ -10,8 +10,8 @@ import os
 
 import pytest
 
-from gateway.base import SendResult
-from gateway.platforms import get_adapter
+from gateways.base import SendResult
+from gateways.platforms import get_adapter
 
 
 def _setenv(**kw):

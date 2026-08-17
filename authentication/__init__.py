@@ -261,10 +261,10 @@ def _gateway_platforms() -> List[str]:
     """Enumerate gateway adapter platform names dynamically so every platform's
     ``ALLOWED_<PLATFORM>_IDS`` env var is honored (not just a hardcoded subset)."""
     try:
-        from gateway.platforms import all_adapters  # lazy: gateway imports authentication
+        from gateways.platforms import all_adapters  # lazy: gateway imports authentication
         return list(all_adapters())
     except Exception:
-        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gateway", "platforms")
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gateways", "platforms")
         names = []
         try:
             for f in os.listdir(base):

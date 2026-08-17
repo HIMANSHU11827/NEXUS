@@ -20,10 +20,10 @@ import time
 
 import pytest
 
-import gateway.webhook_server as webhook_server
-from gateway.base import BasePlatformAdapter, MessageEvent, SendResult
-from gateway.platforms.telegram import TelegramAdapter
-from gateway.run import GatewayRunner, IngressDedupe, dedupe_key_for_event
+import gateways.webhook_server as webhook_server
+from gateways.base import BasePlatformAdapter, MessageEvent, SendResult
+from gateways.platforms.telegram import TelegramAdapter
+from gateways.run import GatewayRunner, IngressDedupe, dedupe_key_for_event
 from providers.health import ComponentBreakerRegistry
 from providers.reliability import (
     BreakerState,
@@ -34,8 +34,8 @@ from providers.reliability import (
     call_with_reliability,
     classify_failure,
 )
-from queue.driver import QueueDriver
-from queue.store import TaskQueue
+from queues.driver import QueueDriver
+from queues.store import TaskQueue
 
 
 def test_billing_and_quota_failures_do_not_retry_like_transient_rate_limits():
@@ -213,8 +213,8 @@ class _FakeAdapter(BasePlatformAdapter):
 
 
 async def test_handle_message_skips_duplicate_message_ids(monkeypatch, tmp_path):
-    import gateway.run as gateway_run
-    from gateway.delivery import DeliveryLedger
+    import gateways.run as gateway_run
+    from gateways.delivery import DeliveryLedger
     from utils import session_bus
 
     class FakeLoop:
@@ -261,8 +261,8 @@ async def test_handle_message_skips_duplicate_message_ids(monkeypatch, tmp_path)
 
 
 async def test_webhook_dispatch_dedupes_duplicate_event():
-    from gateway.run import ingress_dedupe
-    from gateway.base import MessageEvent
+    from gateways.run import ingress_dedupe
+    from gateways.base import MessageEvent
 
     ingress_dedupe.clear()
     received: list[MessageEvent] = []

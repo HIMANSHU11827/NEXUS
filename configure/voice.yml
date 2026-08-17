@@ -1,0 +1,27 @@
+voice:
+  enabled: false
+  auto_speak: true
+  microphone_device: null
+  speaker_device: null
+  sample_rate: 16000
+  record_seconds: 6.0
+  silence_threshold: 0.010
+  min_speech_seconds: 0.18
+  silence_timeout_seconds: 0.9
+  whisper_model: models/local/voice/ggml-tiny-q5_1.bin
+  whisper_device: auto
+  whisper_language: auto
+  whisper_chunk_length_s: 15
+  whisper_batch_size: 1
+  kitten_model: KittenML/kitten-tts-nano-0.8-int8
+  voice_name: Jasper
+  speech_speed: 1.0
+  volume: 1.0
+  push_to_talk_key: none
+  continuous_listening: true
+  wake_word_enabled: false
+  wake_word: nexus
+  allow_text_fallback: true
+  keep_models_loaded: true
+  assistant_timeout_seconds: 45.0
+  require_wake_word: false

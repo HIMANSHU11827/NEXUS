@@ -62,7 +62,7 @@ def _build_state(root: Path) -> None:
         encoding="utf-8",
     )
     # config/mcp_servers.json — for /mcp.
-    config = root / "config"
+    config = root / "configure"
     config.mkdir(parents=True, exist_ok=True)
     (config / "mcp_servers.json").write_text(
         json.dumps(

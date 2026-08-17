@@ -1,4 +1,4 @@
-from gateway.delivery import DeliveryLedger
+from gateways.delivery import DeliveryLedger
 
 
 def test_delivery_ledger_is_idempotent_and_restart_recoverable(tmp_path):
@@ -77,8 +77,8 @@ def test_expired_owner_cannot_renew_ack_or_fail_before_reclaim(tmp_path):
 
 def test_gateway_runner_persists_response_before_send(monkeypatch, tmp_path):
     import asyncio
-    import gateway.run as gateway_run
-    from gateway.base import BasePlatformAdapter, MessageEvent, SendResult
+    import gateways.run as gateway_run
+    from gateways.base import BasePlatformAdapter, MessageEvent, SendResult
 
     class Adapter(BasePlatformAdapter):
         def __init__(self):
@@ -127,8 +127,8 @@ def test_gateway_runner_persists_response_before_send(monkeypatch, tmp_path):
 
 def test_gateway_runner_renews_lease_during_slow_send(tmp_path):
     import asyncio
-    from gateway.base import BasePlatformAdapter, SendResult
-    from gateway.run import GatewayRunner
+    from gateways.base import BasePlatformAdapter, SendResult
+    from gateways.run import GatewayRunner
 
     class SlowAdapter(BasePlatformAdapter):
         def __init__(self):
@@ -170,8 +170,8 @@ def test_gateway_runner_renews_lease_during_slow_send(tmp_path):
 def test_permanent_delivery_failure_notifies_user(tmp_path):
     """Regression: a delivery that exhausts its attempts must be surfaced (P11)."""
     import asyncio
-    from gateway.base import BasePlatformAdapter, SendResult
-    from gateway.run import GatewayRunner
+    from gateways.base import BasePlatformAdapter, SendResult
+    from gateways.run import GatewayRunner
 
     class FailingAdapter(BasePlatformAdapter):
         def __init__(self):

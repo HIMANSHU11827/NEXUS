@@ -12,7 +12,7 @@ def main(steps: int = 50) -> None:
     engine = SelfImprovementEngine(".")
     record = engine.analyze_session([{"role": "user", "content": "Run self-improvement training."}])
     if record:
-        status_path = os.path.join(".", "config", "self_improvement_status.json")
+        status_path = os.path.join(".", "configure", "self_improvement_status.json")
         import json
 
         # Route the status write through the runtime guard so a bad root/config

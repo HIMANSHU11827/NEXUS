@@ -1,8 +1,8 @@
 import asyncio
 import threading
 
-import gateway.platforms.sms as sms_module
-from gateway.platforms.sms import SMSAdapter
+import gateways.platforms.sms as sms_module
+from gateways.platforms.sms import SMSAdapter
 
 
 class _App:

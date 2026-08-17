@@ -1,0 +1,14 @@
+{
+  "name": "nexus-sovereign",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "cd tui && npm start",
+    "api": "python -m server",
+    "ui": "npm --prefix gui run dev"
+  },
+  "devDependencies": {
+    "jest": "^30.4.2"
+  }
+}

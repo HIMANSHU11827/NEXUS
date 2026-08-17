@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from queue.mission import (
+from queues.mission import (
     MissionRunner,
     MissionStore,
     mission_from_dict,
@@ -225,7 +225,7 @@ def test_end_to_end_mission_completes_via_driver(tmp_path, mission_root):
     -> mission completes -> restart-safe ledger."""
     import asyncio
 
-    from queue.driver import QueueDriver
+    from queues.driver import QueueDriver
 
     q = __import__("queue.store", fromlist=["TaskQueue"]).TaskQueue(
         db_path=str(tmp_path / "q.db"), root=str(tmp_path)

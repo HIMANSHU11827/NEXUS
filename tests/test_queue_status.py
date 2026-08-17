@@ -2,7 +2,7 @@ import json
 import os
 import time
 
-from queue.status import QueueRuntimeStatus, read_incident, read_status, record_crash
+from queues.status import QueueRuntimeStatus, read_incident, read_status, record_crash
 
 
 def test_queue_status_publishes_atomic_heartbeat_and_detects_stale(tmp_path):

@@ -366,7 +366,7 @@ def test_mcp_recovery_restores_tools_and_healthy(tmp_path):
 def test_init_mcp_drops_unavailable_server(tmp_path, monkeypatch):
     from tools.nexus_tools.registry import ToolRegistry
 
-    config_dir = tmp_path / "config"
+    config_dir = tmp_path / "configure"
     config_dir.mkdir()
     (config_dir / "mcp_servers.json").write_text(
         json.dumps({"servers": [{"name": "dead", "command": "no-such-bin", "args": []}]}),

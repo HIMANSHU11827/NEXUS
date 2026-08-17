@@ -388,7 +388,7 @@ class MemoryManager:
         # lived worker/connection owned by MemoryManager.
         queue = None
         try:
-            from queue.store import TaskQueue
+            from queues.store import TaskQueue
 
             queue = TaskQueue(root=self.root)
         except Exception:

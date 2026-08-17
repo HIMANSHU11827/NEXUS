@@ -40,16 +40,16 @@ STATE_STOPPED = "stopped"
 class VoiceAssistant:
     @classmethod
     def from_config(cls, config_loader=None, loop=None, session_id: str = "default"):
-        """Create a VoiceAssistant instance from config loader."""
+        """Create a VoiceAssistant instance from configure loader."""
         if config_loader is None:
-            from config.config_loader import NexusConfigLoader
+            from configure.config_loader import NexusConfigLoader
             config_loader = NexusConfigLoader()
         settings = VoiceSettings.from_config(config_loader)
         return cls(settings, loop=loop, session_id=session_id)
 
     def __init__(self, settings: Optional[VoiceSettings] = None, loop=None, session_id: str = "default"):
         if settings is None:
-            from config.config_loader import NexusConfigLoader
+            from configure.config_loader import NexusConfigLoader
             settings = VoiceSettings.from_config(NexusConfigLoader())
         self.settings = settings
         self.session_id = session_id

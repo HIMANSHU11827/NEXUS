@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger("nexus.engine_manager")
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_CONFIG_PATH = os.environ.get("NEXUS_ENGINE_CONFIG", os.path.join(_ROOT, "config", "engine.json"))
+_CONFIG_PATH = os.environ.get("NEXUS_ENGINE_CONFIG", os.path.join(_ROOT, "configure", "engine.json"))
 STATUS_PATH = os.environ.get("NEXUS_ENGINE_STATUS", os.path.join(_ROOT, ".nexus", "llama_cpp_status.json"))
 _LOCK = threading.RLock()
 

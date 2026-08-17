@@ -28,18 +28,18 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import gateway.webhook_server as ws
-from gateway.base import MessageEvent
-from gateway.platforms.line import LineAdapter
-from gateway.platforms.teams import TeamsAdapter
-from gateway.platforms.google_chat import GoogleChatAdapter
-from gateway.platforms.feishu import FeishuAdapter
-from gateway.platforms.yuanbao import YuanbaoAdapter
-from gateway.platforms.qqbot import QQBotAdapter
-from gateway.platforms.dingtalk import DingtalkAdapter, _compute_robot_sign
-from gateway.platforms.wecom import WeComAdapter, _sha1_signature as wecom_sha1
-from gateway.platforms.weixin import WeixinAdapter, _sha1_signature as weixin_sha1
-from gateway.platforms.bluebubbles import BlueBubblesAdapter
+import gateways.webhook_server as ws
+from gateways.base import MessageEvent
+from gateways.platforms.line import LineAdapter
+from gateways.platforms.teams import TeamsAdapter
+from gateways.platforms.google_chat import GoogleChatAdapter
+from gateways.platforms.feishu import FeishuAdapter
+from gateways.platforms.yuanbao import YuanbaoAdapter
+from gateways.platforms.qqbot import QQBotAdapter
+from gateways.platforms.dingtalk import DingtalkAdapter, _compute_robot_sign
+from gateways.platforms.wecom import WeComAdapter, _sha1_signature as wecom_sha1
+from gateways.platforms.weixin import WeixinAdapter, _sha1_signature as weixin_sha1
+from gateways.platforms.bluebubbles import BlueBubblesAdapter
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer

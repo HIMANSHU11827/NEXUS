@@ -32,7 +32,7 @@ _ENV_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Support both project-local env locations while preserving explicit process
 # settings supplied by a launcher or deployment environment.
 load_dotenv(os.path.join(_ENV_PROJECT_ROOT, ".env"), override=False)
-load_dotenv(os.path.join(_ENV_PROJECT_ROOT, "config", ".env"), override=False)
+load_dotenv(os.path.join(_ENV_PROJECT_ROOT, "configure", ".env"), override=False)
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
@@ -133,9 +133,9 @@ def _interprocess_event_lock(path: str):
 _THREAD_LOCAL = threading.local()
 _TASKS_PATH = os.path.join(_ROOT, "logs", "tasks.json")
 _TASKS_PERSIST_LOCK = threading.RLock()
-_CONFIG_PATH = os.path.join(_PROJECT_ROOT, "config", "settings.yml")
+_CONFIG_PATH = os.path.join(_PROJECT_ROOT, "configure", "settings.yml")
 _CONFIG_MUTATION_LOCK = threading.RLock()
-_MCP_SERVERS_PATH = os.path.join(_PROJECT_ROOT, "config", "mcp_servers.json")
+_MCP_SERVERS_PATH = os.path.join(_PROJECT_ROOT, "configure", "mcp_servers.json")
 _CLAUDE_SETTINGS_PATH = os.path.join(_PROJECT_ROOT, ".claude", "settings.json")
 _CLAUDE_SETTINGS_LOCK = threading.RLock()
 _RUNTIME_SETTINGS = {
@@ -337,7 +337,7 @@ def _get_cron_queue():
     """Return the project-scoped durable queue used by server cron."""
     global _CRON_QUEUE
     if _CRON_QUEUE is None:
-        from queue.store import TaskQueue
+        from queues.store import TaskQueue
         _CRON_QUEUE = TaskQueue(root=_PROJECT_ROOT)
     return _CRON_QUEUE
 
@@ -365,9 +365,9 @@ async def _queue_driver_supervisor() -> None:
     durable queue after a worker-level failure.
     """
     global _QUEUE_DRIVER
-    from queue.driver import QueueDriver
-    from queue.alerts import dispatch_incident
-    from queue.status import clear_incident, read_incident, record_crash
+    from queues.driver import QueueDriver
+    from queues.alerts import dispatch_incident
+    from queues.status import clear_incident, read_incident, record_crash
 
     max_restarts = max(1, int(os.environ.get("NEXUS_QUEUE_MAX_RESTARTS", "5")))
     crash_window = max(1.0, float(os.environ.get("NEXUS_QUEUE_CRASH_WINDOW", "300")))
@@ -1300,7 +1300,7 @@ def complete_chat_workflow(session_id: str, prompt: str, turn_id: str = "", stat
 def refresh_provider_runtime() -> str:
     """Reload provider.yml and return the canonical default provider."""
     try:
-        from config.config_loader import NexusConfigLoader
+        from configure.config_loader import NexusConfigLoader
         loader = NexusConfigLoader()
         loader.reload()
         provider_cfg = loader.get("provider", {})
@@ -1331,7 +1331,7 @@ def configured_provider_defaults() -> tuple[str, str]:
     rather than letting the model router choose an unrelated fallback.
     """
     try:
-        from config.config_loader import NexusConfigLoader
+        from configure.config_loader import NexusConfigLoader
         loader = NexusConfigLoader()
         provider_cfg = loader.get("provider", {})
         if not isinstance(provider_cfg, dict):
@@ -2856,8 +2856,8 @@ def queue_snapshot(session_id: str = "", include_global: bool = False, limit: in
     raw payload metadata.
     """
     try:
-        from queue.status import default_status_path, read_incident, read_status
-        from queue.store import TaskQueue
+        from queues.status import default_status_path, read_incident, read_status
+        from queues.store import TaskQueue
 
         requested_session = safe_session_id(session_id) if session_id else ""
         bounded_limit = _work_item_limit(limit)
@@ -2913,7 +2913,7 @@ def queue_snapshot(session_id: str = "", include_global: bool = False, limit: in
 @app.get("/api/metrics")
 def runtime_metrics():
     """Return bounded, restart-safe runtime metrics for operators."""
-    from queue.status import default_status_path, read_incident, read_status
+    from queues.status import default_status_path, read_incident, read_status
 
     status_path = default_status_path(_PROJECT_ROOT)
     queue_status = read_status(status_path)
@@ -3605,7 +3605,7 @@ def _get_available_models() -> list:
     """Return list of known models from provider config."""
     models = []
     try:
-        prov_path = os.path.join(_PROJECT_ROOT, "config", "provider.yml")
+        prov_path = os.path.join(_PROJECT_ROOT, "configure", "provider.yml")
         if os.path.isfile(prov_path) and yaml:
             with open(prov_path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
@@ -3652,7 +3652,7 @@ def _list_saved_models_sync():
     """
     models = []
     try:
-        prov_path = os.path.join(_PROJECT_ROOT, "config", "provider.yml")
+        prov_path = os.path.join(_PROJECT_ROOT, "configure", "provider.yml")
         if os.path.isfile(prov_path) and yaml:
             with open(prov_path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
@@ -4801,8 +4801,8 @@ async def hive_list_teams():
 def list_gateways():
     """List available gateway platforms and their status."""
     try:
-        from gateway.platforms import all_adapters
-        from gateway.run import _PLATFORM_ENV_MAP, _has_required_env
+        from gateways.platforms import all_adapters
+        from gateways.run import _PLATFORM_ENV_MAP, _has_required_env
     except Exception:
         logger.warning("server: list_gateways: gateway module not available", exc_info=True)
         return {"gateways": []}
@@ -4886,7 +4886,7 @@ def _voice_failure(operation: str, exc: Exception) -> str:
 
 def _persist_voice_settings(values: Dict[str, Any]) -> None:
     """Persist only supported voice settings through the serialized config API."""
-    from config.config_loader import NexusConfigLoader
+    from configure.config_loader import NexusConfigLoader
 
     loader = NexusConfigLoader()
     current = loader.get("voice", {})
@@ -5296,7 +5296,7 @@ def list_config_files():
     
     # Search in key directories
     search_dirs = [
-        os.path.join(project_root, 'config'),
+        os.path.join(project_root, 'configure'),
         os.path.join(project_root, 'workspace'),
         os.path.join(project_root, 'skills'),
         os.path.join(project_root, 'tools'),
@@ -6190,7 +6190,7 @@ async def manage_runtime(request: Request):
 
         elif target_type == "config":
             try:
-                from config.config_loader import NexusConfigLoader
+                from configure.config_loader import NexusConfigLoader
                 NexusConfigLoader().reload()
             except Exception:
                 logger.warning("server:1235 : suppressed error", exc_info=True)
@@ -8974,7 +8974,7 @@ def get_voice_statistics():
     try:
         from voice import VoiceAssistant
         # Check if voice is properly configured
-        from config.config_loader import NexusConfigLoader
+        from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
         stats = assistant.get_voice_statistics()
@@ -8988,7 +8988,7 @@ def get_voice_history(limit: int = 50):
     """Return voice transcription history."""
     try:
         from voice import VoiceAssistant
-        from config.config_loader import NexusConfigLoader
+        from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
         history = assistant.get_transcription_history(limit=limit)
@@ -9008,7 +9008,7 @@ async def search_voice_history(request: Request):
             raise HTTPException(status_code=400, detail="Query is required")
         
         from voice import VoiceAssistant
-        from config.config_loader import NexusConfigLoader
+        from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
         results = assistant.search_transcriptions(query)
@@ -9027,7 +9027,7 @@ async def export_voice_data(request: Request):
         format = data.get("format", "json")
         
         from voice import VoiceAssistant
-        from config.config_loader import NexusConfigLoader
+        from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
         exported = assistant.export_voice_data(format)
@@ -9043,7 +9043,7 @@ def clear_voice_history():
     """Clear voice transcription history."""
     try:
         from voice import VoiceAssistant
-        from config.config_loader import NexusConfigLoader
+        from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
         assistant.clear_transcription_history()
@@ -9058,7 +9058,7 @@ def reset_voice_statistics():
     """Reset voice usage statistics."""
     try:
         from voice import VoiceAssistant
-        from config.config_loader import NexusConfigLoader
+        from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
         assistant.reset_statistics()
@@ -9072,7 +9072,7 @@ def get_available_voices():
     """Return list of available TTS voices."""
     try:
         from voice import VoiceAssistant
-        from config.config_loader import NexusConfigLoader
+        from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
         voices = assistant.get_available_voices()
@@ -9086,7 +9086,7 @@ def get_available_languages():
     """Return list of supported STT languages."""
     try:
         from voice import VoiceAssistant
-        from config.config_loader import NexusConfigLoader
+        from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
         languages = assistant.get_available_languages()
@@ -9101,7 +9101,7 @@ def get_audio_devices():
     """Return available audio devices."""
     try:
         from voice import VoiceAssistant
-        from config.config_loader import NexusConfigLoader
+        from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
         devices = assistant.test_audio_devices()
@@ -9115,7 +9115,7 @@ async def update_voice_settings(request: Request):
     """Update voice settings."""
     try:
         data = await request.json()
-        from config.config_loader import NexusConfigLoader
+        from configure.config_loader import NexusConfigLoader
         loader = NexusConfigLoader()
         
         # Get current voice config
@@ -9271,7 +9271,7 @@ _TRAIN_LOCK = threading.Lock()
 
 
 def _training_status_path() -> str:
-    return os.path.join(_PROJECT_ROOT, "config", "self_improvement_status.json")
+    return os.path.join(_PROJECT_ROOT, "configure", "self_improvement_status.json")
 
 
 def _write_training_status(payload: Dict[str, Any]) -> None:

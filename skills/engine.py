@@ -754,7 +754,7 @@ created_at: {time.time()}
     # ─── Config ────────────────────────────────────────────────
 
     def _disabled_skill_ids(self):
-        config_path = Path(self._root) / "config" / "settings.yml"
+        config_path = Path(self._root) / "configure" / "settings.yml"
         if not config_path.exists():
             return set()
         try:

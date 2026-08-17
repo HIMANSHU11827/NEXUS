@@ -34,7 +34,7 @@ class V5Config:
         if cached is not None:
             return cached
         try:
-            from config.config_loader import NexusConfigLoader
+            from configure.config_loader import NexusConfigLoader
 
             loader = NexusConfigLoader()
             self._v5_config_loader = loader
@@ -143,7 +143,7 @@ class V5Config:
         logger.info("[V5CONFIG] configuration loaded (%s keys)", len(data) or 0)
 
     def _apply_config_settings(self) -> None:
-        """Seed runtime fields from config; documented extension point, never raises.
+        """Seed runtime fields from configure; documented extension point, never raises.
 
         Reads ``permissions.mode`` and ``sandbox.tier`` via ``_config`` and
         applies them to ``self.runtime.permission_policy`` /

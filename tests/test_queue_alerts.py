@@ -1,6 +1,6 @@
 import json
 
-from queue.alerts import dispatch_incident
+from queues.alerts import dispatch_incident
 
 
 def _incident():

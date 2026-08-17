@@ -1140,7 +1140,7 @@ async def _cmd_hooks(ctx: CommandContext) -> CommandResult:
 async def _cmd_mcp(ctx: CommandContext) -> CommandResult:
     """List MCP servers from config/mcp_servers.json with running status (real loader shape)."""
     root = _nexus_root(ctx)
-    cfg_path = ctx.extra.get("mcp_config") or os.path.join(root, "config", "mcp_servers.json")
+    cfg_path = ctx.extra.get("mcp_config") or os.path.join(root, "configure", "mcp_servers.json")
     try:
         with open(cfg_path, "r", encoding="utf-8") as fh:
             servers = json.load(fh)

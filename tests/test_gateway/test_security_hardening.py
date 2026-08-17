@@ -23,9 +23,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from gateway.webhook_server import compute_meta_signature, verify_meta_signature
-from gateway.platforms.sms import valid_twilio_signature
-from gateway.run import _PLATFORM_ENV_MAP, _has_required_env
+from gateways.webhook_server import compute_meta_signature, verify_meta_signature
+from gateways.platforms.sms import valid_twilio_signature
+from gateways.run import _PLATFORM_ENV_MAP, _has_required_env
 
 
 # =============================================================================
@@ -105,7 +105,7 @@ class TestMetaWebhookRoute:
     async def client(self):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
-        import gateway.webhook_server as ws
+        import gateways.webhook_server as ws
 
         ws._adapters = {}
         ws._app_secret = self._SECRET
@@ -274,13 +274,13 @@ class TestTelegramBotLazyLoad:
 
     def test_module_imports_without_crashing(self):
         import importlib
-        import gateway.telegram_bot as tb
+        import gateways.telegram_bot as tb
         importlib.reload(tb)
         # The module-level ``get_loop`` function exists; no loop was created.
         assert hasattr(tb, "get_loop")
 
     def test_get_loop_creates_on_first_call(self):
-        import gateway.telegram_bot as tb
+        import gateways.telegram_bot as tb
         # iterate over lazy - won't block because no token
         loop1 = tb.get_loop()
         assert loop1 is not None

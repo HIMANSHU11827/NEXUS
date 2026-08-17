@@ -21,10 +21,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from gateway.base import SendResult  # noqa: E402
-from gateway.platforms import all_adapters, get_adapter  # noqa: E402
-from gateway.platforms.weixin import WeixinAdapter, _sha1_signature  # noqa: E402
-from gateway.platforms.qqbot import QQBotAdapter  # noqa: E402
+from gateways.base import SendResult  # noqa: E402
+from gateways.platforms import all_adapters, get_adapter  # noqa: E402
+from gateways.platforms.weixin import WeixinAdapter, _sha1_signature  # noqa: E402
+from gateways.platforms.qqbot import QQBotAdapter  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +350,7 @@ def test_platforms_registry_includes_both():
 
 
 def test_runner_env_map_covers_both():
-    from gateway.run import _PLATFORM_ENV_MAP, _has_required_env
+    from gateways.run import _PLATFORM_ENV_MAP, _has_required_env
 
     assert _PLATFORM_ENV_MAP["weixin"] == [["WX_APPID"], ["WX_APPSECRET"]]
     assert _PLATFORM_ENV_MAP["qqbot"] == [["QQBOT_APPID"], ["QQBOT_SECRET"]]
@@ -365,7 +365,7 @@ def test_register_all_skips_unconfigured_adapters(monkeypatch):
     ):
         monkeypatch.delenv(var, raising=False)
 
-    from gateway.run import GatewayRunner
+    from gateways.run import GatewayRunner
 
     runner = GatewayRunner()
     runner.register_all()

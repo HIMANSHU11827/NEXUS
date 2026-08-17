@@ -5,7 +5,7 @@ from security.secret_scanner import SecretScanner
 
 
 def test_provider_yml_uses_env_placeholders_not_raw_keys():
-    text = Path("config/provider.yml").read_text(encoding="utf-8")
+    text = Path("configure/provider.yml").read_text(encoding="utf-8")
     raw_key = re.compile(r"api_key:\s*(?!\$\{)[A-Za-z0-9_-]{20,}")
 
     assert not raw_key.search(text)

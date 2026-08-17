@@ -436,7 +436,7 @@ FIRST_RUN_FILE = ".first_run"
 def mark_setup_complete(root_dir: str, mode: str = "setup") -> None:
     import json
 
-    config_dir = Path(root_dir) / "config"
+    config_dir = Path(root_dir) / "configure"
     config_dir.mkdir(parents=True, exist_ok=True)
     complete_path = config_dir / SETUP_COMPLETE_FILE
     first_run_path = config_dir / FIRST_RUN_FILE
@@ -771,7 +771,7 @@ def status_dim(msg: str):
 # ── File operations ──────────────────────────────────────────
 
 def load_env(root_dir: str) -> Dict[str, str]:
-    path = Path(root_dir) / "config" / ".env"
+    path = Path(root_dir) / "configure" / ".env"
     env: Dict[str, str] = {}
     if path.exists():
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -783,7 +783,7 @@ def load_env(root_dir: str) -> Dict[str, str]:
 
 
 def save_env(root_dir: str, env: Dict[str, str]):
-    path = Path(root_dir) / "config" / ".env"
+    path = Path(root_dir) / "configure" / ".env"
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [f"{k}={v}" for k, v in sorted(env.items()) if v]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -795,7 +795,7 @@ def save_env(root_dir: str, env: Dict[str, str]):
 
 
 def load_provider_yml(root_dir: str) -> Dict[str, Any]:
-    path = Path(root_dir) / "config" / "provider.yml"
+    path = Path(root_dir) / "configure" / "provider.yml"
     if path.exists():
         with open(path, encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
@@ -803,7 +803,7 @@ def load_provider_yml(root_dir: str) -> Dict[str, Any]:
 
 
 def save_provider_yml(root_dir: str, config: Dict[str, Any]):
-    path = Path(root_dir) / "config" / "provider.yml"
+    path = Path(root_dir) / "configure" / "provider.yml"
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
@@ -1730,7 +1730,7 @@ def configure_sandbox(root_dir: str):
     sel = select("Pick sandbox level", options)
     chosen = SANDBOX_TIERS[sel][0]
 
-    env_path = Path(root_dir) / "config" / ".env"
+    env_path = Path(root_dir) / "configure" / ".env"
     env_lines = []
     if env_path.exists():
         env_lines = env_path.read_text(encoding="utf-8").splitlines()
@@ -1747,7 +1747,7 @@ def configure_sandbox(root_dir: str):
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
-    settings_path = Path(root_dir) / "config" / "settings.yml"
+    settings_path = Path(root_dir) / "configure" / "settings.yml"
     if settings_path.exists():
         import yaml
         settings = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
@@ -1769,7 +1769,7 @@ def configure_profile(root_dir: str):
     wizard_header()
 
     try:
-        from config.profiles import create_profile, list_profiles, switch_profile
+        from configure.profiles import create_profile, list_profiles, switch_profile
     except ImportError:
         status_info("Profile system not available — skipping.")
         console.print()
@@ -1852,7 +1852,7 @@ def configure_extensions(root_dir: str):
     _s()
     wizard_header()
 
-    settings_path = Path(root_dir) / "config" / "settings.yml"
+    settings_path = Path(root_dir) / "configure" / "settings.yml"
     settings: Dict[str, Any] = {}
     if settings_path.exists():
         with open(settings_path, encoding="utf-8") as f:
@@ -2040,7 +2040,7 @@ def configure_system(root_dir: str):
     _s()
     wizard_header()
 
-    settings_path = Path(root_dir) / "config" / "settings.yml"
+    settings_path = Path(root_dir) / "configure" / "settings.yml"
     settings: Dict[str, Any] = {}
     if settings_path.exists():
         with open(settings_path, encoding="utf-8") as f:
@@ -2180,7 +2180,7 @@ def configure_costs(root_dir: str):
     limit = Prompt.ask("  Monthly budget (USD)", default="50")
     alert = Prompt.ask("  Alert at (%)", default="80")
 
-    env_path = Path(root_dir) / "config" / ".env"
+    env_path = Path(root_dir) / "configure" / ".env"
     env_path.parent.mkdir(parents=True, exist_ok=True)
     with open(env_path, "a", encoding="utf-8") as f:
         f.write(f"\nNEXUS_MONTHLY_BUDGET={limit}\n")
@@ -2265,7 +2265,7 @@ def finish(root_dir: str):
     env = load_env(root_dir)
     provider_cfg = load_provider_yml(root_dir)
     settings = {}
-    settings_path = Path(root_dir) / "config" / "settings.yml"
+    settings_path = Path(root_dir) / "configure" / "settings.yml"
     if settings_path.exists():
         with open(settings_path, encoding="utf-8") as f:
             settings = yaml.safe_load(f) or {}
@@ -2355,7 +2355,7 @@ def finish(root_dir: str):
         export_path = Prompt.ask("  Export path", default=default_path)
         try:
             import zipfile
-            config_dir = Path(root_dir) / "config"
+            config_dir = Path(root_dir) / "configure"
             with zipfile.ZipFile(export_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 for f in config_dir.iterdir():
                     if f.is_file() and f.suffix not in (".lock", ".log"):
@@ -2564,10 +2564,10 @@ def run(root_dir: Optional[str] = None):
             if sel == 0:
                 server_token = secret_input("  Enter server API token")
                 env["NEXUS_SERVER_TOKEN"] = server_token
-                with open(Path(root_dir) / "config" / ".env", "a") as f:
+                with open(Path(root_dir) / "configure" / ".env", "a") as f:
                     f.write(f"\nNEXUS_SERVER_TOKEN={server_token}\n")
             env["NEXUS_SERVER_PORT"] = server_port
-            with open(Path(root_dir) / "config" / ".env", "a") as f:
+            with open(Path(root_dir) / "configure" / ".env", "a") as f:
                 f.write(f"NEXUS_SERVER_PORT={server_port}\n")
             status_ok(f"Server configured on port {server_port}")
             status_dim("Start with: [bold]python -m nexus --server[/bold]")

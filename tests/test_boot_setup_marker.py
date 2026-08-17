@@ -7,7 +7,7 @@ import pytest
 def test_setup_complete_marker_disables_first_run(tmp_path):
     import nexus
 
-    config_dir = tmp_path / "config"
+    config_dir = tmp_path / "configure"
     config_dir.mkdir()
     (config_dir / ".env").write_text("TELEGRAM_BOT_TOKEN=your_token_here\n", encoding="utf-8")
 
@@ -27,10 +27,10 @@ def test_quick_configure_writes_complete_marker(tmp_path):
     nexus._quick_configure(str(tmp_path))
 
     assert nexus._check_first_run(str(tmp_path)) is False
-    assert (tmp_path / "config" / ".env").exists()
-    assert (tmp_path / "config" / "provider.yml").exists()
-    assert (tmp_path / "config" / "settings.yml").exists()
-    settings = (tmp_path / "config" / "settings.yml").read_text(encoding="utf-8")
+    assert (tmp_path / "configure" / ".env").exists()
+    assert (tmp_path / "configure" / "provider.yml").exists()
+    assert (tmp_path / "configure" / "settings.yml").exists()
+    settings = (tmp_path / "configure" / "settings.yml").read_text(encoding="utf-8")
     assert "default_provider:" not in settings
     assert "provider_name:" not in settings
 

@@ -33,7 +33,7 @@ except Exception:  # pragma: no cover - PyYAML is a hard dependency in practice
     yaml = None
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_CONFIG_PATH = _PROJECT_ROOT / "config" / "settings.yml"
+_CONFIG_PATH = _PROJECT_ROOT / "configure" / "settings.yml"
 
 _LOCK = threading.RLock()
 _STATE: Optional[Dict[str, Any]] = None

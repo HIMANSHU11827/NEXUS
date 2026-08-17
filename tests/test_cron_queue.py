@@ -1,4 +1,4 @@
-from queue.store import STATE_QUEUED, TaskQueue
+from queues.store import STATE_QUEUED, TaskQueue
 
 
 def test_cron_definition_and_history_survive_queue_reopen(tmp_path):

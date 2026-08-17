@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from queue.store import STATE_RETRYING, TaskQueue
+from queues.store import STATE_RETRYING, TaskQueue
 
 
 def test_retry_backoff_is_respected(tmp_path):
@@ -135,7 +135,7 @@ def test_corrupted_payload_driver_fails_with_clear_reason(tmp_path):
     """Regression: the driver explains corruption instead of 'no task_desc' (P12)."""
     import asyncio
 
-    from queue.driver import QueueDriver
+    from queues.driver import QueueDriver
 
     class FakeQueue:
         db_path = str(tmp_path / "tasks.db")

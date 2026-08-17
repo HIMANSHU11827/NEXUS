@@ -54,7 +54,7 @@ class VoiceSettings:
         Falls back to NEXUS_PROVIDER_TIMEOUT env var for timeout.
         """
         if config is None:
-            from config.config_loader import NexusConfigLoader
+            from configure.config_loader import NexusConfigLoader
             try:
                 pm = NexusConfigLoader()
                 raw = pm.get("voice", {})

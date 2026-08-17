@@ -83,7 +83,7 @@ nexus-voice = "voice.voice_chat:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["sandbox*", "authentication*", "context*", "evolution*", "hardware*", "intelligence*", "neural*", "reasoning*", "safety*", "security*", "tasks*", "telemetry*", "voice*", "prompts*", "orchestrators*", "utils*", "tools*", "rag*", "integrations*", "knowledge*", "mcp*", "gateway*", "hive*", "indexer*", "kernel*", "permissions*", "router*", "skills*", "server*", "nexus*"]
+include = ["sandbox*", "authentication*", "context*", "evolution*", "hardware*", "intelligence*", "neural*", "reasoning*", "safety*", "security*", "tasks*", "telemetry*", "voice*", "prompts*", "orchestrators*", "utils*", "tools*", "rag*", "integrations*", "knowledge*", "mcp*", "gateway*", "configure*", "hive*", "indexer*", "kernel*", "permissions*", "router*", "skills*", "server*", "nexus*"]
 exclude = [
     "tests*",
     "gui*",

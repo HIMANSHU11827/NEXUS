@@ -1,9 +1,9 @@
 import asyncio
 import importlib
 
-from gateway.base import BasePlatformAdapter, MessageEvent, SendResult
-from gateway.run import GatewayRunner
-from gateway.session_bus_integration import GatewaySessionManager
+from gateways.base import BasePlatformAdapter, MessageEvent, SendResult
+from gateways.run import GatewayRunner
+from gateways.session_bus_integration import GatewaySessionManager
 
 
 class FakeAdapter(BasePlatformAdapter):
@@ -35,14 +35,14 @@ def test_gateway_main_exports_run():
 def test_gateway_package_exports_every_platform_adapter():
     """Regression (P23): every adapter class in gateway.platforms must be
     importable from the gateway package itself via the lazy export surface."""
-    import gateway
-    import gateway.platforms as platforms
+    import gateways
+    import gateways.platforms as platforms
 
     adapter_class_names = set(platforms._CLASS_TO_PLATFORM.keys())
     assert adapter_class_names  # sanity: the map is populated
 
     for name in adapter_class_names:
-        assert name in gateway.__all__, f"{name} missing from gateway.__all__"
+        assert name in gateway.__all__, f"{name} missing from gateways.__all__"
         cls = getattr(gateway, name)
         assert cls is getattr(platforms, name), f"{name} resolves differently"
 
@@ -131,7 +131,7 @@ def test_gateway_disconnect_isolates_adapter_failure():
 
 
 def test_gateway_adapter_factory_loads_only_requested_optional_module(monkeypatch):
-    import gateway.platforms as platforms
+    import gateways.platforms as platforms
 
     imported = []
     real_import = platforms.import_module
@@ -151,7 +151,7 @@ def test_gateway_adapter_factory_loads_only_requested_optional_module(monkeypatc
 
 
 def test_register_all_uses_setup_wizard_gateway_env_names(monkeypatch):
-    import gateway.run as gateway_run
+    import gateways.run as gateway_run
 
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
     monkeypatch.setenv("DISCORD_BOT_TOKEN", "discord-token")
@@ -175,9 +175,9 @@ def test_gateway_runner_and_session_manager_share_session_ids(tmp_path):
 
 
 def test_canonical_adapters_accept_env_aliases(monkeypatch):
-    from gateway.platforms.discord import DiscordAdapter
-    from gateway.platforms.telegram import TelegramAdapter
-    from gateway.platforms.whatsapp import WhatsAppAdapter
+    from gateways.platforms.discord import DiscordAdapter
+    from gateways.platforms.telegram import TelegramAdapter
+    from gateways.platforms.whatsapp import WhatsAppAdapter
 
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
     monkeypatch.setenv("DISCORD_BOT_TOKEN", "discord-token")
@@ -189,7 +189,7 @@ def test_canonical_adapters_accept_env_aliases(monkeypatch):
 
 
 def test_gateway_handle_message_consumes_content_chunks(monkeypatch):
-    import gateway.run as gateway_run
+    import gateways.run as gateway_run
 
     class FakeLoop:
         root = "C:\\project"
@@ -227,7 +227,7 @@ def test_gateway_handle_message_consumes_content_chunks(monkeypatch):
 
 
 def test_gateway_handle_message_retains_legacy_string_chunk_support(monkeypatch):
-    import gateway.run as gateway_run
+    import gateways.run as gateway_run
 
     class FakeLoop:
         root = "C:\\project"
@@ -262,7 +262,7 @@ def test_gateway_handle_message_retains_legacy_string_chunk_support(monkeypatch)
 
 
 def test_gateway_reasoning_error_uses_safe_public_message(monkeypatch):
-    import gateway.run as gateway_run
+    import gateways.run as gateway_run
 
     class FailingLoop:
         root = "C:\\project"
@@ -295,7 +295,7 @@ def test_gateway_reasoning_error_uses_safe_public_message(monkeypatch):
 
 def test_gateway_builds_real_loop_with_root_dir(tmp_path):
     """Regression: GatewayRunner must construct NexusLoop with root_dir (P01)."""
-    import gateway.run as gateway_run
+    import gateways.run as gateway_run
     from orchestrators.v5.core import NexusLoopV5
 
     runner = gateway_run.GatewayRunner(root=str(tmp_path))
@@ -308,7 +308,7 @@ def test_gateway_builds_real_loop_with_root_dir(tmp_path):
 
 def test_gateway_timeout_surfaces_timeout_message(monkeypatch):
     """Regression: deadline on stream_run aborts the turn and the user is told (P02)."""
-    import gateway.run as gateway_run
+    import gateways.run as gateway_run
 
     class TimeoutLoop:
         root = "C:\\project"

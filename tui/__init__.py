@@ -238,7 +238,7 @@ class NexusShell:
 
     def _show_provider_dashboard(self):
         try:
-            from config.profiles import NexusProfiles
+            from configure.profiles import NexusProfiles
             p = NexusProfiles(); providers = getattr(p, "_profiles", {})
         except: providers = {}
         if not providers:

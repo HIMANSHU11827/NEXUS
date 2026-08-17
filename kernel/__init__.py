@@ -35,7 +35,7 @@ from utils.nexus_compat import import_requests, itail, s, safe_round
 from utils.singleton import ThreadSafeSingleton
 
 # Load .env at kernel import — covers both `python -m nexus` and direct imports
-_env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", ".env")
+_env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configure", ".env")
 if os.path.isfile(_env_path):
     load_dotenv(_env_path)
 
@@ -198,7 +198,7 @@ class NexusKernel(ThreadSafeSingleton):
 
     @_register("config")
     def config(self):
-        from config.config_loader import NexusConfigLoader
+        from configure.config_loader import NexusConfigLoader
         return NexusConfigLoader()
 
     @_register("moe")

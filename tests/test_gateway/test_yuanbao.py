@@ -19,10 +19,10 @@ import hmac
 
 import pytest
 
-from gateway.base import SendResult
-from gateway.platforms import all_adapters, get_adapter
-from gateway.platforms.yuanbao import YuanbaoAdapter
-from gateway.run import GatewayRunner, _PLATFORM_ENV_MAP
+from gateways.base import SendResult
+from gateways.platforms import all_adapters, get_adapter
+from gateways.platforms.yuanbao import YuanbaoAdapter
+from gateways.run import GatewayRunner, _PLATFORM_ENV_MAP
 
 
 # ---------------------------------------------------------------------------

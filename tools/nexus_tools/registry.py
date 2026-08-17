@@ -1390,7 +1390,7 @@ class ToolRegistry:
     def _load_mcp_servers(self, config_path: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
         """Read and normalize the MCP server config into ``{name: cfg}``."""
         try:
-            mcp_config_path = config_path or os.path.join(self.root, "config", "mcp_servers.json")
+            mcp_config_path = config_path or os.path.join(self.root, "configure", "mcp_servers.json")
             if not os.path.isfile(mcp_config_path):
                 return {}
             with open(mcp_config_path, encoding="utf-8") as f:
@@ -1419,7 +1419,7 @@ class ToolRegistry:
         Returns the number of MCP tools registered.
         """
         try:
-            mcp_config_path = config_path or os.path.join(self.root, "config", "mcp_servers.json")
+            mcp_config_path = config_path or os.path.join(self.root, "configure", "mcp_servers.json")
             if not os.path.isfile(mcp_config_path):
                 return 0
             with open(mcp_config_path, encoding="utf-8") as f:

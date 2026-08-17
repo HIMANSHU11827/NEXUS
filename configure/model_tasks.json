@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "description": "Per-task benchmark weights and keyword tables for task-aware model routing (providers/model_bench.py). Benchmark keys mirror the per-model scores in config/provider.yml -> model_capabilities.providers.<id>.benchmarks",
+  "tasks": [
+    {
+      "id": "coding",
+      "keywords": [
+        "code", "program", "python", "javascript", "typescript", "function",
+        "class", "api", "script", "debug", "bug", "regex", "sql", "json",
+        "algorithm", "implement", "refactor", "tests", "automate",
+        "write a function", "write code", "fix the", "unit test", "pull request"
+      ],
+      "benchmarks": {"coding": 0.7, "reasoning": 0.2, "chat": 0.1}
+    },
+    {
+      "id": "reasoning",
+      "keywords": [
+        "solve", "equation", "math", "logic", "reason", "deduce", "why",
+        "argument", "proof", "prove", "puzzle", "probability", "hypothesis",
+        "think step by step", "explain the reasoning", "compare", "evaluate"
+      ],
+      "benchmarks": {"reasoning": 0.7, "coding": 0.2, "chat": 0.1}
+    },
+    {
+      "id": "chat",
+      "keywords": [
+        "hello", "hi ", "hey", "how are you", "thanks", "thank you",
+        "small talk", "tell me about yourself", "what can you do",
+        "help me", "just chatting", "casual", "greeting"
+      ],
+      "benchmarks": {"chat": 0.8, "coding": 0.1, "reasoning": 0.1}
+    },
+    {
+      "id": "summarization",
+      "keywords": [
+        "summarize", "summary", "tldr", "tl;dr", "abstract", "brief",
+        "condense", "key points", "highlights", "short version",
+        "bullet list", "recap", "cliff notes", "in one sentence"
+      ],
+      "benchmarks": {"summarization": 0.8, "chat": 0.1, "search": 0.1}
+    },
+    {
+      "id": "search",
+      "keywords": [
+        "search", "find", "look up", "query", "web", "url", "source",
+        "reference", "who is", "what is", "when was", "docs", "documentation",
+        "latest news", "wikipedia", "online"
+      ],
+      "benchmarks": {"search": 0.7, "summarization": 0.2, "chat": 0.1}
+    }
+  ]
+}

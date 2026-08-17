@@ -36,7 +36,7 @@ from fastapi.middleware.cors import CORSMiddleware
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Keep GUI-launched API workers consistent with the standalone server.
 load_dotenv(os.path.join(_ROOT, ".env"), override=False)
-load_dotenv(os.path.join(_ROOT, "config", ".env"), override=False)
+load_dotenv(os.path.join(_ROOT, "configure", ".env"), override=False)
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from nexus.events import CanonicalEvent
@@ -128,7 +128,7 @@ def _interprocess_event_lock(path: str):
 def refresh_provider_runtime() -> str:
     """Reload provider.yml and return the canonical default provider."""
     try:
-        from config.config_loader import NexusConfigLoader
+        from configure.config_loader import NexusConfigLoader
         loader = NexusConfigLoader()
         loader.reload()
         provider_cfg = loader.get("provider", {})
@@ -3236,7 +3236,7 @@ def save_reminders(reminders: List[Dict[str, Any]]) -> None:
 
 
 def build_provider_state(kernel) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Build honest provider status from config instead of static claims."""
+    """Build honest provider status from configure instead of static claims."""
     cfg_data = kernel.config.data.get("providers", {})
     providers: List[Dict[str, Any]] = []
     instances: List[Dict[str, Any]] = []
@@ -4022,7 +4022,7 @@ def get_saved_models():
             seen.add(model)
             provider_name = str(provider_id).upper()
             models.append({"model": model, "provider": provider_name, "label": f"{provider_name} · {model}"})
-    legacy_provider_path = os.path.join(_ROOT, "config", "provider.yml")
+    legacy_provider_path = os.path.join(_ROOT, "configure", "provider.yml")
     if os.path.exists(legacy_provider_path):
         try:
             with open(legacy_provider_path, "r", encoding="utf-8") as provider_file:
@@ -4856,7 +4856,7 @@ def get_vision_accelerator_state():
 
 
 def _provider_config_path() -> str:
-    return os.path.join(_ROOT, "config", "settings.yml")
+    return os.path.join(_ROOT, "configure", "settings.yml")
 
 
 def _is_masked_secret_placeholder(value: str) -> bool:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 
-from gateway.state import GatewayStateStore
+from gateways.state import GatewayStateStore
 
 
 def test_state_store_round_trip_creates_durable_lock_sidecar(tmp_path):

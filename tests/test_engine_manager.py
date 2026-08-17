@@ -6,7 +6,7 @@ import utils.engine_manager as engine_manager
 
 
 def test_engine_config_persists_atomically_and_preserves_shape(tmp_path, monkeypatch):
-    config_path = tmp_path / "config" / "engine.json"
+    config_path = tmp_path / "configure" / "engine.json"
     status_path = tmp_path / ".nexus" / "status.json"
     monkeypatch.setattr(engine_manager, "_CONFIG_PATH", str(config_path))
     monkeypatch.setattr(engine_manager, "STATUS_PATH", str(status_path))

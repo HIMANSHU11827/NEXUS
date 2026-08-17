@@ -73,7 +73,7 @@ def test_training_status_marks_orphaned_process_after_restart(monkeypatch, tmp_p
     import server
 
     monkeypatch.setattr(server, "_PROJECT_ROOT", str(tmp_path))
-    status_path = tmp_path / "config" / "self_improvement_status.json"
+    status_path = tmp_path / "configure" / "self_improvement_status.json"
     status_path.parent.mkdir(parents=True)
     status_path.write_text(json.dumps({"status": "training", "run_id": "r1"}), encoding="utf-8")
     monkeypatch.setattr(server, "_active_train_process", None)

@@ -21,10 +21,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from gateway.base import SendResult  # noqa: E402
-from gateway.platforms.signal import SignalAdapter  # noqa: E402
-from gateway.platforms.matrix import MatrixAdapter, HAS_MATRIX_NIO  # noqa: E402
-from gateway.platforms.mattermost import MattermostAdapter, HAS_WEBSOCKETS  # noqa: E402
+from gateways.base import SendResult  # noqa: E402
+from gateways.platforms.signal import SignalAdapter  # noqa: E402
+from gateways.platforms.matrix import MatrixAdapter, HAS_MATRIX_NIO  # noqa: E402
+from gateways.platforms.mattermost import MattermostAdapter, HAS_WEBSOCKETS  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +188,7 @@ def test_matrix_name():
 def test_matrix_module_imports_without_nio():
     # The whole point: the module must import even when matrix-nio is missing.
     import importlib
-    import gateway.platforms.matrix as m
+    import gateways.platforms.matrix as m
     importlib.reload(m)
     assert m.MatrixAdapter is not None
 
@@ -345,7 +345,7 @@ async def test_mattermost_send_text_success_and_reply():
 # Runner-level env-gating
 # ---------------------------------------------------------------------------
 def test_platform_env_map_covers_three_adapters():
-    from gateway.run import _PLATFORM_ENV_MAP, _has_required_env
+    from gateways.run import _PLATFORM_ENV_MAP, _has_required_env
 
     assert _PLATFORM_ENV_MAP["signal"] == [["SIGNAL_NUMBER"]]
     assert _PLATFORM_ENV_MAP["matrix"] == [["MATRIX_HOMESERVER"], ["MATRIX_USER"]]
@@ -353,7 +353,7 @@ def test_platform_env_map_covers_three_adapters():
 
 
 def test_has_required_env_logic():
-    from gateway.run import _has_required_env
+    from gateways.run import _has_required_env
 
     assert _has_required_env([["SIGNAL_NUMBER"]]) is False
     assert _has_required_env([["MATRIX_HOMESERVER"], ["MATRIX_USER"]]) is False
@@ -369,7 +369,7 @@ def test_register_all_skips_unconfigured_adapters(monkeypatch):
     ):
         monkeypatch.delenv(var, raising=False)
 
-    from gateway.run import GatewayRunner
+    from gateways.run import GatewayRunner
     runner = GatewayRunner()
     runner.register_all()
     # None of the three target adapters should be active without env config.

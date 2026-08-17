@@ -229,7 +229,7 @@ class NexusSupervisor:
     def _dispatch_quarantine_alert(self, incident: Dict[str, Any]) -> Dict[str, Any]:
         """Best-effort durable alert; a broken notifier never changes quarantine."""
         try:
-            from queue.alerts import dispatch_incident
+            from queues.alerts import dispatch_incident
             return dispatch_incident(
                 self.root,
                 {**incident, "source": "supervisor"},

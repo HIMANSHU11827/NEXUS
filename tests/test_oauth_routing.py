@@ -19,7 +19,7 @@ from providers.factory import NexusProviderFactory
 
 
 def _provider_yml() -> dict:
-    path = Path(__file__).resolve().parents[1] / "config" / "provider.yml"
+    path = Path(__file__).resolve().parents[1] / "configure" / "provider.yml"
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 

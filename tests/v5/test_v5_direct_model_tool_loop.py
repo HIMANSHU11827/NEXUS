@@ -1,4 +1,4 @@
-﻿"""Regression tests for the V5 transcript-driven model/tool loop."""
+"""Regression tests for the V5 transcript-driven model/tool loop."""
 
 import asyncio
 import json

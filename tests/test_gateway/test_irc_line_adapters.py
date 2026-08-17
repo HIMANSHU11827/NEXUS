@@ -17,9 +17,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from gateway.base import SendResult
-from gateway.platforms.irc import IRCAdapter
-from gateway.platforms.line import LineAdapter, LINE_REQUIRED_ENV
+from gateways.base import SendResult
+from gateways.platforms.irc import IRCAdapter
+from gateways.platforms.line import LineAdapter, LINE_REQUIRED_ENV
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +382,7 @@ async def test_line_send_image():
 # Runner-level wiring
 # ===========================================================================
 def test_platform_env_map_covers_irc_and_line():
-    from gateway.run import _PLATFORM_ENV_MAP
+    from gateways.run import _PLATFORM_ENV_MAP
 
     assert _PLATFORM_ENV_MAP["irc"] == [["IRC_NICK"]]
     assert _PLATFORM_ENV_MAP["line"] == [
@@ -391,7 +391,7 @@ def test_platform_env_map_covers_irc_and_line():
 
 
 def test_registry_exposes_irc_and_line():
-    from gateway.platforms import all_adapters, get_adapter
+    from gateways.platforms import all_adapters, get_adapter
 
     assert "irc" in all_adapters()
     assert "line" in all_adapters()
@@ -416,7 +416,7 @@ def test_register_all_skips_irc_and_line_without_env(monkeypatch):
     ):
         monkeypatch.delenv(var, raising=False)
 
-    from gateway.run import GatewayRunner
+    from gateways.run import GatewayRunner
 
     runner = GatewayRunner()
     runner.register_all()
