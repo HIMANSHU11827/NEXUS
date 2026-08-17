@@ -1,9 +1,9 @@
 import json
 
-from context.persistence import NexusFilePersistence
+from nexus.context.persistence import NexusFilePersistence
 from gateways.session_bus_integration import GatewaySessionManager
 from memory import MemoryManager
-from utils import session_bus
+from nexus.common import session_bus
 from evolution.memory_forge.scripts.forge import MemoryForge
 
 

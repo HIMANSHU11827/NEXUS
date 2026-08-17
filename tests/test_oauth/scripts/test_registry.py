@@ -1,10 +1,10 @@
-from providers.oauth.registry import (
+from models.providers.auth.oauth.registry import (
     get_oauth_provider,
     get_oauth_providers,
     register_oauth_provider,
     reset_oauth_providers,
 )
-from providers.oauth.types import OAuthCredentials
+from models.providers.auth.oauth.types import OAuthCredentials
 
 
 class FakeOAuthProvider:

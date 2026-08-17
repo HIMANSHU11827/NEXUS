@@ -37,7 +37,7 @@ def _global_mocks():
 @pytest.fixture
 def client():
     """Build a TestClient from the (now safely mockable) server app."""
-    from server import app
+    from apps.api import app
     with TestClient(app) as c:
         yield c
 
@@ -158,7 +158,7 @@ class TestV1ChatCompletions:
 
     @pytest.mark.asyncio
     async def test_loop_eviction_closes_only_evicted_loop(self):
-        import server
+        import apps.api
 
         evicted = MagicMock()
         evicted.aclose = AsyncMock()

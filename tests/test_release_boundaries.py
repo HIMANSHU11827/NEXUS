@@ -5,7 +5,7 @@ from fastapi import HTTPException
 
 
 def test_workspace_mutation_path_rejects_escape():
-    from server import _safe_workspace_mutation_path
+    from apps.api import _safe_workspace_mutation_path
 
     with pytest.raises(HTTPException) as error:
         _safe_workspace_mutation_path("../outside.txt")
@@ -31,7 +31,7 @@ def test_resume_dispatches_unfinished_checkpoint_through_live_loop(monkeypatch, 
 
     monkeypatch.setattr(commands, "V5Checkpoint", Checkpoint, raising=False)
     # The handler imports V5Checkpoint locally, so patch the module it imports.
-    import orchestrators.v5.checkpoint as checkpoint_module
+    import nexus.main_agent.checkpoint as checkpoint_module
     monkeypatch.setattr(checkpoint_module, "V5Checkpoint", Checkpoint)
 
     ctx = commands.CommandContext(loop=Loop(), extra={"root": str(tmp_path)})

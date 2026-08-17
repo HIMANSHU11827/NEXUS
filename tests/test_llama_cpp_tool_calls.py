@@ -1,4 +1,4 @@
-from providers.llama_cpp import LlamaCPPProvider
+from models.providers.local.llama_cpp import LlamaCPPProvider
 
 
 class FakeLlama:

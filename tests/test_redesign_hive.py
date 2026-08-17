@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from nexus.run_control import RunControlRegistry
-from orchestrators.v5.hive import V5Hive, _HIVE_RESULT_MARKER
+from nexus.main_agent.hive import V5Hive, _HIVE_RESULT_MARKER
 
 logger = logging.getLogger("test_redesign_hive")
 
@@ -219,7 +219,7 @@ def test_module_load_persisted_states(tmp_path):
     path = tmp_path / "subagents.jsonl"
     with open(path, "w", encoding="utf-8") as f:
         f.write(json.dumps({"id": "a1", "status": "running", "role": "WORKER"}) + "\n")
-    from orchestrators.v5.hive import load_persisted_subagent_states
+    from nexus.main_agent.hive import load_persisted_subagent_states
     states = load_persisted_subagent_states(str(path))
     assert states["a1"]["status"] == "running"
 

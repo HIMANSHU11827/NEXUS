@@ -18,7 +18,7 @@ def main(steps: int = 50) -> None:
         # Route the status write through the runtime guard so a bad root/config
         # can never point self-improvement at a protected core module.
         try:
-            from utils.runtime_guard import guarded_write_text
+            from nexus.common.runtime_guard import guarded_write_text
 
             guarded_write_text(
                 status_path,

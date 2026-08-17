@@ -9,8 +9,8 @@ resets kernel state and restores any monkeypatched loaders via the autouse
 
 import pytest
 
-import kernel as kernel_mod
-from kernel import FailedSubsystem, NexusKernel, get_nexus_kernel
+import nexus.runtime.kernel as kernel_mod
+from nexus.runtime.kernel import FailedSubsystem, NexusKernel, get_nexus_kernel
 
 # Every health row must carry this schema.
 HEALTH_KEYS = {"name", "loaded", "ok", "error", "latency_ms"}

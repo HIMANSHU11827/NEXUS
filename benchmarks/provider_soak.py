@@ -20,9 +20,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from providers.attempts import ProviderAttemptRecorder
-from providers.health import ProviderHealthRegistry
-from providers.reliability import classify_failure, redact_secrets
+from models.providers.core.attempts import ProviderAttemptRecorder
+from models.providers.core.health import ProviderHealthRegistry
+from models.providers.core.reliability import classify_failure, redact_secrets
 
 SCHEMA_VERSION = "nexus-provider-soak-v1"
 BENCHMARK_PROMPT = (
@@ -113,7 +113,7 @@ def run_soak(*, mode: str = "dry-run", providers: Optional[Iterable[str]] = None
         raise ValueError("provider is not configured: " + ", ".join(unknown))
     if provider_resolver is None:
         if factory is None:
-            from providers.factory import NexusProviderFactory
+            from models.providers.core.factory import NexusProviderFactory
             factory = NexusProviderFactory()
         provider_resolver = lambda name: factory.get_provider_by_name("cloud", name)
 

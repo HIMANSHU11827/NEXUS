@@ -1,6 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 
-from neural.nerve_center import NexusNerveCenter
+from models.neural.nerve_center import NexusNerveCenter
 
 
 def test_reinforcement_is_durable_and_bounded(tmp_path):

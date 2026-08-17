@@ -1,4 +1,4 @@
-from providers.router import ModelRouter
+from models.providers.core.router import ModelRouter
 
 
 class _Health:
@@ -25,10 +25,10 @@ class _Provider:
 def test_model_router_records_redacted_provider_failure():
     router = object.__new__(ModelRouter)
     router.health = _Health()
-    from providers.reliability import CircuitBreakerRegistry, RetryPolicy
+    from models.providers.core.reliability import CircuitBreakerRegistry, RetryPolicy
     router._breakers = CircuitBreakerRegistry.from_config(None)
     router.retry_policy = RetryPolicy(max_attempts=1)
-    from providers.model_capabilities import ModelCapabilityRegistry
+    from models.providers.core.model_capabilities import ModelCapabilityRegistry
     router._model_capabilities = ModelCapabilityRegistry()
     router.attempts = __import__("providers.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
 
@@ -58,10 +58,10 @@ def test_model_router_allows_keyless_loopback_provider():
 
     router = object.__new__(ModelRouter)
     router.health = _Health()
-    from providers.reliability import CircuitBreakerRegistry, RetryPolicy
+    from models.providers.core.reliability import CircuitBreakerRegistry, RetryPolicy
     router._breakers = CircuitBreakerRegistry.from_config(None)
     router.retry_policy = RetryPolicy(max_attempts=1)
-    from providers.model_capabilities import ModelCapabilityRegistry
+    from models.providers.core.model_capabilities import ModelCapabilityRegistry
     router._model_capabilities = ModelCapabilityRegistry()
     router.attempts = __import__("providers.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
 
@@ -90,10 +90,10 @@ def test_model_router_releases_profile_lease_after_successful_call():
 
     router = object.__new__(ModelRouter)
     router.health = _Health()
-    from providers.reliability import CircuitBreakerRegistry, RetryPolicy
+    from models.providers.core.reliability import CircuitBreakerRegistry, RetryPolicy
     router._breakers = CircuitBreakerRegistry.from_config(None)
     router.retry_policy = RetryPolicy(max_attempts=1)
-    from providers.model_capabilities import ModelCapabilityRegistry
+    from models.providers.core.model_capabilities import ModelCapabilityRegistry
     router._model_capabilities = ModelCapabilityRegistry()
     router.attempts = __import__("providers.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
 
@@ -121,10 +121,10 @@ def test_model_router_filters_model_limits_for_strict_provider_signature():
 
     router = object.__new__(ModelRouter)
     router.health = _Health()
-    from providers.reliability import CircuitBreakerRegistry, RetryPolicy
+    from models.providers.core.reliability import CircuitBreakerRegistry, RetryPolicy
     router._breakers = CircuitBreakerRegistry.from_config(None)
     router.retry_policy = RetryPolicy(max_attempts=1)
-    from providers.model_capabilities import ModelCapabilityRegistry
+    from models.providers.core.model_capabilities import ModelCapabilityRegistry
     router._model_capabilities = ModelCapabilityRegistry()
     router.attempts = __import__("providers.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
 
@@ -153,10 +153,10 @@ def test_model_router_does_not_repeat_internal_type_error():
 
     router = object.__new__(ModelRouter)
     router.health = _Health()
-    from providers.reliability import CircuitBreakerRegistry, RetryPolicy
+    from models.providers.core.reliability import CircuitBreakerRegistry, RetryPolicy
     router._breakers = CircuitBreakerRegistry.from_config(None)
     router.retry_policy = RetryPolicy(max_attempts=1)
-    from providers.model_capabilities import ModelCapabilityRegistry
+    from models.providers.core.model_capabilities import ModelCapabilityRegistry
     router._model_capabilities = ModelCapabilityRegistry()
     router.attempts = __import__("providers.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
 
@@ -183,10 +183,10 @@ def test_model_router_releases_profile_lease_after_failed_call():
 
     router = object.__new__(ModelRouter)
     router.health = _Health()
-    from providers.reliability import CircuitBreakerRegistry, RetryPolicy
+    from models.providers.core.reliability import CircuitBreakerRegistry, RetryPolicy
     router._breakers = CircuitBreakerRegistry.from_config(None)
     router.retry_policy = RetryPolicy(max_attempts=1)
-    from providers.model_capabilities import ModelCapabilityRegistry
+    from models.providers.core.model_capabilities import ModelCapabilityRegistry
     router._model_capabilities = ModelCapabilityRegistry()
     router.attempts = __import__("providers.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
 
@@ -215,10 +215,10 @@ def test_model_router_releases_profile_lease_when_credentials_are_rejected():
 
     router = object.__new__(ModelRouter)
     router.health = _Health()
-    from providers.reliability import CircuitBreakerRegistry, RetryPolicy
+    from models.providers.core.reliability import CircuitBreakerRegistry, RetryPolicy
     router._breakers = CircuitBreakerRegistry.from_config(None)
     router.retry_policy = RetryPolicy(max_attempts=1)
-    from providers.model_capabilities import ModelCapabilityRegistry
+    from models.providers.core.model_capabilities import ModelCapabilityRegistry
     router._model_capabilities = ModelCapabilityRegistry()
     router.attempts = __import__("providers.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
     router._provider_credentials_usable = lambda *_args: False
@@ -233,7 +233,7 @@ def test_model_router_releases_profile_lease_when_credentials_are_rejected():
 
 
 def test_model_router_compacts_once_before_context_overflow_fallback():
-    from providers.reliability import Classification, FailureClass, Strategy
+    from models.providers.core.reliability import Classification, FailureClass, Strategy
 
     router = object.__new__(ModelRouter)
     router.mode = "CLOUD"

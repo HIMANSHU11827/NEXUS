@@ -2,7 +2,7 @@ import asyncio
 
 
 def test_storage_cleanup_runs_in_worker_and_preserves_session_index(tmp_path):
-    import server
+    import apps.api
 
     sessions = tmp_path / "logs" / "sessions"
     sessions.mkdir(parents=True)

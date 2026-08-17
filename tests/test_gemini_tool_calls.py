@@ -1,6 +1,6 @@
 import json
 
-from providers.google_gemini import GoogleGeminiProvider
+from models.providers.api.google_gemini import GoogleGeminiProvider
 
 
 def test_gemini_tools_to_functionDeclarations():

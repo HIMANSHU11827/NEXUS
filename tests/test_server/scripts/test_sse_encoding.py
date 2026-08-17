@@ -1,4 +1,4 @@
-from server import _sse_data
+from apps.api import _sse_data
 
 
 def test_multiline_sse_content_prefixes_every_line():

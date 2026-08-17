@@ -14,8 +14,8 @@ from types import SimpleNamespace
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from orchestrators.v5.core import NexusLoopV5
-from orchestrators.v5.paorr import PAORREnhanced
+from nexus.main_agent.core import NexusLoopV5
+from nexus.main_agent.paorr import PAORREnhanced
 
 
 async def test_v5_plan_event_emission():

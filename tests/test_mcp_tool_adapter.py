@@ -1,7 +1,7 @@
 import pytest
 
-from tools.nexus_tools.mcp_adapter import MCPToolAdapter
-from tools.nexus_tools.result import STATUS_ERROR, STATUS_TIMEOUT
+from extensions.tools.built_in.nexus_tools.mcp_adapter import MCPToolAdapter
+from extensions.tools.built_in.nexus_tools.result import STATUS_ERROR, STATUS_TIMEOUT
 
 
 @pytest.mark.asyncio

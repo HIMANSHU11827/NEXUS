@@ -2,12 +2,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrators.v5.token_usage import (
+from nexus.main_agent.token_usage import (
     estimate_cost_usd,
     estimate_messages_tokens,
     normalize_usage,
 )
-from orchestrators.v5.direct_loop import V5DirectModelToolLoop
+from nexus.main_agent.direct_loop import V5DirectModelToolLoop
 
 
 def test_estimate_cost_known_cloud_model_uses_list_price():

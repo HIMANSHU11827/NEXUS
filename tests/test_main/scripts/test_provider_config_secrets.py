@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 
-from security.secret_scanner import SecretScanner
+from security.scanners.secret_scanner import SecretScanner
 
 
 def test_provider_yml_uses_env_placeholders_not_raw_keys():

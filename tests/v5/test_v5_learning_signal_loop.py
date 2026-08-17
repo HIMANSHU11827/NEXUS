@@ -22,7 +22,7 @@ import re
 
 import pytest
 
-from orchestrators.v5.learning import V5Learning
+from nexus.main_agent.learning import V5Learning
 
 
 def _loop_with_runtime():
@@ -105,7 +105,7 @@ def test_digest_is_empty_when_nothing_collected():
 def test_collector_is_wired_into_the_live_turn_path():
     """The collector must be CALLED from core.py's turn finalization, not
     merely defined -- otherwise the signals stay write-only."""
-    import orchestrators.v5.core as core_mod
+    import nexus.main_agent.core as core_mod
 
     text = open(core_mod.__file__, encoding="utf-8", errors="ignore").read()
     # The call site sits right after the existing replay-log call and mirrors
@@ -122,7 +122,7 @@ def test_collector_is_wired_into_the_live_turn_path():
 def test_learning_digest_is_injected_after_memory_merge():
     """The same code path that merges memory must also append the learning
     digest to the context summary the model receives."""
-    import orchestrators.v5.core as core_mod
+    import nexus.main_agent.core as core_mod
 
     text = open(core_mod.__file__, encoding="utf-8", errors="ignore").read()
     # The injection must follow the direct-loop memory merge. The merge helper
@@ -145,7 +145,7 @@ def test_replay_is_logged_exactly_once_per_turn(monkeypatch, tmp_path):
     """The reviewer caught a real regression: `_collect_turn_signals` calls
     `_log_turn_replay` internally, so the live turn path must NOT also call
     it directly -- otherwise the replay JSONL is written twice per turn."""
-    import orchestrators.v5.core as core_mod
+    import nexus.main_agent.core as core_mod
     text = open(core_mod.__file__, encoding="utf-8", errors="ignore").read()
     direct_calls = text.count("log_replay = getattr(self, \"_log_turn_replay\", None)")
     assert direct_calls == 0, (
@@ -193,7 +193,7 @@ async def test_runtime_failures_are_deduped_and_capped():
     }
     await loop._collect_turn_signals(None, result2, None)
     assert len(loop.runtime.failures) == 2, loop.runtime.failures
-    from orchestrators.v5.learning import _LEARNINGS_CAP
+    from nexus.main_agent.learning import _LEARNINGS_CAP
     assert len(loop.runtime.failures) <= _LEARNINGS_CAP
 
 
@@ -204,7 +204,7 @@ async def test_collect_turn_signals_writes_exactly_one_replay_line(tmp_path):
     via asyncio.to_thread but forgot to import asyncio, so every write raised
     NameError inside the guarded block and nothing was ever persisted. This
     test fails loudly if that regresses again."""
-    import orchestrators.v5.learning as learning_mod
+    import nexus.main_agent.learning as learning_mod
     loop = _loop_with_runtime()
     loop.root_dir = str(tmp_path)
     result = _fake_result_with_failure()

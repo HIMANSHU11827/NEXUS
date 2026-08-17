@@ -1,4 +1,4 @@
-from orchestrators.v5.hive import V5Hive
+from nexus.main_agent.hive import V5Hive
 
 
 class _Provider:

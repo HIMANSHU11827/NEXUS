@@ -8,8 +8,8 @@ import logging
 import numpy as np
 import pytest
 
-from intelligence.nate.adaptive_schema import AdaptiveSchemaEngine, NATE_Route
-from intelligence.nate.nate_engine import NATE
+from nexus.capabilities.intelligence.nate.adaptive_schema import AdaptiveSchemaEngine, NATE_Route
+from nexus.capabilities.intelligence.nate.nate_engine import NATE
 
 
 TOOLS = [

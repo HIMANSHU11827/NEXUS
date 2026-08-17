@@ -33,7 +33,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from plugins.manager import HookRegistry, PluginManager, PluginStage
+from extensions.plugins.built_in.manager import HookRegistry, PluginManager, PluginStage
 
 
 # ── isolation fixture ────────────────────────────────────────────────────────

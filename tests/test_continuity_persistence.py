@@ -6,7 +6,7 @@ from memory import MemoryManager
 from memory.continuity import inspect_continuity
 from nexus.run_context import start_run_context
 from queues.store import TaskQueue
-from orchestrators.v5.grounding import V5ContextGrounding
+from nexus.main_agent.grounding import V5ContextGrounding
 
 
 def test_restart_recalls_unfinished_run_and_error(tmp_path):

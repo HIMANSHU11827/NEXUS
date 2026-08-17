@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import tools.web_search.scripts.web_search as ws_mod
+import extensions.tools.built_in.web_search.scripts.web_search as ws_mod
 
 
 def _run(coro):

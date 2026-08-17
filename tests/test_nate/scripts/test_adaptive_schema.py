@@ -1,7 +1,7 @@
 
 import pytest
 
-from intelligence.nate.adaptive_schema import (
+from nexus.capabilities.intelligence.nate.adaptive_schema import (
     AdaptiveSchemaEngine,
     NATE_Route,
     TSCGCompressor,

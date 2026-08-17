@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from providers.profiles import ProviderProfile, ProviderProfileStore
+from models.providers.core.profiles import ProviderProfile, ProviderProfileStore
 
 
 def test_provider_profile_store_persists_and_reads_profile(tmp_path):

@@ -282,7 +282,7 @@ class TestVerifiedMemoryGate:
 
 class TestMemoryToolProvenance:
     def _tool(self, tmp_path):
-        from tools.memory.scripts.memory import MemoryTool
+        from extensions.tools.built_in.memory.scripts.memory import MemoryTool
         return MemoryTool(root_dir=str(tmp_path)), str(tmp_path)
 
     def test_store_records_unverified_claim_provenance(self, tmp_path):

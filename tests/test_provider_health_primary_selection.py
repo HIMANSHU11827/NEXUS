@@ -12,7 +12,7 @@ selected first on every subsequent turn, burning one provider request per turn
 before rotation could skip it.
 """
 
-from intelligence.moe_router import NexusMoERouter
+from nexus.capabilities.intelligence.moe_router import NexusMoERouter
 
 
 class _Loader:

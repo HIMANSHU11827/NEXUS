@@ -93,7 +93,7 @@ class TestSandboxWorkspaceGuardHardening:
 
 class TestShellRunPath:
     def test_run_bash_refuses_blocked_command(self, tmp_path, monkeypatch):
-        from tui import NexusShell
+        from apps.tui import NexusShell
 
         shell = NexusShell(brain=type("B", (), {"root": str(tmp_path)})())
         spawned = []
@@ -107,7 +107,7 @@ class TestShellRunPath:
         assert spawned == []
 
     def test_run_bash_executes_safe_command(self, tmp_path, monkeypatch):
-        from tui import NexusShell
+        from apps.tui import NexusShell
 
         shell = NexusShell(brain=type("B", (), {"root": str(tmp_path)})())
         executed = []
@@ -126,7 +126,7 @@ class TestShellRunPath:
         assert executed == ["git status"]
 
     def test_run_bash_times_out_long_commands(self, tmp_path, monkeypatch):
-        from tui import NexusShell
+        from apps.tui import NexusShell
 
         shell = NexusShell(brain=type("B", (), {"root": str(tmp_path)})())
 
@@ -141,7 +141,7 @@ class TestShellRunPath:
 class TestOAuthRedirectValidation:
     @pytest.fixture
     def oauth_providers(self, monkeypatch):
-        import authentication
+        import security.core.auth
 
         monkeypatch.setattr(
             authentication,
@@ -153,7 +153,7 @@ class TestOAuthRedirectValidation:
         import pytest as _pytest
 
         try:
-            from server import app
+            from apps.api import app
         except Exception as exc:  # pragma: no cover - env guard
             _pytest.skip(f"server import unavailable: {exc}")
         from fastapi.testclient import TestClient
@@ -166,7 +166,7 @@ class TestOAuthRedirectValidation:
         from fastapi.testclient import TestClient
 
         try:
-            from server import app
+            from apps.api import app
         except Exception as exc:  # pragma: no cover
             pytest.skip(f"server import unavailable: {exc}")
 
@@ -181,7 +181,7 @@ class TestOAuthRedirectValidation:
 
     def test_relative_redirect_is_accepted(self, oauth_providers):
         try:
-            from server import app
+            from apps.api import app
         except Exception as exc:  # pragma: no cover
             pytest.skip(f"server import unavailable: {exc}")
         from fastapi.testclient import TestClient
@@ -197,7 +197,7 @@ class TestOAuthRedirectValidation:
 
 class TestReleaseGateSecretScan:
     def test_gate_scanner_detects_committed_key(self, tmp_path, monkeypatch):
-        from security.secret_scanner import SecretScanner
+        from security.scanners.secret_scanner import SecretScanner
 
         tracked = ["config/settings.yml"]
         (tmp_path / "settings.yml").write_text("api_key: sk-abcdef1234567890ABCDEF1234567890", encoding="utf-8")

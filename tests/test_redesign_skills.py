@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from skills.engine import NexusSkillEngine
-from skills.experience import SkillExperience
-from tools.nexus_tools.skill_adapter import (
+from extensions.skills.built_in.engine import NexusSkillEngine
+from extensions.skills.built_in.experience import SkillExperience
+from extensions.tools.built_in.nexus_tools.skill_adapter import (
     SkillExecutor,
     SkillToolAdapter,
     build_instruction_block,

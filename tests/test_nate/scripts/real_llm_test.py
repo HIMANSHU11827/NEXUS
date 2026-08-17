@@ -22,7 +22,7 @@ if _env_path.exists():
 
 import requests
 
-from intelligence.nate.nate_engine import NATE
+from nexus.capabilities.intelligence.nate.nate_engine import NATE
 
 API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 MODEL = "deepseek-chat"

@@ -14,7 +14,7 @@ in ``NexusProviderFactory`` as defense-in-depth.
 import threading
 import time
 
-from utils.singleton import ThreadSafeSingleton
+from nexus.common.singleton import ThreadSafeSingleton
 
 
 def _hammer(ctor, count: int = 8, per_result=None):
@@ -65,8 +65,8 @@ def test_base_singleton_publishes_only_after_init():
 
 
 def test_provider_factory_concurrent_construction_is_fully_initialized(monkeypatch):
-    import providers.factory as factory_mod
-    from providers.factory import NexusProviderFactory
+    import models.providers.core.factory as factory_mod
+    from models.providers.core.factory import NexusProviderFactory
 
     NexusProviderFactory._reset_instance()
 

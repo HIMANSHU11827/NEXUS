@@ -1,6 +1,6 @@
 import json
 
-from providers.ollama import OllamaProvider
+from models.providers.local.ollama import OllamaProvider
 
 
 def test_ollama_native_tool_envelope_is_parser_compatible():

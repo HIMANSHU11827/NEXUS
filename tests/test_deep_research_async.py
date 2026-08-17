@@ -1,6 +1,6 @@
 import pytest
 
-from tools.deep_research.scripts.deep_research import DeepResearchTool
+from extensions.tools.built_in.deep_research.scripts.deep_research import DeepResearchTool
 
 
 @pytest.mark.asyncio

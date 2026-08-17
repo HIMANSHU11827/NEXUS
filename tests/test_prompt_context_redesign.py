@@ -15,10 +15,10 @@ Run serially: ``.venv/Scripts/python.exe -m pytest tests/test_prompt_context_red
 import asyncio
 import builtins
 
-from prompts import NexusPromptEngine
-from orchestrators.v5.core import NexusLoopV5
-from orchestrators.v5.context_manager import ContextConfig, ContextManager
-from orchestrators.v5.direct_loop import _LEGACY_SYSTEM_PROMPT, _live_system_prompt, _live_system_prompt_cache
+from nexus.conversation.prompts import NexusPromptEngine
+from nexus.main_agent.core import NexusLoopV5
+from nexus.main_agent.context_manager import ContextConfig, ContextManager
+from nexus.main_agent.direct_loop import _LEGACY_SYSTEM_PROMPT, _live_system_prompt, _live_system_prompt_cache
 
 
 class TestLivePromptEngine:

@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from authentication import (
+from security.core.auth import (
     OAUTH_PROVIDERS,
     AuthUser,
     _generate_state,

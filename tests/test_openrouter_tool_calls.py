@@ -1,4 +1,4 @@
-from providers.openrouter import OpenRouterProvider
+from models.providers.api.openrouter import OpenRouterProvider
 
 
 def test_openrouter_native_tool_call_is_encoded_for_nexus_parser():

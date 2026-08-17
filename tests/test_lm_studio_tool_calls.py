@@ -1,8 +1,8 @@
 import json
 
-from providers.health import ProviderCapabilityRegistry
-from providers.lm_studio import LMStudioProvider
-from providers.model_capabilities import ModelCapabilityRegistry
+from models.providers.core.health import ProviderCapabilityRegistry
+from models.providers.local.lm_studio import LMStudioProvider
+from models.providers.core.model_capabilities import ModelCapabilityRegistry
 
 
 def test_lm_studio_native_tool_envelope_is_parser_compatible():

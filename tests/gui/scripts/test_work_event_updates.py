@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from gui import api
+from apps.web import api
 from nexus.events import EVENT_STATUSES, EVENT_TYPES, CanonicalEvent
 from nexus.run_context import start_run_context
 
@@ -60,7 +60,7 @@ def test_gui_append_reconciles_sequence_after_external_writer(tmp_path, monkeypa
 def test_gui_append_sequences_are_unique_across_worker_processes(tmp_path, monkeypatch):
     _reset_gui_event_state(monkeypatch, tmp_path)
     worker = (
-        "from gui import api; "
+        "from apps.web import api; "
         "api._WORK_EVENTS_DIR = r'%s'; "
         "[api.append_work_event('parallel', {'id': str(i), 'kind': 'tool', 'status': 'done'}) for i in range(8)]"
     ) % str(tmp_path).replace("'", "''")

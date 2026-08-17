@@ -22,8 +22,8 @@ import time
 
 import pytest
 
-from orchestrators.v5.direct_loop import V5DirectModelToolLoop
-from tools.nexus_tools.registry import ToolEntry, ToolRegistry
+from nexus.main_agent.direct_loop import V5DirectModelToolLoop
+from extensions.tools.built_in.nexus_tools.registry import ToolEntry, ToolRegistry
 
 
 class _FakeCall:
@@ -53,7 +53,7 @@ def _make_registry_with(tools):
 
 def _fake_emitter_with_registry():
     """Wire the single event funnel (V5EventEmitter) to a real registry."""
-    from orchestrators.v5.events import V5EventEmitter
+    from nexus.main_agent.events import V5EventEmitter
 
     reg = ToolRegistry.__new__(ToolRegistry)
     reg.root = os.getcwd()

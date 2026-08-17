@@ -1,4 +1,4 @@
-from providers.router import ModelRouter
+from models.providers.core.router import ModelRouter
 
 
 class _Health:
@@ -99,7 +99,7 @@ def test_transient_primary_stream_failure_retries_before_fallback():
                 raise ConnectionError("temporary connection lost")
             yield "recovered"
 
-    from providers.reliability import CircuitBreakerRegistry, RetryPolicy
+    from models.providers.core.reliability import CircuitBreakerRegistry, RetryPolicy
 
     primary = FlakyProvider()
     router = object.__new__(ModelRouter)
@@ -131,7 +131,7 @@ def test_context_overflow_stream_compacts_once_before_retry():
                 raise RuntimeError("413 context length exceeded")
             yield "recovered"
 
-    from providers.reliability import CircuitBreakerRegistry, RetryPolicy
+    from models.providers.core.reliability import CircuitBreakerRegistry, RetryPolicy
 
     primary = OverflowProvider()
     router = object.__new__(ModelRouter)
@@ -170,7 +170,7 @@ def test_streaming_provider_releases_profile_lease_after_completion():
     primary._profile_lease = "stream-lease"
     primary._profile_store = store
 
-    from providers.reliability import CircuitBreakerRegistry, RetryPolicy
+    from models.providers.core.reliability import CircuitBreakerRegistry, RetryPolicy
 
     router = object.__new__(ModelRouter)
     router.mode = "CLOUD"
@@ -206,7 +206,7 @@ def test_streaming_provider_releases_profile_lease_when_consumer_closes_early():
     primary._profile_lease = "early-close-lease"
     primary._profile_store = store
 
-    from providers.reliability import CircuitBreakerRegistry, RetryPolicy
+    from models.providers.core.reliability import CircuitBreakerRegistry, RetryPolicy
 
     router = object.__new__(ModelRouter)
     router.mode = "CLOUD"
@@ -228,7 +228,7 @@ def test_streaming_provider_releases_profile_lease_when_consumer_closes_early():
 
 def test_streaming_provider_renews_an_expiring_profile_lease():
     from dataclasses import dataclass
-    from providers.reliability import CircuitBreakerRegistry, RetryPolicy
+    from models.providers.core.reliability import CircuitBreakerRegistry, RetryPolicy
 
     @dataclass(frozen=True)
     class Lease:
@@ -270,7 +270,7 @@ def test_streaming_provider_renews_an_expiring_profile_lease():
 
 def test_streaming_provider_stops_when_profile_lease_renewal_is_lost():
     from dataclasses import dataclass
-    from providers.reliability import CircuitBreakerRegistry, RetryPolicy
+    from models.providers.core.reliability import CircuitBreakerRegistry, RetryPolicy
 
     @dataclass(frozen=True)
     class Lease:

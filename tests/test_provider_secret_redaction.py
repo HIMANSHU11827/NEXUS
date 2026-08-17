@@ -1,6 +1,6 @@
 import pytest
 
-from providers.reliability import redact_secrets
+from models.providers.core.reliability import redact_secrets
 
 
 @pytest.mark.parametrize(

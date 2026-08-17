@@ -15,8 +15,8 @@ import os
 import time
 import threading
 
-from orchestrators.v5.core import NexusLoopV5
-from orchestrators.v5.direct_loop import (
+from nexus.main_agent.core import NexusLoopV5
+from nexus.main_agent.direct_loop import (
     MAX_TOOL_RESULT_CHARS,
     TOOL_RESULT_PREVIEW_CHARS,
     V5DirectModelToolLoop,

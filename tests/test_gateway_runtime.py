@@ -210,7 +210,7 @@ def test_gateway_handle_message_consumes_content_chunks(monkeypatch):
     monkeypatch.setattr(gateway_run, "NexusLoop", FakeLoop)
     monkeypatch.setattr(gateway_run, "set_active_session_id", lambda *_args, **_kwargs: None, raising=False)
 
-    from utils import session_bus
+    from nexus.common import session_bus
     monkeypatch.setattr(session_bus, "set_active_session_id", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(session_bus, "sync_loop_from_disk", lambda _loop: None)
     monkeypatch.setattr("authentication.is_gateway_authorized", lambda _platform, _sender: True)
@@ -246,7 +246,7 @@ def test_gateway_handle_message_retains_legacy_string_chunk_support(monkeypatch)
 
     monkeypatch.setattr(gateway_run, "NexusLoop", FakeLoop)
 
-    from utils import session_bus
+    from nexus.common import session_bus
     monkeypatch.setattr(session_bus, "set_active_session_id", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(session_bus, "sync_loop_from_disk", lambda _loop: None)
     monkeypatch.setattr("authentication.is_gateway_authorized", lambda _platform, _sender: True)
@@ -279,7 +279,7 @@ def test_gateway_reasoning_error_uses_safe_public_message(monkeypatch):
             yield  # keep this an async generator
 
     monkeypatch.setattr(gateway_run, "NexusLoop", FailingLoop)
-    from utils import session_bus
+    from nexus.common import session_bus
     monkeypatch.setattr(session_bus, "set_active_session_id", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(session_bus, "sync_loop_from_disk", lambda _loop: None)
     monkeypatch.setattr("authentication.is_gateway_authorized", lambda _platform, _sender: True)
@@ -296,7 +296,7 @@ def test_gateway_reasoning_error_uses_safe_public_message(monkeypatch):
 def test_gateway_builds_real_loop_with_root_dir(tmp_path):
     """Regression: GatewayRunner must construct NexusLoop with root_dir (P01)."""
     import gateways.run as gateway_run
-    from orchestrators.v5.core import NexusLoopV5
+    from nexus.main_agent.core import NexusLoopV5
 
     runner = gateway_run.GatewayRunner(root=str(tmp_path))
     event = MessageEvent(text="hi", sender_id="u", chat_id="c", platform="telegram")
@@ -325,7 +325,7 @@ def test_gateway_timeout_surfaces_timeout_message(monkeypatch):
             yield  # keep this an async generator
 
     monkeypatch.setattr(gateway_run, "NexusLoop", TimeoutLoop)
-    from utils import session_bus
+    from nexus.common import session_bus
     monkeypatch.setattr(session_bus, "set_active_session_id", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(session_bus, "sync_loop_from_disk", lambda _loop: None)
     monkeypatch.setattr("authentication.is_gateway_authorized", lambda _platform, _sender: True)

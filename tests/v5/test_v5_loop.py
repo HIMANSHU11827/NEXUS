@@ -59,8 +59,8 @@ async def test_v5_perception():
     print("\nTesting V5 Loop - Perception Layer")
     print("=" * 50)
     
-    from orchestrators.v5.perceive import PerceptionLayer
-    from orchestrators.v5.core import V5TurnContext
+    from nexus.main_agent.perceive import PerceptionLayer
+    from nexus.main_agent.core import V5TurnContext
     
     perception = PerceptionLayer(str(project_root))
     turn = V5TurnContext(
@@ -86,9 +86,9 @@ async def test_v5_paorr():
     print("\nTesting V5 Loop - PAORR Enhanced")
     print("=" * 50)
     
-    from orchestrators.v5.paorr import PAORREnhanced
-    from orchestrators.v5.perceive import PerceptionLayer
-    from orchestrators.v5.core import V5TurnContext
+    from nexus.main_agent.paorr import PAORREnhanced
+    from nexus.main_agent.perceive import PerceptionLayer
+    from nexus.main_agent.core import V5TurnContext
     
     paorr = PAORREnhanced(str(project_root))
     perception = PerceptionLayer(str(project_root))
@@ -121,8 +121,8 @@ async def test_v5_meta_learning():
     print("\nTesting V5 Loop - Meta-Learning")
     print("=" * 50)
     
-    from orchestrators.v5.meta import MetaLearningLayer, Experience
-    from orchestrators.v5.core import V5Runtime
+    from nexus.main_agent.meta import MetaLearningLayer, Experience
+    from nexus.main_agent.core import V5Runtime
     from datetime import datetime
     
     meta = MetaLearningLayer(str(project_root))
@@ -153,7 +153,7 @@ async def test_v5_quantum():
     print("\nTesting V5 Loop - Quantum Actor Model")
     print("=" * 50)
     
-    from orchestrators.v5.quantum import QuantumActorModel
+    from nexus.main_agent.quantum import QuantumActorModel
     
     quantum = QuantumActorModel(str(project_root))
     
@@ -173,7 +173,7 @@ async def test_v5_consciousness():
     print("\nTesting V5 Loop - Consciousness Layer")
     print("=" * 50)
     
-    from orchestrators.v5.conscious import ConsciousnessLayer
+    from nexus.main_agent.conscious import ConsciousnessLayer
     
     consciousness = ConsciousnessLayer(str(project_root))
     

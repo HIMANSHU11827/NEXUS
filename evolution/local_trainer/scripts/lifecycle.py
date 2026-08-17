@@ -304,7 +304,7 @@ class SelfImprovementLifecycle:
     def _register_gguf_model(self, gguf_path: str) -> None:
         """Register GGUF model with llama.cpp provider so NATE can use it."""
         try:
-            from providers.llama_cpp import LlamaCPPProvider
+            from models.providers.local.llama_cpp import LlamaCPPProvider
             provider = LlamaCPPProvider()
 
             if provider.llm:

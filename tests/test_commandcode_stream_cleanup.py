@@ -1,5 +1,5 @@
 def test_commandcode_http_stream_closes_response_on_completion(monkeypatch):
-    from providers.commandcode import CommandCodeProvider
+    from models.providers.api.commandcode import CommandCodeProvider
 
     class Response:
         status_code = 200

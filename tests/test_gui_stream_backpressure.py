@@ -3,7 +3,7 @@ import time
 
 
 def test_stream_queue_is_bounded_and_releases_blocked_producer_on_cancel():
-    from gui.api import _CancellableStreamQueue
+    from apps.web.api import _CancellableStreamQueue
 
     stopped = threading.Event()
     stream_queue = _CancellableStreamQueue(stopped, maxsize=1)

@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .continuity import inspect_continuity, _timestamp
-from providers.reliability import redact_secrets
+from models.providers.core.reliability import redact_secrets
 
 logger = logging.getLogger("nexus.memory")
 
@@ -940,7 +940,7 @@ class MemoryManager:
         if not user_message:
             return ""
         try:
-            from kernel import get_nexus_kernel
+            from nexus.runtime.kernel import get_nexus_kernel
             kernel = get_nexus_kernel()
             result = kernel.rag.retrieve_as_text(user_message, top_k=3)
             if result and "No relevant" not in result:
@@ -1066,7 +1066,7 @@ class MemoryManager:
         returns "" on any failure.
         """
         try:
-            from skills.engine import NexusSkillEngine
+            from extensions.skills.built_in.engine import NexusSkillEngine
 
             engine = NexusSkillEngine(self.root)
             selected = engine.select_skills(user_message or "", limit=limit) or []

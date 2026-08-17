@@ -1,6 +1,6 @@
 import asyncio
 
-from tools.planning.scripts.planning import PlanningTool
+from extensions.tools.built_in.planning.scripts.planning import PlanningTool
 from nexus.work_items import load_work_item, project_work_item_event, reconcile_checklist_work_item
 
 
@@ -33,7 +33,7 @@ def test_task_status_reconciliation_updates_work_item(tmp_path):
     created = asyncio.run(tool.execute(action="create", goal="Fix the loop", plan_spec=spec, session_id="s2"))
     task_id = next(line.split("] [", 1)[1].split("]", 1)[0] for line in created.output.splitlines() if "] [task_" in line)
 
-    from tools.task.scripts.task import TaskTool
+    from extensions.tools.built_in.task.scripts.task import TaskTool
     updated = asyncio.run(TaskTool(str(tmp_path)).execute(action="update", id=task_id, status="completed", session_id="s2"))
     item = load_work_item(str(tmp_path), "s2", task_id)
 

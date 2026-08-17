@@ -4,17 +4,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from mcp.client import MCPClient
-from mcp.security import (
+from extensions.mcp.core.client import MCPClient
+from extensions.mcp.core.security import (
     bounded_int,
     read_bounded_line,
     redact_secret_text,
     workspace_root,
 )
-from plugins.trust import PluginInstallDisabled, require_unverified_install_opt_in
-from skills.registry import SkillRegistry
-from tools.nexus_tools.base_tool import BaseTool, ToolResult
-from tools.nexus_tools.registry import ToolEntry, ToolRegistry
+from extensions.plugins.built_in.trust import PluginInstallDisabled, require_unverified_install_opt_in
+from extensions.skills.built_in.registry import SkillRegistry
+from extensions.tools.built_in.nexus_tools.base_tool import BaseTool, ToolResult
+from extensions.tools.built_in.nexus_tools.registry import ToolEntry, ToolRegistry
 
 
 class RecordingTool(BaseTool):
@@ -343,7 +343,7 @@ def test_skill_registry_supports_legacy_flat_files(tmp_path):
 
 
 def test_skill_master_instances_are_keyed_by_root(tmp_path):
-    from skills import NexusSkillMaster
+    from extensions.skills.built_in import NexusSkillMaster
 
     NexusSkillMaster._reset_instance()
     root_a = tmp_path / "a"
@@ -369,7 +369,7 @@ def test_skill_master_instances_are_keyed_by_root(tmp_path):
 
 
 def test_skill_master_delete_protects_legacy_skills_without_force(tmp_path):
-    from skills import NexusSkillMaster
+    from extensions.skills.built_in import NexusSkillMaster
 
     NexusSkillMaster._reset_instance()
     legacy_dir = tmp_path / "skills" / "legacy"
@@ -386,7 +386,7 @@ def test_skill_master_delete_protects_legacy_skills_without_force(tmp_path):
 
 
 def test_skill_master_active_prompt_honors_disabled_skill_config(tmp_path):
-    from skills import NexusSkillMaster
+    from extensions.skills.built_in import NexusSkillMaster
 
     NexusSkillMaster._reset_instance()
     skill_root = tmp_path / ".opencode" / "skills"
@@ -413,7 +413,7 @@ def test_skill_master_active_prompt_honors_disabled_skill_config(tmp_path):
 
 
 def test_skill_master_active_prompt_honors_inactive_custom_skill_config(tmp_path):
-    from skills import NexusSkillMaster
+    from extensions.skills.built_in import NexusSkillMaster
 
     NexusSkillMaster._reset_instance()
     skill_root = tmp_path / ".opencode" / "skills" / "reviewer"

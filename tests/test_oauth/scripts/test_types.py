@@ -1,5 +1,5 @@
 
-from providers.oauth.types import OAuthAuthInfo, OAuthCredentials, OAuthPrompt
+from models.providers.auth.oauth.types import OAuthAuthInfo, OAuthCredentials, OAuthPrompt
 
 
 class TestOAuthCredentials:

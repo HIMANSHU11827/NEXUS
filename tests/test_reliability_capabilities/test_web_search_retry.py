@@ -12,7 +12,7 @@ from urllib import error as urlerror
 
 import pytest
 
-import tools.web_search.scripts.web_search as ws_mod
+import extensions.tools.built_in.web_search.scripts.web_search as ws_mod
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 

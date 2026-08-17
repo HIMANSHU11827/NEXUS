@@ -15,7 +15,7 @@ def _archive(*entries):
 
 
 def test_safe_zip_extraction_preserves_nested_files(tmp_path):
-    from gui.api import _safe_extract_zip
+    from apps.web.api import _safe_extract_zip
 
     with _archive(("repo/src/main.py", "print('ok')")) as archive:
         _safe_extract_zip(archive, str(tmp_path / "extract"))
@@ -25,7 +25,7 @@ def test_safe_zip_extraction_preserves_nested_files(tmp_path):
 
 @pytest.mark.parametrize("name", ["../escape.txt", "repo/../../escape.txt", "..\\escape.txt"])
 def test_safe_zip_extraction_rejects_traversal(tmp_path, name):
-    from gui.api import _safe_extract_zip
+    from apps.web.api import _safe_extract_zip
 
     with _archive((name, "escape")) as archive:
         with pytest.raises(RuntimeError, match="traversal|absolute"):
@@ -35,7 +35,7 @@ def test_safe_zip_extraction_rejects_traversal(tmp_path, name):
 
 
 def test_forced_plugin_install_preserves_existing_on_download_failure(monkeypatch, tmp_path):
-    import gui.api as api
+    import apps.web.api as api
 
     monkeypatch.setenv("NEXUS_ALLOW_UNVERIFIED_PLUGIN_INSTALL", "1")
     monkeypatch.setattr(api, "_ROOT", str(tmp_path))
@@ -58,7 +58,7 @@ def test_forced_plugin_install_preserves_existing_on_download_failure(monkeypatc
 
 
 def test_plugin_install_promotes_staged_source(monkeypatch, tmp_path):
-    import gui.api as api
+    import apps.web.api as api
 
     monkeypatch.setenv("NEXUS_ALLOW_UNVERIFIED_PLUGIN_INSTALL", "1")
     monkeypatch.setattr(api, "_ROOT", str(tmp_path))
@@ -79,7 +79,7 @@ def test_plugin_install_promotes_staged_source(monkeypatch, tmp_path):
 
 
 def test_artifact_archive_path_rejects_symlink_escape(tmp_path):
-    from gui.api import _safe_artifact_file_path
+    from apps.web.api import _safe_artifact_file_path
 
     root = tmp_path / "artifacts"
     root.mkdir()

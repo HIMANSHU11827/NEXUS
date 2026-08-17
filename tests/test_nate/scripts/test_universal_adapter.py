@@ -1,6 +1,6 @@
 import pytest
 
-from intelligence.nate.universal_adapter import UniversalAdapter, UniversalTool
+from nexus.capabilities.intelligence.nate.universal_adapter import UniversalAdapter, UniversalTool
 
 
 @pytest.fixture

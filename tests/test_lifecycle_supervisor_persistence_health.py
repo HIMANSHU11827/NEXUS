@@ -1,5 +1,5 @@
-import lifecycle.persistence as persistence
-from lifecycle.supervisor import ComponentSupervisor, LifecycleStage
+import nexus.lifecycle.managers.persistence as persistence
+from nexus.lifecycle.managers.supervisor import ComponentSupervisor, LifecycleStage
 
 
 def test_supervisor_stats_expose_persistence_health(tmp_path, monkeypatch):

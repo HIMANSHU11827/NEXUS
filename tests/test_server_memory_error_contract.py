@@ -2,9 +2,9 @@
 
 from fastapi.testclient import TestClient
 
-import authentication
+import security.core.auth
 import memory
-import server
+import apps.api
 
 
 def _client(monkeypatch):

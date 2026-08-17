@@ -5,8 +5,8 @@ import types
 
 from fastapi.testclient import TestClient
 
-import authentication
-import server
+import security.core.auth
+import apps.api
 
 
 def _client(monkeypatch):

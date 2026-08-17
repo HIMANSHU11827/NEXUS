@@ -9,9 +9,9 @@ import asyncio
 
 import pytest
 
-from tools.nexus_tools.base_tool import ToolResult
-from tools.nexus_tools.registry import ToolEntry, ToolRegistry
-import tools.nexus_tools.registry as registry_mod
+from extensions.tools.built_in.nexus_tools.base_tool import ToolResult
+from extensions.tools.built_in.nexus_tools.registry import ToolEntry, ToolRegistry
+import extensions.tools.built_in.nexus_tools.registry as registry_mod
 
 
 class _FlakyTool:

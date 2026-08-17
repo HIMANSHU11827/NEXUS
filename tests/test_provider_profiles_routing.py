@@ -2,7 +2,7 @@ import multiprocessing
 import time
 from pathlib import Path
 
-from providers.profiles import ProviderProfile, ProviderProfileStore
+from models.providers.core.profiles import ProviderProfile, ProviderProfileStore
 
 
 def test_profile_selection_ignores_disabled_and_cooling_credentials(tmp_path):

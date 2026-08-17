@@ -74,8 +74,8 @@ class TestClassification:
         # providers.reliability.classify_failure should classify a rate-limit
         # shaped provider error identically when importable.
         try:
-            from providers.reliability import classify_failure as provider_classify
-            from providers.reliability import FailureClass as ProviderFC
+            from models.providers.core.reliability import classify_failure as provider_classify
+            from models.providers.core.reliability import FailureClass as ProviderFC
 
             exc = RuntimeError("Rate limit reached for requests")
             result = classify_exception(exc)

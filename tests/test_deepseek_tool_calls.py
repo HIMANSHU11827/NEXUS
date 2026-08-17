@@ -1,6 +1,6 @@
 import json
 
-from providers.deepseek import DeepSeekProvider
+from models.providers.api.deepseek import DeepSeekProvider
 
 
 def test_deepseek_native_tool_envelope_is_parser_compatible():

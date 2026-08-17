@@ -10,7 +10,7 @@ import pytest
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from orchestrators.v5.bench import V5Bench
+from nexus.main_agent.bench import V5Bench
 
 
 def _write_replay(tmp_path, entries):
@@ -314,7 +314,7 @@ def test_run_collects_verdicts(tmp_path):
 # Phase 2 tests — Hive-powered agentic harness (items #9–#20)
 # ─────────────────────────────────────────────────────────────────────────
 
-from orchestrators.v5.bench import V5HiveBench, _parse_hive_verdict, _format_replay_for_hive
+from nexus.main_agent.bench import V5HiveBench, _parse_hive_verdict, _format_replay_for_hive
 
 
 class _MockSubAgent:

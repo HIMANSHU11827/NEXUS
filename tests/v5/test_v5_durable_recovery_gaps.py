@@ -11,8 +11,8 @@
 import asyncio
 import logging
 
-from orchestrators.v5.background_runner import V5BackgroundRunner
-from orchestrators.v5.cron import V5Cron
+from nexus.main_agent.background_runner import V5BackgroundRunner
+from nexus.main_agent.cron import V5Cron
 
 
 class _Runner(V5BackgroundRunner):

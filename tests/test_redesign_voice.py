@@ -10,10 +10,10 @@ import time
 
 import numpy as np
 
-import voice.stt as stt_module
-from voice import STTUnavailable, VoiceAssistant, VoiceSettings
-from voice.audio_io import trim_silence
-from voice.stt import NexusWhisperSTT, _Backend
+import apps.voice.stt as stt_module
+from apps.voice import STTUnavailable, VoiceAssistant, VoiceSettings
+from apps.voice.audio_io import trim_silence
+from apps.voice.stt import NexusWhisperSTT, _Backend
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────

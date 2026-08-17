@@ -1,7 +1,7 @@
 import pytest
 
 from nexus.commands import CommandContext, get_registry
-from server import list_commands
+from apps.api import list_commands
 
 
 def test_command_catalog_is_projected_from_central_registry():

@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from tools.ask_question.scripts.ask_question import AskQuestionTool
-from tools.nexus_tools.registry import ToolRegistry
+from extensions.tools.built_in.ask_question.scripts.ask_question import AskQuestionTool
+from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
 
 
 @pytest.mark.asyncio

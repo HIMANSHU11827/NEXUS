@@ -1,6 +1,6 @@
 import json
 
-from orchestrators.v5.verification_recipes import detect_verification_recipe
+from nexus.main_agent.verification_recipes import detect_verification_recipe
 
 
 def test_detects_node_phase_checks_from_package_scripts(tmp_path):

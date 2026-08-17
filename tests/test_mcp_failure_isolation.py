@@ -25,9 +25,9 @@ import time
 
 import pytest
 
-import mcp.client.scripts.client as client_mod
-from mcp.client import MCPClient
-from mcp.client.scripts.client import (
+import extensions.mcp.core.client.scripts.client as client_mod
+from extensions.mcp.core.client import MCPClient
+from extensions.mcp.core.client.scripts.client import (
     MAX_RECONNECT_ATTEMPTS,
     MCP_BREAKER_COOLDOWN,
     MCP_HANDSHAKE_TIMEOUT,

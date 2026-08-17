@@ -14,10 +14,10 @@ import asyncio
 import datetime
 import json
 
-from context import compact_messages, inspect
+from nexus.context import compact_messages, inspect
 from memory import MemoryBudget, estimate_tokens, expire
-from tools.knowledge.scripts.knowledge import KnowledgeTool
-from tools.memory.scripts.memory import MemoryTool
+from extensions.tools.built_in.knowledge.scripts.knowledge import KnowledgeTool
+from extensions.tools.built_in.memory.scripts.memory import MemoryTool
 
 
 class TestTokenBudget:

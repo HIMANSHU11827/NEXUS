@@ -1,8 +1,8 @@
 import asyncio
 
-import orchestrators.v5.durable_background as durable_background
-from orchestrators.v5.background_runner import V5BackgroundRunner
-from orchestrators.v5.durable_background import DurableBackgroundStore
+import nexus.main_agent.durable_background as durable_background
+from nexus.main_agent.background_runner import V5BackgroundRunner
+from nexus.main_agent.durable_background import DurableBackgroundStore
 
 
 class _Runner(V5BackgroundRunner):

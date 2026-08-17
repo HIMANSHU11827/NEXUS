@@ -1,5 +1,5 @@
-from tools.web_search.scripts.web_search import _DuckDuckGoResultsParser
-from tools.web_search.scripts.web_search import WebSearchTool
+from extensions.tools.built_in.web_search.scripts.web_search import _DuckDuckGoResultsParser
+from extensions.tools.built_in.web_search.scripts.web_search import WebSearchTool
 
 
 def test_web_search_retries_today_query_with_latest_variants(monkeypatch):

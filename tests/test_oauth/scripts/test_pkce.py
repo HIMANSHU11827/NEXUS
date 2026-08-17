@@ -1,6 +1,6 @@
 import hashlib
 
-from providers.oauth.pkce import base64url_encode, generate_oauth_state, generate_pkce
+from models.providers.auth.oauth.pkce import base64url_encode, generate_oauth_state, generate_pkce
 
 
 class TestPKCE:

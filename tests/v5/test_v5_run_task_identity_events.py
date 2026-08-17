@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrators.v5.core import NexusLoopV5
+from nexus.main_agent.core import NexusLoopV5
 
 
 RUN_LIFECYCLE_EVENTS = (

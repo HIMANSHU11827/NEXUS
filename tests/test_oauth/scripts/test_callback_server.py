@@ -1,6 +1,6 @@
 import pytest
 
-from providers.oauth.callback_server import (
+from models.providers.auth.oauth.callback_server import (
     parse_oauth_authorization_input,
 )
 

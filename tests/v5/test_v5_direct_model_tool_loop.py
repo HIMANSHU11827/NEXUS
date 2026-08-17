@@ -4,9 +4,9 @@ import asyncio
 import json
 import time
 
-import orchestrators.v5.direct_loop as direct_loop_module
-from orchestrators.v5.core import NexusLoopV5, _DuckPerceived
-from orchestrators.v5.events import V5EventEmitter
+import nexus.main_agent.direct_loop as direct_loop_module
+from nexus.main_agent.core import NexusLoopV5, _DuckPerceived
+from nexus.main_agent.events import V5EventEmitter
 from nexus.run_context import load_run_context
 from nexus.control_plane import create_plan_version, load_plan
 

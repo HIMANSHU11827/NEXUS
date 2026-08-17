@@ -5,7 +5,7 @@ Shows exact token savings, LLM call reduction, and healing improvements.
 
 import pytest
 
-from intelligence.nate.nate_engine import NATE
+from nexus.capabilities.intelligence.nate.nate_engine import NATE
 
 
 @pytest.fixture

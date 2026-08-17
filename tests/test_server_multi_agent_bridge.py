@@ -19,7 +19,7 @@ class _Hive:
 
 @pytest.mark.asyncio
 async def test_multi_agent_endpoint_launches_real_hive(monkeypatch):
-    import server
+    import apps.api
 
     monkeypatch.setattr(server, "_get_hive_engine", lambda: _Hive())
     monkeypatch.setattr(server, "_persist_hive_manifest", lambda: None)
@@ -39,7 +39,7 @@ async def test_multi_agent_endpoint_launches_real_hive(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_multi_agent_endpoint_rejects_empty_prompt():
-    import server
+    import apps.api
 
     class Request:
         async def json(self):

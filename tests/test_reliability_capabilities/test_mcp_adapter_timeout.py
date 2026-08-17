@@ -4,7 +4,7 @@ The hard-coded 30s default must be tunable via NEXUS_MCP_TOOL_TIMEOUT_S
 (min 1s, float), with the tool definition's own ``timeout`` winning.
 """
 
-from tools.nexus_tools.mcp_adapter import MCPToolAdapter, _mcp_timeout_default
+from extensions.tools.built_in.nexus_tools.mcp_adapter import MCPToolAdapter, _mcp_timeout_default
 
 
 def _adapter(env_value=None, tool_timeout=None, monkeypatch=None):

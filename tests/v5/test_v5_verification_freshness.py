@@ -1,10 +1,10 @@
 import asyncio
 import json
 
-from orchestrators.v5.verification import V5Verifier
-from orchestrators.v5.run_evidence import build_run_evidence
-from orchestrators.v5.verification_state import VerifierStateStore
-from orchestrators.v5.verification_events import VerifierEventStore
+from nexus.main_agent.verification import V5Verifier
+from nexus.main_agent.run_evidence import build_run_evidence
+from nexus.main_agent.verification_state import VerifierStateStore
+from nexus.main_agent.verification_events import VerifierEventStore
 
 
 def test_verification_freshness_detects_referenced_file_edits(tmp_path):
@@ -66,7 +66,7 @@ def test_run_evidence_projects_cross_process_stale_state(tmp_path):
         "turn_id": "turn-1", "success": True,
         "verification": {"success": True},
     }, session_id="session-1")
-    from orchestrators.v5.run_evidence import write_run_evidence
+    from nexus.main_agent.run_evidence import write_run_evidence
     path = write_run_evidence(str(tmp_path), evidence)
     loaded = json.loads(open(path, encoding="utf-8").read())
     assert loaded["verification"]["durable_status"] == "stale"

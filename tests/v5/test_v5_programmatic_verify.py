@@ -3,9 +3,9 @@ import json
 import time
 from types import SimpleNamespace
 
-import orchestrators.v5.programmatic_verify as programmatic_verify
-from orchestrators.v5.verification_events import VerifierEventStore
-from orchestrators.v5.verification_state import VerifierStateStore
+import nexus.main_agent.programmatic_verify as programmatic_verify
+from nexus.main_agent.verification_events import VerifierEventStore
+from nexus.main_agent.verification_state import VerifierStateStore
 
 
 class _FakeSandbox:

@@ -22,7 +22,7 @@ def _configure_session_module(module_name, tmp_path, monkeypatch):
 
 
 def test_server_clear_session_uses_atomic_store_and_updates_cached_loop(tmp_path, monkeypatch):
-    import server
+    import apps.api
 
     class CachedLoop:
         def __init__(self):
@@ -44,7 +44,7 @@ def test_server_clear_session_uses_atomic_store_and_updates_cached_loop(tmp_path
 
 
 def test_server_title_writer_uses_session_lock_and_atomic_json(tmp_path):
-    import server
+    import apps.api
 
     meta_path = tmp_path / "session_a.meta"
     server._write_session_title_sync(str(meta_path), "Renamed")
@@ -54,7 +54,7 @@ def test_server_title_writer_uses_session_lock_and_atomic_json(tmp_path):
 
 
 def test_gui_clear_session_uses_atomic_store_and_updates_cached_loop(tmp_path, monkeypatch):
-    import gui.api as gui_api
+    import apps.web.api as gui_api
 
     class CachedLoop:
         def __init__(self):
@@ -71,7 +71,7 @@ def test_gui_clear_session_uses_atomic_store_and_updates_cached_loop(tmp_path, m
 
 
 def test_gui_title_writer_uses_shared_store(tmp_path):
-    import gui.api as gui_api
+    import apps.web.api as gui_api
 
     meta_path = tmp_path / "session_a.meta"
     gui_api._write_session_title_sync(str(meta_path), "Renamed")

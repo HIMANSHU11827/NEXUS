@@ -4,8 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-import server
-import authentication
+import apps.api
+import security.core.auth
 from nexus.work_items import create_work_item
 from nexus.run_context import start_run_context
 
@@ -131,7 +131,7 @@ def test_work_item_api_validates_limit_and_preserves_legacy_tasks_route(tmp_path
 def test_work_event_sequences_are_unique_across_worker_processes(tmp_path):
     events_dir = tmp_path / "events"
     script = (
-        "import server\n"
+        "import apps.api\n"
         f"server._WORK_EVENTS_DIR = {str(events_dir)!r}\n"
         "server._WORK_EVENT_SEQUENCES.clear()\n"
         "for index in range(10):\n"

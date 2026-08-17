@@ -21,9 +21,9 @@ import time
 
 import pytest
 
-from providers.factory import NexusProviderFactory
-from providers.model_bench import rank_models, score_model
-from providers.reliability import (
+from models.providers.core.factory import NexusProviderFactory
+from models.providers.core.model_bench import rank_models, score_model
+from models.providers.core.reliability import (
     Classification,
     FailureClass,
     ProviderCallError,
@@ -32,7 +32,7 @@ from providers.reliability import (
     call_with_reliability,
     classify_failure,
 )
-from providers.router import ModelRouter
+from models.providers.core.router import ModelRouter
 
 
 # ---------------------------------------------------------------------------
@@ -84,8 +84,8 @@ def _factory(monkeypatch, cfg, available, providers_by_name, env_model=""):
 
 
 def _router(monkeypatch, **overrides):
-    from providers.attempts import ProviderAttemptRecorder
-    from providers.reliability import CircuitBreakerRegistry
+    from models.providers.core.attempts import ProviderAttemptRecorder
+    from models.providers.core.reliability import CircuitBreakerRegistry
 
     router = object.__new__(ModelRouter)
     router.mode = "CLOUD"
@@ -400,7 +400,7 @@ def test_fallback_diagnostics_never_embed_api_keys(monkeypatch):
 
 
 def test_fallback_circuit_open_records_skipped_attempt_and_bounds_loop(monkeypatch):
-    from providers.reliability import CircuitBreakerRegistry
+    from models.providers.core.reliability import CircuitBreakerRegistry
 
     router = _router(
         monkeypatch=monkeypatch,
@@ -593,7 +593,7 @@ def test_rank_models_ignores_malformed_annotations_without_raising():
 
 
 def test_fast_tier_filters_real_provider_yml_annotations():
-    from providers.model_bench import _provider_annotations
+    from models.providers.core.model_bench import _provider_annotations
 
     openrouter = _provider_annotations("openrouter")
     if not openrouter.get("cost_per_1m"):

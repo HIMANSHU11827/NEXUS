@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 
 def test_list_hives_exposes_partial_worker_failure(monkeypatch):
-    import server
+    import apps.api
 
     live = {
         "a-success": SimpleNamespace(status="success"),

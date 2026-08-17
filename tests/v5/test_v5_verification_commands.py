@@ -1,5 +1,5 @@
-from orchestrators.v5.verification_commands import classify_verification_command
-from orchestrators.v5.verification import V5Verifier
+from nexus.main_agent.verification_commands import classify_verification_command
+from nexus.main_agent.verification import V5Verifier
 import asyncio
 
 

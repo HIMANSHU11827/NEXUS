@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mcp.catalog.scripts.catalog import MCPServerCatalog, MCPServerDef
+from extensions.mcp.core.catalog.scripts.catalog import MCPServerCatalog, MCPServerDef
 
 
 def test_mcp_catalog_persists_env_references_without_expanding_secret(tmp_path, monkeypatch):

@@ -7,7 +7,7 @@ import types
 import pytest
 
 from hive.engine import NexusHiveEngine, SubAgent
-from tools.hive.scripts.hive import HiveTool
+from extensions.tools.built_in.hive.scripts.hive import HiveTool
 
 
 def test_hive_tool_forwards_subagent_events_to_runtime_sink(tmp_path):

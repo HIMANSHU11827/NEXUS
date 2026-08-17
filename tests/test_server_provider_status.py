@@ -1,4 +1,4 @@
-import server
+import apps.api
 
 
 class _LocalProvider:

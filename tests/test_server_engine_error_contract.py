@@ -1,11 +1,11 @@
 import pytest
 from fastapi import HTTPException
 
-import server
+import apps.api
 
 
 def test_engine_status_returns_public_error_only(monkeypatch):
-    import utils.engine_manager as engine_manager
+    import nexus.common.engine_manager as engine_manager
 
     secret_error = "local model path=C:\\private\\model.gguf token=sk-live-engine"
     monkeypatch.setattr(

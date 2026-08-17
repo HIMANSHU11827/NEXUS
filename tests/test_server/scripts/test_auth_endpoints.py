@@ -54,14 +54,14 @@ def _global_mocks():
 
 @pytest.fixture
 def client():
-    from server import app
+    from apps.api import app
     with TestClient(app) as c:
         yield c
 
 
 class TestPublicEndpoints:
     def test_shutdown_accepts_non_awaitable_loop_test_double(self):
-        from server import _drain_loop_finalizers
+        from apps.api import _drain_loop_finalizers
 
         loop = MagicMock()
         loop.aclose.return_value = None
@@ -96,7 +96,7 @@ class TestPublicEndpoints:
         assert resp.json() == {"status": "success", "agent": "researcher"}
 
     def test_permission_decisions_endpoint_returns_scrubbed_log(self, client):
-        from permissions import PermissionMode, PermissionSystem
+        from security.permissions import PermissionMode, PermissionSystem
 
         permissions = PermissionSystem()
         old_mode = permissions.mode

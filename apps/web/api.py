@@ -60,8 +60,8 @@ from nexus.runtime import (
 from nexus.runtime import (
     session_file_path as runtime_session_file_path,
 )
-from orchestrators import NexusLoop
-from utils.context_scrubber import StreamingContextScrubber
+from nexus.main_agent import NexusLoop
+from nexus.common.context_scrubber import StreamingContextScrubber
 
 _UPLOAD_DIR = os.path.join(_ROOT, "workspace", "uploads")
 os.makedirs(_UPLOAD_DIR, exist_ok=True)
@@ -136,7 +136,7 @@ def refresh_provider_runtime() -> str:
         if isinstance(provider_cfg, dict):
             default_provider = str(provider_cfg.get("default_provider") or "").strip()
         try:
-            from providers.factory import NexusProviderFactory
+            from models.providers.core.factory import NexusProviderFactory
             factory = NexusProviderFactory()
             if hasattr(factory, "loader") and hasattr(factory.loader, "reload"):
                 factory.loader.reload()
@@ -295,7 +295,7 @@ def audit_event(request: Request, status: str, detail: str = "") -> None:
 
 
 def require_config_write_allowed(request: Request) -> None:
-    from authentication import validate_dashboard_token
+    from security.core.auth import validate_dashboard_token
     supplied = request.headers.get("x-nexus-token", "")
     if not validate_dashboard_token(supplied):
         raise HTTPException(status_code=401, detail="Invalid dashboard token")
@@ -310,7 +310,7 @@ def require_local_runtime_control(request: Request) -> None:
 
 
 def _check_gui_terminal_permission(sid: str, turn_id: str, command: str):
-    from permissions import PermissionMode, PermissionSystem
+    from security.permissions import PermissionMode, PermissionSystem
 
     loop = _LOOPS.get(sid)
     mode_name = str(getattr(loop, "permission_mode", "") if loop else "auto").strip().lower() or "auto"
@@ -361,7 +361,7 @@ async def security_middleware(request: Request, call_next):
     # dashboard authentication used by the canonical API. Health remains a
     # public liveness probe so a reverse proxy can monitor the process.
     if not _LOCAL_ONLY and request.url.path != "/api/health":
-        from authentication import check_auth
+        from security.core.auth import check_auth
         if check_auth(request) is None:
             audit_event(request, "blocked", "not authenticated")
             return JSONResponse({"detail": "Not authenticated"}, status_code=401)
@@ -1009,7 +1009,7 @@ def build_workflow_plan(prompt: str) -> List[Dict[str, Any]]:
     # Attempt dynamic LLM plan generation with a strict 3.5 seconds timeout
     def generate_plan():
         try:
-            from kernel import get_nexus_kernel
+            from nexus.runtime.kernel import get_nexus_kernel
             kernel = get_nexus_kernel(_ROOT)
             
             system_instructions = (
@@ -1173,7 +1173,7 @@ def build_workflow_todo_markdown(prompt: str, plan: List[Dict[str, Any]]) -> str
 
 def write_workspace_todo_plan(content: str) -> str:
     """Persist the visible agent plan as a real workspace file."""
-    from tools.planning.scripts.planning import plan_transaction
+    from extensions.tools.built_in.planning.scripts.planning import plan_transaction
 
     workspace_dir = os.path.join(_ROOT, "workspace")
     os.makedirs(workspace_dir, exist_ok=True)
@@ -1203,7 +1203,7 @@ def workflow_needs_plan(prompt: str) -> bool:
 
 
 def clear_workspace_todo_plan() -> None:
-    from tools.planning.scripts.planning import plan_transaction
+    from extensions.tools.built_in.planning.scripts.planning import plan_transaction
 
     try:
         with plan_transaction(_ROOT):
@@ -1590,7 +1590,7 @@ def filter_chat_chunk(chunk: str, show_thinking: bool = False) -> str:
     return "".join(filtered)
 
 def get_loop(session_id: str = "default") -> NexusLoop:
-    from utils.session_bus import sync_loop_from_disk
+    from nexus.common.session_bus import sync_loop_from_disk
 
     session_id = safe_session_id(session_id)
     if session_id not in _LOOPS:
@@ -1681,7 +1681,7 @@ def encode_chat_stream_frame(event: str, payload: Any, *, legacy: bool = False) 
 
 @app.get("/api/sessions/active")
 def get_active_session():
-    from utils.session_bus import get_active_session
+    from nexus.common.session_bus import get_active_session
 
     active = get_active_session(_ROOT)
     sid = safe_session_id(active.get("session_id", "default"))
@@ -1695,7 +1695,7 @@ def get_active_session():
 
 @app.post("/api/sessions/active")
 async def set_active_session(request: Request):
-    from utils.session_bus import set_active_session_id
+    from nexus.common.session_bus import set_active_session_id
 
     data = await request.json()
     sid = set_active_session_id(_ROOT, data.get("session_id", "default"), source=str(data.get("source", "api")))
@@ -1746,7 +1746,7 @@ def list_sessions():
 
 @app.post("/api/sessions/new")
 def create_session():
-    from utils.session_bus import set_active_session_id
+    from nexus.common.session_bus import set_active_session_id
 
     new_id = f"session_{int(time.time())}"
     clear_workspace_todo_plan()
@@ -1757,7 +1757,7 @@ def create_session():
 
 @app.post("/api/sessions/load")
 async def load_session(request: Request):
-    from utils.session_bus import set_active_session_id
+    from nexus.common.session_bus import set_active_session_id
 
     data = await request.json()
     sid = safe_session_id(data.get("id", "default"))
@@ -1886,7 +1886,7 @@ async def chat(request: Request):
             {"status": "error", "message": f"Invalid chat JSON: {exc}"},
             status_code=400,
     )
-    from utils.session_bus import set_active_session_id
+    from nexus.common.session_bus import set_active_session_id
 
     default_p = refresh_provider_runtime()
     try:
@@ -2374,9 +2374,9 @@ async def run_work_command(request: Request):
         timeout = 90
 
     try:
-        from tools.nexus_tools.bash_tool import BashTool
+        from extensions.tools.built_in.nexus_tools.bash_tool import BashTool
     except ModuleNotFoundError:
-        from tools.bash.scripts.bash import BashTool
+        from extensions.tools.built_in.bash.scripts.bash import BashTool
 
     parent_event = None
     parent_event_id = str(data.get("event_id") or "").strip()
@@ -3432,7 +3432,7 @@ def _plugin_marketplace_entries(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def discover_plugins() -> List[Dict[str, Any]]:
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     cfg = kernel.config.data
@@ -3609,7 +3609,7 @@ def _download_github_zip(repo_url: str, target_dir: str) -> None:
 
 
 def install_plugin_from_source(raw_url: str, kind: str = "plugin", force: bool = False, enable: bool = True) -> Dict[str, Any]:
-    from plugins.trust import PluginInstallDisabled, require_unverified_install_opt_in
+    from extensions.plugins.built_in.trust import PluginInstallDisabled, require_unverified_install_opt_in
 
     try:
         require_unverified_install_opt_in()
@@ -3686,8 +3686,8 @@ def install_plugin_from_source(raw_url: str, kind: str = "plugin", force: bool =
 def build_skill_state() -> List[Dict[str, Any]]:
     """Build the dashboard skill list from the on-disk skill registry."""
     try:
-        from kernel import get_nexus_kernel
-        from skills import NexusSkillMaster
+        from nexus.runtime.kernel import get_nexus_kernel
+        from extensions.skills.built_in import NexusSkillMaster
 
         cfg = get_nexus_kernel(_ROOT).config.data
         custom_cfg = cfg.get("custom_skill_configs", {}) if isinstance(cfg, dict) else {}
@@ -3762,11 +3762,11 @@ def build_mcp_state(kernel) -> Dict[str, Any]:
 def build_audit_state() -> Dict[str, Any]:
     """Return compact control-plane status. Never raises — returns empty on error."""
     try:
-        from optimization.evidence_ledger import EvidenceLedger
-        from optimization.mission_replay import MissionReplay
-        from optimization.roadmap import RoadmapAuditor
-        from optimization.tool_economy import ToolEconomy
-        from optimization.unified_graph import UnifiedNexusGraph
+        from evaluation.evidence_ledger import EvidenceLedger
+        from observability.mission_replay import MissionReplay
+        from maintenance.roadmap import RoadmapAuditor
+        from observability.tool_economy import ToolEconomy
+        from observability.unified_graph import UnifiedNexusGraph
 
         graph = UnifiedNexusGraph(_ROOT)
         loaded_graph = graph.load()
@@ -3860,7 +3860,7 @@ def _python_with_module(module_name: str) -> List[str]:
 def build_evolution_plan() -> Dict[str, Any]:
     from evolution.context import EvolutionContextMap
 
-    from optimization.roadmap import RoadmapAuditor
+    from maintenance.roadmap import RoadmapAuditor
 
     roadmap = RoadmapAuditor(_ROOT).audit()
     context = EvolutionContextMap(_ROOT).build()
@@ -3903,8 +3903,8 @@ def build_evolution_plan() -> Dict[str, Any]:
 
 
 def run_evolution_verification() -> Dict[str, Any]:
-    from optimization.evidence_ledger import EvidenceLedger
-    from optimization.roadmap import RoadmapAuditor
+    from evaluation.evidence_ledger import EvidenceLedger
+    from maintenance.roadmap import RoadmapAuditor
 
     pytest_python = _python_with_module("pytest")
     checks = [
@@ -3994,7 +3994,7 @@ async def set_model(data: dict, request: Request):
 @app.get("/api/models/saved")
 def get_saved_models():
     """Expose only models that the operator has actually saved in provider config."""
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     providers, _instances = build_provider_state(kernel)
@@ -4143,7 +4143,7 @@ async def set_thinking(data: dict, request: Request):
 
 @app.get("/api/state")
 def get_state():
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
     get_nexus_kernel(_ROOT)
     default_provider = refresh_provider_runtime()
     sessions_root = os.path.join(_ROOT, "workspace", "sessions")
@@ -4165,7 +4165,7 @@ def get_state():
             session_titles[sid] = title
     loop = None
     try:
-        from utils.session_bus import get_active_session_id
+        from nexus.common.session_bus import get_active_session_id
         active_sid = get_active_session_id(_ROOT, "default")
         loop = get_loop(active_sid)
     except Exception:
@@ -4238,7 +4238,7 @@ async def evolution_verify(request: Request):
 
 @app.get("/api/config")
 def get_config():
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     return kernel.config.data
@@ -4265,7 +4265,7 @@ async def save_config(data: dict, request: Request):
     require_config_write_allowed(request)
     if not isinstance(data, dict):
         raise HTTPException(status_code=400, detail="Config payload must be an object")
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     try:
@@ -4284,7 +4284,7 @@ def list_plugins():
 @app.get("/api/skills")
 def api_skills():
     try:
-        from skills import NexusSkillMaster
+        from extensions.skills.built_in import NexusSkillMaster
         try:
             NexusSkillMaster(_ROOT)._load_all()
         except Exception:
@@ -4298,13 +4298,13 @@ def api_skills():
 def api_tools():
     kernel = None
     try:
-        from kernel import get_nexus_kernel
+        from nexus.runtime.kernel import get_nexus_kernel
         kernel = get_nexus_kernel(_ROOT)
     except Exception:
         pass
     tools = build_tool_state(kernel) if kernel else []
     try:
-        from tools.nexus_tools.registry import ToolRegistry
+        from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
         reg = ToolRegistry(_ROOT)
         availability = {name: entry.availability() for name, entry in reg._tools.items()}
     except Exception:
@@ -4328,7 +4328,7 @@ def api_tools():
 async def api_tool_invoke(name: str, data: dict, request: Request):
     require_config_write_allowed(request)
     try:
-        from tools.nexus_tools.registry import ToolRegistry
+        from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
         reg = ToolRegistry(_ROOT)
         entry = reg.get(name)
         if not entry:
@@ -4467,7 +4467,7 @@ async def configure_plugin(data: dict, request: Request):
     active = bool(data.get("active", True))
     plugin_config = data.get("config")
 
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     def mutate(cfg):
@@ -4500,7 +4500,7 @@ async def delete_plugin(plugin_id: str, request: Request):
     if not plugin:
         raise HTTPException(status_code=404, detail="Plugin not found")
 
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     if plugin.get("disk_removable"):
@@ -4543,7 +4543,7 @@ async def configure_asset(asset_kind: str, data: dict, request: Request):
     if not isinstance(config, dict):
         raise HTTPException(status_code=400, detail="Asset config must be an object")
 
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     def mutate(cfg):
@@ -4576,7 +4576,7 @@ async def _delete_asset_config(asset_kind: str, name: str, request: Request):
     item_name = _safe_slug(str(name), "")
     if not item_name:
         raise HTTPException(status_code=400, detail="Asset name is required")
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     def mutate(cfg):
@@ -4615,7 +4615,7 @@ async def delete_tool_asset(name: str, request: Request):
 
 @app.get("/api/hive/personas")
 def list_hive_personas():
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
     kernel = get_nexus_kernel(_ROOT)
     return kernel.hive.list_personas()
 
@@ -4627,7 +4627,7 @@ async def create_hive_persona(data: dict, request: Request):
     if not name or not description:
         raise HTTPException(status_code=400, detail="Name and description are required")
     
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
     kernel = get_nexus_kernel(_ROOT)
     success = kernel.hive.create_persona(name, description)
     if success:
@@ -4641,7 +4641,7 @@ async def modify_hive_persona(name: str, data: dict, request: Request):
     if not description:
         raise HTTPException(status_code=400, detail="Description is required")
     
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
     kernel = get_nexus_kernel(_ROOT)
     success = kernel.hive.modify_persona(name, description)
     if success:
@@ -4651,7 +4651,7 @@ async def modify_hive_persona(name: str, data: dict, request: Request):
 @app.delete("/api/hive/personas/{name}")
 async def delete_hive_persona(name: str, request: Request):
     require_config_write_allowed(request)
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
     kernel = get_nexus_kernel(_ROOT)
     success = kernel.hive.delete_persona(name)
     if success:
@@ -4666,7 +4666,7 @@ async def create_hive_mission(data: dict, request: Request):
     if not mission:
         raise HTTPException(status_code=400, detail="Mission is required")
     autostart = bool(data.get("autostart", True))
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     hive_id = kernel.hive.create_mission(mission, autostart=autostart)
@@ -4677,7 +4677,7 @@ async def create_hive_mission(data: dict, request: Request):
 @app.post("/api/hive/{hive_id}/pause")
 async def pause_hive(hive_id: str, request: Request):
     require_config_write_allowed(request)
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     count = kernel.hive.cancel_hive(hive_id)
@@ -4693,7 +4693,7 @@ async def stop_hive(hive_id: str, request: Request):
 @app.delete("/api/hive/{hive_id}")
 async def remove_hive(hive_id: str, request: Request):
     require_config_write_allowed(request)
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     with kernel.hive._lock:
@@ -4720,7 +4720,7 @@ async def remove_hive(hive_id: str, request: Request):
 @app.post("/api/hive/{hive_id}/tasks/{task_id}/stop")
 async def stop_hive_task(hive_id: str, task_id: str, request: Request):
     require_config_write_allowed(request)
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     with kernel.hive._lock:
@@ -4737,7 +4737,7 @@ async def stop_hive_task(hive_id: str, task_id: str, request: Request):
 @app.post("/api/hive/{hive_id}/tasks/{task_id}/resume")
 async def resume_hive_task(hive_id: str, task_id: str, request: Request):
     require_config_write_allowed(request)
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     with kernel.hive._lock:
@@ -4757,7 +4757,7 @@ async def resume_hive_task(hive_id: str, task_id: str, request: Request):
 @app.delete("/api/hive/{hive_id}/tasks/{task_id}")
 async def remove_hive_task(hive_id: str, task_id: str, request: Request):
     require_config_write_allowed(request)
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     with kernel.hive._lock:
@@ -4798,7 +4798,7 @@ def get_hive_merge_plan(hive_id: str):
 
 @app.post("/api/hive/{hive_id}/resume")
 async def resume_hive(hive_id: str, request: Request):
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     return kernel.hive.resume_hive(hive_id)
@@ -4812,7 +4812,7 @@ async def configure_mcp_server(data: dict, request: Request):
     if not name or not isinstance(config, dict):
         raise HTTPException(status_code=400, detail="MCP server name and config object are required")
 
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     def mutate(cfg):
@@ -4832,7 +4832,7 @@ async def delete_mcp_server(name: str, request: Request):
     if not server_name:
         raise HTTPException(status_code=400, detail="Invalid MCP server name")
 
-    from kernel import get_nexus_kernel
+    from nexus.runtime.kernel import get_nexus_kernel
 
     kernel = get_nexus_kernel(_ROOT)
     def mutate(cfg):
@@ -4849,7 +4849,7 @@ async def delete_mcp_server(name: str, request: Request):
 @app.get("/api/vision/accelerator")
 def get_vision_accelerator_state():
     try:
-        from tools.nexus_tools.vision.vision_accelerator_tool import VisionAccelerator
+        from extensions.tools.built_in.nexus_tools.vision.vision_accelerator_tool import VisionAccelerator
         return VisionAccelerator().status()
     except ImportError:
         return {"status": "unavailable", "error": "Vision accelerator not installed"}

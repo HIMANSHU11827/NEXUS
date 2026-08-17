@@ -44,7 +44,7 @@ from gateways.base import (
 from gateways.platforms import all_adapters, get_adapter
 from gateways.run import GatewayRunner, _PLATFORM_ENV_MAP, _has_required_env
 from gateways.state import GatewayStateStore
-from providers.reliability import redact_secrets
+from models.providers.core.reliability import redact_secrets
 
 logger = logging.getLogger(__name__)
 

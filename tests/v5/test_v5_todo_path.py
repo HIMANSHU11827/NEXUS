@@ -8,7 +8,7 @@ loses the plan (audit P39).
 
 import os
 
-from orchestrators.v5.core import NexusLoopV5
+from nexus.main_agent.core import NexusLoopV5
 
 
 def _bare_loop_with_root(root: str) -> NexusLoopV5:

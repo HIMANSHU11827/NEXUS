@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from providers.oauth.storage import OAuthTokenStore
-from providers.oauth.types import OAuthCredentials
+from models.providers.auth.oauth.storage import OAuthTokenStore
+from models.providers.auth.oauth.types import OAuthCredentials
 
 
 class TestOAuthTokenStore:

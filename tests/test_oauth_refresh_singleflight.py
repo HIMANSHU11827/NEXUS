@@ -1,7 +1,7 @@
 import asyncio
 
-from providers.oauth.storage import get_oauth_api_key
-from providers.oauth.types import OAuthCredentials
+from models.providers.auth.oauth.storage import get_oauth_api_key
+from models.providers.auth.oauth.types import OAuthCredentials
 
 
 class _Store:

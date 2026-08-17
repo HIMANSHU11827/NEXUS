@@ -7,8 +7,8 @@ import tempfile
 
 import pytest
 
-from tools.nexus_tools.base_tool import ToolResult
-from plugins.manager import (
+from extensions.tools.built_in.nexus_tools.base_tool import ToolResult
+from extensions.plugins.built_in.manager import (
     HookRegistry,
     PluginContext,
     PluginManager,

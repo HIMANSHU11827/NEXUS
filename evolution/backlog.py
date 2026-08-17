@@ -45,7 +45,7 @@ def backlog_path(root: Optional[str] = None) -> str:
     """Absolute path of the action backlog file (guard-checked)."""
     path = os.path.join(_repo_root(root), BACKLOG_RELPATH)
     try:
-        from utils.runtime_guard import assert_not_rewriting_core
+        from nexus.common.runtime_guard import assert_not_rewriting_core
 
         assert_not_rewriting_core(path, operation="append(action_backlog)")
     except ImportError:

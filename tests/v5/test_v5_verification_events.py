@@ -1,4 +1,4 @@
-from orchestrators.v5.verification_events import VerifierEventStore
+from nexus.main_agent.verification_events import VerifierEventStore
 
 
 def test_verifier_event_history_persists_bounded_redacted_events(tmp_path):

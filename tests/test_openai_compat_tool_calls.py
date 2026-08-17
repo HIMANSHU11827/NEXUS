@@ -9,16 +9,16 @@ import json
 
 import pytest
 
-from providers.commandcode import CommandCodeProvider
-from providers.fireworks import FireworksProvider
-from providers.groq import GroqProvider
-from providers.mistral import MistralProvider
-from providers.nvidia import NvidiaProvider
-from providers.qwen import QwenProvider
-from providers.sambanova import SambaNovaProvider
-from providers.together import TogetherProvider
-from providers.vlm import VLMProvider
-from providers.xai import XAIProvider
+from models.providers.api.commandcode import CommandCodeProvider
+from models.providers.api.fireworks import FireworksProvider
+from models.providers.api.groq import GroqProvider
+from models.providers.api.mistral import MistralProvider
+from models.providers.api.nvidia import NvidiaProvider
+from models.providers.api.qwen import QwenProvider
+from models.providers.api.sambanova import SambaNovaProvider
+from models.providers.api.together import TogetherProvider
+from models.providers.core.vlm import VLMProvider
+from models.providers.api.xai import XAIProvider
 
 
 OPENAI_COMPAT_PROVIDERS = [

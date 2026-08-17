@@ -18,7 +18,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from providers.reliability import redact_secrets
+from models.providers.core.reliability import redact_secrets
 
 # Valid task states
 STATE_QUEUED = "queued"

@@ -24,8 +24,8 @@ import gateways.webhook_server as webhook_server
 from gateways.base import BasePlatformAdapter, MessageEvent, SendResult
 from gateways.platforms.telegram import TelegramAdapter
 from gateways.run import GatewayRunner, IngressDedupe, dedupe_key_for_event
-from providers.health import ComponentBreakerRegistry
-from providers.reliability import (
+from models.providers.core.health import ComponentBreakerRegistry
+from models.providers.core.reliability import (
     BreakerState,
     FailureClass,
     ProviderCallError,
@@ -215,7 +215,7 @@ class _FakeAdapter(BasePlatformAdapter):
 async def test_handle_message_skips_duplicate_message_ids(monkeypatch, tmp_path):
     import gateways.run as gateway_run
     from gateways.delivery import DeliveryLedger
-    from utils import session_bus
+    from nexus.common import session_bus
 
     class FakeLoop:
         root = "C:\\project"

@@ -14,7 +14,7 @@ from contextvars import ContextVar
 from typing import Any, Callable, Dict, Optional
 
 try:
-    from providers.reliability import redact_secrets
+    from models.providers.core.reliability import redact_secrets
 except Exception:  # pragma: no cover - defensive fallback
 
     def redact_secrets(value: str) -> str:

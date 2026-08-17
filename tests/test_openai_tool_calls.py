@@ -1,6 +1,6 @@
 import json
 
-from providers.openai import OpenAIProvider
+from models.providers.api.openai import OpenAIProvider
 
 
 def test_openai_native_tool_envelope_is_parser_compatible():

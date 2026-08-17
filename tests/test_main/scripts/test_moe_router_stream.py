@@ -1,4 +1,4 @@
-from intelligence.moe_router import NexusMoERouter
+from nexus.capabilities.intelligence.moe_router import NexusMoERouter
 
 
 class _Provider:

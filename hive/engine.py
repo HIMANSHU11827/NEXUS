@@ -21,13 +21,13 @@ from typing import Any, Awaitable, Callable, Coroutine, Dict, List, Optional, Tu
 
 from .effects import HiveEffectLedger
 from .state import HiveStateStore
-from providers.reliability import redact_secrets
+from models.providers.core.reliability import redact_secrets
 
 logger = logging.getLogger(__name__)
 
 # Directories sub-agents may never write into (mirrors utils/runtime_guard).
 try:  # pragma: no cover - guard is optional at import time
-    from utils.runtime_guard import PROTECTED_DIRS as _PROTECTED_DIRS, is_core_path
+    from nexus.common.runtime_guard import PROTECTED_DIRS as _PROTECTED_DIRS, is_core_path
 except Exception:  # pragma: no cover
     _PROTECTED_DIRS = ("orchestrators", "kernel", "nexus", "server")
 
@@ -628,10 +628,10 @@ class SubAgent:
             }
             relevant = persona_skill_map.get(self.persona.upper(), ["general"])
             try:
-                from skills.engine import NexusSkillEngine
+                from extensions.skills.built_in.engine import NexusSkillEngine
                 engine = NexusSkillEngine()
             except ImportError:
-                from skills import NexusSkillMaster
+                from extensions.skills.built_in import NexusSkillMaster
                 engine = NexusSkillMaster(self.root)
             skills = engine.list_skills()
             if not skills:
@@ -795,7 +795,7 @@ class SubAgent:
 
     async def _default_llm_call(self, messages: List[Dict[str, str]]) -> str:
         try:
-            from intelligence.moe_router import NexusMoERouter
+            from nexus.capabilities.intelligence.moe_router import NexusMoERouter
 
             def _router_chat() -> Any:
                 # Construction can hit config/disk/network, so keep it off the
@@ -812,7 +812,7 @@ class SubAgent:
             logger.warning("hive/engine.py: _default_llm_call router path failed", exc_info=True)
 
         try:
-            from providers.factory import NexusProviderFactory
+            from models.providers.core.factory import NexusProviderFactory
             factory = NexusProviderFactory()
             provider = factory.get_provider_by_name("cloud", "lm_studio")
             if provider and hasattr(provider, "chat"):

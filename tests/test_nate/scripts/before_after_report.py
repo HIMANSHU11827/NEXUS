@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
-from intelligence.nate.nate_engine import NATE
+from nexus.capabilities.intelligence.nate.nate_engine import NATE
 
 n = NATE()
 n.set_layer("adaptive_schema", False)

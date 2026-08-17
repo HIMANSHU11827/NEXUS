@@ -1,6 +1,6 @@
 """Regression tests for hard context-budget admission boundaries."""
 
-from context import compact_messages, inspect
+from nexus.context import compact_messages, inspect
 
 
 def test_recent_only_messages_do_not_bypass_hard_budget_on_floored_estimate():

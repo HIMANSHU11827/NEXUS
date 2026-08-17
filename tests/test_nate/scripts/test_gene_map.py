@@ -1,6 +1,6 @@
 import pytest
 
-from intelligence.nate.gene_map import Gene, GeneMap, SelfHealingEngine
+from nexus.capabilities.intelligence.nate.gene_map import Gene, GeneMap, SelfHealingEngine
 
 
 class TestGene:

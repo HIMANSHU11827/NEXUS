@@ -26,12 +26,12 @@ from types import SimpleNamespace
 import pytest
 
 from nexus.events import EVENT_TYPES, CanonicalEvent, infer_event_type
-from orchestrators.v5.learning import V5Learning
-from orchestrators.v5.learning_evidence import (
+from nexus.main_agent.learning import V5Learning
+from nexus.main_agent.learning_evidence import (
     LearningEvidenceStore,
     V5LearningEvidence,
 )
-from orchestrators.v5.meta import MetaLearningLayer
+from nexus.main_agent.meta import MetaLearningLayer
 
 
 def _loop_with_runtime(root_dir=None, turn_id="t1", session_id="evidence-test"):
@@ -361,7 +361,7 @@ def test_learning_evidence_is_valid_canonical_event_type():
 
 
 def test_learning_event_payload_carries_identity_fields(tmp_path):
-    from orchestrators.v5.events import V5EventEmitter
+    from nexus.main_agent.events import V5EventEmitter
 
     class _Loop(V5LearningEvidence, V5EventEmitter):
         pass
@@ -449,7 +449,7 @@ def test_store_file_survives_and_is_valid_jsonl(tmp_path):
 def test_evidence_collector_wired_into_turn_signals():
     """collect_evidence must be invoked from the per-turn collector and must
     NOT re-log replays (replays.jsonl stays the property of _log_turn_replay)."""
-    import orchestrators.v5.learning as learning_mod
+    import nexus.main_agent.learning as learning_mod
 
     text = open(learning_mod.__file__, encoding="utf-8", errors="ignore").read()
     assert "collect_evidence" in text
@@ -483,7 +483,7 @@ def test_collect_evidence_never_raises_without_root(tmp_path):
 
 def test_grounding_prompt_includes_lessons_section(tmp_path):
     """The grounding mixin appends the lessons block to the stable prompt."""
-    from orchestrators.v5.grounding import V5ContextGrounding
+    from nexus.main_agent.grounding import V5ContextGrounding
 
     loop = _loop_with_runtime(tmp_path)
     loop.root_dir = str(tmp_path)

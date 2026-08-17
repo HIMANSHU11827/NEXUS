@@ -15,7 +15,7 @@ jobs:
       - name: Install package
         run: python -m pip install -e ".[dev]"
       - name: Compile
-        run: python -m compileall -q nexus server orchestrators tools rag knowledge utils providers gui/api.py
+        run: python -m compileall -q src/nexus apps extensions models memory knowledge evolution hive gateways queues sandbox security reliability observability evaluation maintenance configure scripts
       - name: Release gate
         run: python scripts/release_gate.py
       - name: Unit tests
@@ -29,10 +29,10 @@ jobs:
         with:
           node-version: "22"
           cache: "npm"
-          cache-dependency-path: gui/package-lock.json
+          cache-dependency-path: apps/web/package-lock.json
       - name: Install GUI deps
-        working-directory: gui
+        working-directory: apps/web
         run: npm ci
       - name: Build GUI
-        working-directory: gui
+        working-directory: apps/web
         run: npm run build

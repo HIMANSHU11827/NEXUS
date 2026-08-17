@@ -1,7 +1,7 @@
 import pytest
 
-from orchestrators.v5.core import NexusLoopV5
-from orchestrators.v5.parallel import V5ParallelExecutor
+from nexus.main_agent.core import NexusLoopV5
+from nexus.main_agent.parallel import V5ParallelExecutor
 
 
 class _Call:

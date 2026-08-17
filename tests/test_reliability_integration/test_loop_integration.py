@@ -19,7 +19,7 @@ from reliability.states import RunState
 
 def build_loop(tmp_path, monkeypatch):
     monkeypatch.setenv("NEXUS_V5_STATE_DIR", str(tmp_path / "v5state"))
-    from orchestrators.v5.core import V5LoopState, NexusLoopV5
+    from nexus.main_agent.core import V5LoopState, NexusLoopV5
 
     loop = NexusLoopV5(root_dir=str(tmp_path / "root"), session_id="testsession")
     loop.root_dir = str(tmp_path / "root")

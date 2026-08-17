@@ -12,7 +12,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from orchestrators.v5.core import NexusLoopV5
+from nexus.main_agent.core import NexusLoopV5
 from memory import MemoryManager
 
 _PHASES = ("plan", "verify", "act", "gather", "output")

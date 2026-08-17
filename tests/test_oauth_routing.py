@@ -15,7 +15,7 @@ from pathlib import Path
 import yaml
 
 from providers import factory as factory_module
-from providers.factory import NexusProviderFactory
+from models.providers.core.factory import NexusProviderFactory
 
 
 def _provider_yml() -> dict:

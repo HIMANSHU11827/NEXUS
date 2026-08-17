@@ -10,7 +10,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from providers import model_bench
-from providers.profiles import ProviderProfile, ProviderProfileStore
+from models.providers.core.profiles import ProviderProfile, ProviderProfileStore
 
 
 def _coding_task():

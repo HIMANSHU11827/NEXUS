@@ -1,4 +1,4 @@
-import server
+import apps.api
 
 
 def test_verification_recipe_endpoint_is_read_only_and_workspace_scoped(tmp_path, monkeypatch):

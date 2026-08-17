@@ -1,6 +1,6 @@
 import json
 
-import lifecycle.persistence as persistence
+import nexus.lifecycle.managers.persistence as persistence
 
 
 def test_lifecycle_persistence_round_trip_reports_durable_status(tmp_path, monkeypatch):

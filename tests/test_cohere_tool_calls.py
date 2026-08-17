@@ -1,4 +1,4 @@
-from providers.cohere import CohereProvider
+from models.providers.api.cohere import CohereProvider
 
 
 def test_cohere_native_tool_envelope_is_parser_compatible():

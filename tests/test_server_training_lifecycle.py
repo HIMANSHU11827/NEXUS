@@ -13,7 +13,7 @@ class _Process:
 
 @pytest.mark.asyncio
 async def test_training_endpoint_validates_steps(monkeypatch):
-    import server
+    import apps.api
 
     class Request:
         async def json(self):
@@ -27,7 +27,7 @@ async def test_training_endpoint_validates_steps(monkeypatch):
 @pytest.mark.asyncio
 async def test_training_endpoint_starts_with_durable_run_status(monkeypatch, tmp_path):
     import subprocess
-    import server
+    import apps.api
 
     process = _Process()
     monkeypatch.setattr(server, "_active_train_process", None)
@@ -50,7 +50,7 @@ async def test_training_endpoint_starts_with_durable_run_status(monkeypatch, tmp
 
 @pytest.mark.asyncio
 async def test_training_endpoint_respects_live_cross_process_owner(monkeypatch, tmp_path):
-    import server
+    import apps.api
 
     monkeypatch.setattr(server, "_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setattr(server, "_active_train_process", None)
@@ -70,7 +70,7 @@ async def test_training_endpoint_respects_live_cross_process_owner(monkeypatch, 
 
 def test_training_status_marks_orphaned_process_after_restart(monkeypatch, tmp_path):
     import json
-    import server
+    import apps.api
 
     monkeypatch.setattr(server, "_PROJECT_ROOT", str(tmp_path))
     status_path = tmp_path / "configure" / "self_improvement_status.json"

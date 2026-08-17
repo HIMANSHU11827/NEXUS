@@ -549,7 +549,7 @@ class ToolRegistry:
         and parsing; this method only adapts its records to the tool schema.
         """
         try:
-            from skills import NexusSkillMaster
+            from extensions.skills.built_in import NexusSkillMaster
             from extensions.tools.built_in.nexus_tools.skill_adapter import SkillToolAdapter
 
             registered = 0
@@ -599,7 +599,7 @@ class ToolRegistry:
     def _sync_to_nate(name: str, schema: dict, instance: Any) -> None:
         """Best-effort sync a discovered tool into the NATE native engine."""
         try:
-            from intelligence.nate import NATE
+            from nexus.capabilities.intelligence.nate import NATE
             nate = NATE()
             nate.register_tool(
                 name=name,
@@ -1459,7 +1459,7 @@ class ToolRegistry:
         except Exception:
             return 0
 
-        from mcp.client import MCPClient
+        from extensions.mcp.core.client import MCPClient
 
         registered = 0
         for server_name, server_cfg in servers.items():
@@ -1591,7 +1591,7 @@ class ToolRegistry:
         tool schemas, significantly reducing context window usage.
         """
         try:
-            from intelligence.nate import NATE
+            from nexus.capabilities.intelligence.nate import NATE
             nate = NATE()
             if not hasattr(nate, "adapter") or len(nate.adapter.all()) == 0:
                 self.sync_all_to_nate()

@@ -15,13 +15,13 @@ import uuid
 
 import pytest
 
-from lifecycle import (
+from nexus.lifecycle.managers import (
     ComponentSupervisor,
     LifecycleStage,
     StageTransitionError,
     get_component_supervisor,
 )
-from lifecycle.persistence import clear_state
+from nexus.lifecycle.managers.persistence import clear_state
 
 
 def make_supervisor(**kwargs):
@@ -343,7 +343,7 @@ class TestPersistence:
 
     def test_disabled_persistence_is_not_shared(self):
         key = f"test_supervisor_disabled_{uuid.uuid4().hex}"
-        from lifecycle.persistence import load_state
+        from nexus.lifecycle.managers.persistence import load_state
         try:
             sup = ComponentSupervisor(persist_key=key, persist=False)
             sup.register("a", "Alpha")

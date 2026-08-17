@@ -41,8 +41,8 @@ def _heal_clear_cooldowns(**kwargs) -> str:
 
 
 def _heal_refresh_oauth(provider_id: str = "", **kwargs) -> str:
-    from providers.oauth.registry import get_oauth_provider
-    from providers.oauth.storage import load_oauth_token_store
+    from models.providers.auth.oauth.registry import get_oauth_provider
+    from models.providers.auth.oauth.storage import load_oauth_token_store
     store = load_oauth_token_store()
     if provider_id:
         targets = [provider_id]

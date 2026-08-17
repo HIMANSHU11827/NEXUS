@@ -15,22 +15,22 @@ def td_with_config(tmp_path):
 
 
 class TestSetupHelpers:
-    """Test the helper functions from tui.setup_wizard."""
+    """Test the helper functions from apps.tui.setup_wizard."""
 
     def test_load_env_nonexistent(self):
         with tempfile.TemporaryDirectory() as td:
-            from tui.setup_wizard import load_env
+            from apps.tui.setup_wizard import load_env
             env = load_env(td)
             assert env == {}
 
     def test_save_and_load_env(self, td_with_config):
-        from tui.setup_wizard import load_env, save_env
+        from apps.tui.setup_wizard import load_env, save_env
         save_env(td_with_config, {"DEEPSEEK_API_KEY": "sk-abc123"})
         env = load_env(td_with_config)
         assert env["DEEPSEEK_API_KEY"] == "sk-abc123"
 
     def test_save_env_skips_empty(self, td_with_config):
-        from tui.setup_wizard import load_env, save_env
+        from apps.tui.setup_wizard import load_env, save_env
         save_env(td_with_config, {"A": "val", "B": ""})
         env = load_env(td_with_config)
         assert "A" in env
@@ -38,24 +38,24 @@ class TestSetupHelpers:
 
     def test_load_provider_yml_nonexistent(self):
         with tempfile.TemporaryDirectory() as td:
-            from tui.setup_wizard import load_provider_yml
+            from apps.tui.setup_wizard import load_provider_yml
             cfg = load_provider_yml(td)
             assert cfg == {}
 
     def test_save_and_load_provider_yml(self, td_with_config):
-        from tui.setup_wizard import load_provider_yml, save_provider_yml
+        from apps.tui.setup_wizard import load_provider_yml, save_provider_yml
         expected = {"default_provider": "deepseek", "version": "1.1.0"}
         save_provider_yml(td_with_config, expected)
         cfg = load_provider_yml(td_with_config)
         assert cfg == expected
 
     def test_connection_fails_with_bad_key(self):
-        from tui.setup_wizard import test_connection
+        from apps.tui.setup_wizard import test_connection
         success, msg = test_connection("deepseek", "bad-key", "https://httpbin.org/status/401", "deepseek-v4-flash")
         assert not success
 
     def test_provider_defs_exist(self):
-        from tui.setup_wizard import PROVIDER_DEFS
+        from apps.tui.setup_wizard import PROVIDER_DEFS
         assert "deepseek" in PROVIDER_DEFS
         assert "openai" in PROVIDER_DEFS
         assert "anthropic" in PROVIDER_DEFS
@@ -64,12 +64,12 @@ class TestSetupHelpers:
             assert "models" in val
 
     def test_gateway_defs_exist(self):
-        from tui.setup_wizard import GATEWAY_DEFS
+        from apps.tui.setup_wizard import GATEWAY_DEFS
         assert "telegram" in GATEWAY_DEFS
         assert "discord" in GATEWAY_DEFS
 
     def test_placeholder_secrets_are_not_configured(self):
-        from tui.setup_wizard import is_configured_secret
+        from apps.tui.setup_wizard import is_configured_secret
 
         assert not is_configured_secret("")
         assert not is_configured_secret("your_token_here")
@@ -96,7 +96,7 @@ class TestSetupWizardRun:
         config_dir.mkdir()
         td = str(tmp_path)
 
-        from tui.setup_wizard import load_provider_yml, save_provider_yml
+        from apps.tui.setup_wizard import load_provider_yml, save_provider_yml
 
         api_key = "sk-test123"
         cfg = {"default_provider": "deepseek", "providers": {"deepseek": {"api_key": api_key}}}
@@ -107,26 +107,26 @@ class TestSetupWizardRun:
         assert (config_dir / "provider.yml").exists()
 
     def test_ask_yes_no_defaults(self):
-        from tui.setup_wizard import ask_yes_no
+        from apps.tui.setup_wizard import ask_yes_no
         with patch("builtins.input", return_value=""):
             assert ask_yes_no("test", default=True) is True
             assert ask_yes_no("test", default=False) is False
 
     def test_ask_yes_no_parses(self):
-        from tui.setup_wizard import ask_yes_no
+        from apps.tui.setup_wizard import ask_yes_no
         with patch("builtins.input", return_value="y"):
             assert ask_yes_no("test") is True
         with patch("builtins.input", return_value="n"):
             assert ask_yes_no("test") is False
 
     def test_masked_input(self):
-        from tui.setup_wizard import masked_input
+        from apps.tui.setup_wizard import masked_input
         with patch("tui.setup_wizard.Prompt.ask", return_value="secret123"):
             result = masked_input("Enter key")
             assert result == "secret123"
 
     def test_secret_input_visible_fallback(self, monkeypatch):
-        import tui.setup_wizard as wizard
+        import apps.tui.setup_wizard as wizard
 
         prompts = iter(["", "visible-secret"])
         monkeypatch.setattr(wizard.Prompt, "ask", lambda *args, **kwargs: next(prompts))
@@ -136,7 +136,7 @@ class TestSetupWizardRun:
         assert wizard.secret_input("Enter key") == "visible-secret"
 
     def test_number_prompts_fall_back_to_defaults(self, monkeypatch):
-        import tui.setup_wizard as wizard
+        import apps.tui.setup_wizard as wizard
 
         monkeypatch.setattr(wizard.Prompt, "ask", lambda *args, **kwargs: "not-a-number")
 
@@ -144,7 +144,7 @@ class TestSetupWizardRun:
         assert wizard.ask_int("tokens", "4096", 256, 128000) == 4096
 
     def test_configure_system_permission_and_log_options(self, tmp_path, monkeypatch):
-        import tui.setup_wizard as wizard
+        import apps.tui.setup_wizard as wizard
 
         config_dir = tmp_path / "configure"
         config_dir.mkdir()
@@ -165,7 +165,7 @@ class TestSetupWizardRun:
         assert settings["log_level"] == "INFO"
 
     def test_configure_provider_saves_api_key_in_env_and_placeholder_in_provider_yml(self, tmp_path, monkeypatch):
-        import tui.setup_wizard as wizard
+        import apps.tui.setup_wizard as wizard
 
         monkeypatch.setattr(wizard.Confirm, "ask", lambda *args, **kwargs: True)
         monkeypatch.setattr(wizard.Prompt, "ask", lambda *args, **kwargs: "1")
@@ -188,7 +188,7 @@ class TestSetupWizardRun:
 
         import pytest
 
-        import tui.setup_wizard as wizard
+        import apps.tui.setup_wizard as wizard
 
         if os.name == "nt":
             pytest.skip("POSIX permission bits are not reliable on Windows ACL filesystems")
@@ -199,8 +199,8 @@ class TestSetupWizardRun:
         assert mode & 0o077 == 0
 
     def test_configure_oauth_provider_uses_login_flow(self, tmp_path, monkeypatch):
-        import tui.setup_wizard as wizard
-        from providers.oauth.types import OAuthCredentials
+        import apps.tui.setup_wizard as wizard
+        from models.providers.auth.oauth.types import OAuthCredentials
 
         creds = OAuthCredentials(
             access="oauth-access",
@@ -228,7 +228,7 @@ class TestSetupWizardRun:
         assert not (tmp_path / "configure" / "settings.yml").exists()
 
     def test_configure_gateways_reuses_existing_token(self, tmp_path, monkeypatch):
-        import tui.setup_wizard as wizard
+        import apps.tui.setup_wizard as wizard
 
         selects = iter([0, 0, 1, 1, 1, 1, 1])
         monkeypatch.setattr(wizard, "wizard_header", lambda: None)
@@ -246,7 +246,7 @@ class TestSetupWizardRun:
         assert env["TELEGRAM_BOT_TOKEN"] == "existing-token"
 
     def test_core_setup_steps_run_with_skips(self, tmp_path, monkeypatch):
-        import tui.setup_wizard as wizard
+        import apps.tui.setup_wizard as wizard
 
         monkeypatch.setenv("NEXUS_HOME", str(tmp_path / ".nexus-home"))
         monkeypatch.delenv("NEXUS_BASE_HOME", raising=False)

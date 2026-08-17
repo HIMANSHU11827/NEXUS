@@ -40,13 +40,13 @@ class DeepResearchTool(BaseTool):
 
     async def _llm_call(self, messages: List[Dict[str, str]]) -> str:
         try:
-            from intelligence.moe_router import NexusMoERouter
+            from nexus.capabilities.intelligence.moe_router import NexusMoERouter
             router = NexusMoERouter()
             return router.chat(messages)
         except ImportError:
             logger.warning("tools/deep_research/scripts/deep_research.py:48 suppressed error", exc_info=True)
         try:
-            from providers.factory import NexusProviderFactory
+            from models.providers.core.factory import NexusProviderFactory
             factory = NexusProviderFactory()
             provider = factory.get_provider_by_name("cloud", "lm_studio")
             if provider:

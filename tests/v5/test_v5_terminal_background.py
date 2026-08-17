@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from orchestrators.v5.tools import _TextToolCall, V5ToolExecutor
+from nexus.main_agent.tools import _TextToolCall, V5ToolExecutor
 
 
 class _Granted:

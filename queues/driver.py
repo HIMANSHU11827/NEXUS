@@ -160,7 +160,7 @@ class QueueDriver:
         loop_obj = getattr(self.kernel, "loop", None)
         if loop_obj is not None and hasattr(loop_obj, "stream_run"):
             return self._apply_autonomous_safety(loop_obj)
-        from orchestrators import NexusLoop  # V5 loop
+        from nexus.main_agent import NexusLoop  # V5 loop
         return self._apply_autonomous_safety(
             NexusLoop(root_dir=self.root, session_id=session_id or "default")
         )
@@ -1128,7 +1128,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
 
     kernel = None
     try:
-        from kernel import get_nexus_kernel
+        from nexus.runtime.kernel import get_nexus_kernel
         kernel = get_nexus_kernel()
     except Exception as exc:  # driver still works standalone
         log.warning("kernel unavailable (%s); using standalone NexusLoop", exc)

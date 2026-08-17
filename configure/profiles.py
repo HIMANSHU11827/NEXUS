@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from utils.nexus_path import get_profiles_root, set_active_profile
+from nexus.common.nexus_path import get_profiles_root, set_active_profile
 
 logger = logging.getLogger(__name__)
 

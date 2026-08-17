@@ -1,4 +1,4 @@
-import server
+import apps.api
 import json
 import subprocess
 import sys

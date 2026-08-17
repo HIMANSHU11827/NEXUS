@@ -4,7 +4,7 @@ import logging
 import re
 from typing import Dict, List, Optional
 
-from providers.router import ModelRouter
+from models.providers.core.router import ModelRouter
 
 logger = logging.getLogger(__name__)
 _ROUTER: Optional[ModelRouter] = None

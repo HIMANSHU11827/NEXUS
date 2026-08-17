@@ -2,7 +2,7 @@
 
 import asyncio
 
-from orchestrators.v5.core import NexusLoopV5
+from nexus.main_agent.core import NexusLoopV5
 
 
 def test_stream_run_propagates_idempotency_key_into_turn_context(tmp_path):

@@ -3,8 +3,8 @@ import os
 
 import pytest
 
-import tools.terminal.scripts.terminal as terminal_module
-from tools.terminal.scripts.terminal import TerminalTool
+import extensions.tools.built_in.terminal.scripts.terminal as terminal_module
+from extensions.tools.built_in.terminal.scripts.terminal import TerminalTool
 
 
 def _read_command(path: str) -> str:

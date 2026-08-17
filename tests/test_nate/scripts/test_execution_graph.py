@@ -1,6 +1,6 @@
 import pytest
 
-from intelligence.nate.execution_graph import ExecutionGraph, ToolGraph
+from nexus.capabilities.intelligence.nate.execution_graph import ExecutionGraph, ToolGraph
 
 
 class TestToolGraph:

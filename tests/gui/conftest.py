@@ -36,8 +36,8 @@ def _testclient_is_loopback(monkeypatch):
     gui tests finish, so production's genuine-loopback requirement is never
     relaxed for other test subtrees (e.g. tests/test_tools).
     """
-    import authentication
-    import server
+    import security.core.auth
+    import apps.api
 
     real_auth = authentication.is_loopback_request
     real_srv = server.is_loopback_request

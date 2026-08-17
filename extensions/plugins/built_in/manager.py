@@ -45,10 +45,10 @@ from extensions.plugins.built_in.trust import (
     is_user_plugin_load_allowed,
     resolve_capabilities,
 )
-from tools.nexus_tools.base_tool import BaseTool, ToolResult
-from tools.nexus_tools.registry import ToolEntry
-from tools.nexus_tools.result import ToolCallResult, normalize_result
-from utils.singleton import ThreadSafeSingleton
+from extensions.tools.built_in.nexus_tools.base_tool import BaseTool, ToolResult
+from extensions.tools.built_in.nexus_tools.registry import ToolEntry
+from extensions.tools.built_in.nexus_tools.result import ToolCallResult, normalize_result
+from nexus.common.singleton import ThreadSafeSingleton
 
 logger = logging.getLogger(__name__)
 
@@ -532,7 +532,7 @@ class PluginManager(ThreadSafeSingleton):
             return
         self._initialized = True
 
-        from kernel import get_nexus_kernel
+        from nexus.runtime.kernel import get_nexus_kernel
         self._kernel = get_nexus_kernel(root_dir=root_dir) if root_dir else None
         self.root = root_dir or (self._kernel.root if self._kernel else os.getcwd())
 

@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-import server
+import apps.api
 
 
 class _Request:

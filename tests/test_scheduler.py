@@ -1,7 +1,7 @@
 import time
 import json
 
-from tasks.scheduler import NexusTaskScheduler
+from nexus.tasks.scheduler import NexusTaskScheduler
 
 
 def _wait_until(predicate, timeout=2.0):

@@ -1,7 +1,7 @@
 import json
 from types import SimpleNamespace
 
-from orchestrators.v5.learning import V5Learning
+from nexus.main_agent.learning import V5Learning
 
 
 def test_replay_entries_have_unique_ids_and_record_digests(tmp_path):

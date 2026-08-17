@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 
 def test_hive_budget_environment_setting_is_fail_safe(monkeypatch):
-    import server
+    import apps.api
 
     monkeypatch.setenv("NEXUS_HIVE_MAX_TOTAL_STEPS", "not-an-integer")
     assert server._nonnegative_env_int("NEXUS_HIVE_MAX_TOTAL_STEPS") == 0
@@ -15,7 +15,7 @@ def test_hive_budget_environment_setting_is_fail_safe(monkeypatch):
 
 
 def test_hive_manifest_restores_running_hives_as_interrupted(tmp_path, monkeypatch):
-    import server
+    import apps.api
 
     manifest = tmp_path / "hives" / "index.json"
     manifest.parent.mkdir(parents=True)
@@ -41,7 +41,7 @@ def test_hive_manifest_restores_running_hives_as_interrupted(tmp_path, monkeypat
 
 
 def test_hive_manifest_persist_is_atomic_and_round_trips(tmp_path, monkeypatch):
-    import server
+    import apps.api
 
     manifest = tmp_path / "hives" / "index.json"
     monkeypatch.setattr(server, "_HIVE_MANIFEST_PATH", str(manifest))
@@ -58,7 +58,7 @@ def test_hive_manifest_persist_is_atomic_and_round_trips(tmp_path, monkeypatch):
 
 
 def test_resume_hive_respawns_saved_tasks_and_links_runs(tmp_path, monkeypatch):
-    import server
+    import apps.api
 
     monkeypatch.setattr(server, "_HIVE_MANIFEST_PATH", str(tmp_path / "index.json"))
     monkeypatch.setattr(server, "_HIVES", {
@@ -86,7 +86,7 @@ def test_resume_hive_respawns_saved_tasks_and_links_runs(tmp_path, monkeypatch):
 
 
 def test_resume_hive_skips_terminal_agents(tmp_path, monkeypatch):
-    import server
+    import apps.api
 
     monkeypatch.setattr(server, "_HIVE_MANIFEST_PATH", str(tmp_path / "index.json"))
     monkeypatch.setattr(server, "_HIVES", {
@@ -109,7 +109,7 @@ def test_resume_hive_skips_terminal_agents(tmp_path, monkeypatch):
 
 
 def test_auto_resume_interrupted_hives_is_opt_in_and_links_new_hive(tmp_path, monkeypatch):
-    import server
+    import apps.api
 
     monkeypatch.setattr(server, "_HIVE_MANIFEST_PATH", str(tmp_path / "index.json"))
     monkeypatch.setattr(server, "_HIVES", {
@@ -133,7 +133,7 @@ def test_auto_resume_interrupted_hives_is_opt_in_and_links_new_hive(tmp_path, mo
 
 
 def test_pause_and_resume_paused_hive_stay_on_same_identity(tmp_path, monkeypatch):
-    import server
+    import apps.api
 
     monkeypatch.setattr(server, "_HIVE_MANIFEST_PATH", str(tmp_path / "index.json"))
     monkeypatch.setattr(server, "_HIVES", {
@@ -168,7 +168,7 @@ def test_pause_and_resume_paused_hive_stay_on_same_identity(tmp_path, monkeypatc
 
 
 def test_resume_reconstructs_paused_hive_after_backend_restart(tmp_path, monkeypatch):
-    import server
+    import apps.api
 
     monkeypatch.setattr(server, "_HIVE_MANIFEST_PATH", str(tmp_path / "index.json"))
     monkeypatch.setattr(server, "_HIVES", {
@@ -193,7 +193,7 @@ def test_resume_reconstructs_paused_hive_after_backend_restart(tmp_path, monkeyp
 
 
 def test_create_hive_reconciles_fast_terminal_agents_before_persisting(tmp_path, monkeypatch):
-    import server
+    import apps.api
 
     class Request:
         async def json(self):
@@ -223,7 +223,7 @@ def test_create_hive_reconciles_fast_terminal_agents_before_persisting(tmp_path,
 def test_api_hive_consolidation_stores_result_in_manifest(tmp_path, monkeypatch):
     """Regression: API hives must be consolidated and the result surfaced (P03)."""
     import asyncio
-    import server
+    import apps.api
 
     class Engine:
         async def consolidate_hive(self, hive_id, timeout=None):
@@ -242,7 +242,7 @@ def test_api_hive_consolidation_stores_result_in_manifest(tmp_path, monkeypatch)
 def test_list_hives_surfaces_engine_failure_without_fake_personas(tmp_path, monkeypatch):
     """Regression (P36): a broken hive engine must not masquerade as a
     WORKER roster; the response reports the engine as unavailable."""
-    import server
+    import apps.api
 
     class BrokenEngine:
         def list_personas(self):
@@ -261,7 +261,7 @@ def test_list_hives_surfaces_engine_failure_without_fake_personas(tmp_path, monk
 
 
 def test_list_hives_reports_engine_available_when_healthy(tmp_path, monkeypatch):
-    import server
+    import apps.api
 
     class HealthyEngine:
         def list_personas(self):
@@ -281,7 +281,7 @@ def test_list_hives_reports_engine_available_when_healthy(tmp_path, monkeypatch)
 def test_api_hive_consolidation_records_engine_failure(tmp_path, monkeypatch):
     """Regression: a failed consolidation must leave a visible error (P03)."""
     import asyncio
-    import server
+    import apps.api
 
     class BrokenEngine:
         async def consolidate_hive(self, hive_id, timeout=None):

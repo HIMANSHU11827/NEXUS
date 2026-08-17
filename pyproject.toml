@@ -78,26 +78,19 @@ nexus-version = "nexus:boot"
 nexus-help = "nexus:boot"
 point = "nexus:boot"
 nexus-fix = "nexus:boot"
-nexus-mcp = "mcp.server:main"
-nexus-voice = "voice.voice_chat:main"
+nexus-mcp = "extensions.mcp.core.server:main"
+nexus-voice = "apps.voice.voice_chat:main"
 nexus-gateway-app = "apps.gateway.nexus_gateway_app:main"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["sandbox*", "authentication*", "context*", "evolution*", "hardware*", "intelligence*", "neural*", "reasoning*", "safety*", "security*", "tasks*", "telemetry*", "voice*", "prompts*", "orchestrators*", "utils*", "tools*", "rag*", "integrations*", "knowledge*", "mcp*", "gateway*", "configure*", "hive*", "indexer*", "kernel*", "permissions*", "router*", "skills*", "server*", "apps*", "extensions*", "models*", "nexus*"]
+where = ["src", "."]
+include = ["apps*", "benchmarks*", "configure*", "evaluation*", "evolution*", "extensions*", "gateways*", "hive*", "knowledge*", "maintenance*", "memory*", "models*", "nexus*", "observability*", "queues*", "reliability*", "sandbox*", "scripts*", "security*"]
 exclude = [
     "tests*",
-    "gui*",
-    "models*",
-    "skill*",
-    "temp_gemini_cli*",
     "workspace*",
     "scratch*",
     "training_data*",
     "data*",
-    "tools.docker*",
-    "tools.elite*",
-    "gui.scratch*",
 ]
 
 [tool.pyright]
@@ -115,6 +108,6 @@ testpaths = ["tests"]
 # Repo root on sys.path: local packages (queue/, tools/, ...) shadow stdlib
 # names, so tests only resolved under `python -m pytest`, which injects cwd.
 # Without this the bare `pytest` entrypoint fails collection on 9 modules.
-pythonpath = ["."]
+pythonpath = [".", "src"]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"

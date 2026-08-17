@@ -1,7 +1,7 @@
 """Regression coverage for model tool-argument transport and validation."""
 
 def test_provider_transport_preserves_malformed_arguments():
-    from providers.deepseek import DeepSeekProvider
+    from models.providers.api.deepseek import DeepSeekProvider
 
     envelope = DeepSeekProvider._tool_envelope([
         {"function": {"name": "creating", "arguments": '{"path":'}},
@@ -12,7 +12,7 @@ def test_provider_transport_preserves_malformed_arguments():
 
 
 def test_direct_loop_preserves_native_argument_parse_error():
-    from orchestrators.v5.core import NexusLoopV5
+    from nexus.main_agent.core import NexusLoopV5
 
     calls = NexusLoopV5._part_tool_calls({
         "tool_calls": [{
@@ -28,7 +28,7 @@ def test_direct_loop_preserves_native_argument_parse_error():
 
 
 def test_direct_loop_preserves_text_argument_parse_error():
-    from orchestrators.v5.core import NexusLoopV5
+    from nexus.main_agent.core import NexusLoopV5
 
     loop = NexusLoopV5(".", session_id="text-argument-error")
     _text, calls = loop._model_turn_parts(
@@ -42,7 +42,7 @@ def test_direct_loop_preserves_text_argument_parse_error():
 
 
 def test_direct_tool_schemas_keep_required_arguments_for_file_creation():
-    from orchestrators.v5.core import NexusLoopV5
+    from nexus.main_agent.core import NexusLoopV5
 
     loop = NexusLoopV5(".", session_id="tool-argument-schema-test")
     creating = next(
@@ -59,8 +59,8 @@ def test_registry_rejects_missing_required_arguments_before_side_effect():
     import asyncio
     import pytest
 
-    from tools.nexus_tools.base_tool import BaseTool, ToolResult
-    from tools.nexus_tools.registry import ToolEntry, ToolRegistry
+    from extensions.tools.built_in.nexus_tools.base_tool import BaseTool, ToolResult
+    from extensions.tools.built_in.nexus_tools.registry import ToolEntry, ToolRegistry
 
     class RequiredTool(BaseTool):
         def __init__(self):

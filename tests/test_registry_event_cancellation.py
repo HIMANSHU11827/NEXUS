@@ -1,6 +1,6 @@
 import asyncio
 
-from tools.nexus_tools.registry import _is_cancelled
+from extensions.tools.built_in.nexus_tools.registry import _is_cancelled
 
 
 def test_asyncio_event_is_a_supported_cancellation_token():

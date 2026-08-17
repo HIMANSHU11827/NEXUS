@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from tools.nexus_tools.base_tool import BaseTool, ToolResult
+from extensions.tools.built_in.nexus_tools.base_tool import BaseTool, ToolResult
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -24,7 +24,7 @@ class _PassthroughTool(BaseTool):
 
 
 def _bare_registry(root):
-    from tools.nexus_tools.registry import ToolRegistry
+    from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
 
     registry = object.__new__(ToolRegistry)
     registry.root = str(root)
@@ -40,7 +40,7 @@ def _registry_with(root, entry):
 
 
 def test_schema_additional_properties_false_rejects_extra_key(tmp_path):
-    from tools.nexus_tools.registry import ToolEntry
+    from extensions.tools.built_in.nexus_tools.registry import ToolEntry
 
     schema = {"params": {"known": {"type": "string"}}, "additionalProperties": False}
     registry = _registry_with(tmp_path, ToolEntry("strict", schema, _PassthroughTool()))
@@ -54,7 +54,7 @@ def test_schema_additional_properties_false_rejects_extra_key(tmp_path):
 
 
 def test_schema_additional_properties_false_in_params_dict(tmp_path):
-    from tools.nexus_tools.registry import ToolEntry
+    from extensions.tools.built_in.nexus_tools.registry import ToolEntry
 
     # .jsnol form: additionalProperties carried inside the params map.
     schema = {"params": {"known": {"type": "string"}, "additionalProperties": False}}
@@ -65,7 +65,7 @@ def test_schema_additional_properties_false_in_params_dict(tmp_path):
 
 
 def test_schema_unknown_params_allowed_when_not_strict(tmp_path):
-    from tools.nexus_tools.registry import ToolEntry
+    from extensions.tools.built_in.nexus_tools.registry import ToolEntry
 
     registry = _registry_with(tmp_path, ToolEntry("loose", {"params": {"known": {"type": "string"}}}, _PassthroughTool()))
     result = asyncio.run(registry.execute("loose", known="ok", anything="allowed"))
@@ -73,7 +73,7 @@ def test_schema_unknown_params_allowed_when_not_strict(tmp_path):
 
 
 def test_schema_enum_rejects_out_of_list_value(tmp_path):
-    from tools.nexus_tools.registry import ToolEntry
+    from extensions.tools.built_in.nexus_tools.registry import ToolEntry
 
     schema = {"params": {"mode": {"type": "string", "enum": ["read", "write"]}}}
     registry = _registry_with(tmp_path, ToolEntry("enummed", schema, _PassthroughTool()))
@@ -95,7 +95,7 @@ class _BigOutputTool(BaseTool):
 
 
 def test_oversized_result_persists_with_preview_envelope(tmp_path):
-    from tools.nexus_tools.registry import ToolEntry
+    from extensions.tools.built_in.nexus_tools.registry import ToolEntry
 
     registry = _registry_with(tmp_path, ToolEntry("big_output", {"params": {}}, _BigOutputTool()))
     result = asyncio.run(registry.execute("big_output"))
@@ -113,7 +113,7 @@ def test_oversized_result_persists_with_preview_envelope(tmp_path):
 
 
 def test_oversized_stream_result_persists(tmp_path):
-    from tools.nexus_tools.registry import ToolEntry
+    from extensions.tools.built_in.nexus_tools.registry import ToolEntry
 
     class BigStreamTool(BaseTool):
         async def execute(self, **kwargs):
@@ -132,7 +132,7 @@ def test_oversized_stream_result_persists(tmp_path):
 
 
 def test_small_output_not_persisted(tmp_path):
-    from tools.nexus_tools.registry import ToolEntry
+    from extensions.tools.built_in.nexus_tools.registry import ToolEntry
 
     class SmallTool(BaseTool):
         async def execute(self, **kwargs):
@@ -145,7 +145,7 @@ def test_small_output_not_persisted(tmp_path):
 
 
 def test_elision_flag_result_is_persisted_too(tmp_path):
-    from tools.nexus_tools.registry import ToolEntry
+    from extensions.tools.built_in.nexus_tools.registry import ToolEntry
 
     class ElidedTool(BaseTool):
         async def execute(self, **kwargs):
@@ -160,8 +160,8 @@ def test_elision_flag_result_is_persisted_too(tmp_path):
 def test_reading_policy_persists_large_source_previews(tmp_path):
     """Large source reads must not consume the V5 run deadline as a stream."""
     from pathlib import Path
-    from tools.nexus_tools.registry import ToolEntry
-    from tools.reading.scripts.reading import ReadingTool
+    from extensions.tools.built_in.nexus_tools.registry import ToolEntry
+    from extensions.tools.built_in.reading.scripts.reading import ReadingTool
 
     metadata = json.loads(Path("extensions/tools/built_in/reading/reading.jsnol").read_text(encoding="utf-8"))
     assert metadata["execution"]["max_output_chars"] == 32000
@@ -194,8 +194,8 @@ def test_reading_policy_persists_large_source_previews(tmp_path):
 
 
 def test_reading_supports_targeted_line_ranges(tmp_path):
-    from tools.nexus_tools.registry import ToolEntry
-    from tools.reading.scripts.reading import ReadingTool
+    from extensions.tools.built_in.nexus_tools.registry import ToolEntry
+    from extensions.tools.built_in.reading.scripts.reading import ReadingTool
 
     source = tmp_path / "source.py"
     source.write_text("".join(f"line_{index}\n" for index in range(1, 21)), encoding="utf-8")
@@ -228,7 +228,7 @@ def test_reading_supports_targeted_line_ranges(tmp_path):
 # ─────────────────────────────────────────────────────────────────────
 
 def _modifying_tool(tmp_path):
-    from tools.modifying.scripts.modifying import ModifyingTool
+    from extensions.tools.built_in.modifying.scripts.modifying import ModifyingTool
 
     return ModifyingTool(root_dir=str(tmp_path))
 
@@ -288,7 +288,7 @@ def test_modifying_matches_curly_quotes_as_straight(tmp_path):
 # ─────────────────────────────────────────────────────────────────────
 
 def test_mcp_health_probe_tristate():
-    from mcp.client.scripts.client import MCPClient
+    from extensions.mcp.core.client.scripts.client import MCPClient
 
     client = MCPClient("nope", [])
     # Not started yet → unavailable.
@@ -303,8 +303,8 @@ def test_mcp_health_probe_tristate():
 
 
 def test_mcp_transport_failure_parks_tools_and_not_healthy(tmp_path):
-    from mcp.client.scripts.client import MCPClient
-    from tools.nexus_tools.registry import ToolRegistry
+    from extensions.mcp.core.client.scripts.client import MCPClient
+    from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
 
     registry = _bare_registry(tmp_path)
     client = MCPClient("nonexistent-binary", [])
@@ -329,8 +329,8 @@ def test_mcp_transport_failure_parks_tools_and_not_healthy(tmp_path):
 
 
 def test_mcp_recovery_restores_tools_and_healthy(tmp_path):
-    from mcp.client.scripts.client import MCPClient
-    from tools.nexus_tools.registry import ToolRegistry
+    from extensions.mcp.core.client.scripts.client import MCPClient
+    from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
 
     class FakeProcess:
         def poll(self):
@@ -364,7 +364,7 @@ def test_mcp_recovery_restores_tools_and_healthy(tmp_path):
 
 
 def test_init_mcp_drops_unavailable_server(tmp_path, monkeypatch):
-    from tools.nexus_tools.registry import ToolRegistry
+    from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
 
     config_dir = tmp_path / "configure"
     config_dir.mkdir()

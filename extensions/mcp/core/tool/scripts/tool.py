@@ -7,7 +7,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from extensions.mcp.core.client import MCPClient
-from tools.nexus_tools.base_tool import BaseTool, ToolResult
+from extensions.tools.built_in.nexus_tools.base_tool import BaseTool, ToolResult
 
 logger = logging.getLogger(__name__)
 

@@ -19,7 +19,7 @@ class LogAnalyzer:
     def _get_router(self):
         if self._router is None:
             try:
-                from providers.router import ModelRouter
+                from models.providers.core.router import ModelRouter
                 self._router = ModelRouter()
             except Exception:
                 return None

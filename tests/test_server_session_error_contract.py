@@ -1,7 +1,7 @@
 import pytest
 from fastapi import HTTPException
 
-import server
+import apps.api
 
 
 def test_session_creation_returns_public_error_only(monkeypatch):

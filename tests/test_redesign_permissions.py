@@ -32,10 +32,10 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import permissions as permissions_module
-from orchestrators.v5.tools import V5ToolExecutor, _TextToolCall
-from permissions import PermissionMode, PermissionSystem
-from permissions.approval_broker import get_approval_broker
+import security.permissions as permissions_module
+from nexus.main_agent.tools import V5ToolExecutor, _TextToolCall
+from security.permissions import PermissionMode, PermissionSystem
+from security.permissions.approval_broker import get_approval_broker
 from sandbox.sandbox_manager import SovereignSandbox
 
 

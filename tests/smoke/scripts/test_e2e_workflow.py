@@ -18,7 +18,7 @@ NEXUS_API_URL = os.environ.get("NEXUS_API_URL", "http://localhost:8000")
 # ═══════════════════════════════════════════════════════════════════
 
 def test_server_import():
-    from server import app
+    from apps.api import app
     assert app.title == "NEXUS AI API"
     assert app.version == "2.1.0"
 

@@ -1,5 +1,5 @@
 def test_llama_cpp_stream_closes_native_iterator_on_completion():
-    from providers.llama_cpp import LlamaCPPProvider
+    from models.providers.local.llama_cpp import LlamaCPPProvider
 
     class NativeStream:
         def __init__(self):

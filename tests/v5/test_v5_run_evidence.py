@@ -1,11 +1,11 @@
 import json
 
-from orchestrators.v5.run_evidence import (
+from nexus.main_agent.run_evidence import (
     build_hermes_trajectory,
     build_run_evidence,
     write_run_evidence,
 )
-from orchestrators.v5.events import V5EventEmitter
+from nexus.main_agent.events import V5EventEmitter
 
 
 def test_canonical_event_summaries_exclude_payload_and_bound_history():
@@ -20,7 +20,7 @@ def test_canonical_event_summaries_exclude_payload_and_bound_history():
         "sequence": 0, "parent_id": "", "related_tool": "terminal",
     }]
     assert "payload" not in summaries[0]
-from orchestrators.v5.events import summarize_work_event, summarize_work_events
+from nexus.main_agent.events import summarize_work_event, summarize_work_events
 
 
 def test_run_evidence_is_bounded_and_redacted(tmp_path):
@@ -219,7 +219,7 @@ def test_artifact_statuses_distinguish_missing_and_ambiguous_replay(tmp_path):
 
 
 def test_replay_digest_detects_tampering(tmp_path):
-    from orchestrators.v5.run_evidence import _replay_record_digest, _replay_status
+    from nexus.main_agent.run_evidence import _replay_record_digest, _replay_status
 
     replay_path = tmp_path / "replays.jsonl"
     record = {

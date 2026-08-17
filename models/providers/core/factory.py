@@ -5,7 +5,7 @@ import os
 import threading
 from typing import Any, List, Optional
 
-from utils.singleton import ThreadSafeSingleton
+from nexus.common.singleton import ThreadSafeSingleton
 from models.providers.core.reliability import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -85,9 +85,9 @@ def _resolve_api_key(provider_id: str, profile_name: Optional[str] = None) -> Op
         logger.warning("providers/factory.py:29 _resolve_api_key: suppressed error", exc_info=True)
         pass
     try:
-        from providers.oauth.providers.autoregister import register_all_oauth_providers
-        from providers.oauth.registry import get_oauth_provider
-        from providers.oauth.storage import load_oauth_token_store
+        from models.providers.auth.oauth.providers.autoregister import register_all_oauth_providers
+        from models.providers.auth.oauth.registry import get_oauth_provider
+        from models.providers.auth.oauth.storage import load_oauth_token_store
         register_all_oauth_providers()
         store = load_oauth_token_store()
         credentials = store.get(provider_id)

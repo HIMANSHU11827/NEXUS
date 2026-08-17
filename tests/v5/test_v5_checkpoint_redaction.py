@@ -18,8 +18,8 @@ the checkpoint change.
 import json
 import os
 
-from orchestrators.v5.core import NexusLoopV5, V5TurnContext
-from orchestrators.v5.checkpoint import _checkpoint_safe
+from nexus.main_agent.core import NexusLoopV5, V5TurnContext
+from nexus.main_agent.checkpoint import _checkpoint_safe
 
 
 def test_checkpoint_safe_redacts_key_shaped_secrets():

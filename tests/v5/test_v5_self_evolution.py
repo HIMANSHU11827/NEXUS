@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from orchestrators.v5.self_evolution import EvolutionCandidate, SelfEvolutionLayer
+from nexus.main_agent.self_evolution import EvolutionCandidate, SelfEvolutionLayer
 
 
 def test_unsafe_self_evolution_does_not_claim_failed_deployment(tmp_path, monkeypatch):
@@ -169,7 +169,7 @@ def test_closed_evolution_loop_surfaces_backlog_into_context(tmp_path, monkeypat
     action must be surfaced as a [SELF-EVOLUTION] block in the next turn's
     context_summary AND marked 'proposed' so it is not re-proposed on
     every future session."""
-    from orchestrators.v5.core import NexusLoopV5
+    from nexus.main_agent.core import NexusLoopV5
     from evolution.backlog import (
         queue_improvement_action, pending_actions, mark_action_status
     )

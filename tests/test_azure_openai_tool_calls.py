@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from providers.azure_openai import AzureOpenAIProvider
+from models.providers.api.azure_openai import AzureOpenAIProvider
 
 
 def test_azure_tool_envelope_is_parser_compatible():

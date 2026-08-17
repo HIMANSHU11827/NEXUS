@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Awaitable, Callable, List, Optional
 
-from providers.reliability import redact_secrets
+from models.providers.core.reliability import redact_secrets
 
 logger = logging.getLogger(__name__)
 

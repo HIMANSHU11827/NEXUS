@@ -2,8 +2,8 @@ import json
 
 
 def test_server_and_gui_run_summaries_recognize_timeout_and_cancel_aliases(tmp_path, monkeypatch):
-    import gui.api as gui_api
-    import server
+    import apps.web.api as gui_api
+    import apps.api
 
     event_dir = tmp_path / "events"
     event_dir.mkdir()

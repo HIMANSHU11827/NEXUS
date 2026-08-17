@@ -1,6 +1,6 @@
 from providers import factory as factory_module
-from providers.factory import NexusProviderFactory
-from providers.oauth.types import OAuthCredentials
+from models.providers.core.factory import NexusProviderFactory
+from models.providers.auth.oauth.types import OAuthCredentials
 
 
 class _Loader:
@@ -89,7 +89,7 @@ def test_named_profile_credential_identity_is_opaque(monkeypatch):
 
 
 def test_named_profile_acquires_exclusive_runtime_lease(monkeypatch, tmp_path):
-    from providers.profiles import ProviderProfile, ProviderProfileStore
+    from models.providers.core.profiles import ProviderProfile, ProviderProfileStore
 
     store = ProviderProfileStore(tmp_path / "profiles.json")
     store.add_profile(ProviderProfile(

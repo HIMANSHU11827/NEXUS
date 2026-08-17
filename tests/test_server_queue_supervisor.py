@@ -4,7 +4,7 @@ import asyncio
 
 
 def test_embedded_queue_supervisor_restarts_after_driver_failure(monkeypatch, tmp_path):
-    import server
+    import apps.api
     import queues.driver as queue_driver
 
     instances = []
@@ -40,7 +40,7 @@ def test_embedded_queue_supervisor_restarts_after_driver_failure(monkeypatch, tm
 
 
 def test_health_reports_embedded_worker_readiness(monkeypatch):
-    import server
+    import apps.api
 
     class DoneTask:
         def done(self):
@@ -57,7 +57,7 @@ def test_health_reports_embedded_worker_readiness(monkeypatch):
 
 
 def test_embedded_queue_supervisor_retries_constructor_failure(monkeypatch, tmp_path):
-    import server
+    import apps.api
     import queues.driver as queue_driver
 
     attempts = []
@@ -90,7 +90,7 @@ def test_embedded_queue_supervisor_retries_constructor_failure(monkeypatch, tmp_
 
 
 def test_runtime_metrics_exposes_stale_safe_queue_status(monkeypatch, tmp_path):
-    import server
+    import apps.api
 
     monkeypatch.setattr(server, "_PROJECT_ROOT", str(tmp_path))
     monkeypatch.delenv("NEXUS_EMBED_QUEUE_DRIVER", raising=False)
@@ -101,7 +101,7 @@ def test_runtime_metrics_exposes_stale_safe_queue_status(monkeypatch, tmp_path):
 
 
 def test_runtime_metrics_external_mode_when_worker_disabled(monkeypatch, tmp_path):
-    import server
+    import apps.api
 
     monkeypatch.setattr(server, "_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("NEXUS_EMBED_QUEUE_DRIVER", "false")
@@ -112,7 +112,7 @@ def test_runtime_metrics_external_mode_when_worker_disabled(monkeypatch, tmp_pat
 
 def test_prometheus_metrics_exposes_runtime_health_and_quarantine(monkeypatch, tmp_path):
     import json
-    import server
+    import apps.api
 
     monkeypatch.setattr(server, "_PROJECT_ROOT", str(tmp_path))
     monkeypatch.delenv("NEXUS_EMBED_QUEUE_DRIVER", raising=False)
@@ -128,7 +128,7 @@ def test_prometheus_metrics_exposes_runtime_health_and_quarantine(monkeypatch, t
 
 
 def test_embedded_queue_supervisor_quarantines_repeated_crashes(monkeypatch, tmp_path):
-    import server
+    import apps.api
     import queues.driver as queue_driver
     from queues.status import read_incident
 

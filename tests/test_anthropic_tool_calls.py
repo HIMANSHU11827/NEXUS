@@ -1,6 +1,6 @@
 import json
 
-from providers.anthropic import AnthropicProvider
+from models.providers.api.anthropic import AnthropicProvider
 
 
 def test_anthropic_tool_use_envelope_is_parser_compatible():

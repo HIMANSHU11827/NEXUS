@@ -19,7 +19,7 @@ from evolution.quality import (
     validate_forge_output,
 )
 from evolution.version.scripts.version import VersionManager
-from providers.router import ModelRouter
+from models.providers.core.router import ModelRouter
 
 logger = logging.getLogger(__name__)
 _ROUTER: Optional[ModelRouter] = None

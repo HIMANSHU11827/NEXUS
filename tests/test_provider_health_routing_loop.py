@@ -12,7 +12,7 @@ These tests assert the loop is closed both ways:
 
 import time
 
-from intelligence.moe_router import NexusMoERouter
+from nexus.capabilities.intelligence.moe_router import NexusMoERouter
 
 
 class _Factory:
@@ -90,7 +90,7 @@ def test_health_decays_so_one_failure_is_not_a_permanent_ban():
     assert router._next_healthy_provider("a", set()) == "c"
 
     # Age the record past the decay TTL.
-    from providers.health import DEGRADED_TTL_SECONDS
+    from models.providers.core.health import DEGRADED_TTL_SECONDS
 
     record = router._health_registry().get("b")
     record.checked_at = time.time() - (DEGRADED_TTL_SECONDS + 5)
@@ -130,7 +130,7 @@ def test_health_recording_never_raises_on_a_broken_registry():
 
 def test_provider_health_registry_is_safe_for_concurrent_router_updates():
     from concurrent.futures import ThreadPoolExecutor
-    from providers.health import ProviderHealthRegistry
+    from models.providers.core.health import ProviderHealthRegistry
 
     registry = ProviderHealthRegistry()
 
@@ -152,7 +152,7 @@ def test_provider_health_registry_is_safe_for_concurrent_router_updates():
 
 
 def test_provider_health_registry_shares_recent_state_across_instances(tmp_path):
-    from providers.health import ProviderHealthRegistry
+    from models.providers.core.health import ProviderHealthRegistry
 
     path = str(tmp_path / "provider-health.sqlite3")
     first = ProviderHealthRegistry(store_path=path)
@@ -167,7 +167,7 @@ def test_provider_health_registry_shares_recent_state_across_instances(tmp_path)
 
 
 def test_provider_health_persistence_rejects_stale_cross_process_update(tmp_path):
-    from providers.health import ProviderHealth, ProviderHealthRegistry
+    from models.providers.core.health import ProviderHealth, ProviderHealthRegistry
 
     path = str(tmp_path / "provider-health.sqlite3")
     registry = ProviderHealthRegistry(store_path=path)

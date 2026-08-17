@@ -1,4 +1,4 @@
-from orchestrators.v5.core import NexusLoopV5
+from nexus.main_agent.core import NexusLoopV5
 
 
 def _loop(tmp_path, provider_name="deepseek"):

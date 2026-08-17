@@ -12,7 +12,7 @@ class TestPlanRetryBackoff:
     def test_enforcement_retries_with_backoff(self, tmp_path, monkeypatch):
         import logging
 
-        import orchestrators.v5.retry as retry_module
+        import nexus.main_agent.retry as retry_module
 
         sleeps = []
 
@@ -71,7 +71,7 @@ class TestPlanRetryBackoff:
     def test_no_backoff_when_disabled(self, monkeypatch):
         import logging
 
-        import orchestrators.v5.retry as retry_module
+        import nexus.main_agent.retry as retry_module
 
         sleeps = []
 

@@ -83,13 +83,13 @@ class TestIsLoopbackRequest:
         ],
     )
     def test_host_classification(self, host, expected):
-        from authentication import is_loopback_request
+        from security.core.auth import is_loopback_request
 
         req = _make_request("/api/sessions", client_host=host)
         assert is_loopback_request(req) is expected
 
     def test_missing_client_is_remote(self):
-        from authentication import is_loopback_request
+        from security.core.auth import is_loopback_request
 
         req = _make_request("/api/sessions", client_host=None)
         assert is_loopback_request(req) is False
@@ -102,13 +102,13 @@ class TestCheckAuthHardening:
 
     def test_anon_flag_off_requires_auth_even_on_loopback(self):
         with patch.dict(os.environ, {"NEXUS_ALLOW_LOCAL_ANON": "false"}):
-            from authentication import check_auth
+            from security.core.auth import check_auth
 
             assert check_auth(self._req("127.0.0.1")) is None
 
     def test_anon_flag_on_loopback_bypasses(self):
         with patch.dict(os.environ, {"NEXUS_ALLOW_LOCAL_ANON": "true"}):
-            from authentication import check_auth
+            from security.core.auth import check_auth
 
             user = check_auth(self._req("127.0.0.1"))
             assert user is not None
@@ -118,14 +118,14 @@ class TestCheckAuthHardening:
     def test_anon_flag_on_lan_peer_still_requires_auth(self):
         # THE CORE HARDENING: a remote peer must never be trusted by the flag.
         with patch.dict(os.environ, {"NEXUS_ALLOW_LOCAL_ANON": "true"}):
-            from authentication import check_auth
+            from security.core.auth import check_auth
 
             assert check_auth(self._req("192.168.1.50")) is None
 
     def test_anon_flag_on_testclient_peer_requires_auth(self):
         # The pytest TestClient peer is "testclient", not a real loopback addr.
         with patch.dict(os.environ, {"NEXUS_ALLOW_LOCAL_ANON": "true"}):
-            from authentication import check_auth
+            from security.core.auth import check_auth
 
             assert check_auth(self._req("testclient")) is None
 
@@ -133,7 +133,7 @@ class TestCheckAuthHardening:
         with patch.dict(os.environ, {"NEXUS_ALLOW_LOCAL_ANON": "false"}), patch(
             "authentication._AUTH_TOKEN", "secret-token"
         ):
-            from authentication import check_auth
+            from security.core.auth import check_auth
 
             req = _make_request(
                 "/api/sessions",
@@ -149,7 +149,7 @@ class TestCheckAuthHardening:
 class TestAuthMiddlewareHardening:
     @pytest.fixture
     def mw(self):
-        from server import auth_middleware
+        from apps.api import auth_middleware
 
         return auth_middleware
 

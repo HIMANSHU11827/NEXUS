@@ -10,9 +10,9 @@ Covers:
 
 import json
 
-from providers.anthropic import AnthropicProvider
-from providers.google_gemini import GoogleGeminiProvider
-from providers.xai import XAIProvider
+from models.providers.api.anthropic import AnthropicProvider
+from models.providers.api.google_gemini import GoogleGeminiProvider
+from models.providers.api.xai import XAIProvider
 
 
 def _sse(events):

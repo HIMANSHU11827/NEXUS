@@ -3,7 +3,7 @@ import json
 import threading
 import time
 
-from rag.engine import NexusAtlasRAG, _rag_interprocess_lock
+from knowledge.rag.engine import NexusAtlasRAG, _rag_interprocess_lock
 
 
 def test_shared_vault_mutex_serializes_transactions(tmp_path):

@@ -31,7 +31,7 @@ class ModelRouter:
         if kernel:
             self.kernel = kernel
         else:
-            from kernel import get_nexus_kernel
+            from nexus.runtime.kernel import get_nexus_kernel
             self.kernel = get_nexus_kernel()
             
         self.total_local_calls = 0
@@ -62,7 +62,7 @@ class ModelRouter:
         self.last_failure: Optional[Classification] = None
         self.attempts = ProviderAttemptRecorder()
 
-        from cognition.intent_engine import IntentEngine
+        from nexus.conversation.intent_engine import IntentEngine
         self.intent_engine = IntentEngine(self)
 
     @property
@@ -134,7 +134,7 @@ class ModelRouter:
         last_input = user_msgs[-1].lower()
         
         # Use the IntentEngine for high-fidelity classification
-        from cognition.intent_engine import NexusIntent
+        from nexus.conversation.intent_engine import NexusIntent
         classified = self.intent_engine.classify(last_input)
         # IntentEngine historically returned a mapping; accept enum/string
         # values too so partial restores and custom engines remain compatible.
@@ -572,7 +572,7 @@ class ModelRouter:
     ) -> List[Dict[str, str]]:
         """Compact one overflow retry without splitting tool call/result pairs."""
         try:
-            from context import compact_messages, inspect
+            from nexus.context import compact_messages, inspect
 
             current_tokens = int(inspect(messages).get("est_tokens", 0) or 0)
             advertised = (

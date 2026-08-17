@@ -11,7 +11,7 @@ from gateways.base import (
     MessageType,
     SendResult,
 )
-from providers.reliability import bounded_tool_retry
+from models.providers.core.reliability import bounded_tool_retry
 
 logger = logging.getLogger(__name__)
 

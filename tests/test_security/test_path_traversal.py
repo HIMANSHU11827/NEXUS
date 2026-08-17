@@ -19,12 +19,12 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.reading.scripts.reading import ReadingTool
-from tools.deleting.scripts.deleting import DeletingTool
-from tools.creating.scripts.creating import CreatingTool
-from tools.modifying.scripts.modifying import ModifyingTool
-from tools.code_search.scripts.code_search import CodeSearchTool
-from tools.shortcuts.scripts.shortcuts import ShortcutsTool
+from extensions.tools.built_in.reading.scripts.reading import ReadingTool
+from extensions.tools.built_in.deleting.scripts.deleting import DeletingTool
+from extensions.tools.built_in.creating.scripts.creating import CreatingTool
+from extensions.tools.built_in.modifying.scripts.modifying import ModifyingTool
+from extensions.tools.built_in.code_search.scripts.code_search import CodeSearchTool
+from extensions.tools.built_in.shortcuts.scripts.shortcuts import ShortcutsTool
 
 
 def _run(coro):

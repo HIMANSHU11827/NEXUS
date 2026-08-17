@@ -24,8 +24,8 @@ from typing import Any, Dict
 
 import pytest
 
-from orchestrators.v5.hive import V5Hive, _HIVE_RESULT_MARKER
-from orchestrators.v5.parallel import V5ParallelExecutor
+from nexus.main_agent.hive import V5Hive, _HIVE_RESULT_MARKER
+from nexus.main_agent.parallel import V5ParallelExecutor
 
 
 # ─────────────────────────── (a) hive merge ──────────────────────────────
@@ -177,7 +177,7 @@ def test_run_steps_parallel_propagates_tool_errors():
 
 def test_detect_stall_feeds_ledger_history_used_by_replan():
     """Ledger -> _detect_stall -> _hive_replan_on_stall contract holds."""
-    from orchestrators.v5.active_loop import V5ActiveLoop
+    from nexus.main_agent.active_loop import V5ActiveLoop
 
     class _Host(V5ActiveLoop, V5ParallelExecutor):
         logger = logging.getLogger("test.active")

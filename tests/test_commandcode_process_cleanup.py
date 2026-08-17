@@ -1,6 +1,6 @@
 import subprocess
 
-from providers.commandcode import CommandCodeProvider
+from models.providers.api.commandcode import CommandCodeProvider
 
 
 class _FakeProcess:

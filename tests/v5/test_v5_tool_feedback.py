@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 
-from neural.nerve_center import NexusNerveCenter
-from orchestrators.v5.tools import V5ToolExecutor
+from models.neural.nerve_center import NexusNerveCenter
+from nexus.main_agent.tools import V5ToolExecutor
 
 
 class _Call:

@@ -35,7 +35,7 @@ class NEXUSMCPServer:
     @property
     def tool_registry(self):
         if self._tool_registry is None:
-            from tools.nexus_tools.registry import ToolRegistry
+            from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
             self._tool_registry = ToolRegistry(self.root_dir)
         return self._tool_registry
 

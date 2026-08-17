@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from skills.experience import SkillExperience
+from extensions.skills.built_in.experience import SkillExperience
 
 logger = logging.getLogger("NEXUS_SKILL_ENGINE")
 

@@ -1,4 +1,4 @@
-from permissions import PermissionMode, PermissionSystem
+from security.permissions import PermissionMode, PermissionSystem
 
 
 def _with_clean_permissions():

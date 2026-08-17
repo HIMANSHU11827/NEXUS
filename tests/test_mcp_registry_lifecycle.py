@@ -1,6 +1,6 @@
 import json
 
-from tools.nexus_tools.registry import ToolRegistry
+from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
 
 
 def test_mcp_lifecycle_callbacks_remain_bound_to_each_server(tmp_path, monkeypatch):

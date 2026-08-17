@@ -21,7 +21,7 @@ def _install_stub_llm(monkeypatch):
         last = messages[-1]["content"] if messages else ""
         return "FINAL ANSWER: done for: " + last[:40]
 
-    import server as server_mod
+    import apps.api as server_mod
 
     orig = server_mod._get_hive_capability
 
@@ -41,8 +41,8 @@ def client(tmp_path, monkeypatch):
     # picked up by the module-level _AUTH_TOKEN loader.
     monkeypatch.setenv("NEXUS_HIVE_ROOT", str(tmp_path / "hive_runs"))
     monkeypatch.setenv("NEXUS_DASHBOARD_TOKEN", "test-hive-token")
-    import server
-    import authentication as auth_mod
+    import apps.api
+    import security.core.auth as auth_mod
     # Override the cached token directly so the test is independent of the
     # order in which server/authentication were first imported in the session.
     monkeypatch.setattr(auth_mod, "_AUTH_TOKEN", "test-hive-token")

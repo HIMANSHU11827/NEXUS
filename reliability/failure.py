@@ -21,7 +21,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 try:
-    from providers.reliability import redact_secrets
+    from models.providers.core.reliability import redact_secrets
 except Exception:  # pragma: no cover - defensive import fallback
 
     _SECRET_PATTERNS = [
@@ -333,7 +333,7 @@ def classify_exception(exc: BaseException, hint: str = "") -> FailureClass:
     type- and text-based heuristics so classification never raises.
     """
     try:
-        from providers.reliability import classify_failure
+        from models.providers.core.reliability import classify_failure
 
         provider_class = classify_failure(exc, str(hint or ""))
         if provider_class is not None:

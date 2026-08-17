@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.system.scripts.system import SystemTool
+from extensions.tools.built_in.system.scripts.system import SystemTool
 
 
 def _run(coro):

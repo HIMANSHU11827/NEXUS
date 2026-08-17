@@ -11,8 +11,8 @@ import pytest
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from orchestrators.v5.context_manager import ContextManager
-from orchestrators.v5.core import NexusLoopV5, _DuckPerceived
+from nexus.main_agent.context_manager import ContextManager
+from nexus.main_agent.core import NexusLoopV5, _DuckPerceived
 
 
 @pytest.fixture(scope="module")

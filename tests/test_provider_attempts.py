@@ -1,5 +1,5 @@
-from providers.attempts import ProviderAttemptRecorder
-from providers.reliability import classify_failure
+from models.providers.core.attempts import ProviderAttemptRecorder
+from models.providers.core.reliability import classify_failure
 
 
 def test_provider_attempt_recorder_is_bounded_and_redacts_secrets():

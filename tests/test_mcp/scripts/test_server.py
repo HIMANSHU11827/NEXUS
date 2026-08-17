@@ -1,11 +1,11 @@
 import pytest
 
-from tools.nexus_tools.base_tool import ToolResult
+from extensions.tools.built_in.nexus_tools.base_tool import ToolResult
 
 
 @pytest.mark.asyncio
 async def test_tools_call_awaits_async_tool():
-    from mcp.server.scripts.server import NEXUSMCPServer
+    from extensions.mcp.core.server.scripts.server import NEXUSMCPServer
 
     class FakeInstance:
         async def execute(self, msg):
@@ -30,7 +30,7 @@ async def test_tools_call_awaits_async_tool():
 
 
 def test_tools_list_converts_jsnol_params_to_input_schema():
-    from mcp.server.scripts.server import NEXUSMCPServer
+    from extensions.mcp.core.server.scripts.server import NEXUSMCPServer
 
     class FakeRegistry:
         def list_tools(self):

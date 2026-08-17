@@ -1,6 +1,6 @@
 import subprocess
 
-from providers.opencode_cli import OpenCodeCLIProvider
+from models.providers.auth.opencode_cli import OpenCodeCLIProvider
 
 
 class _FakeProcess:

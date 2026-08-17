@@ -1,13 +1,13 @@
 import pytest
 from fastapi import HTTPException
 
-import server
+import apps.api
 
 
 @pytest.mark.asyncio
 async def test_safety_settings_does_not_reflect_store_exception(monkeypatch):
     secret_error = "sqlite path=C:\\private\\safety.db token=sk-live-safety"
-    import safety.safety_store as safety_store
+    import security.policies.safety_store as safety_store
 
     monkeypatch.setattr(
         safety_store,

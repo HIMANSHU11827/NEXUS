@@ -2,7 +2,7 @@ import asyncio
 
 
 def test_open_path_platform_launcher_runs_in_worker(monkeypatch, tmp_path):
-    import server
+    import apps.api
 
     opened = []
     monkeypatch.setattr(server.os, "startfile", lambda path: opened.append(path), raising=False)

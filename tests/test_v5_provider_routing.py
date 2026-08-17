@@ -1,6 +1,6 @@
 from nexus.runtime import build_chat_request
-from orchestrators.v5.response import V5ResponseBuilder
-from providers.profiles import ProviderProfile, ProviderProfileStore
+from nexus.main_agent.response import V5ResponseBuilder
+from models.providers.core.profiles import ProviderProfile, ProviderProfileStore
 
 
 def test_chat_request_preserves_selected_provider_profile_and_model():

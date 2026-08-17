@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tools.nexus_tools.registry import ToolEntry
+from extensions.tools.built_in.nexus_tools.registry import ToolEntry
 
 
 class TestToolEntry:
@@ -120,7 +120,7 @@ def test_registry_uses_explicit_root_when_cwd_differs(tmp_path, monkeypatch):
     other.mkdir()
     monkeypatch.chdir(other)
 
-    from tools.nexus_tools.registry import ToolRegistry
+    from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
     registry = ToolRegistry(str(project))
 
     assert "demo" in registry.list_tools(include_unavailable=True)
@@ -136,7 +136,7 @@ def test_registry_summary_explains_unavailable_tools(tmp_path):
         encoding="utf-8",
     )
 
-    from tools.nexus_tools.registry import ToolRegistry
+    from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
     registry = ToolRegistry(str(project))
 
     assert registry.list_tools() == {}
@@ -157,7 +157,7 @@ def test_registry_list_tools_exposes_structured_contract(tmp_path):
         encoding="utf-8",
     )
 
-    from tools.nexus_tools.registry import ToolRegistry
+    from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
 
     summary = ToolRegistry(str(tmp_path / "project")).list_tools(include_unavailable=True)["demo"]
 
@@ -177,7 +177,7 @@ def test_registry_discovers_active_skills_as_model_tools(tmp_path):
         encoding="utf-8",
     )
 
-    from tools.nexus_tools.registry import ToolRegistry
+    from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
 
     registry = ToolRegistry(str(tmp_path))
     tools = registry.list_tools(include_unavailable=True)
@@ -195,7 +195,7 @@ def test_registry_discovers_nested_skill_tree(tmp_path):
         encoding="utf-8",
     )
 
-    from skills.registry import SkillRegistry
+    from extensions.skills.built_in.registry import SkillRegistry
 
     records = SkillRegistry(str(tmp_path)).discover()
     assert any(record.id == "nested_code_review" for record in records)
@@ -230,7 +230,7 @@ def test_registry_accepts_mcp_servers_list_and_normalizes_schema(tmp_path, monke
             }]
 
     monkeypatch.setattr("mcp.client.MCPClient", FakeClient)
-    from tools.nexus_tools.registry import ToolRegistry
+    from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
 
     registry = ToolRegistry(str(tmp_path))
     entry = registry.get("lookup")
@@ -244,8 +244,8 @@ def test_registry_accepts_mcp_servers_list_and_normalizes_schema(tmp_path, monke
 def test_registry_enforces_mcp_top_level_required_fields():
     import asyncio
 
-    from tools.nexus_tools.base_tool import BaseTool, ToolResult
-    from tools.nexus_tools.registry import ToolEntry, ToolRegistry
+    from extensions.tools.built_in.nexus_tools.base_tool import BaseTool, ToolResult
+    from extensions.tools.built_in.nexus_tools.registry import ToolEntry, ToolRegistry
 
     class RequiredTool(BaseTool):
         async def execute(self, query: str) -> ToolResult:
@@ -266,8 +266,8 @@ def test_registry_enforces_mcp_top_level_required_fields():
 
 
 def test_registry_passes_hidden_runtime_context_without_validating_as_tool_param():
-    from tools.nexus_tools.base_tool import BaseTool, ToolResult
-    from tools.nexus_tools.registry import ToolEntry, ToolRegistry
+    from extensions.tools.built_in.nexus_tools.base_tool import BaseTool, ToolResult
+    from extensions.tools.built_in.nexus_tools.registry import ToolEntry, ToolRegistry
 
     class ContextTool(BaseTool):
         def __init__(self):
@@ -305,8 +305,8 @@ def test_registry_passes_hidden_runtime_context_without_validating_as_tool_param
 def test_registry_binds_stream_runtime_context_after_acquiring_semaphore():
     import asyncio
 
-    from tools.nexus_tools.base_tool import BaseTool, ToolResult
-    from tools.nexus_tools.registry import ToolEntry, ToolRegistry
+    from extensions.tools.built_in.nexus_tools.base_tool import BaseTool, ToolResult
+    from extensions.tools.built_in.nexus_tools.registry import ToolEntry, ToolRegistry
 
     class BlockingContextTool(BaseTool):
         def __init__(self):
@@ -380,7 +380,7 @@ def test_registry_discovers_json_metadata_and_marks_stub_unavailable(tmp_path):
         encoding="utf-8",
     )
 
-    from tools.nexus_tools.registry import ToolRegistry
+    from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
 
     registry = ToolRegistry(str(tmp_path))
     summary = registry.list_tools(include_unavailable=True)["legacy_probe"]
@@ -394,8 +394,8 @@ def test_registry_discovers_json_metadata_and_marks_stub_unavailable(tmp_path):
 def test_registry_stream_timeout_applies_to_native_async_generators():
     import asyncio
 
-    from tools.nexus_tools.base_tool import BaseTool
-    from tools.nexus_tools.registry import ToolEntry, ToolRegistry
+    from extensions.tools.built_in.nexus_tools.base_tool import BaseTool
+    from extensions.tools.built_in.nexus_tools.registry import ToolEntry, ToolRegistry
 
     class HangingTool(BaseTool):
         async def stream_execute(self):

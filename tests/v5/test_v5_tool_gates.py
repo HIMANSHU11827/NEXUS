@@ -10,9 +10,9 @@ import pytest
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from orchestrators.v5.core import NexusLoopV5
-from orchestrators.v5.tools import _TextToolCall
-from tools.nexus_tools.base_tool import ToolResult
+from nexus.main_agent.core import NexusLoopV5
+from nexus.main_agent.tools import _TextToolCall
+from extensions.tools.built_in.nexus_tools.base_tool import ToolResult
 
 
 class _FakeAssessment:

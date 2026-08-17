@@ -1,5 +1,5 @@
-from intelligence.local_brain import NexusLocalBrain
-from intelligence.moa import MixtureOfArchitects
+from nexus.capabilities.intelligence.local_brain import NexusLocalBrain
+from nexus.capabilities.intelligence.moa import MixtureOfArchitects
 
 
 def test_moa_delegates_hybrid_request_instead_of_returning_empty_success():

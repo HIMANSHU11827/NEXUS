@@ -8,8 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from nexus.run_control import RunControlRegistry
-from orchestrators.v5.model import V5ModelCaller
-from orchestrators.v5.tools import V5ToolExecutor
+from nexus.main_agent.model import V5ModelCaller
+from nexus.main_agent.tools import V5ToolExecutor
 
 
 def test_cancel_before_registration_survives_generator_startup():

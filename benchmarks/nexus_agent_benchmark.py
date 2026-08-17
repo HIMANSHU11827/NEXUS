@@ -22,8 +22,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from nexus.events import CanonicalEvent
-from orchestrators.v5.bench import V5Bench
-from safety.safety_store import _command_policy_for
+from nexus.main_agent.bench import V5Bench
+from security.policies.safety_store import _command_policy_for
 
 
 def _case(name: str, check: Callable[[], tuple[bool, str]]) -> dict[str, Any]:

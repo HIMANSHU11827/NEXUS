@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import requests
 
-from tools.nexus_tools.result import ToolArgumentError, parse_tool_arguments
+from extensions.tools.built_in.nexus_tools.result import ToolArgumentError, parse_tool_arguments
 
 logger = logging.getLogger("NEXUS_PROVIDER")
 

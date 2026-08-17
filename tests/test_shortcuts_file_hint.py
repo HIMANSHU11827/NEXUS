@@ -1,6 +1,6 @@
 import asyncio
 
-from tools.shortcuts.scripts.shortcuts import ShortcutsTool
+from extensions.tools.built_in.shortcuts.scripts.shortcuts import ShortcutsTool
 
 
 def test_shortcuts_list_on_file_returns_repair_hint(tmp_path):

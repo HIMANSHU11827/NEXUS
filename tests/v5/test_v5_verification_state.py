@@ -5,8 +5,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from orchestrators.v5.verification_state import VerifierStateStore
-from orchestrators.v5.events import V5EventEmitter
+from nexus.main_agent.verification_state import VerifierStateStore
+from nexus.main_agent.events import V5EventEmitter
 
 
 def test_missing_store_is_conservatively_unverified(tmp_path):

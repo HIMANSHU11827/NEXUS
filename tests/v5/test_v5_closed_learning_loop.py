@@ -14,8 +14,8 @@ import asyncio
 import json
 from pathlib import Path
 
-from orchestrators.v5.core import NexusLoopV5
-from orchestrators.v5.meta import MetaLearningLayer
+from nexus.main_agent.core import NexusLoopV5
+from nexus.main_agent.meta import MetaLearningLayer
 
 
 def _run(coro):
@@ -99,7 +99,7 @@ def test_recorded_experience_influences_the_next_strategy_choice(tmp_path):
 def _experience(strategy: str, outcome: float):
     from datetime import datetime
 
-    from orchestrators.v5.meta import Experience
+    from nexus.main_agent.meta import Experience
 
     return Experience(
         task_id=f"task-{strategy}",

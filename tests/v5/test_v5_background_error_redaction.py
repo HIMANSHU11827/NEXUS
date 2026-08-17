@@ -1,6 +1,6 @@
 import asyncio
 
-from orchestrators.v5.background_runner import V5BackgroundRunner
+from nexus.main_agent.background_runner import V5BackgroundRunner
 
 
 class _Runner(V5BackgroundRunner):

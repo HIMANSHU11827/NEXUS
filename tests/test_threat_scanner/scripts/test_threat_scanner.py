@@ -3,7 +3,7 @@ __version__ = "1.0.0"
 import os
 import tempfile
 
-from tools.threat_patterns import (
+from extensions.tools.built_in.threat_patterns import (
     ScanResult,
     ThreatMatch,
     scan_content,

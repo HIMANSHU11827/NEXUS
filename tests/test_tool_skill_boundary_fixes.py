@@ -10,11 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from orchestrators.v5.skill import V5Skill
-from skills.registry import SkillRegistry
-from tools.nexus_tools.base_tool import BaseTool, ToolResult
-from tools.nexus_tools.registry import ToolEntry, ToolRegistry
-from tools.nexus_tools.result import ToolCallResult
+from nexus.main_agent.skill import V5Skill
+from extensions.skills.built_in.registry import SkillRegistry
+from extensions.tools.built_in.nexus_tools.base_tool import BaseTool, ToolResult
+from extensions.tools.built_in.nexus_tools.registry import ToolEntry, ToolRegistry
+from extensions.tools.built_in.nexus_tools.result import ToolCallResult
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

@@ -16,7 +16,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     AsyncTeleBot = None  # type: ignore[assignment]
 
-from orchestrators import NexusLoop
+from nexus.main_agent import NexusLoop
 
 # Configuration
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")

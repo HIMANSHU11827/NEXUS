@@ -1395,11 +1395,11 @@ def _oauth_provider_id(provider_key: str) -> str:
 
 
 async def _login_oauth_provider(provider_key: str, provider_name: str):
-    from providers.oauth.providers.autoregister import register_all_oauth_providers
-    from providers.oauth.registry import get_oauth_provider, get_oauth_providers
-    from providers.oauth.storage import load_oauth_token_store
-    from providers.oauth.types import OAuthAuthInfo, OAuthPrompt
-    from providers.profiles import ProviderProfile, load_profile_store
+    from models.providers.auth.oauth.providers.autoregister import register_all_oauth_providers
+    from models.providers.auth.oauth.registry import get_oauth_provider, get_oauth_providers
+    from models.providers.auth.oauth.storage import load_oauth_token_store
+    from models.providers.auth.oauth.types import OAuthAuthInfo, OAuthPrompt
+    from models.providers.core.profiles import ProviderProfile, load_profile_store
 
     register_all_oauth_providers()
     oauth_id = _oauth_provider_id(provider_key)
@@ -1862,7 +1862,7 @@ def configure_extensions(root_dir: str):
     # ── Skills ──
     console.print("[bold]📐 Skills[/bold]")
     try:
-        from skills.registry import SkillRegistry
+        from extensions.skills.built_in.registry import SkillRegistry
         skills = SkillRegistry(root_dir).discover()
     except ImportError:
         skills = []
@@ -1875,7 +1875,7 @@ def configure_extensions(root_dir: str):
     # ── Tools ──
     console.print("[bold]🔧 Tools[/bold]")
     try:
-        from tools.nexus_tools.registry import ToolRegistry
+        from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
         tools_reg = ToolRegistry(root_dir)
         all_tools = tools_reg.list_tools(include_unavailable=True)
     except ImportError:
@@ -1889,7 +1889,7 @@ def configure_extensions(root_dir: str):
     # ── Plugins ──
     console.print("[bold]🔌 Plugins[/bold]")
     try:
-        from plugins.manager import PluginManager
+        from extensions.plugins.built_in.manager import PluginManager
         pm = PluginManager(root_dir)
         plugins = pm.list_plugins() if hasattr(pm, 'list_plugins') else pm.discover_plugins()
     except (ImportError, Exception):
@@ -1906,7 +1906,7 @@ def configure_extensions(root_dir: str):
     # ── MCP Servers ──
     console.print("[bold]🔗 MCP Servers[/bold]")
     try:
-        from mcp.catalog.scripts.catalog import MCPServerCatalog
+        from extensions.mcp.core.catalog.scripts.catalog import MCPServerCatalog
         catalog = MCPServerCatalog(root_dir)
         servers = catalog.list_servers()
     except (ImportError, Exception):
@@ -2156,7 +2156,7 @@ def init_knowledge(root_dir: str):
         return
 
     try:
-        from rag.engine import NexusAtlasRAG
+        from knowledge.rag.engine import NexusAtlasRAG
         rag = NexusAtlasRAG(root_dir)
         indexed = rag.index_workspace()
         status_ok(f"Indexed {indexed} files into knowledge base")

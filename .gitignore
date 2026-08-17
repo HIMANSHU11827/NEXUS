@@ -35,7 +35,7 @@ context_archive/
 graphify-out/
 *.lock.sqlite
 *.lock.sqlite3
-lifecycle/skill_lifecycle_state.json
+src/nexus/lifecycle/managers/skill_lifecycle_state.json
 knowledge/store.json
 
 # Local test and agent scratch directories
@@ -62,11 +62,11 @@ FAILED
 response.txt
 subtasks-response.json
 hello_world.py
-tui/out.txt
-tui/warn.txt
-tui/_repro-app.tsx
-tui/repro-dup-key.mts
-tui/artifacts/
+apps/tui/out.txt
+apps/tui/warn.txt
+apps/tui/_repro-app.tsx
+apps/tui/repro-dup-key.mts
+apps/tui/artifacts/
 .opencode/
 logs/
 workspace/
@@ -79,12 +79,12 @@ models/local/
 data/
 training_data/
 temp_gemini_cli/
-gui/src/App.tsx.found_*.txt
-gui/vite_dev.log
-gui/workspace/
-gui/src/App.tsx.original_log_*.txt
-gui/src/*.patch_ui.py
-tui/node_modules/
+apps/web/src/App.tsx.found_*.txt
+apps/web/vite_dev.log
+apps/web/workspace/
+apps/web/src/App.tsx.original_log_*.txt
+apps/web/src/*.patch_ui.py
+apps/tui/node_modules/
 
 knowledge/*.db
 knowledge/*.enc
@@ -106,9 +106,10 @@ graphify-out/cache/     # optional: commit for speed
 HERMES.md
 MULTI_AGENT_TASKS.md
 .tmp/research-gemini
-gui/src/*.patch_ui.py
-gui/src/App.tsx.found_*.txt
-gui/src/App.tsx.original_log_*.txt
-gui/vite_dev.log
-gui/workspace/
+apps/web/src/*.patch_ui.py
+apps/web/src/App.tsx.found_*.txt
+apps/web/src/App.tsx.original_log_*.txt
+apps/web/vite_dev.log
+apps/web/workspace/
+apps/web/test-results/
 .nexus/

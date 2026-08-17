@@ -3,7 +3,7 @@ import json
 import pytest
 from fastapi import Request
 
-from server import global_exception_handler
+from apps.api import global_exception_handler
 
 
 @pytest.mark.asyncio

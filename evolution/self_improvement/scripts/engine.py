@@ -6,7 +6,7 @@ import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
-from providers.router import ModelRouter
+from models.providers.core.router import ModelRouter
 
 logger = logging.getLogger(__name__)
 _ROUTER: Optional[ModelRouter] = None
@@ -83,7 +83,7 @@ Return JSON with:
         self-improvement loop is non-fatal to the running agent.
         """
         try:
-            from utils.runtime_guard import guarded_jsonl_append
+            from nexus.common.runtime_guard import guarded_jsonl_append
 
             guarded_jsonl_append(self.log_path, asdict(record))
         except Exception:

@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 import numpy as np
 
-from intelligence.nate.adaptive_schema import NATE_Route
+from nexus.capabilities.intelligence.nate.adaptive_schema import NATE_Route
 
 TOOLS = [
     ("get_weather", "Get current weather for any city worldwide. Returns temperature, humidity, wind speed, and conditions."),

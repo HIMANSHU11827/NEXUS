@@ -1,6 +1,6 @@
 import json
 
-from providers.universal import UniversalProvider
+from models.providers.core.universal import UniversalProvider
 
 
 def test_universal_native_tool_envelope_is_parser_compatible():

@@ -2,9 +2,9 @@ import asyncio
 import sys
 from types import SimpleNamespace
 
-from providers.oauth.providers.autoregister import register_all_oauth_providers
-from providers.oauth.registry import get_oauth_providers, reset_oauth_providers
-from providers.oauth.types import OAuthCredentials
+from models.providers.auth.oauth.providers.autoregister import register_all_oauth_providers
+from models.providers.auth.oauth.registry import get_oauth_providers, reset_oauth_providers
+from models.providers.auth.oauth.types import OAuthCredentials
 
 
 class TestOAuthProviderRegistration:
@@ -32,7 +32,7 @@ class TestOAuthProviderRegistration:
 
 
 def test_openrouter_refresh_stores_absolute_expiry_ms(monkeypatch):
-    from providers.oauth.providers import openrouter
+    from models.providers.auth.oauth.providers import openrouter
 
     class Response:
         def raise_for_status(self):
@@ -52,8 +52,8 @@ def test_openrouter_refresh_stores_absolute_expiry_ms(monkeypatch):
 
 
 def test_autoregister_refresh_accepts_sync_refresh_function():
-    from providers.oauth.providers.autoregister import _make_oauth_provider
-    from providers.oauth.types import OAuthCredentials
+    from models.providers.auth.oauth.providers.autoregister import _make_oauth_provider
+    from models.providers.auth.oauth.types import OAuthCredentials
 
     def login_fn(**_kwargs):
         raise AssertionError("login should not be called")

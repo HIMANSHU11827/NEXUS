@@ -19,7 +19,7 @@ def setup(download: bool = True):
         print(f"[!] Holistic asset vendoring failed: {exc}")
 
     try:
-        from tools.nexus_tools.vision.mediapipe_suite_tool import MediaPipeSuiteTool
+        from extensions.tools.built_in.nexus_tools.vision.mediapipe_suite_tool import MediaPipeSuiteTool
     except ImportError:
         MediaPipeSuiteTool = None
 

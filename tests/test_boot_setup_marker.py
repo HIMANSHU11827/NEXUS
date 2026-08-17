@@ -37,7 +37,7 @@ def test_quick_configure_writes_complete_marker(tmp_path):
 
 def test_setup_alias_inserts_setup_arg(monkeypatch):
     import nexus
-    import tui.setup_wizard as setup_wizard
+    import apps.tui.setup_wizard as setup_wizard
 
     monkeypatch.setattr(sys, "argv", ["nexus-configure"])
     monkeypatch.setattr(nexus, "_setup_environment", lambda: "C:/tmp/nexus-test")

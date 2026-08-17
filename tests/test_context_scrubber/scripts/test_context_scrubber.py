@@ -1,6 +1,6 @@
 __version__ = "1.0.0"
 
-from utils.context_scrubber import MessageSanitizer, StreamingContextScrubber
+from nexus.common.context_scrubber import MessageSanitizer, StreamingContextScrubber
 
 
 class TestStreamingContextScrubber:

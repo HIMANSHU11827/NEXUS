@@ -1,5 +1,5 @@
 from configure.profiles import create_profile, get_profile_path, switch_profile
-from utils.nexus_path import get_profiles_root
+from nexus.common.nexus_path import get_profiles_root
 
 
 def test_switch_profile_uses_stable_profiles_root(tmp_path, monkeypatch):

@@ -43,7 +43,7 @@ class MCPToolAdapter(BaseTool):
     """Adapts an MCP client tool into a BaseTool for the ToolRegistry.
 
     Registered via ::
-        from mcp.client import MCPClient
+        from extensions.mcp.core.client import MCPClient
         client = MCPClient("server.exe", [])
         client.start()
         for tool_def in client.list_tools():

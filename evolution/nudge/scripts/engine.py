@@ -6,7 +6,7 @@ import os
 import time
 from typing import Any, Dict, Optional
 
-from providers.router import ModelRouter
+from models.providers.core.router import ModelRouter
 
 logger = logging.getLogger(__name__)
 _ROUTER: Optional[ModelRouter] = None

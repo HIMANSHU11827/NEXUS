@@ -29,7 +29,7 @@ sys.path = [p for p in sys.path if 'cpython-3.11' not in p.lower()]
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from rag.engine import NexusAtlasRAG
+from knowledge.rag.engine import NexusAtlasRAG
 
 
 def do_index():
@@ -63,15 +63,15 @@ def do_verify():
     print(f"Avg DL:    {rag._avg_dl:.2f}")
     print(f"IDF cache: {len(rag._idf_cache)} terms")
 
-    from rag.turbo_vector import NexusTurboVectorEngine
+    from knowledge.rag.turbo_vector import NexusTurboVectorEngine
     tv = NexusTurboVectorEngine()
     print(f"Vector:    {len(tv.store)} entries")
 
-    from rag.atlas.engine import NexusAtlasEngine
+    from knowledge.rag.atlas.engine import NexusAtlasEngine
     ae = NexusAtlasEngine()
     print(f"Atlas:     {len(ae.symbols)} symbols")
 
-    from rag.deep_indexer import NexusDeepIndexer
+    from knowledge.rag.deep_indexer import NexusDeepIndexer
     di = NexusDeepIndexer()
     print(f"DeepIdx:   {os.path.exists(di.db_path)}")
 

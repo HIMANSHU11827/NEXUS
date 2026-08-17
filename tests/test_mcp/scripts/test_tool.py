@@ -3,9 +3,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mcp.tool.scripts.tool import MCPTool, _run_mcp_call
-from tools.nexus_tools.base_tool import ToolResult
-from tools.nexus_tools.registry import ToolEntry, ToolRegistry
+from extensions.mcp.core.tool.scripts.tool import MCPTool, _run_mcp_call
+from extensions.tools.built_in.nexus_tools.base_tool import ToolResult
+from extensions.tools.built_in.nexus_tools.registry import ToolEntry, ToolRegistry
 
 
 @pytest.fixture

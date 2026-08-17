@@ -1,4 +1,4 @@
-from cognition.intent_engine import IntentEngine, NexusIntent
+from nexus.conversation.intent_engine import IntentEngine, NexusIntent
 
 
 def test_intent_engine_returns_compatible_mapping_for_high_signal_requests():
@@ -17,7 +17,7 @@ def test_intent_engine_classifies_diagnostics_without_provider_calls():
 
 
 def test_model_router_required_tier_accepts_legacy_mapping_result():
-    from providers.router import ModelRouter
+    from models.providers.core.router import ModelRouter
 
     router = object.__new__(ModelRouter)
     router.intent_engine = IntentEngine()

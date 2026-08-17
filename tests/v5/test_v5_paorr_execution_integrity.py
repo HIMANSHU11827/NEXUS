@@ -2,8 +2,8 @@
 
 import asyncio
 
-from orchestrators.v5.paorr import PAORREnhanced, Plan, PlanStep
-from orchestrators.v5.verification import V5Verifier
+from nexus.main_agent.paorr import PAORREnhanced, Plan, PlanStep
+from nexus.main_agent.verification import V5Verifier
 
 
 def test_failed_step_does_not_spin_and_blocks_dependents():

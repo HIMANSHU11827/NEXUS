@@ -2,12 +2,12 @@ import json
 
 import pytest
 
-import tools.test_runner.scripts.test_runner as test_runner_module
-from tools.creating.scripts.creating import CreatingTool
-from tools.modifying.scripts.modifying import ModifyingTool
+import extensions.tools.built_in.test_runner.scripts.test_runner as test_runner_module
+from extensions.tools.built_in.creating.scripts.creating import CreatingTool
+from extensions.tools.built_in.modifying.scripts.modifying import ModifyingTool
 # Alias so pytest's ``Test*`` collection pattern does not treat the
 # imported tool class (which has an __init__) as a test class.
-from tools.test_runner.scripts.test_runner import TestRunnerTool as LocalTestRunnerTool
+from extensions.tools.built_in.test_runner.scripts.test_runner import TestRunnerTool as LocalTestRunnerTool
 
 
 def test_test_runner_auto_detects_node_test_script(tmp_path):

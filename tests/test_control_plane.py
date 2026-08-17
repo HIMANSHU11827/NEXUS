@@ -8,7 +8,7 @@ from nexus.control_plane import (
     ready_steps,
     transition_step,
 )
-from orchestrators.v5.core import NexusLoopV5
+from nexus.main_agent.core import NexusLoopV5
 
 
 def test_durable_plan_steps_enforce_dependencies_and_project_run_events(tmp_path):

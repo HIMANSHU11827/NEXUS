@@ -32,7 +32,7 @@ class ReasoningTool(BaseTool):
         **kwargs: Any,
     ) -> ToolResult:
         try:
-            from reasoning.hyper_engine import HyperReasoningEngine
+            from nexus.capabilities.reasoning.hyper_engine import HyperReasoningEngine
 
             max_steps = min(int(steps or 5), DEPTH_STEPS.get(depth, 5))
             engine, mode, init_err = self._build_engine()
@@ -93,10 +93,10 @@ class ReasoningTool(BaseTool):
     @staticmethod
     def _build_engine():
         """Return (engine, mode, init_error). Never raises."""
-        from reasoning.hyper_engine import HyperReasoningEngine
+        from nexus.capabilities.reasoning.hyper_engine import HyperReasoningEngine
 
         try:
-            from providers.factory import NexusProviderFactory
+            from models.providers.core.factory import NexusProviderFactory
 
             provider = NexusProviderFactory().get_provider()
             if provider is not None:

@@ -2,9 +2,9 @@ import json
 
 from fastapi.testclient import TestClient
 
-import authentication
-from gui import api
-from permissions import PermissionMode, PermissionSystem
+import security.core.auth
+from apps.web import api
+from security.permissions import PermissionMode, PermissionSystem
 
 
 _TEST_DASHBOARD_TOKEN = "test-dashboard-token-command-execution"

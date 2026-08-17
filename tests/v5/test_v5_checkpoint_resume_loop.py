@@ -25,7 +25,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from orchestrators.v5.core import NexusLoopV5, V5LoopState, V5TurnContext
+from nexus.main_agent.core import NexusLoopV5, V5LoopState, V5TurnContext
 
 
 def test_checkpoint_save_does_not_block_async_state_transition(tmp_path):
@@ -221,7 +221,7 @@ def test_checkpoint_directory_is_bounded_for_long_running_sessions(tmp_path):
     cleared in production (`_checkpoint_clear` has no callers). Measured at
     ~34KB/file that is ~134MB per 1000 turns of unbounded growth, so the
     directory must self-prune to the newest N."""
-    from orchestrators.v5.checkpoint import MAX_CHECKPOINT_FILES
+    from nexus.main_agent.checkpoint import MAX_CHECKPOINT_FILES
 
     loop = NexusLoopV5(str(tmp_path), session_id="ckpt-bound")
     _seed(loop, plan=[{"step": "x"}], actions=[], memory=[])

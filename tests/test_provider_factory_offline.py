@@ -1,6 +1,6 @@
 import os
 
-from providers.factory import NexusProviderFactory
+from models.providers.core.factory import NexusProviderFactory
 
 
 def test_offline_mode_is_opt_in(monkeypatch):

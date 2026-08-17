@@ -1,7 +1,7 @@
 import asyncio
 
-from tools.nexus_tools.registry import ToolEntry, ToolRegistry
-from tools.nexus_tools.base_tool import ToolResult
+from extensions.tools.built_in.nexus_tools.registry import ToolEntry, ToolRegistry
+from extensions.tools.built_in.nexus_tools.base_tool import ToolResult
 
 
 class _FlakyTool:

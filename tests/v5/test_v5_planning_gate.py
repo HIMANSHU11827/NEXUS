@@ -1,7 +1,7 @@
-from orchestrators.v5.core import NexusLoopV5
-from orchestrators.v5.perceive import PerceivedInput, InputType, Intent
+from nexus.main_agent.core import NexusLoopV5
+from nexus.main_agent.perceive import PerceivedInput, InputType, Intent
 import asyncio
-from tools.nexus_tools.base_tool import ToolResult
+from extensions.tools.built_in.nexus_tools.base_tool import ToolResult
 
 
 def test_v5_planning_gate_skips_conversation_and_factual_questions(tmp_path):

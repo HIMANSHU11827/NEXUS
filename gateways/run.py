@@ -12,8 +12,8 @@ from gateways.base import BasePlatformAdapter, MessageEvent
 from gateways.delivery import DeliveryLedger
 from gateways.platforms import all_adapters, get_adapter
 from gateways.session_ids import gateway_session_id
-from orchestrators import NexusLoop
-from providers.reliability import bounded_tool_retry, redact_secrets
+from nexus.main_agent import NexusLoop
+from models.providers.core.reliability import bounded_tool_retry, redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -330,7 +330,7 @@ class GatewayRunner:
 
     def is_authorized(self, event: MessageEvent) -> bool:
         """Check if the user is allowed to issue commands."""
-        from authentication import is_gateway_authorized
+        from security.core.auth import is_gateway_authorized
         return is_gateway_authorized(event.platform, event.sender_id)
 
     async def handle_message(self, event: MessageEvent):
@@ -355,7 +355,7 @@ class GatewayRunner:
         except Exception:  # degrade softly — never drop on dedupe failure
             logger.debug("message dedupe check failed", exc_info=True)
 
-        from utils.session_bus import set_active_session_id, sync_loop_from_disk
+        from nexus.common.session_bus import set_active_session_id, sync_loop_from_disk
 
         session_id = self.session_id_for(event)
         logger.info(

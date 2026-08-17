@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from reasoning.hyper_engine import HyperReasoningEngine
+from nexus.capabilities.reasoning.hyper_engine import HyperReasoningEngine
 
 
 PLAN_JSON = json.dumps({

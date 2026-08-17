@@ -159,11 +159,11 @@ class NexusShell:
 
     def _show_skills(self):
         try:
-            from skills.engine import NexusSkillEngine
+            from extensions.skills.built_in.engine import NexusSkillEngine
             e = NexusSkillEngine(); skills = e.list_skills()
         except ImportError:
             try:
-                from skills import NexusSkillMaster
+                from extensions.skills.built_in import NexusSkillMaster
                 e = NexusSkillMaster(); skills = e.list_skills()
             except Exception as ex:
                 console.print(f"[red]Skills unavailable: {ex}[/red]"); return
@@ -183,7 +183,7 @@ class NexusShell:
 
     def _show_tools(self):
         try:
-            import tools
+            import extensions.tools.built_in
             reg = tools.ToolRegistry() if hasattr(tools, 'ToolRegistry') else None
             tl = reg.list_tools() if reg else {}
         except Exception:
@@ -212,7 +212,7 @@ class NexusShell:
 
     def _show_plugins(self):
         try:
-            from plugins import PluginManager
+            from extensions.plugins.built_in import PluginManager
             pm = PluginManager(); pl = getattr(pm, "_plugins", {})
         except Exception:
             console.print("[yellow]Plugins unavailable.[/yellow]"); return
@@ -253,7 +253,7 @@ class NexusShell:
     def _show_agent_monitor(self):
         lines = []
         try:
-            from skills.engine import NexusSkillEngine
+            from extensions.skills.built_in.engine import NexusSkillEngine
             e = NexusSkillEngine(); h = e.health_report()
             lines.append(f"Skills: {h['total_skills']} total, {h['active_skills']} active")
         except: lines.append("[dim]Skill health unavailable[/dim]")
@@ -285,7 +285,7 @@ class NexusShell:
     def _show_system_map(self):
         lines = ["[bold]NEXUS System Map[/bold]", ""]
         try:
-            from skills.engine import NexusSkillEngine
+            from extensions.skills.built_in.engine import NexusSkillEngine
             e = NexusSkillEngine(); h = e.health_report()
             lines.append(f"[cyan]Skills:[/cyan] {h['total_skills']} loaded, {h['active_skills']} active")
         except: lines.append("[cyan]Skills:[/cyan] [dim]unavailable[/dim]")
@@ -295,7 +295,7 @@ class NexusShell:
             lines.append(f"[cyan]Hive:[/cyan] {len(a)} agents")
         except: lines.append("[cyan]Hive:[/cyan] [dim]idle[/dim]")
         try:
-            from permissions import PermissionSystem
+            from security.permissions import PermissionSystem
             lines.append(f"[cyan]Permissions:[/cyan] {PermissionSystem().mode}")
         except: pass
         console.print(Panel("\n".join(lines), title="System", border_style="cyan"))

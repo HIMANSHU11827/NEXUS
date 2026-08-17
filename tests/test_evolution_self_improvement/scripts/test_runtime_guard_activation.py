@@ -11,8 +11,8 @@ import os
 
 import pytest
 
-from utils import runtime_guard as guard
-from utils.runtime_guard import (
+from nexus.common import runtime_guard as guard
+from nexus.common.runtime_guard import (
     CoreRewriteBlocked,
     guarded_append_text,
     guarded_jsonl_append,

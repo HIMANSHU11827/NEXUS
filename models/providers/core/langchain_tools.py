@@ -28,7 +28,7 @@ except Exception:
 
 
 try:
-    from utils.nexus_path import _ROOT as _REPO_ROOT
+    from nexus.common.nexus_path import _ROOT as _REPO_ROOT
 except Exception:  # pragma: no cover - defensive
     _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -88,7 +88,7 @@ def _run_command(command: str) -> str:
     if not cmd:
         raise ValueError("empty command")
     try:
-        from tools.terminal.scripts.terminal import TerminalTool
+        from extensions.tools.built_in.terminal.scripts.terminal import TerminalTool
 
         result = asyncio.run(TerminalTool(WORKSPACE_ROOT).execute(cmd))
         if result is None:
@@ -121,7 +121,7 @@ def _get_rag():
     """Lazily build the canonical RAG engine over the knowledge vault."""
     global _rag
     if _rag is None:
-        from rag.engine import NexusAtlasRAG
+        from knowledge.rag.engine import NexusAtlasRAG
 
         _rag = NexusAtlasRAG(KNOWLEDGE_VAULT)
     return _rag

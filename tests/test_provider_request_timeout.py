@@ -1,10 +1,10 @@
 import pytest
 
-from providers.anthropic import AnthropicProvider
-from providers.deepseek import DeepSeekProvider
-from providers.google_gemini import GoogleGeminiProvider
-from providers.groq import GroqProvider
-from providers.openai import OpenAIProvider
+from models.providers.api.anthropic import AnthropicProvider
+from models.providers.api.deepseek import DeepSeekProvider
+from models.providers.api.google_gemini import GoogleGeminiProvider
+from models.providers.api.groq import GroqProvider
+from models.providers.api.openai import OpenAIProvider
 
 
 class _Response:

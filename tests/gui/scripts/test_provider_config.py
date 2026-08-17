@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 
 def test_provider_config_uses_project_config_path_and_creates_file(tmp_path, monkeypatch):
-    import gui.api as api
+    import apps.web.api as api
 
     monkeypatch.setattr(api, "_ROOT", str(tmp_path))
     monkeypatch.setattr(api, "require_config_write_allowed", lambda _request: None)
@@ -34,7 +34,7 @@ def test_provider_config_uses_project_config_path_and_creates_file(tmp_path, mon
 
 
 def test_provider_config_does_not_overwrite_key_with_mask_placeholder(tmp_path, monkeypatch):
-    import gui.api as api
+    import apps.web.api as api
 
     monkeypatch.setattr(api, "_ROOT", str(tmp_path))
     monkeypatch.setattr(api, "require_config_write_allowed", lambda _request: None)
@@ -79,7 +79,7 @@ def test_provider_config_does_not_overwrite_key_with_mask_placeholder(tmp_path, 
 
 
 def test_concurrent_provider_config_updates_preserve_both_instances(tmp_path, monkeypatch):
-    import gui.api as api
+    import apps.web.api as api
 
     monkeypatch.setattr(api, "_ROOT", str(tmp_path))
     monkeypatch.setattr(api, "require_config_write_allowed", lambda _request: None)

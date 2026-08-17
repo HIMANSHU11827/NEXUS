@@ -2,7 +2,7 @@ import pytest
 
 
 def test_openai_http_stream_closes_response_on_completion(monkeypatch):
-    from providers.openai import OpenAIProvider
+    from models.providers.api.openai import OpenAIProvider
 
     class Response:
         status_code = 200
@@ -95,7 +95,7 @@ def test_openai_compatible_stream_adapters_close_response(monkeypatch, module_na
 
 
 def test_deepseek_http_stream_closes_response_on_completion(monkeypatch):
-    from providers.deepseek import DeepSeekProvider
+    from models.providers.api.deepseek import DeepSeekProvider
 
     class Response:
         status_code = 200
@@ -129,7 +129,7 @@ def test_deepseek_http_stream_closes_response_on_completion(monkeypatch):
 
 
 def test_anthropic_http_stream_closes_response_on_completion(monkeypatch):
-    from providers.anthropic import AnthropicProvider
+    from models.providers.api.anthropic import AnthropicProvider
 
     class Response:
         status_code = 200
@@ -161,7 +161,7 @@ def test_anthropic_http_stream_closes_response_on_completion(monkeypatch):
 
 
 def test_gemini_http_stream_closes_response_on_completion(monkeypatch):
-    from providers.google_gemini import GoogleGeminiProvider
+    from models.providers.api.google_gemini import GoogleGeminiProvider
 
     class Response:
         status_code = 200
@@ -192,7 +192,7 @@ def test_gemini_http_stream_closes_response_on_completion(monkeypatch):
 
 
 def test_ollama_http_stream_closes_response_on_completion(monkeypatch):
-    from providers.ollama import OllamaProvider
+    from models.providers.local.ollama import OllamaProvider
 
     class Response:
         status_code = 200

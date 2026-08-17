@@ -1,7 +1,7 @@
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
-from tools.task.scripts.task import TaskTool
+from extensions.tools.built_in.task.scripts.task import TaskTool
 from nexus.work_items import load_work_item, project_work_item_event
 
 

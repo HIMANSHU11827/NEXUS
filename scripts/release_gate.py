@@ -101,7 +101,7 @@ def main() -> int:
         tracked_all = []
     if tracked_all:
         try:
-            from security.secret_scanner import SecretScanner
+            from security.scanners.secret_scanner import SecretScanner
 
             # Test fixtures and vendored reference material intentionally hold
             # fake/placeholder keys; scan everything else for real secrets.

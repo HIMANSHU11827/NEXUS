@@ -56,8 +56,8 @@ from nexus.runtime import (
     session_file_path as runtime_session_file_path,
 )
 from nexus.task_workflow import complete_task_workflow, start_task_workflow
-from orchestrators import NexusLoop
-from providers.reliability import redact_secrets
+from nexus.main_agent import NexusLoop
+from models.providers.core.reliability import redact_secrets
 
 try:
     import yaml
@@ -66,7 +66,7 @@ except Exception:  # pragma: no cover - handled at request time
 
 # Persistent Safety settings (Permission Mode / Sandbox Mode / policies). Kept
 # separate from the workspace selection; see safety.safety_store.
-from safety.safety_store import (  # noqa: E402
+from security.policies.safety_store import (  # noqa: E402
     PERMISSION_MODES as _SAFETY_PERMISSION_MODES,
     SANDBOX_MODES as _SAFETY_SANDBOX_MODES,
     COMMAND_CATEGORIES as _SAFETY_COMMAND_CATEGORIES,
@@ -271,7 +271,7 @@ def _get_hive_engine():
         if _HIVE_ENGINE is not None:
             return _HIVE_ENGINE
         from hive.engine import NexusHiveEngine
-        from tools.nexus_tools.registry import ToolRegistry
+        from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
 
         engine = NexusHiveEngine(
             _PROJECT_ROOT,
@@ -479,7 +479,7 @@ def _validate_public_deployment() -> None:
     if not enabled:
         return
     errors = []
-    from authentication import OAUTH_PROVIDERS
+    from security.core.auth import OAUTH_PROVIDERS
 
     token = os.environ.get("NEXUS_DASHBOARD_TOKEN", "").strip()
     if not token and not OAUTH_PROVIDERS:
@@ -660,7 +660,7 @@ app = FastAPI(title="NEXUS AI API", version="2.1.0", lifespan=_app_lifespan)
 # ── Session middleware (signed cookies) ─────────────────────────────
 from starlette.middleware.sessions import SessionMiddleware
 
-from authentication import _SESSION_SECRET as _session_secret
+from security.core.auth import _SESSION_SECRET as _session_secret
 
 app.add_middleware(SessionMiddleware, secret_key=_session_secret, max_age=86400)
 
@@ -694,7 +694,7 @@ app.add_middleware(
 )
 
 # ── Auth middleware ─────────────────────────────────────────────────
-from authentication import AuthUser, check_auth, is_loopback_request
+from security.core.auth import AuthUser, check_auth, is_loopback_request
 
 _WINDOWS_RESERVED = frozenset({"con", "prn", "aux", "nul", "com1", "com2", "com3", "com4",
     "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
@@ -778,7 +778,7 @@ async def auth_login(provider: str = "token", redirect: str = ""):
     if provider == "token":
         return {"status": "ok", "message": "Use Authorization: Bearer <token> header"}
 
-    from authentication import OAUTH_PROVIDERS, get_oauth_authorize_url
+    from security.core.auth import OAUTH_PROVIDERS, get_oauth_authorize_url
 
     oauth = OAUTH_PROVIDERS.get(provider)
     if not oauth:
@@ -820,7 +820,7 @@ async def auth_callback(request: Request, code: str = "", state: str = "", provi
     base_redirect = f"{os.environ.get('NEXUS_API_BASE', 'http://127.0.0.1:8000')}/api/auth/callback"
     redirect_uri = f"{base_redirect}?provider={_provider}"
 
-    from authentication import handle_oauth_callback
+    from security.core.auth import handle_oauth_callback
     result = await handle_oauth_callback(_provider, code, state, redirect_uri)
     if not result.success or not result.user:
         raise HTTPException(status_code=401, detail=result.error)
@@ -835,7 +835,7 @@ async def auth_token(request: Request):
 
     Body: ``{"token": "..."}`` or use ``Authorization: Bearer <token>`` header.
     """
-    from authentication import validate_dashboard_token
+    from security.core.auth import validate_dashboard_token
 
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     token = body.get("token", "") or request.headers.get("Authorization", "").replace("Bearer ", "")
@@ -863,7 +863,7 @@ async def auth_status(request: Request):
     if not user_data:
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Bearer "):
-            from authentication import validate_dashboard_token
+            from security.core.auth import validate_dashboard_token
             token = auth[7:]
             if validate_dashboard_token(token):
                 user_data = {"provider": "token", "sub": "dashboard", "name": "Token User"}
@@ -1117,7 +1117,7 @@ def safe_workspace_read_path(raw_path: str) -> str:
 
 def write_workspace_todo_plan(content: str) -> str:
     """Persist the visible agent plan as a real workspace file (atomic)."""
-    from tools.planning.scripts.planning import plan_transaction
+    from extensions.tools.built_in.planning.scripts.planning import plan_transaction
 
     workspace_dir = os.path.join(_PROJECT_ROOT, "workspace")
     os.makedirs(workspace_dir, exist_ok=True)
@@ -1144,7 +1144,7 @@ def write_workspace_todo_plan(content: str) -> str:
 
 # ── Plan / todo workflow (ported from the canonical gui.api implementation) ──
 def clear_workspace_todo_plan() -> None:
-    from tools.planning.scripts.planning import plan_transaction
+    from extensions.tools.built_in.planning.scripts.planning import plan_transaction
 
     try:
         with plan_transaction(_PROJECT_ROOT):
@@ -1308,7 +1308,7 @@ def refresh_provider_runtime() -> str:
         if isinstance(provider_cfg, dict):
             default_provider = str(provider_cfg.get("default_provider") or "").strip()
         try:
-            from providers.factory import NexusProviderFactory
+            from models.providers.core.factory import NexusProviderFactory
             factory = NexusProviderFactory()
             if hasattr(factory, "loader") and hasattr(factory.loader, "reload"):
                 factory.loader.reload()
@@ -1662,7 +1662,7 @@ def append_work_event(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any
         action_text = str(event.get("action") or "").lower()
         if any(token in action_text for token in ("edit", "create", "write", "delete", "remove", "update")):
             try:
-                from orchestrators.v5.verification_state import VerifierStateStore
+                from nexus.main_agent.verification_state import VerifierStateStore
 
                 state_path = Path(_PROJECT_ROOT) / ".nexus_v5" / "verifier_state.json"
                 VerifierStateStore(state_path).mark_stale(
@@ -1991,7 +1991,7 @@ def get_loop(session_id: str = "default") -> NexusLoop:
 
 def set_active_session(session_id: str, source: str = "cli-api") -> None:
     try:
-        from utils.session_bus import set_active_session_id
+        from nexus.common.session_bus import set_active_session_id
         set_active_session_id(_PROJECT_ROOT, session_id, source=source)
     except Exception as e:
         logger.warning("set_active_session: failed for %s: %s", session_id, e)
@@ -2100,8 +2100,8 @@ def apply_runtime_settings(loop: NexusLoop) -> None:
             logger.warning("apply_runtime_settings: model %s failed: %s", model, e)
 
     try:
-        from permissions import PermissionMode
-        from orchestrators.v5.core import PermissionPolicy
+        from security.permissions import PermissionMode
+        from nexus.main_agent.core import PermissionPolicy
         from sandbox.sandbox_manager import SandboxTier
         mode_map = {
             "auto": PermissionMode.AUTO_PILOT,
@@ -2150,7 +2150,7 @@ def _check_gui_terminal_permission(sid: str, turn_id: str, command: str):
     sandbox, so a restrictive mode (ask / default / allowlist) does not
     silently execute destructive commands. Returns the PermissionSystem result.
     """
-    from permissions import PermissionMode, PermissionSystem
+    from security.permissions import PermissionMode, PermissionSystem
 
     loop = _LOOPS.get(sid)
     mode_name = str(getattr(loop, "permission_mode", "") if loop else "auto").strip().lower() or "auto"
@@ -2454,7 +2454,7 @@ def _flatten_providers(config: Dict[str, Any]) -> list:
     if not isinstance(providers, dict) or not providers:
         # Auto-generate providers from factory mappings if config doesn't have providers section
         try:
-            from providers.factory import MAPPINGS
+            from models.providers.core.factory import MAPPINGS
             providers = {
                 "cloud": {},
                 "local": {},
@@ -2535,7 +2535,7 @@ def _clear_runtime(reason: str) -> Dict[str, Any]:
     # loops leaves newly-added MCP tools invisible until a full restart.
     refreshed = False
     try:
-        from kernel import NexusKernel
+        from nexus.runtime.kernel import NexusKernel
         kernel = NexusKernel(_PROJECT_ROOT)
         cached_registry = getattr(kernel, "_instances", {}).pop("tools", None)
         if cached_registry is not None:
@@ -2648,7 +2648,7 @@ def _provider_reachability(provider_name: str) -> Dict[str, Any]:
     if name in {"auto", "", "unknown"}:
         return {"name": name or "auto", "configured": False, "reachable": None, "reason": "provider_not_selected"}
     try:
-        from providers.factory import NexusProviderFactory
+        from models.providers.core.factory import NexusProviderFactory
 
         factory = NexusProviderFactory()
         provider = factory.get_provider_by_name("cloud", name)
@@ -2709,7 +2709,7 @@ def _provider_runtime_diagnostics() -> Dict[str, Any]:
                 value = getter()
                 if isinstance(value, list):
                     try:
-                        from providers.reliability import redact_secrets
+                        from models.providers.core.reliability import redact_secrets
                     except Exception:
                         redact_secrets = lambda value: str(value or "")
                     for item in value:
@@ -2768,7 +2768,7 @@ def _provider_runtime_diagnostics() -> Dict[str, Any]:
 
     cooldowns: List[Dict[str, Any]] = []
     try:
-        from providers.profiles import load_profile_store
+        from models.providers.core.profiles import load_profile_store
         now = time.time()
         store = load_profile_store()
         for profile in store.list_profiles():
@@ -2798,7 +2798,7 @@ def _provider_runtime_diagnostics() -> Dict[str, Any]:
 def _lifecycle_persistence_health() -> Dict[str, Any]:
     """Project lifecycle durability health into the public health response."""
     try:
-        from lifecycle import get_component_supervisor
+        from nexus.lifecycle.managers import get_component_supervisor
 
         stats = get_component_supervisor().get_stats()
         value = stats.get("persistence") if isinstance(stats, dict) else None
@@ -3071,12 +3071,12 @@ def _command_load_session(session_id: str):
 
 
 def _command_sync_permission_mode(mode: str) -> None:
-    from safety.safety_store import sync_permission_from_legacy
+    from security.policies.safety_store import sync_permission_from_legacy
     sync_permission_from_legacy(mode)
 
 
 def _command_sync_sandbox_tier(tier: str) -> None:
-    from safety.safety_store import sync_sandbox_from_legacy
+    from security.policies.safety_store import sync_sandbox_from_legacy
     sync_sandbox_from_legacy(tier)
 
 
@@ -3246,7 +3246,7 @@ async def chat(request: Request):
     # while real loops still fail fast with an actionable configuration error.
     if safe_provider and safe_provider not in {"lm_studio", "ollama", "llama_cpp"} and hasattr(nexus_loop, "brain"):
         try:
-            from providers.factory import NexusProviderFactory
+            from models.providers.core.factory import NexusProviderFactory
             selected_provider = NexusProviderFactory().get_provider_by_name(
                 "cloud", safe_provider, profile=safe_profile
             )
@@ -3664,7 +3664,7 @@ def _list_saved_models_sync():
                     model = str(cfg["model"])
                     alias = ""
                     try:
-                        from providers.profiles import load_profile_store
+                        from models.providers.core.profiles import load_profile_store
                         for profile in load_profile_store().list_profiles(str(provider)):
                             native = str(getattr(profile, "model_id", "") or getattr(profile, "model", ""))
                             if native == model and getattr(profile, "active", True) and getattr(profile, "enabled", True):
@@ -4118,7 +4118,7 @@ def list_skills():
     # by the direct model/tool loop.  This includes legacy and bundled skills,
     # not only config entries and .opencode/skills folders.
     try:
-        from tools.nexus_tools.registry import ToolRegistry
+        from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
 
         registry = ToolRegistry(_PROJECT_ROOT)
         for name, entry in registry._tools.items():
@@ -4141,7 +4141,7 @@ def list_tools():
     summary = _config_summary()
     config_tools = {tool["name"]: tool for tool in summary["tools"]}
     try:
-        from tools.nexus_tools.registry import ToolRegistry
+        from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
         registry = ToolRegistry(_PROJECT_ROOT)
         tools = []
         registry_summary = registry.list_tools(include_unavailable=True)
@@ -4226,7 +4226,7 @@ async def run_programmatic_verification(request: Request):
         readiness_timeout = max(0.1, min(float(data.get("readiness_timeout", 10.0)), 60.0))
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="timeouts must be numeric and within their allowed bounds")
-    from orchestrators.v5.programmatic_verify import (
+    from nexus.main_agent.programmatic_verify import (
         run_detected_verification, run_programmatic_verification as run_verify,
     )
 
@@ -4257,7 +4257,7 @@ def get_verification_recipe(root: str = ""):
         target.relative_to(Path(_PROJECT_ROOT).resolve(strict=False))
     except (OSError, RuntimeError, ValueError):
         raise HTTPException(status_code=403, detail="recipe root must be inside the Nexus workspace")
-    from orchestrators.v5.verification_recipes import detect_verification_recipe
+    from nexus.main_agent.verification_recipes import detect_verification_recipe
 
     recipe = detect_verification_recipe(target)
     return {"recipe": recipe.to_dict() if recipe else None, "root": str(target)}
@@ -4312,7 +4312,7 @@ def list_agents():
         pass
 
     try:
-        from providers.profiles import load_profile_store
+        from models.providers.core.profiles import load_profile_store
         store = load_profile_store()
         for profile in store.list_profiles():
             key = profile.name.lower()
@@ -4869,7 +4869,7 @@ def _get_voice_assistant(session_id: str = "default"):
     with _VOICE_LOCK:
         if session_id not in _VOICE_ASSISTANT:
             try:
-                from voice.pipeline import VoiceAssistant
+                from apps.voice.pipeline import VoiceAssistant
                 _VOICE_ASSISTANT[session_id] = VoiceAssistant(session_id=session_id)
                 _VOICE_ASSISTANT[session_id].warmup()
             except Exception as e:
@@ -5006,7 +5006,7 @@ def voice_speak_stop(session_id: str = "default"):
 def voice_voices():
     """List available TTS voices."""
     try:
-        from voice.pipeline import VoiceAssistant
+        from apps.voice.pipeline import VoiceAssistant
         return {"status": "ok", "voices": VoiceAssistant.get_available_voices(None)}
     except Exception as e:
         return {"status": "error", "message": _voice_failure("voice listing", e), "voices": []}
@@ -5016,7 +5016,7 @@ def voice_voices():
 def voice_languages():
     """List supported STT languages."""
     try:
-        from voice.pipeline import VoiceAssistant
+        from apps.voice.pipeline import VoiceAssistant
         return {"status": "ok", "languages": VoiceAssistant.get_available_languages(None)}
     except Exception as e:
         return {"status": "error", "message": _voice_failure("language listing", e), "languages": []}
@@ -5184,7 +5184,7 @@ def list_provider_config():
     providers = _config_summary()["providers"]
 
     try:
-        from providers.factory import NexusProviderFactory
+        from models.providers.core.factory import NexusProviderFactory
         factory = NexusProviderFactory()
     except Exception:
         factory = None
@@ -5192,7 +5192,7 @@ def list_provider_config():
     active_providers_from_kernel = set()
     if factory:
         try:
-            from providers.profiles import load_profile_store
+            from models.providers.core.profiles import load_profile_store
             store = load_profile_store()
             for prov in store.providers():
                 active_providers_from_kernel.add(prov.lower())
@@ -5374,7 +5374,7 @@ async def approve_tool_request(request: Request):
     stalled until it timed out. Decisions are brokered by
     permissions.approval_broker so any surface can answer.
     """
-    from permissions.approval_broker import get_approval_broker, normalize_decision
+    from security.permissions.approval_broker import get_approval_broker, normalize_decision
 
     try:
         data = await request.json()
@@ -5392,7 +5392,7 @@ async def approve_tool_request(request: Request):
 @app.get("/api/approve/pending")
 def list_pending_approvals(session_id: str = ""):
     """Outstanding approvals, so a reconnecting client can re-render them."""
-    from permissions.approval_broker import get_approval_broker
+    from security.permissions.approval_broker import get_approval_broker
 
     return {"pending": get_approval_broker().pending(safe_session_id(session_id) if session_id else "")}
 
@@ -5453,7 +5453,7 @@ async def _file_json(request: Request) -> Dict[str, Any]:
 def _invalidate_verifier_after_file_mutation(session_id: Any, *paths: Any) -> None:
     """Mark workspace verifier state stale after an API-side mutation."""
     try:
-        from orchestrators.v5.verification_state import VerifierStateStore
+        from nexus.main_agent.verification_state import VerifierStateStore
 
         state_path = Path(_PROJECT_ROOT) / ".nexus_v5" / "verifier_state.json"
         VerifierStateStore(state_path).mark_stale(
@@ -6160,7 +6160,7 @@ async def manage_runtime(request: Request):
 
         if target_type in {"tool", "tools"}:
             try:
-                from tools.nexus_tools.registry import ToolRegistry
+                from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
                 ToolRegistry._reset_instance()
             except Exception:
                 logger.warning("server:1208 : suppressed error", exc_info=True)
@@ -6169,7 +6169,7 @@ async def manage_runtime(request: Request):
 
         elif target_type in {"skill", "skills"}:
             try:
-                from skills import NexusSkillMaster
+                from extensions.skills.built_in import NexusSkillMaster
                 NexusSkillMaster._reset_instance()
             except Exception:
                 logger.warning("server:1216 : suppressed error", exc_info=True)
@@ -6181,7 +6181,7 @@ async def manage_runtime(request: Request):
 
         elif target_type in {"provider", "providers"}:
             try:
-                from providers.factory import NexusProviderFactory
+                from models.providers.core.factory import NexusProviderFactory
                 NexusProviderFactory._reset_instance()
             except Exception:
                 logger.warning("server:1227 : suppressed error", exc_info=True)
@@ -6616,7 +6616,7 @@ async def set_mode(request: Request):
     apply_runtime_to_all_loops()
     await asyncio.to_thread(_save_runtime_preferences)
     try:
-        from safety.safety_store import sync_permission_from_legacy
+        from security.policies.safety_store import sync_permission_from_legacy
         sync_permission_from_legacy(mode)
     except Exception:
         logger.warning("safety: could not sync permission mode from legacy mode %s", mode, exc_info=True)
@@ -6626,7 +6626,7 @@ async def set_mode(request: Request):
 @app.get("/api/permissions")
 def get_permissions():
     """Return permission mode and saved allow-list."""
-    from permissions import PermissionSystem
+    from security.permissions import PermissionSystem
 
     return {
         "status": "success",
@@ -6640,7 +6640,7 @@ def get_permissions():
 @app.get("/api/permissions/decisions")
 def get_permission_decisions(limit: int = 50):
     """Return recent permission decisions with scrubbed action previews."""
-    from permissions import PermissionSystem
+    from security.permissions import PermissionSystem
 
     return {
         "status": "success",
@@ -6671,7 +6671,7 @@ async def set_permissions(request: Request):
     apply_runtime_to_all_loops()
     await asyncio.to_thread(_save_runtime_preferences)
     try:
-        from safety.safety_store import sync_permission_from_legacy
+        from security.policies.safety_store import sync_permission_from_legacy
         sync_permission_from_legacy(mode)
     except Exception:
         logger.warning("safety: could not sync permission mode from /permissions", exc_info=True)
@@ -6705,7 +6705,7 @@ async def set_model(request: Request):
         if not provider:
             raise HTTPException(status_code=400, detail="provider is required when selecting a profile")
         try:
-            from providers.profiles import load_profile_store
+            from models.providers.core.profiles import load_profile_store
             selected = load_profile_store().get_profile(provider, profile)
         except Exception as exc:
             raise HTTPException(status_code=503, detail="Provider profile store is unavailable") from exc
@@ -6782,7 +6782,7 @@ async def run_command(request: Request):
     if not cmd:
         raise HTTPException(status_code=404, detail=f"Unknown command: {raw}")
 
-    from utils.session_bus import get_active_session_id
+    from nexus.common.session_bus import get_active_session_id
     requested_session = str(data.get("session_id") or "").strip()
     session_id = safe_session_id(requested_session) if requested_session else get_active_session_id(
         _PROJECT_ROOT, str(_RUNTIME_SETTINGS.get("session_id") or "default")
@@ -6866,7 +6866,7 @@ async def set_sandbox(request: Request):
     apply_runtime_to_all_loops()
     await asyncio.to_thread(_save_runtime_preferences)
     try:
-        from safety.safety_store import sync_sandbox_from_legacy
+        from security.policies.safety_store import sync_sandbox_from_legacy
         sync_sandbox_from_legacy(tier)
     except Exception:
         logger.warning("safety: could not sync sandbox mode from legacy tier %s", tier, exc_info=True)
@@ -6915,7 +6915,7 @@ async def set_effort(request: Request):
 
 def _safety_apply_runtime():
     """Push the current Safety permission/sandbox modes into the runtime engine."""
-    from safety.safety_store import get_state, PERMISSION_TO_LEGACY, SANDBOX_TO_LEGACY
+    from security.policies.safety_store import get_state, PERMISSION_TO_LEGACY, SANDBOX_TO_LEGACY
     state = get_state(refresh=True)
     legacy_mode = PERMISSION_TO_LEGACY.get(state.get("permission_mode"), "auto")
     legacy_tier = SANDBOX_TO_LEGACY.get(state.get("sandbox_mode"), "normal")
@@ -6931,7 +6931,7 @@ def _safety_apply_runtime():
 async def safety_summary():
     """Short summary for the header bar (workspace, modes, counts)."""
     try:
-        from safety.safety_store import get_state, summary
+        from security.policies.safety_store import get_state, summary
         get_state(refresh=True)  # cross-process freshness (server may outlive a CLI edit)
         return summary()
     except Exception as exc:  # pragma: no cover - defensive
@@ -6943,7 +6943,7 @@ async def safety_summary():
 async def safety_settings():
     """Full current Safety settings (no secrets ever included)."""
     try:
-        from safety.safety_store import get_state
+        from security.policies.safety_store import get_state
         return get_state(refresh=True)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: settings failed: %s", exc, exc_info=True)
@@ -6959,7 +6959,7 @@ async def safety_meta():
         return list(mapping)
 
     try:
-        from safety.safety_store import _default_protected_paths, list_presets
+        from security.policies.safety_store import _default_protected_paths, list_presets
         default_paths = _default_protected_paths()
         presets = list_presets()
     except Exception:  # pragma: no cover - defensive
@@ -6998,7 +6998,7 @@ async def safety_save(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     try:
-        from safety.safety_store import save
+        from security.policies.safety_store import save
         result = save(data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -7024,7 +7024,7 @@ async def safety_reset(request: Request):
     if not confirm:
         raise HTTPException(status_code=400, detail="Reset requires confirm: true")
     try:
-        from safety.safety_store import reset
+        from security.policies.safety_store import reset
         result = reset()
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: reset failed: %s", exc, exc_info=True)
@@ -7040,7 +7040,7 @@ async def safety_set_permission_mode(request: Request):
     data = await request.json()
     mode = str((data or {}).get("mode", "")).strip()
     try:
-        from safety.safety_store import set_permission_mode
+        from security.policies.safety_store import set_permission_mode
         result = set_permission_mode(mode)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: set permission mode failed: %s", exc, exc_info=True)
@@ -7057,7 +7057,7 @@ async def safety_set_sandbox_mode(request: Request):
     data = await request.json()
     mode = str((data or {}).get("mode", "")).strip()
     try:
-        from safety.safety_store import set_sandbox_mode
+        from security.policies.safety_store import set_sandbox_mode
         result = set_sandbox_mode(mode)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: set sandbox mode failed: %s", exc, exc_info=True)
@@ -7071,7 +7071,7 @@ async def safety_set_sandbox_mode(request: Request):
 @app.get("/api/safety/protected-paths")
 async def safety_protected_paths():
     try:
-        from safety.safety_store import get_state
+        from security.policies.safety_store import get_state
         state = get_state(refresh=True)
         return {"paths": state.get("protected_paths", []), "mandatory": state.get("mandatory_protected_paths", [])}
     except Exception as exc:  # pragma: no cover - defensive
@@ -7083,7 +7083,7 @@ async def safety_protected_paths():
 async def safety_add_protected_path(request: Request):
     data = await request.json()
     try:
-        from safety.safety_store import add_protected_path
+        from security.policies.safety_store import add_protected_path
         result = add_protected_path(data or {})
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: add protected path failed: %s", exc, exc_info=True)
@@ -7100,7 +7100,7 @@ async def safety_update_protected_path(request: Request):
     if not pattern:
         raise HTTPException(status_code=400, detail="pattern is required")
     try:
-        from safety.safety_store import update_protected_path
+        from security.policies.safety_store import update_protected_path
         result = update_protected_path(pattern, data or {})
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: update protected path failed: %s", exc, exc_info=True)
@@ -7117,7 +7117,7 @@ async def safety_remove_protected_path(request: Request):
     if not pattern:
         raise HTTPException(status_code=400, detail="pattern is required")
     try:
-        from safety.safety_store import remove_protected_path
+        from security.policies.safety_store import remove_protected_path
         result = remove_protected_path(pattern)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: remove protected path failed: %s", exc, exc_info=True)
@@ -7134,7 +7134,7 @@ async def safety_test_path(request: Request):
     if not path:
         raise HTTPException(status_code=400, detail="path is required")
     try:
-        from safety.safety_store import test_path
+        from security.policies.safety_store import test_path
         return test_path(path)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: test path failed: %s", exc, exc_info=True)
@@ -7148,7 +7148,7 @@ async def safety_reset_protected_paths(request: Request):
     if not confirm:
         raise HTTPException(status_code=400, detail="Reset requires confirm: true")
     try:
-        from safety.safety_store import reset_protected_paths
+        from security.policies.safety_store import reset_protected_paths
         return reset_protected_paths()
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: reset protected paths failed: %s", exc, exc_info=True)
@@ -7158,7 +7158,7 @@ async def safety_reset_protected_paths(request: Request):
 @app.get("/api/safety/temp-permissions")
 async def safety_temp_permissions():
     try:
-        from safety.safety_store import list_temp_permissions
+        from security.policies.safety_store import list_temp_permissions
         return {"permissions": list_temp_permissions()}
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: temp permissions failed: %s", exc, exc_info=True)
@@ -7169,7 +7169,7 @@ async def safety_temp_permissions():
 async def safety_add_temp_permission(request: Request):
     data = await request.json()
     try:
-        from safety.safety_store import add_temp_permission
+        from security.policies.safety_store import add_temp_permission
         result = add_temp_permission(data or {})
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: add temp permission failed: %s", exc, exc_info=True)
@@ -7186,7 +7186,7 @@ async def safety_revoke_temp_permission(request: Request):
     if not permission_id:
         raise HTTPException(status_code=400, detail="id is required")
     try:
-        from safety.safety_store import revoke_temp_permission
+        from security.policies.safety_store import revoke_temp_permission
         return revoke_temp_permission(permission_id)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: revoke temp permission failed: %s", exc, exc_info=True)
@@ -7201,7 +7201,7 @@ async def safety_extend_temp_permission(request: Request):
     if not permission_id:
         raise HTTPException(status_code=400, detail="id is required")
     try:
-        from safety.safety_store import extend_temp_permission
+        from security.policies.safety_store import extend_temp_permission
         result = extend_temp_permission(permission_id, seconds)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: extend temp permission failed: %s", exc, exc_info=True)
@@ -7218,7 +7218,7 @@ async def safety_convert_temp_permission(request: Request):
     if not permission_id:
         raise HTTPException(status_code=400, detail="id is required")
     try:
-        from safety.safety_store import convert_temp_permission
+        from security.policies.safety_store import convert_temp_permission
         result = convert_temp_permission(permission_id)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: convert temp permission failed: %s", exc, exc_info=True)
@@ -7231,7 +7231,7 @@ async def safety_convert_temp_permission(request: Request):
 @app.get("/api/safety/approvals")
 async def safety_approvals():
     try:
-        from safety.safety_store import list_approvals
+        from security.policies.safety_store import list_approvals
         return {"approvals": list_approvals()}
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: approvals failed: %s", exc, exc_info=True)
@@ -7245,7 +7245,7 @@ async def safety_revoke_approval(request: Request):
     if not approval_id:
         raise HTTPException(status_code=400, detail="id is required")
     try:
-        from safety.safety_store import revoke_approval
+        from security.policies.safety_store import revoke_approval
         result = revoke_approval(approval_id)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: revoke approval failed: %s", exc, exc_info=True)
@@ -7262,7 +7262,7 @@ async def safety_clear_approvals(request: Request):
     if not confirm:
         raise HTTPException(status_code=400, detail="Clear requires confirm: true")
     try:
-        from safety.safety_store import clear_expired_approvals
+        from security.policies.safety_store import clear_expired_approvals
         return clear_expired_approvals()
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: clear approvals failed: %s", exc, exc_info=True)
@@ -7272,7 +7272,7 @@ async def safety_clear_approvals(request: Request):
 @app.get("/api/safety/events")
 async def safety_events():
     try:
-        from safety.safety_store import list_events
+        from security.policies.safety_store import list_events
         return {"events": list_events(limit=200)}
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: events failed: %s", exc, exc_info=True)
@@ -7282,7 +7282,7 @@ async def safety_events():
 @app.get("/api/safety/diagnostics")
 async def safety_diagnostics():
     try:
-        from safety.safety_store import run_diagnostics
+        from security.policies.safety_store import run_diagnostics
         return run_diagnostics()
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: diagnostics failed: %s", exc, exc_info=True)
@@ -7292,7 +7292,7 @@ async def safety_diagnostics():
 @app.get("/api/safety/presets")
 async def safety_presets():
     try:
-        from safety.safety_store import list_presets
+        from security.policies.safety_store import list_presets
         return {"presets": list_presets()}
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: presets failed: %s", exc, exc_info=True)
@@ -7306,7 +7306,7 @@ async def safety_apply_preset(request: Request):
     if not preset_id:
         raise HTTPException(status_code=400, detail="preset is required")
     try:
-        from safety.safety_store import apply_preset
+        from security.policies.safety_store import apply_preset
         result = apply_preset(preset_id)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("safety: apply preset failed: %s", exc, exc_info=True)
@@ -8192,7 +8192,7 @@ def workspace_index_rebuild():
 
     def _run():
         try:
-            from rag.engine import NexusAtlasRAG
+            from knowledge.rag.engine import NexusAtlasRAG
             rag = NexusAtlasRAG()
             counts = {"files": 0, "failed": 0}
             try:
@@ -8681,7 +8681,7 @@ def _voice_python_executable() -> str:
 
 def _voice_command_for_mode(mode: str, session_id: str = "default", owner_pid: int | None = None) -> list:
     python = _voice_python_executable()
-    command = [python, "-c", "from voice.voice_chat import main; main()"]
+    command = [python, "-c", "from apps.voice.voice_chat import main; main()"]
     if mode == "manual":
         command.append("--manual")
     elif mode == "text":
@@ -8700,7 +8700,7 @@ def _kill_stray_voice_processes() -> None:
 
     current_pid = os.getpid()
     signatures = (
-        "from voice.voice_chat import main; main()",
+        "from apps.voice.voice_chat import main; main()",
         "voice_chat.py",
     )
 
@@ -8972,7 +8972,7 @@ def stop_voice():
 def get_voice_statistics():
     """Return comprehensive voice usage statistics."""
     try:
-        from voice import VoiceAssistant
+        from apps.voice import VoiceAssistant
         # Check if voice is properly configured
         from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
@@ -8987,7 +8987,7 @@ def get_voice_statistics():
 def get_voice_history(limit: int = 50):
     """Return voice transcription history."""
     try:
-        from voice import VoiceAssistant
+        from apps.voice import VoiceAssistant
         from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
@@ -9007,7 +9007,7 @@ async def search_voice_history(request: Request):
         if not query:
             raise HTTPException(status_code=400, detail="Query is required")
         
-        from voice import VoiceAssistant
+        from apps.voice import VoiceAssistant
         from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
@@ -9026,7 +9026,7 @@ async def export_voice_data(request: Request):
         data = await request.json()
         format = data.get("format", "json")
         
-        from voice import VoiceAssistant
+        from apps.voice import VoiceAssistant
         from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
@@ -9042,7 +9042,7 @@ async def export_voice_data(request: Request):
 def clear_voice_history():
     """Clear voice transcription history."""
     try:
-        from voice import VoiceAssistant
+        from apps.voice import VoiceAssistant
         from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
@@ -9057,7 +9057,7 @@ def clear_voice_history():
 def reset_voice_statistics():
     """Reset voice usage statistics."""
     try:
-        from voice import VoiceAssistant
+        from apps.voice import VoiceAssistant
         from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
@@ -9071,7 +9071,7 @@ def reset_voice_statistics():
 def get_available_voices():
     """Return list of available TTS voices."""
     try:
-        from voice import VoiceAssistant
+        from apps.voice import VoiceAssistant
         from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
@@ -9085,7 +9085,7 @@ def get_available_voices():
 def get_available_languages():
     """Return list of supported STT languages."""
     try:
-        from voice import VoiceAssistant
+        from apps.voice import VoiceAssistant
         from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
@@ -9100,7 +9100,7 @@ def get_available_languages():
 def get_audio_devices():
     """Return available audio devices."""
     try:
-        from voice import VoiceAssistant
+        from apps.voice import VoiceAssistant
         from configure.config_loader import NexusConfigLoader
         settings = VoiceAssistant.from_config(NexusConfigLoader())
         assistant = VoiceAssistant(settings)
@@ -9185,7 +9185,7 @@ async def multi_agent(request: Request):
 @app.get("/api/engine/status")
 def engine_status():
     try:
-        from utils.engine_manager import get_engine_status, load_or_create_config
+        from nexus.common.engine_manager import get_engine_status, load_or_create_config
         return {
             "status": get_engine_status(),
             "config": load_or_create_config()
@@ -9198,7 +9198,7 @@ def engine_status():
 @app.post("/api/engine/config")
 async def update_engine_config(request: Request):
     try:
-        from utils.engine_manager import load_or_create_config, save_config
+        from nexus.common.engine_manager import load_or_create_config, save_config
     except ImportError:
         raise HTTPException(status_code=501, detail="Engine manager not available")
     try:
@@ -9223,7 +9223,7 @@ async def update_engine_config(request: Request):
 @app.post("/api/engine/compile")
 async def compile_engine():
     try:
-        from utils.engine_compiler import compile_llama_cpp
+        from nexus.common.engine_compiler import compile_llama_cpp
         res = compile_llama_cpp()
         return res
     except ImportError:
@@ -9251,7 +9251,7 @@ def _resolve_local_model_path(model_name: Any) -> Optional[str]:
 @app.post("/api/engine/reload")
 async def reload_local_engine(request: Request):
     try:
-        from utils.engine_manager import reload_engine
+        from nexus.common.engine_manager import reload_engine
     except ImportError:
         raise HTTPException(status_code=501, detail="Engine manager not available")
     try:

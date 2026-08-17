@@ -19,8 +19,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from tools.nexus_tools import result as tr  # noqa: E402
-from tools.nexus_tools.base_tool import ToolResult  # noqa: E402
+from extensions.tools.built_in.nexus_tools import result as tr  # noqa: E402
+from extensions.tools.built_in.nexus_tools.base_tool import ToolResult  # noqa: E402
 
 
 def test_status_vocabulary_is_closed_and_canonical():
@@ -108,7 +108,7 @@ def test_timeout_status_is_always_retryable():
 
 
 def test_authentication_loopback_gate_only_allows_local_peers():
-    import authentication
+    import security.core.auth
 
     # A genuine loopback request passes the check when the opt-in is on.
     lb_request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"), headers={}, cookies={})

@@ -11,7 +11,7 @@ import os
 import pytest
 import yaml
 
-import safety.safety_store as safety_store
+import security.policies.safety_store as safety_store
 
 EXPECTED_PERMISSION_MODES = {"automatic", "ask", "read_only", "restricted", "trusted", "custom", "deny_all"}
 EXPECTED_SANDBOX_MODES = {"no_tools", "read_only", "workspace", "restricted", "isolated_temp", "custom", "no_sandbox"}
@@ -108,7 +108,7 @@ def test_set_sandbox_mode_accepts_all_seven_and_rejects_invalid(isolated_store):
 # ── 4. Mode reduction enforcement via the permission engine overlay ───────────
 
 def test_permission_overlay_deny_all_denies_read(isolated_store):
-    from permissions import PermissionSystem
+    from security.permissions import PermissionSystem
     system = PermissionSystem()
     safety_store.set_permission_mode("deny_all")
     try:
@@ -120,7 +120,7 @@ def test_permission_overlay_deny_all_denies_read(isolated_store):
 
 
 def test_permission_overlay_automatic_falls_through(isolated_store):
-    from permissions import PermissionSystem
+    from security.permissions import PermissionSystem
     system = PermissionSystem()
     safety_store.set_permission_mode("automatic")
     result = system.check("read_file", "foo.txt")
@@ -308,8 +308,8 @@ def test_sync_sandbox_from_legacy(isolated_store):
 def safety_server(tmp_path, monkeypatch):
     """TestClient for the real FastAPI app, fully redirected to a temp config."""
     monkeypatch.setenv("NEXUS_ALLOW_LOCAL_ANON", "true")
-    import server
-    import authentication
+    import apps.api
+    import security.core.auth
 
     ws_dir = tmp_path / "ws"
     ws_dir.mkdir(exist_ok=True)

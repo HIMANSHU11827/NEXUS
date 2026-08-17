@@ -1,7 +1,7 @@
 import pytest
 
-from indexer import NexusSemanticIndexer
-from rag.engine import NexusAtlasRAG
+from knowledge.indexer import NexusSemanticIndexer
+from knowledge.rag.engine import NexusAtlasRAG
 
 
 @pytest.fixture(autouse=True)

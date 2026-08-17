@@ -13,7 +13,7 @@ import pytest
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from orchestrators.v5.active_loop import V5ActiveLoop
+from nexus.main_agent.active_loop import V5ActiveLoop
 
 
 @pytest.fixture(autouse=True)

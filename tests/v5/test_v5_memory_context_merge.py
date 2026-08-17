@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrators.v5.core import NexusLoopV5
+from nexus.main_agent.core import NexusLoopV5
 
 
 def test_memory_prefetch_enriches_existing_execution_context_without_replacing_it():
@@ -26,7 +26,7 @@ def test_memory_prefetch_enriches_existing_execution_context_without_replacing_i
 
 @pytest.mark.asyncio
 async def test_perception_injects_all_memory_channels_before_planning():
-    from orchestrators.v5.core import NexusLoopV5, V5TurnContext
+    from nexus.main_agent.core import NexusLoopV5, V5TurnContext
 
     memory = SimpleNamespace(
         session_history="[SESSION] previous",
@@ -63,7 +63,7 @@ async def test_perception_injects_all_memory_channels_before_planning():
 
 
 def test_bounded_memory_recall_prevents_large_session_from_starving_procedural_context():
-    from orchestrators.v5.core import NexusLoopV5
+    from nexus.main_agent.core import NexusLoopV5
 
     memory = SimpleNamespace(
         session_history="[SESSION]" + "s" * 10000,
