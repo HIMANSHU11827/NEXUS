@@ -1,2 +1,0 @@
-# Agent Instructions
-Do X

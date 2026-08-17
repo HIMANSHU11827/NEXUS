@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nexus-gateway-app"
+version = "2.1.0"
+description = "Dedicated Gateway application for NEXUS AI (supervises external communication gateways)."
+requires-python = ">=3.10"
+dependencies = [
+    "nexus-ai",  # the NEXUS core + gateways engine (same repo)
+]
+
+[project.scripts]
+nexus-gateway-app = "apps.gateway.nexus_gateway_app:main"
+
+[tool.setuptools]
+packages = ["apps.gateway.nexus_gateway_app"]

@@ -80,10 +80,11 @@ point = "nexus:boot"
 nexus-fix = "nexus:boot"
 nexus-mcp = "mcp.server:main"
 nexus-voice = "voice.voice_chat:main"
+nexus-gateway-app = "apps.gateway.nexus_gateway_app:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["sandbox*", "authentication*", "context*", "evolution*", "hardware*", "intelligence*", "neural*", "reasoning*", "safety*", "security*", "tasks*", "telemetry*", "voice*", "prompts*", "orchestrators*", "utils*", "tools*", "rag*", "integrations*", "knowledge*", "mcp*", "gateway*", "configure*", "hive*", "indexer*", "kernel*", "permissions*", "router*", "skills*", "server*", "nexus*"]
+include = ["sandbox*", "authentication*", "context*", "evolution*", "hardware*", "intelligence*", "neural*", "reasoning*", "safety*", "security*", "tasks*", "telemetry*", "voice*", "prompts*", "orchestrators*", "utils*", "tools*", "rag*", "integrations*", "knowledge*", "mcp*", "gateway*", "configure*", "hive*", "indexer*", "kernel*", "permissions*", "router*", "skills*", "server*", "apps*", "extensions*", "models*", "nexus*"]
 exclude = [
     "tests*",
     "gui*",
