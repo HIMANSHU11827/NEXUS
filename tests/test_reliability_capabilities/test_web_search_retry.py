@@ -180,7 +180,7 @@ def test_retry_policy_env_parsing(monkeypatch):
 
 def test_web_search_jsnol_declares_bounded_registry_retry():
     metadata = json.loads(
-        (PROJECT_ROOT / "tools" / "web_search" / "web_search.jsnol").read_text(encoding="utf-8")
+        (PROJECT_ROOT / "extensions" / "tools" / "built_in" / "web_search" / "web_search.jsnol").read_text(encoding="utf-8")
     )
     assert metadata["execution"]["max_retries"] == 2
     assert metadata["execution"].get("retry_side_effects") is not True

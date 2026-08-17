@@ -2,7 +2,7 @@ import ast
 from pathlib import Path
 
 
-SERVER_SOURCE = Path(__file__).resolve().parents[3] / "server" / "__init__.py"
+SERVER_SOURCE = Path(__file__).resolve().parents[3] / "apps" / "api" / "__init__.py"
 
 
 def _async_handler(name: str) -> ast.AsyncFunctionDef:

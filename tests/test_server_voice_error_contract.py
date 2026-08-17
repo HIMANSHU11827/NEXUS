@@ -88,7 +88,7 @@ def test_voice_persistence_allowlists_settings(monkeypatch):
         def save(self):
             return None
 
-    monkeypatch.setattr("config.config_loader.NexusConfigLoader", FakeLoader)
+    monkeypatch.setattr("configure.config_loader.NexusConfigLoader", FakeLoader)
     server._persist_voice_settings({"auto_speak": True, "secret": "discard"})
 
     # The helper only forwards known voice settings to the persisted mapping.
