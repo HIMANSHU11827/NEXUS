@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, List, Optional
 
-from nexus.commands.core.command import CommandRequest, CommandResult
+from nexus.command_system.core.command import CommandRequest, CommandResult
 
 
 class CommandHandler(ABC):

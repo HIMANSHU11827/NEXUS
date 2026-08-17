@@ -19,19 +19,19 @@ import asyncio
 import time
 from typing import Callable, Dict, List, Optional
 
-from nexus.commands.core.command import CommandRequest, CommandResult, CommandStatus
-from nexus.commands.core.command_context import CommandInvocation
-from nexus.commands.core.command_dispatcher import CommandDispatcher
-from nexus.commands.core.command_error import CommandNotFound, CommandTimeout
-from nexus.commands.core.command_events import (
+from nexus.command_system.core.command import CommandRequest, CommandResult, CommandStatus
+from nexus.command_system.core.command_context import CommandInvocation
+from nexus.command_system.core.command_dispatcher import CommandDispatcher
+from nexus.command_system.core.command_error import CommandNotFound, CommandTimeout
+from nexus.command_system.core.command_events import (
     EVENT_DISPATCHED,
     EVENT_FAILURE,
     EVENT_RECEIVED,
     EVENT_SUCCESS,
     CommandEvent,
 )
-from nexus.commands.core.command_pipeline import MiddlewareChain
-from nexus.commands.routing.alias_resolver import AliasResolver
+from nexus.command_system.core.command_pipeline import MiddlewareChain
+from nexus.command_system.routing.alias_resolver import AliasResolver
 
 
 class CommandBus:

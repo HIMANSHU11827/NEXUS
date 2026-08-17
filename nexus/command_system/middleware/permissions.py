@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable, Set
 
-from nexus.commands.core.command import CommandResult, CommandStatus
-from nexus.commands.core.command_context import CommandInvocation
-from nexus.commands.core.command_pipeline import CommandMiddleware
+from nexus.command_system.core.command import CommandResult, CommandStatus
+from nexus.command_system.core.command_context import CommandInvocation
+from nexus.command_system.core.command_pipeline import CommandMiddleware
 
 
 class PermissionMiddleware(CommandMiddleware):

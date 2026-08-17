@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from nexus.commands.core.command import CommandRequest, CommandResult, CommandStatus
-from nexus.commands.core.command_error import CommandNotFound
-from nexus.commands.core.command_handler import CommandHandler
+from nexus.command_system.core.command import CommandRequest, CommandResult, CommandStatus
+from nexus.command_system.core.command_error import CommandNotFound
+from nexus.command_system.core.command_handler import CommandHandler
 
 
 class CommandDispatcher:

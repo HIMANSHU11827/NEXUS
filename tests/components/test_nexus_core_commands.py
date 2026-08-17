@@ -11,15 +11,15 @@ import tempfile
 
 import pytest
 
-from nexus.commands import (
+from nexus.command_system import (
     CommandBus,
     CommandContext,
     CommandHandler,
     CommandRequest,
     CommandResult,
 )
-from nexus.commands.core.command import CommandStatus
-from nexus.commands.middleware.permissions import PermissionMiddleware
+from nexus.command_system.core.command import CommandStatus
+from nexus.command_system.middleware.permissions import PermissionMiddleware
 from nexus.core import Nexus, SystemContext
 from nexus.core.dependency_graph import DependencyGraph, DependencyNode
 from nexus.core.errors import LifecycleError, StartupError

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from nexus.commands.core.command import CommandContext, CommandRequest, CommandResult
+from nexus.command_system.core.command import CommandContext, CommandRequest, CommandResult
 
 
 @dataclass

@@ -12,9 +12,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Awaitable, Callable, List, Optional
 
-from nexus.commands.core.command import CommandRequest, CommandResult, CommandStatus
-from nexus.commands.core.command_events import EVENT_REJECTED
-from nexus.commands.core.command_context import CommandInvocation
+from nexus.command_system.core.command import CommandRequest, CommandResult, CommandStatus
+from nexus.command_system.core.command_events import EVENT_REJECTED
+from nexus.command_system.core.command_context import CommandInvocation
 
 
 class CommandMiddleware(ABC):
