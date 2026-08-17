@@ -1,0 +1,15 @@
+{
+  "version": "1.0",
+  "description": "Feature flags for NEXUS. Flags are read by configure/feature_flags and may be overridden at runtime.",
+  "flags": {
+    "autonomous_loop": true,
+    "hive_multiagent": true,
+    "mcp_enabled": true,
+    "gateway_supervision": true,
+    "learning_enabled": true,
+    "evaluation_enabled": true,
+    "evolution_experiments": false,
+    "self_healing": true,
+    "observability": true
+  }
+}

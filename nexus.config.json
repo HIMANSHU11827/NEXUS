@@ -1,0 +1,45 @@
+{
+  "version": "2.1.0",
+  "name": "nexus-ai",
+  "description": "NEXUS AI autonomous multi-agent runtime",
+  "paths": {
+    "extensions": "extensions",
+    "hive": "hive",
+    "gateways": "gateways",
+    "models": "models",
+    "memory": "memory",
+    "workflows": "workflows",
+    "automation": "automation",
+    "queues": "queues",
+    "sandbox": "sandbox",
+    "security": "security",
+    "reliability": "reliability",
+    "knowledge": "knowledge",
+    "evolution": "evolution",
+    "learning": "learning",
+    "evaluation": "evaluation",
+    "governance": "governance",
+    "maintenance": "maintenance",
+    "configure": "configure",
+    "schemas": "schemas",
+    "data": "data",
+    "storage": "storage"
+  },
+  "apps": {
+    "cli": "apps/cli",
+    "api": "apps/api",
+    "gateway": "apps/gateway",
+    "tui": "apps/tui",
+    "web": "apps/web",
+    "desktop": "apps/desktop",
+    "mobile": "apps/mobile"
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "text"
+  },
+  "runtime": {
+    "state_dir": ".nexus",
+    "graceful_shutdown_timeout_seconds": 30
+  }
+}

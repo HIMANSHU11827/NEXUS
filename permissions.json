@@ -1,0 +1,36 @@
+{
+  "version": "1.0",
+  "description": "Default permission grants for NEXUS executable components. Every tool, skill, plugin, MCP server, gateway, agent, and team must declare and respect these boundaries.",
+  "default_mode": "auto",
+  "allow": {
+    "filesystem": {
+      "read": ["."],
+      "write": [".nexus", "data", "workspace"],
+      "deny_paths": ["/etc", "/sys", "/proc"]
+    },
+    "network": {
+      "allowed_domains": ["api.openai.com", "api.anthropic.com", "localhost", "127.0.0.1"],
+      "deny_all_other": false
+    },
+    "process": {
+      "allow_execution": true,
+      "allowed_commands": ["python", "git", "pip", "pytest"]
+    },
+    "environment_variables": {
+      "read": ["PATH", "HOME", "NEXUS_*"],
+      "deny": ["*_SECRET", "*_TOKEN", "*_KEY"]
+    },
+    "secrets": {
+      "access": "secret_manager_only"
+    },
+    "browser": { "allow": false },
+    "provider": { "access": "configured_only" },
+    "gateway": { "access": "enabled_only" },
+    "tool": { "access": "registered_only" },
+    "hive_delegation": { "allow": true }
+  },
+  "sandbox": {
+    "default_tier": "normal",
+    "require_tier_for": ["process", "network", "browser"]
+  }
+}
