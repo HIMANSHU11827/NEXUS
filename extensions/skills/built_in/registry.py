@@ -41,10 +41,10 @@ class SkillRegistry:
         canonical = self.root / ".opencode" / "skills"
         legacy = self.root / "skills"
         # Canonical built-in skills location after the restructure:
-        # extensions/skills/built_in/. This package always contains the shipped
-        # SKILL.md skills regardless of the caller's root, so discovery never
-        # regresses when the top-level ``skills/`` shim is the only thing on disk.
-        bundled = Path(__file__).resolve().parent
+        # <root>/extensions/skills/built_in/. This is scanned only when ``root``
+        # is the NEXUS project, so an isolated tmp-project SkillRegistry (used by
+        # tests) does not accidentally pull in the project's shipped skills.
+        bundled = self.root / "extensions" / "skills" / "built_in"
         for base, source in ((canonical, "opencode"), (legacy, "legacy"), (bundled, "bundled")):
             if not base.is_dir():
                 continue

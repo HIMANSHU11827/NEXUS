@@ -426,20 +426,17 @@ class ToolRegistry:
     def _tool_scan_dirs(self):
         """Resolve the directories that contain built-in tool packages.
 
-        After the restructure, tools live in ``extensions/tools/built_in/<name>/``
-        (the canonical location). Historically they lived in a top-level
-        ``tools/`` directory. Scan both so discovery works regardless of which
-        ``root`` a caller passes and survives the layout migration.
+        After the restructure, built-in tools live in
+        ``<root>/extensions/tools/built_in/<name>/`` when ``root`` is the NEXUS
+        project. Historically they lived in a top-level ``<root>/tools/``
+        directory. Scan both so discovery works for the real project while an
+        isolated tmp-project registry (used by tests) does NOT accidentally
+        pull in the project's built-in tools.
         """
         dirs = []
-        try:
-            from extensions.tools import built_in as _bt
-
-            canonical = os.path.dirname(os.path.abspath(_bt.__file__))
-            if canonical and os.path.isdir(canonical):
-                dirs.append(canonical)
-        except Exception:
-            pass
+        builtin = os.path.join(self.root, "extensions", "tools", "built_in")
+        if os.path.isdir(builtin):
+            dirs.append(builtin)
         legacy = os.path.join(self.root, "tools")
         if os.path.isdir(legacy) and legacy not in dirs:
             dirs.append(legacy)
