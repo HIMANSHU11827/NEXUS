@@ -20,7 +20,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _path(*parts):
-    return os.path.join(ROOT, *parts)
+    return os.path.join(ROOT, "scripts", "launchers", *parts)
 
 
 EXPECTED_ACTIONS = [

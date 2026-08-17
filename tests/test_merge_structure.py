@@ -9,5 +9,5 @@ def test_cognition_package_exposes_core_components():
 
 
 def test_kernel_telemetry_module_is_available():
-    telemetry = importlib.import_module("kernel.telemetry")
+    telemetry = importlib.import_module("nexus.runtime.kernel.telemetry")
     assert hasattr(telemetry, "NexusTelemetryDB")

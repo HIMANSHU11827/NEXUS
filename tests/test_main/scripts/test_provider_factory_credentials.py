@@ -1,4 +1,4 @@
-from providers import factory as factory_module
+from models.providers.core import factory as factory_module
 from models.providers.core.factory import NexusProviderFactory
 from models.providers.auth.oauth.types import OAuthCredentials
 
@@ -99,7 +99,7 @@ def test_named_profile_acquires_exclusive_runtime_lease(monkeypatch, tmp_path):
     provider_factory.loader = _Loader({"model": "test-model"})
     provider_factory._load_provider_instance = lambda _name: _Provider()
     monkeypatch.setattr(factory_module, "_resolve_api_key", lambda *_args: "profile-secret")
-    monkeypatch.setattr("providers.profiles.load_profile_store", lambda: ProviderProfileStore(tmp_path / "profiles.json"))
+    monkeypatch.setattr("models.providers.core.profiles.load_profile_store", lambda: ProviderProfileStore(tmp_path / "profiles.json"))
 
     provider = provider_factory.get_provider_by_name("cloud", "deepseek", profile="backup")
 
@@ -134,13 +134,13 @@ def test_expired_oauth_refresh_failure_does_not_return_stale_token(monkeypatch):
 
     calls = {"registered": False}
     store = _Store(OAuthCredentials(access="expired-access", refresh="refresh", expires=1.0))
-    monkeypatch.setattr("providers.profiles.resolve_api_key", lambda *_args: None)
+    monkeypatch.setattr("models.providers.core.profiles.resolve_api_key", lambda *_args: None)
     monkeypatch.setattr(
-        "providers.oauth.providers.autoregister.register_all_oauth_providers",
+        "models.providers.auth.oauth.providers.autoregister.register_all_oauth_providers",
         lambda: calls.__setitem__("registered", True),
     )
-    monkeypatch.setattr("providers.oauth.storage.load_oauth_token_store", lambda: store)
-    monkeypatch.setattr("providers.oauth.registry.get_oauth_provider", lambda _provider_id: BrokenOAuthProvider())
+    monkeypatch.setattr("models.providers.auth.oauth.storage.load_oauth_token_store", lambda: store)
+    monkeypatch.setattr("models.providers.auth.oauth.registry.get_oauth_provider", lambda _provider_id: BrokenOAuthProvider())
 
     key = factory_module._resolve_api_key("codex")
 

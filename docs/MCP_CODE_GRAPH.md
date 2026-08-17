@@ -10,15 +10,15 @@ whole repository.
 nexus-mcp
 ```
 
-> **Note**: `nexus-mcp` and `python -m mcp.server` launch the **full NEXUS tool
-> server** (`mcp/server/` package — `NEXUSMCPServer`), which exposes every
+> **Note**: `nexus-mcp` and `python -m extensions.mcp.core.server` launch the **full NEXUS tool
+> server** (`extensions/mcp/core/server/` package — `NEXUSMCPServer`), which exposes every
 > registered NEXUS tool over stdio MCP. The code-graph tools below belong to the
-> **legacy** `mcp/server.py` module, which is shadowed by the `mcp/server/`
-> package under Python's import rules. To run the code-graph server directly,
-> execute the module as a file:
+> **legacy** `extensions/mcp/core/server.py` module, which is shadowed by the
+> `extensions/mcp/core/server/` package under Python's import rules. To run the code-graph
+> server directly, execute the module as a file:
 
 ```powershell
-python mcp/server.py
+python extensions/mcp/core/server.py
 ```
 
 If the package is not installed in editable mode yet:
@@ -35,7 +35,7 @@ Use this command in MCP clients that accept a command/args pair:
 ```json
 {
   "command": "python",
-  "args": ["-m", "mcp.server"]
+  "args": ["-m", "extensions.mcp.core.server"]
 }
 ```
 

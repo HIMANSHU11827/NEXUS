@@ -22,24 +22,24 @@ from security.core.auth import (
 
 class TestTokenValidation:
     def test_no_token_set_rejects_bearer_tokens(self):
-        with patch("authentication._AUTH_TOKEN", ""):
+        with patch("security.core.auth._AUTH_TOKEN", ""):
             assert validate_dashboard_token("anything") is False
             assert validate_dashboard_token("") is False
 
     def test_valid_token(self):
-        with patch("authentication._AUTH_TOKEN", "my-secret-token"):
+        with patch("security.core.auth._AUTH_TOKEN", "my-secret-token"):
             assert validate_dashboard_token("my-secret-token") is True
 
     def test_invalid_token(self):
-        with patch("authentication._AUTH_TOKEN", "real-token"):
+        with patch("security.core.auth._AUTH_TOKEN", "real-token"):
             assert validate_dashboard_token("wrong-token") is False
 
     def test_empty_token_with_env_set(self):
-        with patch("authentication._AUTH_TOKEN", "real-token"):
+        with patch("security.core.auth._AUTH_TOKEN", "real-token"):
             assert validate_dashboard_token("") is False
 
     def test_constant_time_compare(self):
-        with patch("authentication._AUTH_TOKEN", "a" * 1000):
+        with patch("security.core.auth._AUTH_TOKEN", "a" * 1000):
             assert validate_dashboard_token("a" * 1000) is True
             assert validate_dashboard_token("b" * 1000) is False
 
@@ -116,14 +116,14 @@ class TestOAuthFlow:
             get_oauth_authorize_url("nonexistent", "http://localhost/callback")
 
     def test_authorize_url_contains_params(self):
-        with patch("authentication.OAUTH_PROVIDERS", _TEST_OAUTH):
+        with patch("security.core.auth.OAUTH_PROVIDERS", _TEST_OAUTH):
             url, state = get_oauth_authorize_url("google", "http://localhost:5173/callback")
             assert url.startswith("https://accounts.google.com/")
             assert "client_id=" in url
             assert len(state) > 10
 
     def test_authorize_url_encodes_redirect_uri_and_scope(self):
-        with patch("authentication.OAUTH_PROVIDERS", _TEST_OAUTH):
+        with patch("security.core.auth.OAUTH_PROVIDERS", _TEST_OAUTH):
             url, _state = get_oauth_authorize_url("google", "http://localhost:5173/callback?next=/a b")
             assert "redirect_uri=http%3A%2F%2Flocalhost%3A5173%2Fcallback%3Fnext%3D%2Fa+b" in url
             assert "scope=openid+email+profile" in url
@@ -136,7 +136,7 @@ class TestOAuthFlow:
 
     @pytest.mark.asyncio
     async def test_handle_callback_bad_state(self):
-        with patch("authentication.OAUTH_PROVIDERS", _TEST_OAUTH):
+        with patch("security.core.auth.OAUTH_PROVIDERS", _TEST_OAUTH):
             result = await handle_oauth_callback("google", "code", "bad-state", "uri")
             assert not result.success
             assert "Invalid or expired state" in result.error
@@ -157,7 +157,7 @@ class TestOAuthFlow:
         fake_httpx.TimeoutException = TimeoutError
         monkeypatch.setitem(__import__("sys").modules, "httpx", fake_httpx)
 
-        with patch("authentication.OAUTH_PROVIDERS", _TEST_OAUTH):
+        with patch("security.core.auth.OAUTH_PROVIDERS", _TEST_OAUTH):
             result = await handle_oauth_callback("google", "code", state, "uri")
 
         assert result.success is False
@@ -207,7 +207,7 @@ class TestCheckAuth:
         assert result.name == "Test"
 
     def test_bearer_token(self):
-        with patch("authentication._AUTH_TOKEN", "my-token"):
+        with patch("security.core.auth._AUTH_TOKEN", "my-token"):
             request = MagicMock()
             request.session = {}
             request.headers = {"Authorization": "Bearer my-token"}
@@ -216,7 +216,7 @@ class TestCheckAuth:
             assert result.provider == "token"
 
     def test_bearer_wrong_token(self):
-        with patch("authentication._AUTH_TOKEN", "real-token"):
+        with patch("security.core.auth._AUTH_TOKEN", "real-token"):
             request = MagicMock()
             request.session = {}
             request.headers = {"authorization": "Bearer wrong"}

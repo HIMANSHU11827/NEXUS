@@ -17,7 +17,7 @@ class NexusAutoDiscover:
         self.root = root_dir
 
     def discover_tools(self) -> List[Dict[str, Any]]:
-        tools_dir = os.path.join(self.root, "tools")
+        tools_dir = os.path.join(self.root, "extensions", "tools", "built_in")
         result = []
         if not os.path.isdir(tools_dir):
             return result
@@ -87,7 +87,7 @@ class NexusAutoDiscover:
         return result
 
     def discover_plugins(self) -> List[Dict[str, Any]]:
-        plugins_dir = os.path.join(self.root, "plugins")
+        plugins_dir = os.path.join(self.root, "extensions", "plugins", "built_in")
         result = []
         if not os.path.isdir(plugins_dir):
             return result

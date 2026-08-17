@@ -91,8 +91,8 @@ _PROJECT_ROOT = os.path.dirname(_ROOT)  # One level up from apps.api/ to project
 _RUN_ROOT = _PROJECT_ROOT
 _LOOPS: Dict[str, NexusLoop] = {}
 _MAX_LOOPS = 20  # Prevent unbounded memory growth
-_SESSION_DIR = os.path.join(_PROJECT_ROOT, "logs", "sessions")
-_WORK_EVENTS_DIR = os.path.join(_PROJECT_ROOT, "workspace", "work_events")
+_SESSION_DIR = os.path.join(_PROJECT_ROOT, ".nexus", "logs", "sessions")
+_WORK_EVENTS_DIR = os.path.join(_PROJECT_ROOT, ".nexus", "workspace", "work_events")
 _WORK_EVENT_SEQUENCE_LOCK = threading.Lock()
 _WORK_EVENT_SEQUENCES: Dict[str, int] = {}
 # Bounded-retention + cache state for the canonical work-event log. These were
@@ -131,7 +131,7 @@ def _interprocess_event_lock(path: str):
         finally:
             connection.close()
 _THREAD_LOCAL = threading.local()
-_TASKS_PATH = os.path.join(_ROOT, "logs", "tasks.json")
+_TASKS_PATH = os.path.join(_PROJECT_ROOT, ".nexus", "logs", "tasks.json")
 _TASKS_PERSIST_LOCK = threading.RLock()
 _CONFIG_PATH = os.path.join(_PROJECT_ROOT, "configure", "settings.yml")
 _CONFIG_MUTATION_LOCK = threading.RLock()
@@ -165,14 +165,14 @@ import subprocess
 _VOICE_PROCESS: Optional[subprocess.Popen] = None
 _VOICE_MODE = "off"
 _VOICE_STARTED_AT = 0.0
-_VOICE_LOG_PATH = os.path.join(_PROJECT_ROOT, "logs", "voice-runtime.log")
+_VOICE_LOG_PATH = os.path.join(_PROJECT_ROOT, ".nexus", "logs", "voice-runtime.log")
 
 # ── Hive runtime state ───────────────────────────────────────────────────────
 _HIVES: Dict[str, Dict[str, Any]] = {}
 _HIVES_LOCK = threading.Lock()
 _HIVE_ENGINE = None
 _HIVE_ENGINE_LOCK = threading.Lock()
-_HIVE_MANIFEST_PATH = os.path.join(_PROJECT_ROOT, "workspace", "hives", "index.json")
+_HIVE_MANIFEST_PATH = os.path.join(_PROJECT_ROOT, ".nexus", "workspace", "hives", "index.json")
 _HIVE_CONSOLIDATION_TASKS: set = set()
 
 
@@ -442,7 +442,7 @@ async def _queue_driver_supervisor() -> None:
 # Per-message restore points: a snapshot of the workspace taken right before a
 # run's first tool executes, so the GUI can revert file changes made by a turn.
 # Stored outside the snapshot scope (the workspace/ dir is ignored while walking).
-_CHECKPOINTS_ROOT = os.path.join(_PROJECT_ROOT, "workspace", "checkpoints")
+_CHECKPOINTS_ROOT = os.path.join(_PROJECT_ROOT, ".nexus", "workspace", "checkpoints")
 # Heavy/generated/app-runtime paths never enter a checkpoint snapshot. This keeps
 # snapshots small and fast, and guarantees restore never touches those areas.
 # ``workspace/`` itself is the default snapshot root, so its internal stores
@@ -452,8 +452,8 @@ _CHECKPOINT_SKIP_NAMES = frozenset({
     ".git", ".venv", ".voice-venv", ".research", ".kilo", ".opencode", ".tmp",
     ".cache", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".tox",
     ".playwright-cli", ".playwright-mcp", ".nexus", "workspace", "models",
-    "bin", "logs", "graphify-out", "queue", "dist", "build", "node_modules",
-    "__pycache__", ".idea", ".vscode", ".next", "coverage", "htmlcov", "deploy",
+    "native", "logs", "graphify-out", "queues", "dist", "build", "node_modules",
+    "__pycache__", ".idea", ".vscode", ".next", "coverage", "htmlcov", "deployment",
     "checkpoints", "work_events",
 })
 _CHECKPOINT_SKIP_SUFFIXES = frozenset({
@@ -1119,7 +1119,7 @@ def write_workspace_todo_plan(content: str) -> str:
     """Persist the visible agent plan as a real workspace file (atomic)."""
     from extensions.tools.built_in.planning.scripts.planning import plan_transaction
 
-    workspace_dir = os.path.join(_PROJECT_ROOT, "workspace")
+    workspace_dir = os.path.join(_PROJECT_ROOT, ".nexus", "workspace")
     os.makedirs(workspace_dir, exist_ok=True)
     todo_path = os.path.abspath(os.path.join(workspace_dir, "todo.md"))
     if os.path.commonpath([os.path.abspath(workspace_dir), todo_path]) != os.path.abspath(workspace_dir):
@@ -1148,7 +1148,7 @@ def clear_workspace_todo_plan() -> None:
 
     try:
         with plan_transaction(_PROJECT_ROOT):
-            todo_path = os.path.abspath(os.path.join(_PROJECT_ROOT, "workspace", "todo.md"))
+            todo_path = os.path.abspath(os.path.join(_PROJECT_ROOT, ".nexus", "workspace", "todo.md"))
             if os.path.exists(todo_path):
                 os.remove(todo_path)
     except Exception:
@@ -1200,7 +1200,7 @@ def latest_todo_snapshot(session_id: str) -> Dict[str, Any]:
         except Exception:
             pass
 
-    todo_path = os.path.abspath(os.path.join(_PROJECT_ROOT, "workspace", "todo.md"))
+    todo_path = os.path.abspath(os.path.join(_PROJECT_ROOT, ".nexus", "workspace", "todo.md"))
     if os.path.exists(todo_path):
         try:
             with open(todo_path, "r", encoding="utf-8") as f:
@@ -6582,7 +6582,7 @@ async def clear_memory(request: Request):
 def list_memory_sessions():
     """List all available memory sessions."""
     try:
-        sess_dir = os.path.join(_PROJECT_ROOT, "logs", "sessions")
+        sess_dir = os.path.join(_PROJECT_ROOT, ".nexus", "logs", "sessions")
         sessions = []
         
         if os.path.isdir(sess_dir):
@@ -7541,7 +7541,7 @@ def _workspace_root() -> str:
     if configured:
         return os.path.realpath(os.path.abspath(configured))
     # Default to workspace/ subfolder if it exists, otherwise project root
-    workspace_dir = os.path.join(_PROJECT_ROOT, "workspace")
+    workspace_dir = os.path.join(_PROJECT_ROOT, ".nexus", "workspace")
     return os.path.realpath(workspace_dir if os.path.isdir(workspace_dir) else _PROJECT_ROOT)
 
 
@@ -7935,8 +7935,8 @@ def _storage_stats() -> Dict[str, Any]:
             pass
         return total
 
-    sessions = os.path.join(_PROJECT_ROOT, "logs", "sessions")
-    work_events = os.path.join(_PROJECT_ROOT, "workspace", "work_events")
+    sessions = os.path.join(_PROJECT_ROOT, ".nexus", "logs", "sessions")
+    work_events = os.path.join(_PROJECT_ROOT, ".nexus", "workspace", "work_events")
     knowledge = os.path.join(_PROJECT_ROOT, "knowledge")
     cache = os.path.join(_PROJECT_ROOT, ".cache")
     return {
@@ -8346,7 +8346,7 @@ def workspace_storage():
 def _clear_workspace_storage_sync(root: str, target: str) -> int:
     """Clear only the server-owned workspace storage target."""
     if target == "sessions":
-        path = os.path.join(root, "logs", "sessions")
+        path = os.path.join(root, ".nexus", "logs", "sessions")
         preserved = {"session_index.json"}
     elif target == "index":
         path = os.path.join(root, "knowledge", "_rag_index.json")

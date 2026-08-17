@@ -89,7 +89,7 @@ class NexusMoERouter:
         # legacy substring scan below stays as the true fallback so unannotated
         # routing tables keep their exact behavior.
         try:
-            from providers import model_bench
+            from models.providers.core import model_bench
             keyword_task = model_bench.classify_task(text, candidates=list(task_cfg))
             if keyword_task:
                 return dict(task_cfg.get(keyword_task, {}))
@@ -108,7 +108,7 @@ class NexusMoERouter:
     def _preference_tier(prefs: Optional[dict] = None) -> str:
         """Map caller preference kwargs (preferred/latency_tier/cost_tier) to
         a routing tier. Optional; defaults to the NEXUS_HEAVY_MODE/env policy."""
-        from providers import model_bench
+        from models.providers.core import model_bench
         return model_bench.resolve_tier(
             preferred=(prefs or {}).get("preferred"),
             latency_tier=(prefs or {}).get("latency_tier"),
@@ -123,7 +123,7 @@ class NexusMoERouter:
         usable so callers keep their exact legacy default-provider behavior.
         """
         try:
-            from providers import model_bench
+            from models.providers.core import model_bench
             text = " ".join(
                 str(m.get("content", "")) for m in (messages or [])
                 if isinstance(m.get("content"), str)

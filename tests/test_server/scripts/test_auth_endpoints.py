@@ -34,18 +34,18 @@ def _global_mocks():
     """Patch heavy deps at their source before any server import."""
     patches = [
         patch("dotenv.load_dotenv"),
-        patch("orchestrators.NexusLoop"),
-        patch("authentication.check_auth", return_value=MagicMock()),
-        patch("authentication.is_public_path", return_value=True),
-        patch("authentication.AuthUser"),
-        patch("authentication.validate_dashboard_token", return_value=True),
+        patch("nexus.main_agent.NexusLoop"),
+        patch("security.core.auth.check_auth", return_value=MagicMock()),
+        patch("security.core.auth.is_public_path", return_value=True),
+        patch("security.core.auth.AuthUser"),
+        patch("security.core.auth.validate_dashboard_token", return_value=True),
         patch("yaml.safe_load", return_value={}),
         patch("yaml.safe_dump"),
     ]
     for p in patches:
         p.start()
     for mod in list(sys.modules.keys()):
-        if mod.startswith("server"):
+        if mod.startswith("apps.api"):
             del sys.modules[mod]
     yield
     for p in patches:
@@ -127,9 +127,9 @@ class TestAuthRequiredEndpoints:
     @pytest.fixture(autouse=True)
     def _no_auth(self):
         for mod in list(sys.modules.keys()):
-            if mod.startswith("server"):
+            if mod.startswith("apps.api"):
                 del sys.modules[mod]
-        patcher = patch("authentication.check_auth", return_value=None)
+        patcher = patch("security.core.auth.check_auth", return_value=None)
         patcher.start()
         yield
         patcher.stop()

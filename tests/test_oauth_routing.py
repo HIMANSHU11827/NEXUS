@@ -14,7 +14,7 @@ from pathlib import Path
 
 import yaml
 
-from providers import factory as factory_module
+from models.providers.core import factory as factory_module
 from models.providers.core.factory import NexusProviderFactory
 
 

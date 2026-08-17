@@ -19,7 +19,7 @@ python -m nexus --shell     # Legacy Rich shell
 python -m nexus --help      # All options
 ```
 
-Set provider keys via environment variables or `config/.env`:
+Set provider keys via environment variables or `configure/.env`:
 
 ```powershell
 $env:OPENAI_API_KEY = "sk-..."
@@ -52,35 +52,35 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for full details.
 
 | Layer | Components | Status |
 |-------|-----------|--------|
-| **Boot** | `nexus/` (boot, events, commands, runtime) | **Stable** |
-| **Agent Loop** | `orchestrators/v5/core.py` — V5 `NexusLoop` with the direct model/tool loop | **Stable** |
-| **Kernel** | `kernel/` — thread-safe singleton, 20 lazy-loaded subsystems | **Stable** |
-| **API** | `server/` (FastAPI v2.1.0), `gui/api.py` (GUI backend) | **Stable** |
+| **Boot** | `src/nexus/` (boot, events, commands, runtime) | **Stable** |
+| **Agent Loop** | `src/nexus/main_agent/core.py` — V5 `NexusLoop` with the direct model/tool loop | **Stable** |
+| **Kernel** | `src/nexus/runtime/kernel/` — thread-safe singleton, 20 lazy-loaded subsystems | **Stable** |
+| **API** | `apps/api/` (FastAPI v2.1.0), `apps/web/api.py` (GUI backend) | **Stable** |
 | **Providers** | 40+ LLM providers with OAuth, health, auto-heal, fallback chains | **Stable** |
 | **Tools** | Registry-discovered tools and skills (BaseTool + ToolRegistry + `.jsnol` metadata) | **Stable** |
-| **Intelligence** | `intelligence/` — MoE Router + NATE 5-layer fused tool engine | **Beta** |
-| **Reasoning** | `reasoning/` — HyperReasoningEngine (planner/critic/verifier) | **Beta** |
+| **Intelligence** | `src/nexus/capabilities/intelligence/` — MoE Router + NATE 5-layer fused tool engine | **Beta** |
+| **Reasoning** | `src/nexus/capabilities/reasoning/` — HyperReasoningEngine (planner/critic/verifier) | **Beta** |
 | **Memory** | `memory/` — multi-source MemoryManager with parallel prefetch/sync | **Stable** |
-| **RAG** | `rag/` — BM25 + SimHash hybrid + Atlas deep indexing | **Beta** |
+| **RAG** | `knowledge/rag/` — BM25 + SimHash hybrid + Atlas deep indexing | **Beta** |
 | **Sandbox** | `sandbox/` — 3-tier command sandbox + risk scoring + failure memory | **Stable** |
-| **Safety** | `safety/` — sovereign laws + logic prover | **Stable** |
+| **Safety** | `security/policies/` — sovereign laws + logic prover | **Stable** |
 | **Security** | `security/` — secret scanner, threat patterns, MCP security | **Stable** |
-| **Authentication** | `authentication/` — OAuth 2.0 (Google, GitHub) + token auth | **Stable** |
-| **Plugins** | `plugins/` — plugin system with hooks, trust model, tool registration | **Beta** |
-| **Skills** | `skills/` — skill registry with SKILL.md format (69 files, 14 categories) | **Stable** |
-| **MCP** | `mcp/` — MCP stdio client/server/tool integration | **Beta** |
-| **Voice** | `voice/` — 4 STT backends + KittenTTS + VAD | **Beta** |
+| **Authentication** | `security/core/auth.py` — OAuth 2.0 (Google, GitHub) + token auth | **Stable** |
+| **Plugins** | `extensions/plugins/built_in/` — plugin system with hooks, trust model, tool registration | **Beta** |
+| **Skills** | `extensions/skills/built_in/` — skill registry with SKILL.md format (69 files, 14 categories) | **Stable** |
+| **MCP** | `extensions/mcp/core/` — MCP stdio client/server/tool integration | **Beta** |
+| **Voice** | `apps/voice/` — 4 STT backends + KittenTTS + VAD | **Beta** |
 | **Hive** | `hive/` — multi-agent sub-engine (spawn, consolidate, blackboard) | **Beta** |
-| **Gateway** | `gateway/` — 21-platform messaging gateway | **Beta** |
+| **Gateway** | `gateways/` — 21-platform messaging gateway | **Beta** |
 | **Evolution** | `evolution/` — self-improvement (6 forges + VersionManager) | **Beta** |
-| **GUI** | `gui/` — React 18 + Vite + TypeScript (rebuilt from scratch) | **Stable** |
-| **TUI** | `tui/` — Ink (React 19) TUI backed by the canonical 152-command registry | **Stable** |
+| **GUI** | `apps/web/` — React 18 + Vite + TypeScript (rebuilt from scratch) | **Stable** |
+| **TUI** | `apps/tui/` — Ink (React 19) TUI backed by the canonical 152-command registry | **Stable** |
 
 ---
 
 ## Provider Setup
 
-Providers are configured in `config/provider.yml`. Keys use `${ENV_VAR}` references:
+Providers are configured in `configure/provider.yml`. Keys use `${ENV_VAR}` references:
 
 ```yaml
 openai:
@@ -100,21 +100,21 @@ deepseek:
   model: deepseek-chat
 ```
 
-Environment variables take precedence. See `config/provider.yml` for all configured providers.
+Environment variables take precedence. See `configure/provider.yml` for all configured providers.
 
 ---
 
 ## Tool Execution
 
-Tools are discovered from `tools/<name>/` directories via `.jsnol` metadata files and registered by `ToolRegistry`. Each tool exposes JSON schema for LLM function calling and extends `BaseTool`.
+Tools are discovered from `extensions/tools/built_in/<name>/` directories via `.jsnol` metadata files and registered by `ToolRegistry`. Each tool exposes JSON schema for LLM function calling and extends `BaseTool`.
 
-**Tools are discovered at runtime** from `tools/<name>/<name>.jsnol` metadata and active local skills. The model receives the current executable registry, including available MCP tools, rather than a hardcoded tool list.
+**Tools are discovered at runtime** from `extensions/tools/built_in/<name>/<name>.jsnol` metadata and active local skills. The model receives the current executable registry, including available MCP tools, rather than a hardcoded tool list.
 
 **Security model**:
 - **3-tier sandbox**: `NO_SANDBOX` / `NORMAL` / `DOCKER`
 - **Risk scoring**: `CommandRiskScorer` (8 regex rules, 16 safe prefixes, block threshold 80)
 - **Permission modes**: auto, ai_decide, ask_all, checklist
-- **Threat detection**: `tools/threat_patterns.py` — 41 regex patterns across 3 scopes
+- **Threat detection**: `extensions/tools/built_in/threat_patterns.py` — 41 regex patterns across 3 scopes
 - **Failure memory**: `sandbox/failure_memory.py` — append-only JSONL failure log
 
 ---
@@ -123,11 +123,11 @@ Tools are discovered from `tools/<name>/` directories via `.jsnol` metadata file
 
 | File | Purpose |
 |------|---------|
-| `config/provider.yml` | Provider definitions, model endpoints, API keys |
-| `config/settings.yml` | Runtime settings (theme, temperature, safety, etc.) |
-| `config/settings.yml` | Runtime settings and preferences (theme, permissions, sandbox, security, etc.) |
-| `config/mcp_servers.json` | MCP server definitions |
-| `config/.env` | Provider API keys (loaded by python-dotenv) |
+| `configure/provider.yml` | Provider definitions, model endpoints, API keys |
+| `configure/settings.yml` | Runtime settings (theme, temperature, safety, etc.) |
+| `configure/settings.yml` | Runtime settings and preferences (theme, permissions, sandbox, security, etc.) |
+| `configure/mcp_servers.json` | MCP server definitions |
+| `configure/.env` | Provider API keys (loaded by python-dotenv) |
 
 Environment variables take precedence: `NEXUS_API_HOST`, `NEXUS_API_PORT`, `NEXUS_DASHBOARD_TOKEN`.
 
@@ -136,33 +136,42 @@ Environment variables take precedence: `NEXUS_API_HOST`, `NEXUS_API_PORT`, `NEXU
 ## Project Structure
 
 ```
-nexus/              Boot loader, events, commands, runtime, run context
-server/             FastAPI HTTP/SSE server (port 8000, v2.1.0)
-orchestrators/      V5 NexusLoop agent loop (orchestrators/v5/core.py)
-providers/          40+ LLM provider implementations + OAuth
-tools/              Registry-discovered tools with .jsnol metadata + BaseTool
-gui/                React 18 + Vite + TypeScript frontend (port 5173, rebuilt)
-tui/                Ink-based TUI (React 19, v3.0 redesign, canonical 152-command registry)
+src/nexus/          Boot loader, events, commands, runtime, run context
+apps/api/           FastAPI HTTP/SSE server (port 8000, v2.1.0)
+apps/tui/           Ink-based TUI (React 19, v3.0 redesign, canonical 152-command registry)
+apps/web/           React 18 + Vite + TypeScript frontend (port 5173, rebuilt)
+apps/gateway/       Dedicated gateway app (engine lives in gateways/)
+src/nexus/main_agent/  V5 NexusLoop agent loop (src/nexus/main_agent/core.py)
+src/nexus/runtime/kernel/  Central singleton (20 lazy-loaded subsystems)
+src/nexus/capabilities/   MoE router + NATE tool engine, HyperReasoningEngine, intent router
+src/nexus/common/   Shared utilities (session bus, engine manager, helpers)
+src/nexus/context/  Context persistence and compression
+src/nexus/tasks/    Task scheduler
+models/providers/   40+ LLM provider implementations (core/api/local/auth) + OAuth
+extensions/tools/built_in/  Registry-discovered tools with .jsnol metadata + BaseTool
+extensions/skills/built_in/ Skill registry with SKILL.md format
+extensions/plugins/built_in/ Plugin system with hooks + trust model
+extensions/mcp/core/  MCP stdio client/server/tool integration
 hive/               Sub-agent engine (spawn, consolidate, blackboard)
-kernel/             Central singleton (20 lazy-loaded subsystems)
+gateways/           21-platform messaging gateway
 memory/             Multi-source MemoryManager (parallel prefetch/sync)
-rag/                BM25 + SimHash hybrid + Atlas deep indexing
+knowledge/rag/      BM25 + SimHash hybrid + Atlas deep indexing
 sandbox/            3-tier sandbox + risk scoring + failure memory
-safety/             Sovereign laws + logic prover
-security/           Secret scanner + release hygiene
-authentication/     OAuth 2.0 (Google, GitHub) + token auth
-plugins/            Plugin system with hooks + trust model
-skills/             Skill registry with SKILL.md format
-mcp/                MCP stdio client/server/tool integration
-voice/              Voice pipeline (4 STT backends + KittenTTS)
-gateway/            21-platform messaging gateway
+security/           Secret scanners + release hygiene
+security/policies/  Sovereign laws + logic prover
+security/permissions/  Permission modes
+security/core/auth.py  OAuth 2.0 (Google, GitHub) + token auth
+observability/      Telemetry + mission replay + tool economy + unified graph
+evaluation/         Evidence ledger + test selection
+maintenance/        Roadmap maintenance
 evolution/          Self-improvement (6 forges + VersionManager)
-intelligence/       MoE router + NATE 5-layer tool engine
-reasoning/          HyperReasoningEngine
-config/             YAML/JSON/env configuration loader
+apps/voice/         Voice pipeline (4 STT backends + KittenTTS)
+configure/          YAML/JSON/env configuration loader
 tests/              150+ test files
 scripts/            Helper scripts
-deploy/             Docker deployment
+scripts/launchers/  .cmd/.ps1 launchers
+docs/               Documentation
+deployment/         Docker deployment (Dockerfile; docker-compose.yml at repo root)
 ```
 
 ---
@@ -171,8 +180,8 @@ deploy/             Docker deployment
 
 ```powershell
 python -m pytest tests/ -v
-cd gui && npm run build       # TypeScript + Vite build
-cd tui && npm run build       # Ink TUI type check
+cd apps/web && npm run build  # TypeScript + Vite build
+cd apps/tui && npm run build  # Ink TUI type check
 ```
 
 ---
@@ -187,16 +196,16 @@ pip install -e ".[dev]"
 
 - **Linting**: `ruff` (select E, F, I; ignore E501)
 - **Type checking**: `pyright` (basic mode)
-- **GUI**: `cd gui && npm run dev` (Vite dev server)
-- **TUI**: `cd tui && npx tsx nexus-tui.tsx`
+- **GUI**: `cd apps/web && npm run dev` (Vite dev server)
+- **TUI**: `cd apps/tui && npx tsx nexus-tui.tsx`
 
 ---
 
 ## Known Limitations
 
-- `orchestrators/architect.py` and `mission_control.py` — removed (legacy), planning uses `todo.md` + `planning` tool
-- `intelligence/moa.py` provides the hybrid provider-mesh facade and
-  `intelligence/local_brain.py` provides lazy local-provider routing; true
+- Legacy `architect.py` and `mission_control.py` — removed, planning uses `todo.md` + `planning` tool
+- `src/nexus/capabilities/intelligence/moa.py` provides the hybrid provider-mesh facade and
+  `src/nexus/capabilities/intelligence/local_brain.py` provides lazy local-provider routing; true
   multi-model ensemble and local vision inference remain optional capabilities
 - The 13 stale unimplemented stub tool directories were permanently deleted from the source tree — the model only ever sees executable tools
 - `bash` tool is retired — `terminal` is the only command-execution tool

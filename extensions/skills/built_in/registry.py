@@ -39,7 +39,7 @@ class SkillRegistry:
 
     def _candidates(self) -> Iterable[tuple[Path, str]]:
         canonical = self.root / ".opencode" / "skills"
-        legacy = self.root / "skills"
+        legacy = self.root / "extensions" / "skills" / "built_in"
         # Canonical built-in skills location after the restructure:
         # <root>/extensions/skills/built_in/. This is scanned only when ``root``
         # is the NEXUS project, so an isolated tmp-project SkillRegistry (used by

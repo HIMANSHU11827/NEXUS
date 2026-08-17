@@ -256,14 +256,14 @@ def test_shipped_skill_yaml_descriptions_use_top_level_values():
 def test_skill_engine_receives_the_workspace_root(monkeypatch):
     captured = {}
     sentinel = object()
-    fake_module = types.ModuleType("skills.engine")
+    fake_module = types.ModuleType("extensions.skills.built_in.engine")
 
     def fake_engine(root):
         captured["root"] = root
         return sentinel
 
     fake_module.NexusSkillEngine = fake_engine
-    monkeypatch.setitem(sys.modules, "skills.engine", fake_module)
+    monkeypatch.setitem(sys.modules, "extensions.skills.built_in.engine", fake_module)
 
     host = V5Skill()
     host.root_dir = str(PROJECT_ROOT / "workspace-under-test")

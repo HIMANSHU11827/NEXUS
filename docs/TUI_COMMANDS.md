@@ -6,11 +6,11 @@ queue worker unless `NEXUS_EMBED_QUEUE_DRIVER` was explicitly set. `/tasks`
 and `/queue` intentionally show different stores: session work-items versus
 the project SQLite queue.
 
-The TUI (`tui/nexus-tui.tsx`) is an Ink-based TypeScript thin client that talks to the local FastAPI backend on port 8000. `python -m nexus` launches this TUI by default and starts `gui.api:app` when needed, because that backend exposes the full TUI/GUI control-plane endpoints. This document catalogs every command with its current behavior.
+The TUI (`apps/tui/nexus-tui.tsx`) is an Ink-based TypeScript thin client that talks to the local FastAPI backend on port 8000. `python -m nexus` launches this TUI by default and starts `apps.web.api:app` when needed, because that backend exposes the full TUI/GUI control-plane endpoints. This document catalogs every command with its current behavior.
 
 ## Source of truth
 
-The canonical command catalog is `nexus/commands.py`, exposed at `GET /api/commands` and executed at `POST /api/command`. Both the TUI palette and GUI palette load that catalog; neither should add a private suggestion list. Entries marked `execution: client` are real catalog entries whose behavior needs interactive state (for example clipboard, local terminal, or browser controls), so the client dispatcher handles them and the API returns an honest capability response when called from a stateless surface.
+The canonical command catalog is `src/nexus/commands.py`, exposed at `GET /api/commands` and executed at `POST /api/command`. Both the TUI palette and GUI palette load that catalog; neither should add a private suggestion list. Entries marked `execution: client` are real catalog entries whose behavior needs interactive state (for example clipboard, local terminal, or browser controls), so the client dispatcher handles them and the API returns an honest capability response when called from a stateless surface.
 
 ## Command Categories
 
@@ -121,7 +121,7 @@ Uses `.venv\Scripts\python.exe` when available (Windows fix). stderr output capt
 ### Work & Activity
 | Command | Aliases | Behavior |
 |---------|---------|----------|
-| `/work` | — | Shows recent work events from `workspace/work_events/{session_id}.jsonl` |
+| `/work` | — | Shows recent work events from `.nexus/workspace/work_events/{session_id}.jsonl` |
 | `/open` | `/detail` | Opens activity detail in sidebar |
 | `/close` | `/panel` | Closes sidebar detail panel |
 | `/back` | — | Returns to previous panel (activity→workspace, agent→hive, provider-detail→provider) |

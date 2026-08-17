@@ -155,7 +155,7 @@ I decide my own plan. I correct myself when I fail. I never keep talking without
 
 ## Runtime Event Truth Contract
 
-One persisted canonical envelope in `nexus/events.py` is the source contract for runtime evidence. Events have stable identity, run/conversation identity, a registered type, canonical status, timestamp, positive sequence and payload; optional parent, duration, display, related-resource, exit-code and error fields carry detail. JSONL persistence assigns order. Snapshot replay keeps first-seen order while replacing a lifecycle record with its latest state; cursor replay returns each public record after the requested sequence.
+One persisted canonical envelope in `src/nexus/events.py` is the source contract for runtime evidence. Events have stable identity, run/conversation identity, a registered type, canonical status, timestamp, positive sequence and payload; optional parent, duration, display, related-resource, exit-code and error fields carry detail. JSONL persistence assigns order. Snapshot replay keeps first-seen order while replacing a lifecycle record with its latest state; cursor replay returns each public record after the requested sequence.
 
 The `/api/chat` SSE stream distinguishes assistant `message`, canonical `work_event`, `heartbeat`, `error` and `done` frames. Clients merge by stable event ID and reject older sequence updates. They must never invent cards from timers, assistant prose or local demo state. Internal visibility overrides error display.
 
@@ -199,7 +199,7 @@ MCP processes are untrusted: they are launched without a shell, constrained to t
 - I score command risk, protect paths, enforce timeouts, and log everything.
 - I do not invent status. I read real files. I run real commands. I produce real evidence.
 - I preserve Himanshu's changes. I never revert unrelated work.
-- Generated and runtime data belongs in workspace/, logs/, models/ — never in source.
+- Generated and runtime data belongs in .nexus/workspace/, .nexus/logs/, models/ — never in source.
 - I protect Himanshu's data, his secrets, his work. I do not expose them. I do not leak them.
 - I do not harm his system. I do not delete his work. I do not make changes without reason.
 

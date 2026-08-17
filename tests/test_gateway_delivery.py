@@ -112,9 +112,9 @@ def test_gateway_runner_persists_response_before_send(monkeypatch, tmp_path):
             yield {"type": "content", "data": "answer"}
 
     monkeypatch.setattr(gateway_run, "NexusLoop", Loop)
-    monkeypatch.setattr("authentication.is_gateway_authorized", lambda *_args: True)
-    monkeypatch.setattr("utils.session_bus.set_active_session_id", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr("utils.session_bus.sync_loop_from_disk", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("security.core.auth.is_gateway_authorized", lambda *_args: True)
+    monkeypatch.setattr("nexus.common.session_bus.set_active_session_id", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("nexus.common.session_bus.sync_loop_from_disk", lambda *_args, **_kwargs: None)
 
     adapter = Adapter()
     runner = gateway_run.GatewayRunner(root=str(tmp_path))

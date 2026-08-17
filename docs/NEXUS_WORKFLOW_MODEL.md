@@ -87,7 +87,7 @@ A work event is one observable action.
   "kind": "file",
   "action": "Read file",
   "tool": "file_read",
-  "target": "gui/src/App.tsx",
+  "target": "apps/web/src/App.tsx",
   "status": "done",
   "result": "Read 400 lines"
 }
@@ -103,7 +103,7 @@ An artifact is generated output worth opening, replaying, or sharing.
   "mission_id": "mis_001",
   "phase_id": "phase_002",
   "name": "index.html",
-  "path": "workspace/artifacts/default/index.html",
+  "path": ".nexus/workspace/artifacts/default/index.html",
   "kind": "html",
   "status": "created"
 }
@@ -199,13 +199,13 @@ The GUI should render phases as first-class timeline sections.
 
 ```text
 Phase 1: Understand
-  [Read file] gui/src/App.tsx
+  [Read file] apps/web/src/App.tsx
   [Search] workEvents
-  [Read file] gui/api.py
+  [Read file] apps/web/api.py
 
 Phase 2: Implement
   [Edit file] core/mission/models.py
-  [Edit file] gui/src/App.tsx
+  [Edit file] apps/web/src/App.tsx
 
 Phase 3: Verify
   [Run command] npm run build
@@ -235,12 +235,12 @@ Terminal output should stay compact and readable:
 ```text
 [MISSION] Improve NEXUS workflow UI
 [PHASE 1/5] Understand
-  done  Read file      gui/src/App.tsx
+  done  Read file      apps/web/src/App.tsx
   done  Search         workEvents
 
 [PHASE 2/5] Implement
   run   Edit file      core/mission/models.py
-  done  Edit file      gui/api.py
+  done  Edit file      apps/web/api.py
 
 [VERIFY]
   done  python -m pytest tests/test_gui_security.py -q

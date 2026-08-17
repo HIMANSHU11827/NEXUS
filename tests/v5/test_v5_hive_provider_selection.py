@@ -13,7 +13,7 @@ class _Factory:
 
 
 def test_hive_llm_uses_configured_factory_provider(monkeypatch):
-    monkeypatch.setattr("providers.factory.NexusProviderFactory", lambda: _Factory())
+    monkeypatch.setattr("models.providers.core.factory.NexusProviderFactory", lambda: _Factory())
     host = object.__new__(V5Hive)
     assert host._hive_llm_call()([
         {"role": "system", "content": "system"},

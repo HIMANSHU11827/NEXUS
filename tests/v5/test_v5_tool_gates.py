@@ -146,7 +146,7 @@ def test_lint_source_fails_closed_when_validator_errors(loop, tmp_path, monkeypa
     def broken_run(*args, **kwargs):
         raise OSError("compiler unavailable")
 
-    monkeypatch.setattr("orchestrators.v5.tools.subprocess.run", broken_run)
+    monkeypatch.setattr("nexus.main_agent.tools.subprocess.run", broken_run)
     ok, err = loop._lint_source(str(path))
     assert ok is False
     assert "compiler unavailable" in err
@@ -182,7 +182,7 @@ def test_run_tool_rejects_and_rolls_back_invalid_post_write_edit(loop, tmp_path)
 def test_edit_lint_and_snapshot_do_not_block_event_loop(loop, tmp_path, monkeypatch):
     path = tmp_path / "edited.py"
     path.write_text("value = 1\n", encoding="utf-8")
-    original_run = __import__("orchestrators.v5.tools", fromlist=["subprocess"]).subprocess.run
+    original_run = __import__("nexus.main_agent.tools", fromlist=["subprocess"]).subprocess.run
 
     def slow_run(*args, **kwargs):
         import time
@@ -190,7 +190,7 @@ def test_edit_lint_and_snapshot_do_not_block_event_loop(loop, tmp_path, monkeypa
         time.sleep(0.08)
         return original_run(*args, **kwargs)
 
-    monkeypatch.setattr("orchestrators.v5.tools.subprocess.run", slow_run)
+    monkeypatch.setattr("nexus.main_agent.tools.subprocess.run", slow_run)
 
     class Registry:
         def get(self, name):

@@ -14,18 +14,18 @@ from fastapi.testclient import TestClient
 def _server_mocks():
     patches = [
         patch("dotenv.load_dotenv"),
-        patch("orchestrators.NexusLoop"),
-        patch("authentication.check_auth", return_value=MagicMock()),
-        patch("authentication.is_public_path", return_value=True),
-        patch("authentication.AuthUser"),
-        patch("authentication.validate_dashboard_token", return_value=True),
+        patch("nexus.main_agent.NexusLoop"),
+        patch("security.core.auth.check_auth", return_value=MagicMock()),
+        patch("security.core.auth.is_public_path", return_value=True),
+        patch("security.core.auth.AuthUser"),
+        patch("security.core.auth.validate_dashboard_token", return_value=True),
         patch("yaml.safe_load", return_value={}),
         patch("yaml.safe_dump"),
     ]
     for item in patches:
         item.start()
     for mod in list(sys.modules.keys()):
-        if mod.startswith("server"):
+        if mod.startswith("apps.api"):
             del sys.modules[mod]
     yield
     for item in patches:

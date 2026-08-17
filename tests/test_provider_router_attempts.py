@@ -30,7 +30,7 @@ def test_model_router_records_redacted_provider_failure():
     router.retry_policy = RetryPolicy(max_attempts=1)
     from models.providers.core.model_capabilities import ModelCapabilityRegistry
     router._model_capabilities = ModelCapabilityRegistry()
-    router.attempts = __import__("providers.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
+    router.attempts = __import__("models.providers.core.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
 
     try:
         router._invoke(_Provider(), "primary", [{"role": "user", "content": "hi"}])
@@ -63,7 +63,7 @@ def test_model_router_allows_keyless_loopback_provider():
     router.retry_policy = RetryPolicy(max_attempts=1)
     from models.providers.core.model_capabilities import ModelCapabilityRegistry
     router._model_capabilities = ModelCapabilityRegistry()
-    router.attempts = __import__("providers.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
+    router.attempts = __import__("models.providers.core.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
 
     assert router._provider_credentials_usable(LocalProvider(), "lm_studio") is True
     assert router._invoke(LocalProvider(), "lm_studio", [{"role": "user", "content": "hi"}]) == "local response"
@@ -95,7 +95,7 @@ def test_model_router_releases_profile_lease_after_successful_call():
     router.retry_policy = RetryPolicy(max_attempts=1)
     from models.providers.core.model_capabilities import ModelCapabilityRegistry
     router._model_capabilities = ModelCapabilityRegistry()
-    router.attempts = __import__("providers.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
+    router.attempts = __import__("models.providers.core.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
 
     assert router._invoke(provider, "primary", [{"role": "user", "content": "hi"}]) == "ok"
     assert store.released == ["lease-token"]
@@ -126,7 +126,7 @@ def test_model_router_filters_model_limits_for_strict_provider_signature():
     router.retry_policy = RetryPolicy(max_attempts=1)
     from models.providers.core.model_capabilities import ModelCapabilityRegistry
     router._model_capabilities = ModelCapabilityRegistry()
-    router.attempts = __import__("providers.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
+    router.attempts = __import__("models.providers.core.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
 
     assert router._invoke(
         StrictProvider(), "primary", [{"role": "user", "content": "hi"}],
@@ -158,7 +158,7 @@ def test_model_router_does_not_repeat_internal_type_error():
     router.retry_policy = RetryPolicy(max_attempts=1)
     from models.providers.core.model_capabilities import ModelCapabilityRegistry
     router._model_capabilities = ModelCapabilityRegistry()
-    router.attempts = __import__("providers.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
+    router.attempts = __import__("models.providers.core.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
 
     try:
         router._invoke(BuggyProvider(), "primary", [{"role": "user", "content": "hi"}])
@@ -188,7 +188,7 @@ def test_model_router_releases_profile_lease_after_failed_call():
     router.retry_policy = RetryPolicy(max_attempts=1)
     from models.providers.core.model_capabilities import ModelCapabilityRegistry
     router._model_capabilities = ModelCapabilityRegistry()
-    router.attempts = __import__("providers.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
+    router.attempts = __import__("models.providers.core.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
 
     try:
         router._invoke(provider, "primary", [{"role": "user", "content": "hi"}])
@@ -220,7 +220,7 @@ def test_model_router_releases_profile_lease_when_credentials_are_rejected():
     router.retry_policy = RetryPolicy(max_attempts=1)
     from models.providers.core.model_capabilities import ModelCapabilityRegistry
     router._model_capabilities = ModelCapabilityRegistry()
-    router.attempts = __import__("providers.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
+    router.attempts = __import__("models.providers.core.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
     router._provider_credentials_usable = lambda *_args: False
 
     try:
@@ -241,7 +241,7 @@ def test_model_router_compacts_once_before_context_overflow_fallback():
     router.factory = object()
     router.total_cloud_calls = 0
     router.health = _Health()
-    router.attempts = __import__("providers.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
+    router.attempts = __import__("models.providers.core.attempts", fromlist=["ProviderAttemptRecorder"]).ProviderAttemptRecorder()
     router._should_use_heavy_brain = lambda _messages: True
     router._fallback_mesh = lambda **_kwargs: []
     calls = []
@@ -249,7 +249,7 @@ def test_model_router_compacts_once_before_context_overflow_fallback():
     def invoke(_provider, _provider_id, messages, **_kwargs):
         calls.append(messages)
         if len(calls) == 1:
-            raise __import__("providers.reliability", fromlist=["ProviderCallError"]).ProviderCallError(
+            raise __import__("models.providers.core.reliability", fromlist=["ProviderCallError"]).ProviderCallError(
                 Classification(
                     failure_class=FailureClass.CONTEXT_OVERFLOW,
                     retryable=False,

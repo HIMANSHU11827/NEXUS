@@ -9,16 +9,16 @@
 | Surface | Command | Entry |
 |---|---|---|
 | TUI | `python -m nexus` | Ink (React 19) → backend → `NexusLoop` |
-| GUI | `python -m nexus --gui` | React18/Vite → FastAPI `gui/api.py` → `NexusLoop` |
-| Server API | `python -m nexus --server` | FastAPI `server/__init__.py` (:8000) → `NexusLoop` |
-| Gateway | `python -m nexus --gateway` | `gateway/run.py` → `NexusLoop` |
-| Setup | `python -m nexus --setup` | `tui/setup_wizard.py` |
+| GUI | `python -m nexus --gui` | React18/Vite → FastAPI `apps/web/api.py` → `NexusLoop` |
+| Server API | `python -m nexus --server` | FastAPI `apps/api/__init__.py` (:8000) → `NexusLoop` |
+| Gateway | `python -m nexus --gateway` | `gateways/run.py` → `NexusLoop` |
+| Setup | `python -m nexus --setup` | `apps/tui/setup_wizard.py` |
 
 All surfaces converge on the same canonical loop.
 
 ## 2. The Agent Loop (canonical path)
 
-`orchestrators/v5/core.py` — `NexusLoop`.
+`src/nexus/main_agent/core.py` — `NexusLoop`.
 
 ```
 user message
@@ -36,12 +36,12 @@ user message
 2. **Model call** — `raw = await _safe_model_call_raw(messages, **kwargs)` (:340)
    → `model.py:_call_model_raw` (:135) → `brain.generate(**request)` (:157).
    `brain` = kernel MoE router (`core.py:388`).
-3. **Brain dispatch** — `intelligence/moe_router.py` → `provider.stream_generate(messages, **call_kwargs)`.
+3. **Brain dispatch** — `src/nexus/capabilities/intelligence/moe_router.py` → `provider.stream_generate(messages, **call_kwargs)`.
    Tool defs reach the LLM API only if the provider forwards them (see §5).
 4. **Parse** — `_model_turn_parts(raw)` (:597-639):
    - native `tool_calls` → `_part_tool_calls` (:651)
    - text envelopes `<function=name>{json}` → (:612-623)
-   - `parse_all_tool_calls` from `tools/nexus_tools/call_parser.py` (:628-638)
+   - `parse_all_tool_calls` from `extensions/tools/built_in/nexus_tools/call_parser.py` (:628-638)
 5. **Execute** — `_run_tool(call)` (:453) → `tools.py:_run_tool` (:54-225):
    - command aliases → risk score → permission → `sandbox.stream_execute`
    - registry tools → `ToolRegistry.stream_execute` → `entry.instance.execute(params)`
@@ -56,12 +56,12 @@ Dead code (confirmed unreachable): PAORR block after `return` at core.py:2023,
 ## 3. Provider routing
 
 ```
-model.py → brain.generate (NexusMoERouter, intelligence/moe_router.py:299)
+model.py → brain.generate (NexusMoERouter, src/nexus/capabilities/intelligence/moe_router.py:299)
          → provider.stream_generate(messages, **call_kwargs)   (moe_router.py:215-219)
-         → factory.get_provider_by_name(...)                   (providers/factory.py:202)
+         → factory.get_provider_by_name(...)                   (models/providers/core/factory.py:202)
 ```
 
-The MoE router calls the raw provider directly. `providers/router.py` (with its
+The MoE router calls the raw provider directly. `models/providers/core/router.py` (with its
 capability-based tool stripping) is NOT in this path.
 
 ## 4. Memory write path (after-turn)
@@ -72,7 +72,7 @@ capability-based tool stripping) is NOT in this path.
 - MemoryForge (`evolution/memory_forge`)
 
 **Verification gate (P0):** Historically unverified model text reached all three.
-A per-action verifier (`orchestrators/v5/verification.py`) exists but was not fed
+A per-action verifier (`src/nexus/main_agent/verification.py`) exists but was not fed
 into the memory path. Fix in flight to gate memory on verified evidence.
 
 ## 5. Tool support by provider (2026-08-05)
@@ -90,19 +90,19 @@ into the memory path. Fix in flight to gate memory on verified evidence.
 | ollama/llama_cpp/cohere | in progress | native formats |
 | huggingface/replicate/perplexity | low priority | no native tool API |
 
-Config gate: `config/provider.yml` `model_capabilities.providers.<id>.tools`
-controls `providers/router.py:_apply_model_limits` stripping (only when the router
+Config gate: `configure/provider.yml` `model_capabilities.providers.<id>.tools`
+controls `models/providers/core/router.py:_apply_model_limits` stripping (only when the router
 is used). Enabled for all tool-capable providers 2026-08-05.
 
 ## 6. Key subsystems
 
-- **Kernel** (`kernel/__init__.py`) — thread-safe singleton, lazy-loaded subsystems;
+- **Kernel** (`src/nexus/runtime/kernel/__init__.py`) — thread-safe singleton, lazy-loaded subsystems;
   `moe` → `NexusMoERouter`; `tools` → `ToolRegistry`.
-- **Tools** (`tools/nexus_tools/registry.py`) — `.jsnol` metadata discovery,
+- **Tools** (`extensions/tools/built_in/nexus_tools/registry.py`) — `.jsnol` metadata discovery,
   `stream_execute` → `entry.instance.execute`.
 - **Sandbox** (`sandbox/`) — 3-tier, risk scoring, failure memory.
-- **Permission** (`permissions/`) — deny→allow precedence, AUTO_PILOT.
+- **Permission** (`security/permissions/`) — deny→allow precedence, AUTO_PILOT.
 - **Memory** (`memory/`) — multi-source MemoryManager.
-- **RAG** (`rag/`) — BM25 + SimHash hybrid; atlas deep index.
-- **Gateway** (`gateway/platforms/`) — async adapters per platform.
+- **RAG** (`knowledge/rag/`) — BM25 + SimHash hybrid; atlas deep index.
+- **Gateway** (`gateways/platforms/`) — async adapters per platform.
 - **Hive** (`hive/`) — sub-agent engine.

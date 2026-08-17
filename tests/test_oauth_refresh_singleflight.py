@@ -31,7 +31,7 @@ def test_async_expired_refresh_is_single_flight(monkeypatch):
         def get_api_key(credentials):
             return credentials.access
 
-    monkeypatch.setattr("providers.oauth.registry.get_oauth_provider", lambda _id: Provider())
+    monkeypatch.setattr("models.providers.auth.oauth.registry.get_oauth_provider", lambda _id: Provider())
 
     async def run():
         return await asyncio.gather(

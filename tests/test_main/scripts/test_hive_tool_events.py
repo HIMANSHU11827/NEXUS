@@ -41,9 +41,9 @@ def test_default_sync_router_chat_does_not_block_event_loop(monkeypatch, tmp_pat
             release.wait(0.5)
             return "router result"
 
-    router_module = types.ModuleType("intelligence.moe_router")
+    router_module = types.ModuleType("nexus.capabilities.intelligence.moe_router")
     router_module.NexusMoERouter = FakeRouter
-    monkeypatch.setitem(sys.modules, "intelligence.moe_router", router_module)
+    monkeypatch.setitem(sys.modules, "nexus.capabilities.intelligence.moe_router", router_module)
 
     async def scenario():
         agent = SubAgent(

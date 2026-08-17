@@ -33,7 +33,8 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 # 🌌 [NEXUS_PATH_CORE]
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# apps/web/api.py -> apps/web -> apps -> repository root
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Keep GUI-launched API workers consistent with the standalone server.
 load_dotenv(os.path.join(_ROOT, ".env"), override=False)
 load_dotenv(os.path.join(_ROOT, "configure", ".env"), override=False)
@@ -63,15 +64,15 @@ from nexus.runtime import (
 from nexus.main_agent import NexusLoop
 from nexus.common.context_scrubber import StreamingContextScrubber
 
-_UPLOAD_DIR = os.path.join(_ROOT, "workspace", "uploads")
+_UPLOAD_DIR = os.path.join(_ROOT, ".nexus", "workspace", "uploads")
 os.makedirs(_UPLOAD_DIR, exist_ok=True)
-_WORK_EVENTS_DIR = os.path.join(_ROOT, "workspace", "work_events")
+_WORK_EVENTS_DIR = os.path.join(_ROOT, ".nexus", "workspace", "work_events")
 os.makedirs(_WORK_EVENTS_DIR, exist_ok=True)
-_ARTIFACTS_DIR = os.path.join(_ROOT, "workspace", "artifacts")
+_ARTIFACTS_DIR = os.path.join(_ROOT, ".nexus", "workspace", "artifacts")
 os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
-_REMINDERS_PATH = os.path.join(_ROOT, "workspace", "dashboard_reminders.json")
-_SOURCE_LIBRARY_PATH = os.path.join(_ROOT, "workspace", "source_library.json")
-_API_AUDIT_LOG = os.path.join(_ROOT, "logs", "dashboard_api.jsonl")
+_REMINDERS_PATH = os.path.join(_ROOT, ".nexus", "workspace", "dashboard_reminders.json")
+_SOURCE_LIBRARY_PATH = os.path.join(_ROOT, ".nexus", "workspace", "source_library.json")
+_API_AUDIT_LOG = os.path.join(_ROOT, ".nexus", "logs", "dashboard_api.jsonl")
 _LOCAL_ONLY = os.environ.get("NEXUS_DASHBOARD_LOCAL_ONLY", "true").lower() == "true"
 _AUTH_TOKEN = os.environ.get("NEXUS_DASHBOARD_TOKEN", "").strip()
 _RATE_WINDOW_SECONDS = 60
@@ -81,7 +82,7 @@ _MAX_UPLOAD_BYTES = int(os.environ.get("NEXUS_MAX_UPLOAD_BYTES", str(10 * 1024 *
 _LOCAL_CLIENTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 _SHOW_CHAT_THINKING = os.environ.get("NEXUS_CHAT_SHOW_THINKING", "false").lower() in {"1", "true", "yes", "on"}
 _SANDBOX_TIER = os.environ.get("NEXUS_SANDBOX_TIER", "normal").strip().lower() or "normal"
-_SANDBOX_ROOT = os.path.abspath(os.environ.get("NEXUS_SANDBOX_ROOT", os.path.join(_ROOT, "workspace")))
+_SANDBOX_ROOT = os.path.abspath(os.environ.get("NEXUS_SANDBOX_ROOT", os.path.join(_ROOT, ".nexus", "workspace")))
 
 app = FastAPI()
 
@@ -385,7 +386,7 @@ def safe_session_id(session_id: str) -> str:
 
 
 def session_file_path(session_id: str, suffix: str = ".json") -> str:
-    sessions_dir = os.path.join(_ROOT, "logs", "sessions")
+    sessions_dir = os.path.join(_ROOT, ".nexus", "logs", "sessions")
     try:
         return runtime_session_file_path(sessions_dir, session_id, suffix)
     except ValueError:
@@ -1175,7 +1176,7 @@ def write_workspace_todo_plan(content: str) -> str:
     """Persist the visible agent plan as a real workspace file."""
     from extensions.tools.built_in.planning.scripts.planning import plan_transaction
 
-    workspace_dir = os.path.join(_ROOT, "workspace")
+    workspace_dir = os.path.join(_ROOT, ".nexus", "workspace")
     os.makedirs(workspace_dir, exist_ok=True)
     todo_path = os.path.abspath(os.path.join(workspace_dir, "todo.md"))
     if os.path.commonpath([os.path.abspath(workspace_dir), todo_path]) != os.path.abspath(workspace_dir):
@@ -1207,7 +1208,7 @@ def clear_workspace_todo_plan() -> None:
 
     try:
         with plan_transaction(_ROOT):
-            todo_path = os.path.abspath(os.path.join(_ROOT, "workspace", "todo.md"))
+            todo_path = os.path.abspath(os.path.join(_ROOT, ".nexus", "workspace", "todo.md"))
             if os.path.exists(todo_path):
                 os.remove(todo_path)
     except Exception:
@@ -1250,7 +1251,7 @@ def latest_todo_snapshot(session_id: str) -> Dict[str, Any]:
         except Exception:
             pass
 
-    todo_path = os.path.abspath(os.path.join(_ROOT, "workspace", "todo.md"))
+    todo_path = os.path.abspath(os.path.join(_ROOT, ".nexus", "workspace", "todo.md"))
     if os.path.exists(todo_path):
         try:
             with open(todo_path, "r", encoding="utf-8") as f:
@@ -1377,7 +1378,7 @@ def list_work_events(session_id: str, limit: int = 200, active_turn_id: str = ""
     # planning events. Injecting this snapshot into an existing turn makes
     # Planning appear first even when the agent actually searched, read, or ran
     # a command first.
-    todo_path = os.path.join(_ROOT, "workspace", "todo.md")
+    todo_path = os.path.join(_ROOT, ".nexus", "workspace", "todo.md")
     if os.path.exists(todo_path) and not has_persisted_plan and not filtered_events:
         try:
             with open(todo_path, "r", encoding="utf-8") as f:
@@ -1704,7 +1705,7 @@ async def set_active_session(request: Request):
 
 @app.get("/api/sessions")
 def list_sessions():
-    sessions_dir = os.path.join(_ROOT, "logs", "sessions")
+    sessions_dir = os.path.join(_ROOT, ".nexus", "logs", "sessions")
     if not os.path.exists(sessions_dir):
         os.makedirs(sessions_dir, exist_ok=True)
     
@@ -2680,7 +2681,7 @@ def api_files_tree(path: str = ""):
     different local folder by supplying its absolute path.
     """
     requested_path = str(path or "").strip()
-    target = requested_path or os.path.join(_ROOT, "workspace")
+    target = requested_path or os.path.join(_ROOT, ".nexus", "workspace")
     target = os.path.abspath(os.path.expanduser(os.path.expandvars(target)))
 
     if not os.path.isdir(target):
@@ -2781,7 +2782,7 @@ def session_files_zip(session_id: str = "default"):
 
 @app.get("/api/screenshot/live")
 def get_live_screenshot(timestamp: float = None):
-    screenshot_dir = os.path.join(_ROOT, "workspace", "browser")
+    screenshot_dir = os.path.join(_ROOT, ".nexus", "workspace", "browser")
     if not os.path.exists(screenshot_dir):
         raise HTTPException(status_code=404, detail="No screenshots directory found")
     png_files = [
@@ -3055,7 +3056,7 @@ def scan_metadata(directory, default_desc="Core NEXUS Capability"):
 
 
 def _read_hive_manifest() -> Dict[str, Any]:
-    manifest = os.path.join(_ROOT, "logs", "hive", "hive_manifest.json")
+    manifest = os.path.join(_ROOT, ".nexus", "logs", "hive", "hive_manifest.json")
     if not os.path.exists(manifest):
         return {}
     try:
@@ -3133,7 +3134,7 @@ def load_hive_state(limit: int = 10) -> List[Dict[str, Any]]:
 
     hives: Dict[str, Dict[str, Any]] = {}
     signals_by_hive: Dict[str, List[Dict[str, Any]]] = {}
-    blackboard_path = os.path.join(_ROOT, "logs", "hive", "hive_blackboard.jsonl")
+    blackboard_path = os.path.join(_ROOT, ".nexus", "logs", "hive", "hive_blackboard.jsonl")
     if os.path.exists(blackboard_path):
         try:
             with open(blackboard_path, "r", encoding="utf-8") as f:
@@ -3439,7 +3440,7 @@ def discover_plugins() -> List[Dict[str, Any]]:
     disabled = _config_disabled_set(cfg, "disabled_plugins")
     deleted = _config_disabled_set(cfg, "deleted_plugins")
     roots = [
-        ("plugins", os.path.join(_ROOT, "plugins")),
+        ("plugins", os.path.join(_ROOT, ".nexus", "plugins")),
     ]
     plugins: List[Dict[str, Any]] = []
     seen = set()
@@ -3617,7 +3618,7 @@ def install_plugin_from_source(raw_url: str, kind: str = "plugin", force: bool =
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     repo_url, slug = _normalize_repo_url(raw_url)
     kind = str(kind or "plugin").lower()
-    install_root = os.path.abspath(os.path.join(_ROOT, "plugins"))
+    install_root = os.path.abspath(os.path.join(_ROOT, ".nexus", "plugins"))
     os.makedirs(install_root, exist_ok=True)
     target = os.path.abspath(os.path.join(install_root, slug))
     if os.path.commonpath([install_root, target]) != install_root:
@@ -3896,8 +3897,8 @@ def build_evolution_plan() -> Dict[str, Any]:
             "python -m pytest tests/test_nextgen_power.py tests/test_evolution_context.py -q",
         ],
     }
-    os.makedirs(os.path.join(_ROOT, "workspace"), exist_ok=True)
-    with open(os.path.join(_ROOT, "workspace", "evolution_plan.json"), "w", encoding="utf-8") as f:
+    os.makedirs(os.path.join(_ROOT, ".nexus", "workspace"), exist_ok=True)
+    with open(os.path.join(_ROOT, ".nexus", "workspace", "evolution_plan.json"), "w", encoding="utf-8") as f:
         json.dump(plan, f, indent=2)
     return plan
 
@@ -3910,14 +3911,14 @@ def run_evolution_verification() -> Dict[str, Any]:
     checks = [
         _run_evolution_check(
             "Python evolution compile gate",
-            ["python", "-m", "py_compile", "gui/api.py", "optimization/roadmap.py", "evolution/context.py"],
+            ["python", "-m", "py_compile", "apps/web/api.py", "maintenance/roadmap.py", "evolution/self_improvement.py"],
             timeout=45,
         ),
         _run_evolution_check(
             "GUI build gate",
             ["npm.cmd" if os.name == "nt" else "npm", "run", "build"],
             timeout=120,
-            cwd=os.path.join(_ROOT, "gui"),
+            cwd=os.path.join(_ROOT, "apps", "web"),
         ),
         _run_evolution_check(
             "Evolution regression tests",
@@ -4080,7 +4081,7 @@ async def set_sandbox(data: dict, request: Request):
     if tier not in {"no_sandbox", "normal", "docker"}:
         raise HTTPException(status_code=400, detail="Sandbox must be no_sandbox, normal, or docker.")
     raw_root = str(data.get("root", "") or "").strip()
-    selected_root = os.path.abspath(raw_root) if raw_root else os.path.join(_ROOT, "workspace")
+    selected_root = os.path.abspath(raw_root) if raw_root else os.path.join(_ROOT, ".nexus", "workspace")
     if tier in {"normal", "docker"} and not os.path.isdir(selected_root):
         raise HTTPException(status_code=404, detail=f"Sandbox folder not found: {selected_root}")
     _SANDBOX_TIER = tier
@@ -4146,7 +4147,7 @@ def get_state():
     from nexus.runtime.kernel import get_nexus_kernel
     get_nexus_kernel(_ROOT)
     default_provider = refresh_provider_runtime()
-    sessions_root = os.path.join(_ROOT, "workspace", "sessions")
+    sessions_root = os.path.join(_ROOT, ".nexus", "workspace", "sessions")
     session_titles = {}
     if os.path.isdir(sessions_root):
         for fname in os.listdir(sessions_root):
@@ -4423,7 +4424,7 @@ async def create_local_plugin(data: dict, request: Request):
     version = str(data.get("version", "0.1.0")).strip() or "0.1.0"
     install_kind = str(data.get("kind", "custom")).strip() or "custom"
 
-    plugin_root = os.path.abspath(os.path.join(_ROOT, "plugins"))
+    plugin_root = os.path.abspath(os.path.join(_ROOT, ".nexus", "plugins"))
     target = os.path.abspath(os.path.join(plugin_root, name))
     if os.path.commonpath([plugin_root, target]) != plugin_root:
         raise HTTPException(status_code=400, detail="Invalid plugin name")
@@ -4505,7 +4506,7 @@ async def delete_plugin(plugin_id: str, request: Request):
     kernel = get_nexus_kernel(_ROOT)
     if plugin.get("disk_removable"):
         path = os.path.abspath(plugin.get("path", ""))
-        plugin_root = os.path.abspath(os.path.join(_ROOT, "plugins"))
+        plugin_root = os.path.abspath(os.path.join(_ROOT, ".nexus", "plugins"))
         resolved_root = os.path.realpath(plugin_root)
         resolved_path = os.path.realpath(path)
         if os.path.commonpath([resolved_root, resolved_path]) != resolved_root:
@@ -5613,7 +5614,7 @@ def vision_status():
 
 @app.get("/api/todo")
 def get_todo_endpoint():
-    todo_path = os.path.abspath(os.path.join(_ROOT, "workspace", "todo.md"))
+    todo_path = os.path.abspath(os.path.join(_ROOT, ".nexus", "workspace", "todo.md"))
     if not os.path.exists(todo_path):
         return {"content": "", "exists": False}
     try:
@@ -5666,7 +5667,7 @@ def _save_todo_sync(content: str, session_id: str, turn_id: str):
                 _invalidate_work_event_cache(events_file)
                     
             # Add planning_artifact event
-            todo_rel_path = os.path.relpath(os.path.join(_ROOT, "workspace", "todo.md"), _ROOT)
+            todo_rel_path = os.path.relpath(os.path.join(_ROOT, ".nexus", "workspace", "todo.md"), _ROOT)
             task_text = plan[0].get("task", "Agent Workspace Plan") if plan else "Agent Workspace Plan"
             append_work_event(sid, {
                 "kind": "file",

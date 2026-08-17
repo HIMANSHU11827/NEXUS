@@ -6,30 +6,30 @@ The GUI is a React + Vite single-page application backed by a FastAPI Python ser
 
 | Component | File | Description |
 |-----------|------|-------------|
-| API Server | `gui/api.py` | FastAPI backend (~4950 lines) |
-| React App | `gui/src/App.tsx` | Main React component |
-| Vite Config | `gui/vite.config.ts` | Vite build/dev configuration |
+| API Server | `apps/web/api.py` | FastAPI backend (~4950 lines) |
+| React App | `apps/web/src/App.tsx` | Main React component |
+| Vite Config | `apps/web/vite.config.ts` | Vite build/dev configuration |
 
 ## Starting The GUI
 
 ```powershell
-python -m nexus --gui     # starts gui.api on :8000 and Vite on :5173
+python -m nexus --gui     # starts apps.web.api on :8000 and Vite on :5173
 ```
 
 For manual development:
 
 ```powershell
-cd gui
+cd apps/web
 npm install
-python -m uvicorn gui.api:app --host 127.0.0.1 --port 8000
+python -m uvicorn apps.web.api:app --host 127.0.0.1 --port 8000
 npm run dev
 ```
 
 Or via TUI: `/gui start` launches `scripts/run-gui.ps1`, `/gui open` opens browser.
 
-## Backend (`gui/api.py`)
+## Backend (`apps/web/api.py`)
 
-The FastAPI server provides all REST endpoints consumed by the React GUI. Most are in `gui/api.py`; some (engine, goal, agent, multi-agent, add-dir) are in `server/__init__.py`. Key endpoint groups:
+The FastAPI server provides all REST endpoints consumed by the React GUI. Most are in `apps/web/api.py`; some (engine, goal, agent, multi-agent, add-dir) are in `apps/api/__init__.py`. Key endpoint groups:
 
 ### Session Endpoints
 | Route | Method | Purpose |
@@ -118,11 +118,11 @@ The GUI’s “Backend connected” indicator means the local API is reachable; 
 | `/api/work-events/{session_id}` | GET | List work events |
 | `/api/work-events/{session_id}` | POST | Append work event |
 
-Work events are stored as JSONL (`workspace/work_events/{session_id}.jsonl`). Each event tracks file reads/writes, command runs, tool calls, and mission milestones with timestamps.
+Work events are stored as JSONL (`.nexus/workspace/work_events/{session_id}.jsonl`). Each event tracks file reads/writes, command runs, tool calls, and mission milestones with timestamps.
 
 ### Chat Rendering
 
-Assistant messages are rendered by `gui/src/components/MainChat.tsx` using a safe, component-based Markdown renderer. The renderer keeps provider output readable while avoiding HTML injection:
+Assistant messages are rendered by `apps/web/src/components/MainChat.tsx` using a safe, component-based Markdown renderer. The renderer keeps provider output readable while avoiding HTML injection:
 
 - headings (`#` through `######`)
 - bold text, inline code, and links
@@ -132,7 +132,7 @@ Assistant messages are rendered by `gui/src/components/MainChat.tsx` using a saf
 
 User messages remain plain text. Assistant Markdown is rendered both for live responses and when a session is restored from history, so formatting does not disappear after refresh. Raw Markdown markers are not displayed as chat prose.
 
-## Frontend (`gui/src/`)
+## Frontend (`apps/web/src/`)
 
 | File | Purpose |
 |------|---------|

@@ -11,7 +11,7 @@
 - **Actual**: `_call_model` and `_stream_model` in `model.py` pass only `messages` — no `tools` parameter
 - **Root cause**: The model layer was designed for text-only interactions; tool calling via native function calling was never implemented
 - **Impact**: LLM generates natural language claims about completing work instead of executing actual tool calls
-- **Files**: `orchestrators/v5/model.py` (lines 54-87, 177-246)
+- **Files**: `src/nexus/main_agent/model.py` (lines 54-87, 177-246)
 - **Fix**: Add `tools` parameter support to model calls; pass tool definitions from the tool registry
 - **Status**: Fixed in the V5 direct model/tool loop — tool definitions are now passed from the live `ToolRegistry` (see `tests/v5/` and `LOOP_RESEARCH_REPORT.md`)
 
@@ -20,7 +20,7 @@
 - **Expected**: Real tool execution with actual results
 - **Actual**: Returns hardcoded `["[tool_output]"]`
 - **Root cause**: Method is a V1 compatibility stub (line 972-973 in core.py)
-- **Files**: `orchestrators/v5/core.py:972-973`
+- **Files**: `src/nexus/main_agent/core.py:972-973`
 - **Status**: Resolved — the V5 loop now executes real tool calls (extraction strategies, permission policies, PAORR integrity — see `LOOP_RESEARCH_REPORT.md`)
 
 ### P0-3: False success claims stored in memory — ✅ Resolved
@@ -54,7 +54,7 @@
 - **Historical root cause**: not reproduced in the current checkout; the
   previous 30+ second measurement is stale and is not evidence for changing
   lazy initialization
-- **Additional fix**: the launcher now gives `python -m server` its own process
+- **Additional fix**: the launcher now gives `python -m nexus --server` its own process
   group and terminates/reaps the complete owned tree on shutdown, preventing a
   launcher exit from leaving an API child listening on port 8000
 - **Verification**: `35 passed` across boot, queue-supervisor, and command
@@ -83,13 +83,13 @@
   `Dict[name, summary]` containing version, description, availability,
   missing environment, handler presence, and execution constitution details;
   unavailable entries are opt-in for diagnostics/UI inventory
-- **Files**: `tools/nexus_tools/registry.py`
+- **Files**: `extensions/tools/built_in/nexus_tools/registry.py`
 - **Verification (2026-08-11)**: explicit structured-contract regression plus
   registry, MCP, security, and V5 caller suites passed (`112 tests`)
 
 ### P2-2: Some skills/plugin integrations are stubs — ✅ Resolved for runtime paths
-- **Files**: `intelligence/moa.py`, `intelligence/local_brain.py`, `tools/reasoning/`
-- **Status**: `tools/reasoning/` is a real LLM-backed engine; HYBRID routing now
+- **Files**: `src/nexus/capabilities/intelligence/moa.py`, `src/nexus/capabilities/intelligence/local_brain.py`, `extensions/tools/built_in/reasoning/`
+- **Status**: `extensions/tools/built_in/reasoning/` is a real LLM-backed engine; HYBRID routing now
   delegates to the configured provider mesh instead of returning an empty fake
   response; the local-brain path now uses configured local providers with
   explicit bounded fallback/error semantics. `scan_image()` reports a truthful

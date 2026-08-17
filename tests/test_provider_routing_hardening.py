@@ -65,7 +65,7 @@ class _FakeLoader:
 
 def _factory(monkeypatch, cfg, available, providers_by_name, env_model=""):
     """Build a fresh (non-singleton) factory with fakes injected."""
-    from providers import auto_detect
+    from models.providers.core import auto_detect
 
     monkeypatch.setattr(
         auto_detect, "detect_available_providers", lambda: dict(available)
@@ -174,7 +174,7 @@ def test_factory_auto_returns_none_and_logs_diagnostic(monkeypatch, caplog):
         available={"openai": "sk-abc123"},
         providers_by_name=lambda _group, name: bad if name == "openai" else None,
     )
-    with caplog.at_level("WARNING", logger="providers.factory"):
+    with caplog.at_level("WARNING", logger="models.providers.core.factory"):
         assert factory.get_provider() is None
     assert "auto" in caplog.text
     assert "openai" in caplog.text
@@ -241,7 +241,7 @@ def test_factory_auto_with_health_degraded_skips_provider(monkeypatch):
     monkeypatch.setattr(
         NexusProviderFactory, "_auto_health", lambda self: _DegradedHealth()
     )
-    from providers import auto_detect
+    from models.providers.core import auto_detect
 
     monkeypatch.setattr(
         auto_detect, "detect_available_providers",

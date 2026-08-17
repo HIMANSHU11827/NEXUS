@@ -2,7 +2,7 @@
 
 NEXUS connects Google MediaPipe through two local paths:
 
-- Real-time Holistic webcam tracking uses the official vendored web runtime in `gui/public/mediapipe`.
+- Real-time Holistic webcam tracking uses the official vendored web runtime in `apps/web/public/mediapipe`.
 - Python task runners use local model files in `models/local/mediapipe/tasks`.
 
 ## gui Runtime Status

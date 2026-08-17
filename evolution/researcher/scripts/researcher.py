@@ -122,7 +122,7 @@ class NexusResearcher:
         if os.path.isdir(docs_dir):
             for path in _walk_md(docs_dir):
                 yield "doc", path, _read(path)
-        skills_dir = os.path.join(base, "skills")
+        skills_dir = os.path.join(base, "extensions", "skills", "built_in")
         if os.path.isdir(skills_dir):
             for path in _walk_md(skills_dir, only_skill_md=True):
                 text = _read(path)
@@ -131,7 +131,7 @@ class NexusResearcher:
                     # match its own corpus, not just body prose.
                     text = os.path.relpath(path, base) + "\n" + text
                 yield "skill", path, text
-        tools_dir = os.path.join(base, "tools")
+        tools_dir = os.path.join(base, "extensions", "tools", "built_in")
         if os.path.isdir(tools_dir):
             for path in _walk_tool_meta(tools_dir):
                 text = _read(path)

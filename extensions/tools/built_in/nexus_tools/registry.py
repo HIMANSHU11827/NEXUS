@@ -428,18 +428,14 @@ class ToolRegistry:
 
         After the restructure, built-in tools live in
         ``<root>/extensions/tools/built_in/<name>/`` when ``root`` is the NEXUS
-        project. Historically they lived in a top-level ``<root>/tools/``
-        directory. Scan both so discovery works for the real project while an
-        isolated tmp-project registry (used by tests) does NOT accidentally
-        pull in the project's built-in tools.
+        project. Scan only the canonical path so discovery works for the real
+        project while an isolated tmp-project registry (used by tests) does NOT
+        accidentally pull in the project's built-in tools.
         """
         dirs = []
         builtin = os.path.join(self.root, "extensions", "tools", "built_in")
         if os.path.isdir(builtin):
             dirs.append(builtin)
-        legacy = os.path.join(self.root, "tools")
-        if os.path.isdir(legacy) and legacy not in dirs:
-            dirs.append(legacy)
         return dirs
 
     def _discover(self):

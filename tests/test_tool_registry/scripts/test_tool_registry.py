@@ -229,7 +229,7 @@ def test_registry_accepts_mcp_servers_list_and_normalizes_schema(tmp_path, monke
                 },
             }]
 
-    monkeypatch.setattr("mcp.client.MCPClient", FakeClient)
+    monkeypatch.setattr("extensions.mcp.core.client.MCPClient", FakeClient)
     from extensions.tools.built_in.nexus_tools.registry import ToolRegistry
 
     registry = ToolRegistry(str(tmp_path))

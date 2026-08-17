@@ -49,18 +49,18 @@ class TestIsCorePath:
 
     def test_unrelated_dir_with_similar_name_is_safe(self):
         # A non-protected dir that merely *contains* a protected name is safe.
-        assert is_core_path(os.path.join("my_orchestrators", "x.py")) is False
+        assert is_core_path(os.path.join("my_src", "x.py")) is False
 
 
 # ── assert_not_rewriting_core ───────────────────────────────────────────────
 class TestAssertNotRewritingCore:
     def test_blocks_protected_path(self):
         with pytest.raises(CoreRewriteBlocked):
-            guard.assert_not_rewriting_core("orchestrators/v5/core.py", "write")
+            guard.assert_not_rewriting_core("src/nexus/main_agent/core.py", "write")
 
     def test_block_is_permissionerror_subclass(self):
         with pytest.raises(PermissionError):
-            guard.assert_not_rewriting_core("server/app.py")
+            guard.assert_not_rewriting_core("apps/api/__init__.py")
 
     def test_allows_non_core_path_and_returns_it(self):
         p = guard.assert_not_rewriting_core("logs/improvements/x.jsonl")
@@ -70,7 +70,7 @@ class TestAssertNotRewritingCore:
         prev = guard.set_enabled(False)
         try:
             # Even a protected path is allowed while the guard is disabled.
-            assert guard.assert_not_rewriting_core("kernel/core.py") == "kernel/core.py"
+            assert guard.assert_not_rewriting_core("src/nexus/runtime/kernel/__init__.py") == "src/nexus/runtime/kernel/__init__.py"
         finally:
             guard.set_enabled(prev)
 
@@ -79,11 +79,11 @@ class TestAssertNotRewritingCore:
 class TestGuardedOpen:
     def test_write_to_core_is_blocked(self, tmp_path):
         with pytest.raises(CoreRewriteBlocked):
-            guarded_open("nexus/boot.py", "w")
+            guarded_open("src/nexus/__init__.py", "w")
 
     def test_append_to_core_is_blocked(self, tmp_path):
         with pytest.raises(CoreRewriteBlocked):
-            guarded_open("orchestrators/v5/core.py", "a")
+            guarded_open("src/nexus/main_agent/core.py", "a")
 
     def test_safe_write_and_read(self, tmp_path):
         f = tmp_path / "safe.txt"
@@ -97,7 +97,7 @@ class TestGuardedOpen:
 class TestGuardedWriters:
     def test_write_text_blocks_core(self, tmp_path):
         with pytest.raises(CoreRewriteBlocked):
-            guarded_write_text("server/app.py", "evil")
+            guarded_write_text("apps/api/__init__.py", "evil")
 
     def test_write_text_writes_safe_and_creates_parents(self, tmp_path):
         target = tmp_path / "nested" / "dir" / "out.txt"
@@ -107,7 +107,7 @@ class TestGuardedWriters:
 
     def test_append_text_blocks_core(self, tmp_path):
         with pytest.raises(CoreRewriteBlocked):
-            guarded_append_text("kernel/runtime.py", "x")
+            guarded_append_text("src/nexus/runtime/kernel/__init__.py", "x")
 
     def test_append_text_appends(self, tmp_path):
         target = tmp_path / "log.txt"
@@ -130,7 +130,7 @@ class TestGuardedWriters:
 
     def test_jsonl_append_blocks_core(self, tmp_path):
         with pytest.raises(CoreRewriteBlocked):
-            guarded_jsonl_append("orchestrators/v5/core.py", {"x": 1})
+            guarded_jsonl_append("src/nexus/main_agent/core.py", {"x": 1})
 
 
 # ── protected_core_writes scope ─────────────────────────────────────────────
@@ -138,7 +138,7 @@ class TestProtectedCoreWritesScope:
     def test_reraises_violation(self):
         with pytest.raises(CoreRewriteBlocked):
             with protected_core_writes("test"):
-                guard.assert_not_rewriting_core("nexus/run.py", "write")
+                guard.assert_not_rewriting_core("src/nexus/__init__.py", "write")
 
     def test_passes_through_normally(self):
         with protected_core_writes("test"):
@@ -163,19 +163,19 @@ class TestEnableFlag:
 # ── verify_core_integrity ──────────────────────────────────────────────────
 class TestVerifyCoreIntegrity:
     def test_clean_root_returns_true(self, tmp_path):
-        core = tmp_path / "orchestrators" / "v5"
+        core = tmp_path / "src" / "nexus" / "main_agent"
         core.mkdir(parents=True)
         (core / "core.py").write_text("def main():\n    return 1\n", encoding="utf-8")
         assert guard.verify_core_integrity(str(tmp_path)) is True
 
     def test_corrupted_marker_returns_false(self, tmp_path):
-        core = tmp_path / "orchestrators" / "v5"
+        core = tmp_path / "src" / "nexus" / "main_agent"
         core.mkdir(parents=True)
         (core / "core.py").write_text("x = getcworkspace\n", encoding="utf-8")
         assert guard.verify_core_integrity(str(tmp_path)) is False
 
     def test_syntax_error_returns_false(self, tmp_path):
-        core = tmp_path / "orchestrators" / "v5"
+        core = tmp_path / "src" / "nexus" / "main_agent"
         core.mkdir(parents=True)
         (core / "core.py").write_text("def broken(:\n", encoding="utf-8")
         assert guard.verify_core_integrity(str(tmp_path)) is False

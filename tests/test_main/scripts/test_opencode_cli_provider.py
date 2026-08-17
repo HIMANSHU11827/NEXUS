@@ -43,7 +43,7 @@ def test_opencode_cli_provider_cleans_terminal_footer(monkeypatch):
     provider = _provider()
     process = _FakeProcess("NEXUS OK\n\x1b[0m\n> plan Â· free\n")
     monkeypatch.setattr(
-        "providers.opencode_cli.subprocess.Popen",
+        "models.providers.auth.opencode_cli.subprocess.Popen",
         lambda *args, **kwargs: process,
     )
 
@@ -54,7 +54,7 @@ def test_opencode_cli_provider_reports_process_failure(monkeypatch):
     provider = _provider()
     process = _FakeProcess("", "not authenticated", returncode=1)
     monkeypatch.setattr(
-        "providers.opencode_cli.subprocess.Popen",
+        "models.providers.auth.opencode_cli.subprocess.Popen",
         lambda *args, **kwargs: process,
     )
 
@@ -71,7 +71,7 @@ def test_opencode_cli_provider_passes_process_ownership_and_cleans_timeout(monke
         process.kwargs = kwargs
         return process
 
-    monkeypatch.setattr("providers.opencode_cli.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("models.providers.auth.opencode_cli.subprocess.Popen", fake_popen)
 
     result = provider.generate(prompt="hello", timeout=0.01)
 

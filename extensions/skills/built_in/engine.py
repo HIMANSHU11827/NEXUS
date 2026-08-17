@@ -220,7 +220,7 @@ class NexusSkillEngine:
         self._event_emitter = None
         self._health = {}
         self._experience = SkillExperience()
-        state_path = os.path.join(resolved, "lifecycle", "skill_lifecycle_state.json")
+        state_path = os.path.join(resolved, ".nexus", "lifecycle", "skill_lifecycle_state.json")
         self._lifecycle = SkillLifecycleState(state_path)
         self._discover_all()
         self._load_health()
@@ -230,7 +230,7 @@ class NexusSkillEngine:
     def _discover_all(self):
         self._skills.clear()
         canonical = Path(self._root) / ".opencode" / "skills"
-        legacy = Path(self._root) / "skills"
+        legacy = Path(self._root) / "extensions" / "skills" / "built_in"
         bundled = Path(self.bundled_dir) if self.bundled_dir else Path(os.path.dirname(os.path.abspath(__file__)))
         for base, source in [(canonical, "opencode"), (legacy, "legacy"), (bundled, "bundled")]:
             if not base.is_dir():

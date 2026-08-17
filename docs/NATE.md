@@ -106,20 +106,20 @@ Repeat — cycle improves NATE routing + local brain
 | Zupra-1.6-50M-Instruct-Ultra-exp | LLM | 50M | 103MB | Local offline brain |
 
 ### Zupra Provider
-- `providers/zupra.py` — `ZupraProvider` class for local inference
-- Registered in `providers/factory.py` as "zupra"
+- `models/providers/api/zupra.py` — `ZupraProvider` class for local inference
+- Registered in `models/providers/core/factory.py` as "zupra"
 - No API key needed, fully offline
 - ~0.1s load time on CPU
 
 ## Files
-- `intelligence/nate/__init__.py` — exports `NATE`, `NATE_Route`, `AdaptiveSchemaEngine`
-- `intelligence/nate/universal_adapter.py` — `UniversalTool`, `UniversalAdapter`
-- `intelligence/nate/adaptive_schema.py` — `TSCGCompressor`, `NATE_Route`, `AdaptiveSchemaEngine`
-- `intelligence/nate/execution_graph.py` — `ToolGraph`, `ExecutionGraph`
-- `intelligence/nate/gene_map.py` — `GeneMap`, `SelfHealingEngine`
-- `intelligence/nate/nate_engine.py` — `NATE` main engine class
+- `src/nexus/capabilities/intelligence/nate/__init__.py` — exports `NATE`, `NATE_Route`, `AdaptiveSchemaEngine`
+- `src/nexus/capabilities/intelligence/nate/universal_adapter.py` — `UniversalTool`, `UniversalAdapter`
+- `src/nexus/capabilities/intelligence/nate/adaptive_schema.py` — `TSCGCompressor`, `NATE_Route`, `AdaptiveSchemaEngine`
+- `src/nexus/capabilities/intelligence/nate/execution_graph.py` — `ToolGraph`, `ExecutionGraph`
+- `src/nexus/capabilities/intelligence/nate/gene_map.py` — `GeneMap`, `SelfHealingEngine`
+- `src/nexus/capabilities/intelligence/nate/nate_engine.py` — `NATE` main engine class
 - `evolution/local_trainer/scripts/` — lifecycle + fine-tuning system
-- `providers/zupra.py` — Zupra local provider
+- `models/providers/api/zupra.py` — Zupra local provider
 
 ## Tests
 - `tests/test_nate/` — 56 tests across all 5 layers

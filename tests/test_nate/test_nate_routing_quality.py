@@ -43,7 +43,7 @@ def test_missing_faiss_warning_is_process_wide_once(caplog, monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", block_faiss)
     routers = []
-    with caplog.at_level(logging.WARNING, logger="intelligence.nate.adaptive_schema"):
+    with caplog.at_level(logging.WARNING, logger="nexus.capabilities.intelligence.nate.adaptive_schema"):
         for index in range(19):
             router = NATE_Route()
             router.register_tool(f"tool_{index}", "test tool")

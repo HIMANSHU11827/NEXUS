@@ -526,7 +526,7 @@ def test_prompt_files_and_private_diagnostics_never_replay(tmp_path, monkeypatch
 
 
 def test_completed_plan_event_contains_numbered_real_tool_steps():
-    source = (Path(__file__).parents[3] / "orchestrators" / "v5" / "core.py").read_text(encoding="utf-8")
+    source = (Path(__file__).parents[3] / "src" / "nexus" / "main_agent" / "core.py").read_text(encoding="utf-8")
     assert "_run_direct_model_tool_loop" in source
     assert "plan" in source
 

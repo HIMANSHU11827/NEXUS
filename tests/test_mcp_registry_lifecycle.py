@@ -31,7 +31,7 @@ def test_mcp_lifecycle_callbacks_remain_bound_to_each_server(tmp_path, monkeypat
         def stop(self):
             return None
 
-    monkeypatch.setattr("mcp.client.MCPClient", FakeClient)
+    monkeypatch.setattr("extensions.mcp.core.client.MCPClient", FakeClient)
     config_path = tmp_path / "mcp_servers.json"
     config_path.write_text(json.dumps({
         "servers": [

@@ -26,14 +26,14 @@ from starlette.responses import JSONResponse
 def _import_mocks():
     patches = [
         patch("dotenv.load_dotenv"),
-        patch("orchestrators.NexusLoop"),
+        patch("nexus.main_agent.NexusLoop"),
         patch("yaml.safe_load", return_value={}),
         patch("yaml.safe_dump"),
     ]
     for p in patches:
         p.start()
     for mod in list(sys.modules.keys()):
-        if mod == "server" or mod.startswith("server."):
+        if mod == "apps.api" or mod.startswith("apps.api."):
             del sys.modules[mod]
     yield
     for p in patches:
@@ -131,7 +131,7 @@ class TestCheckAuthHardening:
 
     def test_valid_bearer_token_authenticates_remote_peer(self):
         with patch.dict(os.environ, {"NEXUS_ALLOW_LOCAL_ANON": "false"}), patch(
-            "authentication._AUTH_TOKEN", "secret-token"
+            "security.core.auth._AUTH_TOKEN", "secret-token"
         ):
             from security.core.auth import check_auth
 

@@ -15,7 +15,7 @@ class _Factory:
 
 
 def test_local_provider_status_reports_unreachable(monkeypatch):
-    monkeypatch.setattr("providers.factory.NexusProviderFactory", lambda: _Factory())
+    monkeypatch.setattr("models.providers.core.factory.NexusProviderFactory", lambda: _Factory())
 
     def refused(*_args, **_kwargs):
         raise OSError("connection refused")
@@ -28,7 +28,7 @@ def test_local_provider_status_reports_unreachable(monkeypatch):
 
 
 def test_remote_provider_status_defers_to_real_request(monkeypatch):
-    monkeypatch.setattr("providers.factory.NexusProviderFactory", lambda: _Factory())
+    monkeypatch.setattr("models.providers.core.factory.NexusProviderFactory", lambda: _Factory())
 
     def fail_if_probed(*_args, **_kwargs):
         raise AssertionError("remote provider should not be probed")
@@ -94,7 +94,7 @@ class _DiagnosticStore:
 
 def test_provider_diagnostics_are_bounded_and_secret_free(monkeypatch):
     monkeypatch.setattr(server, "_LOOPS", {"demo": _DiagnosticLoop()})
-    monkeypatch.setattr("providers.profiles.load_profile_store", lambda: _DiagnosticStore())
+    monkeypatch.setattr("models.providers.core.profiles.load_profile_store", lambda: _DiagnosticStore())
     monkeypatch.setattr(server.time, "time", lambda: 100.0)
 
     result = server._provider_runtime_diagnostics()

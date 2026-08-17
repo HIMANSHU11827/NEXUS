@@ -9,7 +9,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from providers import model_bench
+from models.providers.core import model_bench
 from models.providers.core.profiles import ProviderProfile, ProviderProfileStore
 
 
@@ -21,7 +21,7 @@ def _coding_task():
 def empty_profiles(tmp_path, monkeypatch):
     """Hermetic profile store so ranking tests never see dev-machine state."""
     store = ProviderProfileStore(tmp_path / "profiles.json")
-    monkeypatch.setattr("providers.profiles.load_profile_store", lambda: store)
+    monkeypatch.setattr("models.providers.core.profiles.load_profile_store", lambda: store)
     return store
 
 
@@ -68,7 +68,7 @@ def test_profiles_build_keeps_cooldown_provider_out_of_top_rank(tmp_path, monkey
         api_key="x",
         cooldown_until=10**12,  # far in the future -> in cooldown
     ))
-    monkeypatch.setattr("providers.profiles.load_profile_store", lambda: store)
+    monkeypatch.setattr("models.providers.core.profiles.load_profile_store", lambda: store)
 
     task = _coding_task()
     ranked = model_bench.rank_models(task, ["deepseek", "openrouter", "lm_studio"])

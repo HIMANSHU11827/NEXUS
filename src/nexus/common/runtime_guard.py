@@ -37,10 +37,12 @@ from typing import Iterable, Union
 logger = logging.getLogger("nexus.runtime_guard")
 
 # Top-level package directories that make up the running core of NEXUS.
-PROTECTED_DIRS = ("orchestrators", "kernel", "nexus", "server")
+PROTECTED_DIRS = ("src", "apps", "extensions", "models", "security", "knowledge",
+                  "observability", "evaluation", "maintenance", "hive", "gateways",
+                  "queues", "sandbox", "reliability", "evolution")
 
-# Repo root = parent of utils/
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Repo root = src/nexus/common/ -> src/nexus -> src -> root
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 PathLike = Union[str, "os.PathLike[str]"]
 
@@ -209,7 +211,7 @@ def verify_core_integrity(root: str | None = None) -> bool:
     import ast
 
     root = root or PROJECT_ROOT
-    loop_path = os.path.join(root, "orchestrators", "v5", "core.py")
+    loop_path = os.path.join(root, "src", "nexus", "main_agent", "core.py")
     if not os.path.isfile(loop_path):
         logger.warning("[RUNTIME_GUARD] V5 core not found at %s", loop_path)
         return False
@@ -220,13 +222,13 @@ def verify_core_integrity(root: str | None = None) -> bool:
         return False
     if "getcworkspace" in src:
         logger.error(
-            "[RUNTIME_GUARD] CORRUPTION DETECTED in orchestrators/v5/core.py: "
+            "[RUNTIME_GUARD] CORRUPTION DETECTED in src/nexus/main_agent/core.py: "
             "'getcworkspace' marker present — core file was rewritten at runtime."
         )
         return False
     try:
         ast.parse(src)
     except SyntaxError as exc:
-        logger.error("[RUNTIME_GUARD] orchestrators/v5/core.py fails to parse: %s", exc)
+        logger.error("[RUNTIME_GUARD] src/nexus/main_agent/core.py fails to parse: %s", exc)
         return False
     return True

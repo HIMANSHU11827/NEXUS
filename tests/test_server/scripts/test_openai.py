@@ -15,11 +15,11 @@ def _global_mocks():
     """Patch heavy deps at their source before any server import."""
     patches = [
         patch("dotenv.load_dotenv"),
-        patch("orchestrators.NexusLoop"),
-        patch("authentication.check_auth", return_value=MagicMock()),
-        patch("authentication.is_public_path", return_value=True),
-        patch("authentication.AuthUser"),
-        patch("authentication.validate_dashboard_token", return_value=True),
+        patch("nexus.main_agent.NexusLoop"),
+        patch("security.core.auth.check_auth", return_value=MagicMock()),
+        patch("security.core.auth.is_public_path", return_value=True),
+        patch("security.core.auth.AuthUser"),
+        patch("security.core.auth.validate_dashboard_token", return_value=True),
         patch("yaml.safe_load", return_value={}),
         patch("yaml.safe_dump"),
     ]
@@ -27,7 +27,7 @@ def _global_mocks():
         p.start()
     # Prevent server module from being cached across tests
     for mod in list(sys.modules.keys()):
-        if mod.startswith("server"):
+        if mod.startswith("apps.api"):
             del sys.modules[mod]
     yield
     for p in patches:
@@ -93,7 +93,7 @@ class TestV1ChatCompletions:
         fake_loop.memory = []
         fake_loop.session_id = "test"
         fake_loop.stream_run = fake_stream_run
-        self._get_loop_patch = patch("server.get_loop", return_value=fake_loop)
+        self._get_loop_patch = patch("apps.api.get_loop", return_value=fake_loop)
         self._get_loop_patch.start()
         return fake_loop
 
@@ -143,7 +143,7 @@ class TestV1ChatCompletions:
             "messages": [{"role": "user", "content": "hi"}],
             "stream": False,
         }
-        with patch("server.get_loop", side_effect=capture_loop), patch("server.time.time", return_value=1_700_000_000):
+        with patch("apps.api.get_loop", side_effect=capture_loop), patch("apps.api.time.time", return_value=1_700_000_000):
             first = client.post("/v1/chat/completions", json=payload)
             second = client.post("/v1/chat/completions", json=payload)
 

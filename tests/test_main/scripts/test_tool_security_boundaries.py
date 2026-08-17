@@ -203,7 +203,7 @@ def test_mcp_client_never_uses_a_shell():
     process = MagicMock()
     process.stdout.readline.return_value = ""
     process.stderr.readline.return_value = ""
-    with patch("mcp.client.scripts.client.subprocess.Popen", return_value=process) as popen, patch.object(
+    with patch("extensions.mcp.core.client.scripts.client.subprocess.Popen", return_value=process) as popen, patch.object(
         client, "call", return_value=None
     ):
         client.start()
@@ -221,7 +221,7 @@ def test_mcp_client_failed_initialize_stops_process():
     process = MagicMock()
     process.stdout.readline.return_value = ""
     process.stderr.readline.return_value = ""
-    with patch("mcp.client.scripts.client.subprocess.Popen", return_value=process), patch.object(
+    with patch("extensions.mcp.core.client.scripts.client.subprocess.Popen", return_value=process), patch.object(
         client, "call", return_value=None
     ):
         assert client.start() is False
@@ -242,7 +242,7 @@ def test_mcp_client_restarts_after_process_exits():
     new_process.stdout.readline.return_value = ""
     new_process.stderr.readline.return_value = ""
 
-    with patch("mcp.client.scripts.client.subprocess.Popen", return_value=new_process) as popen, patch.object(
+    with patch("extensions.mcp.core.client.scripts.client.subprocess.Popen", return_value=new_process) as popen, patch.object(
         client, "call", return_value={"serverInfo": {"name": "ok"}}
     ):
         assert client.start() is True
@@ -254,7 +254,7 @@ def test_mcp_client_restarts_after_process_exits():
 def test_mcp_client_start_failure_returns_false():
     client = MCPClient("missing-server", [])
 
-    with patch("mcp.client.scripts.client.subprocess.Popen", side_effect=OSError("not found")):
+    with patch("extensions.mcp.core.client.scripts.client.subprocess.Popen", side_effect=OSError("not found")):
         assert client.start() is False
 
     assert client.process is None
@@ -270,7 +270,7 @@ def test_mcp_client_serializes_concurrent_start_attempts():
     process.stdout.readline.return_value = ""
     process.stderr.readline.return_value = ""
 
-    with patch("mcp.client.scripts.client.subprocess.Popen", return_value=process) as popen, patch.object(
+    with patch("extensions.mcp.core.client.scripts.client.subprocess.Popen", return_value=process) as popen, patch.object(
         client, "call", return_value={"serverInfo": {"name": "ok"}}
     ):
         with ThreadPoolExecutor(max_workers=2) as pool:

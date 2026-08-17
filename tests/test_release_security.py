@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 def test_public_deployment_requires_explicit_safe_configuration(monkeypatch):
-    import apps.api
+    import apps.api as server
 
     monkeypatch.setenv("NEXUS_PUBLIC_DEPLOYMENT", "true")
     monkeypatch.setenv("NEXUS_DASHBOARD_TOKEN", "r" * 40)
@@ -29,7 +29,7 @@ def test_public_deployment_requires_explicit_safe_configuration(monkeypatch):
 
 
 def test_public_deployment_rejects_missing_credentials_and_local_cors(monkeypatch):
-    import apps.api
+    import apps.api as server
 
     monkeypatch.setenv("NEXUS_PUBLIC_DEPLOYMENT", "true")
     monkeypatch.delenv("NEXUS_DASHBOARD_TOKEN", raising=False)
@@ -45,7 +45,7 @@ def test_public_deployment_rejects_missing_credentials_and_local_cors(monkeypatc
 
 def test_server_rate_limit_is_applied_before_route_execution(monkeypatch):
     from fastapi.testclient import TestClient
-    import apps.api
+    import apps.api as server
 
     server._RATE_BUCKETS.clear()
     monkeypatch.setattr(server, "_RATE_LIMIT", 1)
@@ -65,7 +65,7 @@ def test_command_risk_scorer_blocks_credential_reads():
 
 
 def test_remote_file_reads_block_sensitive_files(tmp_path, monkeypatch):
-    import apps.api
+    import apps.api as server
 
     monkeypatch.setattr(server, "_PROJECT_ROOT", str(tmp_path))
     secret = tmp_path / ".env"
@@ -77,7 +77,7 @@ def test_remote_file_reads_block_sensitive_files(tmp_path, monkeypatch):
 def test_compose_has_fail_closed_public_defaults():
     import yaml
 
-    with open(Path(__file__).parents[1] / "deploy" / "docker-compose.yml", encoding="utf-8") as handle:
+    with open(Path(__file__).parents[1] / "docker-compose.yml", encoding="utf-8") as handle:
         compose = yaml.safe_load(handle)
     backend = compose["services"]["nexus"]
     environment = backend["environment"]
@@ -94,7 +94,7 @@ def test_compose_has_fail_closed_public_defaults():
 
 
 def test_workspace_containment_resolves_symlink_escape(tmp_path):
-    import apps.api
+    import apps.api as server
 
     root = tmp_path / "root"
     outside = tmp_path / "outside"

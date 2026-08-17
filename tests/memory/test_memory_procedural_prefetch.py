@@ -34,9 +34,9 @@ class _Engine:
 
 
 def _install_stub_engine(monkeypatch):
-    module = types.ModuleType("skills.engine")
+    module = types.ModuleType("extensions.skills.built_in.engine")
     module.NexusSkillEngine = _Engine
-    monkeypatch.setitem(sys.modules, "skills.engine", module)
+    monkeypatch.setitem(sys.modules, "extensions.skills.built_in.engine", module)
 
 
 def test_prefetch_procedural_populates_slot(tmp_path, monkeypatch):
@@ -58,13 +58,13 @@ def test_prefetch_all_exposes_procedural_context(tmp_path, monkeypatch):
 
 
 def test_prefetch_procedural_never_raises(tmp_path, monkeypatch):
-    broken = types.ModuleType("skills.engine")
+    broken = types.ModuleType("extensions.skills.built_in.engine")
 
     class _Boom:
         def __init__(self, root=None):
             raise RuntimeError("no engine")
 
     broken.NexusSkillEngine = _Boom
-    monkeypatch.setitem(sys.modules, "skills.engine", broken)
+    monkeypatch.setitem(sys.modules, "extensions.skills.built_in.engine", broken)
     mgr = MemoryManager(str(tmp_path), session_id="s1")
     assert mgr._prefetch_procedural("anything") == ""

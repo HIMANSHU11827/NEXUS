@@ -11,151 +11,150 @@
 
 | # | Directory | Purpose | Status |
 |---|-----------|---------|--------|
-| 1 | `nexus/` | Events & Boot Loader | Stable |
-| 2 | `server/` | FastAPI HTTP/SSE Server (v2.1.0) | Stable |
-| 3 | `gateway/` | Multi-Platform Gateway (21 platforms) | Beta |
-| 4 | `orchestrators/` | NexusLoop Agent Loop (rebuilt) | Stable |
-| 5 | `kernel/` | Central Singleton (20 subsystems) | Stable |
-| 6 | `providers/` | 40+ LLM Provider + OAuth | Stable |
-| 7 | `intelligence/` | MoE Router + NATE 5-Layer Engine | Beta |
-| 8 | `rag/` | BM25 + SimHash + Atlas Deep Indexing | Beta |
-| 9 | `reasoning/` | HyperReasoningEngine | Beta |
-| 10 | `tools/` | Registry-discovered tools (BaseTool + .jsnol) | Stable |
+| 1 | `src/nexus/` | Events & Boot Loader | Stable |
+| 2 | `apps/api/` | FastAPI HTTP/SSE Server (v2.1.0) | Stable |
+| 3 | `gateways/` | Multi-Platform Gateway (21 platforms) | Beta |
+| 4 | `src/nexus/main_agent/` | NexusLoop Agent Loop (rebuilt) | Stable |
+| 5 | `src/nexus/runtime/kernel/` | Central Singleton (20 subsystems) | Stable |
+| 6 | `models/providers/` | 40+ LLM Provider + OAuth | Stable |
+| 7 | `src/nexus/capabilities/intelligence/` | MoE Router + NATE 5-Layer Engine | Beta |
+| 8 | `knowledge/rag/` | BM25 + SimHash + Atlas Deep Indexing | Beta |
+| 9 | `src/nexus/capabilities/reasoning/` | HyperReasoningEngine | Beta |
+| 10 | `extensions/tools/built_in/` | Registry-discovered tools (BaseTool + .jsnol) | Stable |
 | 11 | `hive/` | Sub-Agent Engine | Beta |
-| 12 | `skills/` | Skill Registry (SKILL.md) | Stable |
-| 13 | `plugins/` | Plugin System + Trust Model | Beta |
-| 14 | `mcp/` | MCP Client/Server/Tool Integration | Beta |
+| 12 | `extensions/skills/built_in/` | Skill Registry (SKILL.md) | Stable |
+| 13 | `extensions/plugins/built_in/` | Plugin System + Trust Model | Beta |
+| 14 | `extensions/mcp/core/` | MCP Client/Server/Tool Integration | Beta |
 | 15 | `memory/` | Multi-Source MemoryManager | Stable |
 | 16 | `sandbox/` | 3-Tier Sandbox + Risk Scoring | Stable |
-| 17 | `safety/` | Sovereign Laws + Logic Prover | Stable |
+| 17 | `security/policies/` | Sovereign Laws + Logic Prover | Stable |
 | 18 | `security/` | Secret Scanner | Stable |
-| 19 | `authentication/` | OAuth 2.0 + Token Auth | Stable |
+| 19 | `security/core/auth.py` | OAuth 2.0 + Token Auth | Stable |
 | 20 | `evolution/` | Self-Improvement (6 Forges + VersionManager) | Beta |
-| 21 | `gui/` | React 18 + Vite + TypeScript (rebuilt) | Stable |
-| 22 | `tui/` | Ink TUI (React 19) | Stable |
-| 23 | `shell/` | Legacy Rich Compat Shim | Legacy |
-| 24 | `voice/` | Voice Pipeline (4 STT backends) | Beta |
-| 25 | `config/` | YAML/JSON/env Configuration | Stable |
-| 26 | `tests/` | 150+ Test Files | Stable |
-| 27 | `docs/` | Documentation (32 markdown files) | Mixed |
-| 28 | `scripts/` | Build & Run Scripts | Stable |
-| 29 | `deploy/` | Docker Deployment | Stable |
+| 21 | `apps/web/` | React 18 + Vite + TypeScript (rebuilt) | Stable |
+| 22 | `apps/tui/` | Ink TUI (React 19) | Stable |
+| 23 | `apps/voice/` | Voice Pipeline (4 STT backends) | Beta |
+| 24 | `configure/` | YAML/JSON/env Configuration | Stable |
+| 25 | `tests/` | 150+ Test Files | Stable |
+| 26 | `docs/` | Documentation (32 markdown files) | Mixed |
+| 27 | `scripts/` | Build & Run Scripts | Stable |
+| 28 | `deployment/` | Docker Deployment | Stable |
 
 ---
 
-## 1. `nexus/` — Events & Boot Loader
+## 1. `src/nexus/` — Events & Boot Loader
 
 **Purpose**: Entry point for the entire NEXUS AI runtime. Handles boot sequence, process lifecycle, command aliases, and canonical event system.
 
 ### Python Files
 | File | Description |
 |------|-------------|
-| `nexus/__init__.py` | Boot loader (687 lines) — loads `.env`, applies command aliases, launches TUI/GUI/server/gateway/setup, export/import, first-run wizard |
-| `nexus/__main__.py` | Delegates to `boot()` |
-| `nexus/commands.py` | CommandRegistry singleton — canonical 152-command catalog across shared/client general, settings, info, workspace, developer, integrations, and orchestration entries |
-| `nexus/events.py` | **CanonicalEvent** dataclass — ~50 event types with validation, `infer_event_type()` heuristic |
-| `nexus/runtime.py` | `ChatRunRequest`, session/turn ID sanitization, provider normalization |
-| `nexus/run_context.py` | `RunContext` durable identity, `start_run_context()`, `list_run_contexts()`
+| `src/nexus/__init__.py` | Boot loader (687 lines) — loads `.env`, applies command aliases, launches TUI/GUI/server/gateway/setup, export/import, first-run wizard |
+| `src/nexus/__main__.py` | Delegates to `boot()` |
+| `src/nexus/commands.py` | CommandRegistry singleton — canonical 152-command catalog across shared/client general, settings, info, workspace, developer, integrations, and orchestration entries |
+| `src/nexus/events.py` | **CanonicalEvent** dataclass — ~50 event types with validation, `infer_event_type()` heuristic |
+| `src/nexus/runtime.py` | `ChatRunRequest`, session/turn ID sanitization, provider normalization |
+| `src/nexus/run_context.py` | `RunContext` durable identity, `start_run_context()`, `list_run_contexts()`
 
 ---
 
-## 2. `server/` — FastAPI HTTP/SSE Server
+## 2. `apps/api/` — FastAPI HTTP/SSE Server
 
 **Purpose**: Standalone HTTP API server (port 8000, v2.1.0) powering the GUI, TUI, and external clients. OpenAI-compatible `/v1/chat/completions` endpoint. 80+ API endpoints covering sessions, chat, files, providers, tools, skills, plugins, MCP, voice, engine management, auth.
 
 ### Python Files
 | File | Description |
 |------|-------------|
-| `server/__init__.py` | **2,690 lines** — Main FastAPI app. 80+ routes: `/api/chat`, `/api/sessions`, `/api/history`, `/v1/chat/completions`, `/api/tools`, `/api/skills`, `/api/files/list`, `/api/voice/*`, `/api/engine/*`, auth middleware, CORS, SSE streaming, OpenAI-compatible streaming |
-| `server/__main__.py` | Uvicorn runner (`python -m server`)
+| `apps/api/__init__.py` | **2,690 lines** — Main FastAPI app. 80+ routes: `/api/chat`, `/api/sessions`, `/api/history`, `/v1/chat/completions`, `/api/tools`, `/api/skills`, `/api/files/list`, `/api/voice/*`, `/api/engine/*`, auth middleware, CORS, SSE streaming, OpenAI-compatible streaming |
+| `apps/api/__main__.py` | Uvicorn runner (`python -m apps.api`)
 
 ### Subdirectories
-- `server/logs/` — session logs (`sessions/`, `tasks.json`)
-- `server/workspace/` — runtime state (`kernel_state.json`, `active_session.json`)
+- `.nexus/logs/` — session logs (`sessions/`, `run_contexts/`)
+- `.nexus/workspace/` — runtime state (`kernel_state.json`, `active_session.json`)
 
 ---
 
-## 3. `orchestrators/` — Agent Loop
+## 3. `src/nexus/main_agent/` — Agent Loop
 
-**Purpose**: Core agent orchestration — the main `NexusLoop` sovereign reasoning loop (`orchestrators/v5/core.py`, rebuilt).
+**Purpose**: Core agent orchestration — the main `NexusLoop` sovereign reasoning loop (`src/nexus/main_agent/core.py`, rebuilt).
 
 ### Python Files
 | File | Description |
 |------|-------------|
-| `orchestrators/v5/core.py` | **NexusLoop V5** — canonical sovereign loop. Direct model/tool turns, registry discovery, permission policies, memory management, risk scoring, Hive/MCP integration, verification, and canonical work events |
-| `orchestrators/__init__.py` | Package docstring |
+| `src/nexus/main_agent/core.py` | **NexusLoop V5** — canonical sovereign loop. Direct model/tool turns, registry discovery, permission policies, memory management, risk scoring, Hive/MCP integration, verification, and canonical work events |
+| `src/nexus/main_agent/__init__.py` | Package init |
 
 ### Notes
 - `architect.py` (legacy) and `mission_control.py` have been removed — planning uses `todo.md` + `planning` tool
 
 ---
 
-## 4. `providers/` — 40+ LLM Provider Implementations
+## 4. `models/providers/` — 40+ LLM Provider Implementations
 
 **Purpose**: Universal LLM provider abstraction. Every major provider has a dedicated adapter with OAuth, auto-healing, health checks, and routing.
 
-### Python Files (Root)
+### Python Files (core)
 | File | Provider |
 |------|----------|
-| `providers/base.py` | Base provider interface |
-| `providers/factory.py` | NexusProviderFactory — creates provider instances |
-| `providers/profiles.py` | Provider profiles/capabilities |
-| `providers/router.py` | Provider routing logic |
-| `providers/health.py` | Health check system |
-| `providers/auto_detect.py` | Auto-discovery of available providers |
-| `providers/auto_heal.py` | Auto-recovery on provider failures |
-| `providers/heal_tools.py` | Healing tool implementations |
-| `providers/universal.py` | Universal provider wrapper |
-| `providers/openai.py` | OpenAI |
-| `providers/anthropic.py` | Anthropic (Claude) |
-| `providers/deepseek.py` | DeepSeek |
-| `providers/google_gemini.py` | Google Gemini |
-| `providers/groq.py` | Groq |
-| `providers/ollama.py` | Ollama (local) |
-| `providers/llama_cpp.py` | llama.cpp |
-| `providers/lm_studio.py` | LM Studio |
-| `providers/lm_studio_auto.py` | LM Studio auto-config |
-| `providers/mistral.py` | Mistral |
-| `providers/cohere.py` | Cohere |
-| `providers/perplexity.py` | Perplexity |
-| `providers/together.py` | Together AI |
-| `providers/huggingface.py` | Hugging Face |
-| `providers/fireworks.py` | Fireworks |
-| `providers/sambanova.py` | SambaNova |
-| `providers/nvidia.py` | NVIDIA |
-| `providers/xai.py` | xAI (Grok) |
-| `providers/replicate.py` | Replicate |
-| `providers/qwen.py` | Qwen |
-| `providers/zupra.py` | Zupra |
-| `providers/azure_openai.py` | Azure OpenAI |
-| `providers/commandcode.py` | CommandCode |
-| `providers/opencode_cli.py` | OpenCode CLI |
-| `providers/openrouter.py` | OpenRouter (aggregator) |
-| `providers/flux_image.py` | FLUX image generation |
-| `providers/vlm.py` | Vision Language Models |
-| `providers/sandbox_interpreter.py` | Sandbox code interpreter |
-| `providers/search_serper.py` | Serper search |
-| `providers/langchain_provider.py` | LangChain bridge |
-| `providers/langchain_tools.py` | LangChain tool bridge |
+| `models/providers/core/base.py` | Base provider interface |
+| `models/providers/core/factory.py` | NexusProviderFactory — creates provider instances |
+| `models/providers/core/profiles.py` | Provider profiles/capabilities |
+| `models/providers/core/router.py` | Provider routing logic |
+| `models/providers/core/health.py` | Health check system |
+| `models/providers/core/auto_detect.py` | Auto-discovery of available providers |
+| `models/providers/core/auto_heal.py` | Auto-recovery on provider failures |
+| `models/providers/core/heal_tools.py` | Healing tool implementations |
+| `models/providers/core/universal.py` | Universal provider wrapper |
+| `models/providers/api/openai.py` | OpenAI |
+| `models/providers/api/anthropic.py` | Anthropic (Claude) |
+| `models/providers/api/deepseek.py` | DeepSeek |
+| `models/providers/api/google_gemini.py` | Google Gemini |
+| `models/providers/api/groq.py` | Groq |
+| `models/providers/local/ollama.py` | Ollama (local) |
+| `models/providers/local/llama_cpp.py` | llama.cpp |
+| `models/providers/local/lm_studio.py` | LM Studio |
+| `models/providers/local/lm_studio_auto.py` | LM Studio auto-config |
+| `models/providers/api/mistral.py` | Mistral |
+| `models/providers/api/cohere.py` | Cohere |
+| `models/providers/api/perplexity.py` | Perplexity |
+| `models/providers/api/together.py` | Together AI |
+| `models/providers/api/huggingface.py` | Hugging Face |
+| `models/providers/api/fireworks.py` | Fireworks |
+| `models/providers/api/sambanova.py` | SambaNova |
+| `models/providers/api/nvidia.py` | NVIDIA |
+| `models/providers/api/xai.py` | xAI (Grok) |
+| `models/providers/api/replicate.py` | Replicate |
+| `models/providers/api/qwen.py` | Qwen |
+| `models/providers/api/zupra.py` | Zupra |
+| `models/providers/api/azure_openai.py` | Azure OpenAI |
+| `models/providers/api/commandcode.py` | CommandCode |
+| `models/providers/auth/opencode_cli.py` | OpenCode CLI |
+| `models/providers/api/openrouter.py` | OpenRouter (aggregator) |
+| `models/providers/core/flux_image.py` | FLUX image generation |
+| `models/providers/core/vlm.py` | Vision Language Models |
+| `models/providers/local/sandbox_interpreter.py` | Sandbox code interpreter |
+| `models/providers/core/search_serper.py` | Serper search |
+| `models/providers/core/langchain_provider.py` | LangChain bridge |
+| `models/providers/core/langchain_tools.py` | LangChain tool bridge |
 
 ### Subdirectories
-- `providers/oauth/` — Full OAuth 2.0 / PKCE / Device Code flow
+- `models/providers/auth/oauth/` — Full OAuth 2.0 / PKCE / Device Code flow
   - `callback_server.py`, `device_code.py`, `pkce.py`, `registry.py`, `storage.py`, `types.py`, `refresh.py`
-  - `providers/oauth/providers/` — OAuth adapters: Claude, Codex, Copilot, Gemini, Grok, Minimax, OpenRouter, Qwen, Chutes (9 providers)
+  - `models/providers/auth/oauth/providers/` — OAuth adapters: Claude, Codex, Copilot, Gemini, Grok, Minimax, OpenRouter, Qwen, Chutes (9 providers)
 
 ---
 
-## 5. `tools/` — Tool Registry & Tool Implementations
+## 5. `extensions/tools/built_in/` — Tool Registry & Tool Implementations
 
 **Purpose**: Runtime tool discovery via `.jsnol` metadata, active local skills, and MCP adapters. The model receives the current executable registry through `ToolRegistry`.
 
 ### Core Registry
 | File | Description |
 |------|-------------|
-| `tools/__init__.py` | Tool package init |
-| `tools/nexus_tools/base_tool.py` | BaseTool abstract class + ToolResult dataclass |
-| `tools/nexus_tools/registry.py` | ToolRegistry — loads `.jsnol` metadata, discovers BaseTool subclasses, validates |
-| `tools/threat_patterns.py` | Content-level threat scanner — 41 regex patterns in 3 scopes (all/context/strict) |
+| `extensions/tools/built_in/__init__.py` | Tool package init |
+| `extensions/tools/built_in/nexus_tools/base_tool.py` | BaseTool abstract class + ToolResult dataclass |
+| `extensions/tools/built_in/nexus_tools/registry.py` | ToolRegistry — loads `.jsnol` metadata, discovers BaseTool subclasses, validates |
+| `extensions/tools/built_in/threat_patterns.py` | Content-level threat scanner — 41 regex patterns in 3 scopes (all/context/strict) |
 
 ### Tool Implementations (each has `.jsnol` + `.md` + `scripts/*.py` extending BaseTool)
 | Tool | Handler | Lines | Status |
@@ -185,25 +184,25 @@
 
 ---
 
-## 6. `gateway/` — Multi-Platform Gateway
+## 6. `gateways/` — Multi-Platform Gateway
 
 **Purpose**: Connects NEXUS AI to external messaging platforms via 21 async platform adapters with per-platform message handling, webhook HMAC verification, session tracking, and supervised lifecycle.
 
 ### Python Files
 | File | Description |
 |------|-------------|
-| `gateway/__init__.py` | Package init |
-| `gateway/base.py` | Base gateway interface |
-| `gateway/main.py` | Gateway entry point |
-| `gateway/run.py` | Gateway runner + ingress dedupe |
-| `gateway/supervisor.py` | GatewaySupervisor — supervised lifecycle (retries, crash-loop detection, state persistence) |
-| `gateway/state.py` | GatewayStateStore — atomic JSON state persistence |
-| `gateway/webhook_server.py` | Webhook server (Meta HMAC + LINE, Teams, Google Chat, Feishu, YuanBao, QQBot, DingTalk, WeCom, Weixin, BlueBubbles) |
-| `gateway/session_bus_integration.py` | Session bus bridge |
-| `gateway/session_ids.py` | Session ID management |
+| `gateways/__init__.py` | Package init |
+| `gateways/base.py` | Base gateway interface |
+| `gateways/main.py` | Gateway entry point |
+| `gateways/run.py` | Gateway runner + ingress dedupe |
+| `gateways/supervisor.py` | GatewaySupervisor — supervised lifecycle (retries, crash-loop detection, state persistence) |
+| `gateways/state.py` | GatewayStateStore — atomic JSON state persistence |
+| `gateways/webhook_server.py` | Webhook server (Meta HMAC + LINE, Teams, Google Chat, Feishu, YuanBao, QQBot, DingTalk, WeCom, Weixin, BlueBubbles) |
+| `gateways/session_bus_integration.py` | Session bus bridge |
+| `gateways/session_ids.py` | Session ID management |
 
 ### Subdirectories
-- `gateway/platforms/` — 21 async adapters: BlueBubbles, DingTalk, Discord, Email, Feishu, Google Chat, IRC, LINE, Matrix, Mattermost, Meta, QQBot, Signal, Slack, SMS, Teams, Telegram, WeCom, Weixin, WhatsApp, Yuanbao
+- `gateways/platforms/` — 21 async adapters: BlueBubbles, DingTalk, Discord, Email, Feishu, Google Chat, IRC, LINE, Matrix, Mattermost, Meta, QQBot, Signal, Slack, SMS, Teams, Telegram, WeCom, Weixin, WhatsApp, Yuanbao
 
 ---
 
@@ -238,7 +237,7 @@
 | `docs/HERMES_COMPARISON.md` | Hermes comparison | Historical |
 | `docs/MEDIAPIPE_SUITE.md` | MediaPipe vision suite | Current |
 | `docs/SPECIAL_FOCUS.md` | Special focus areas | Outdated |
-| `docs/DEVELOPMENT.md` | Development guide | Current |
+| `docs/development.md` | Development guide | Current |
 | `docs/design-qa.md` | Design QA report | Historical |
 
 ### Subdirectories

@@ -386,7 +386,7 @@ def test_init_mcp_drops_unavailable_server(tmp_path, monkeypatch):
         def list_tools(self):
             return []
 
-    monkeypatch.setattr("mcp.client.MCPClient", DeadClient)
+    monkeypatch.setattr("extensions.mcp.core.client.MCPClient", DeadClient)
 
     registry = _bare_registry(tmp_path)
     assert registry.init_mcp_tools() == 0

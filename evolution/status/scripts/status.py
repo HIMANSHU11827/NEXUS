@@ -42,7 +42,7 @@ class EvolutionStatus:
         return "\n".join(lines)
 
     def _scan_skills(self) -> Dict:
-        skills_dir = os.path.join(self.root, "skills")
+        skills_dir = os.path.join(self.root, "extensions", "skills", "built_in")
         items = []
         if os.path.isdir(skills_dir):
             for cat in sorted(os.listdir(skills_dir)):
@@ -57,7 +57,7 @@ class EvolutionStatus:
         return {"count": len(items), "items": items}
 
     def _scan_tools(self) -> Dict:
-        tools_dir = os.path.join(self.root, "tools")
+        tools_dir = os.path.join(self.root, "extensions", "tools", "built_in")
         items = []
         if os.path.isdir(tools_dir):
             for entry in sorted(os.listdir(tools_dir)):
@@ -77,7 +77,7 @@ class EvolutionStatus:
         return {"count": len(items), "items": items}
 
     def _scan_plugins(self) -> Dict:
-        plugins_dir = os.path.join(self.root, "plugins")
+        plugins_dir = os.path.join(self.root, "extensions", "plugins", "built_in")
         items = []
         if os.path.isdir(plugins_dir):
             for entry in sorted(os.listdir(plugins_dir)):

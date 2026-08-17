@@ -81,7 +81,7 @@ class TestClassification:
             result = classify_exception(exc)
             assert result == FailureClass.RATE_LIMIT
         except ImportError:
-            pytest.skip("providers.reliability not importable in this environment")
+            pytest.skip("models.providers.core.reliability not importable in this environment")
 
 
 class TestEnvelope:

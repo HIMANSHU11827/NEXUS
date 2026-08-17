@@ -1,6 +1,6 @@
 # NEXUS Unified Cognitive Loop
 
-The V5 `NexusLoop` (`orchestrators/v5/core.py`) is the NEXUS runtime harness. The TUI/GUI backend, standalone server, Rich shell, gateways, and hive tools all enter this contract. It coordinates request-scoped provider selection, context, permissions, command risk scoring, sandbox routing, tool execution, verification, memory persistence, cancellation, and canonical work events.
+The V5 `NexusLoop` (`src/nexus/main_agent/core.py`) is the NEXUS runtime harness. The TUI/GUI backend, standalone server, Rich shell, gateways, and hive tools all enter this contract. It coordinates request-scoped provider selection, context, permissions, command risk scoring, sandbox routing, tool execution, verification, memory persistence, cancellation, and canonical work events.
 
 ---
 
@@ -29,7 +29,7 @@ Performs concurrent operations using `asyncio.gather` to minimize latency:
 *   Performs structural compiler and target engine status checks.
 
 ### 2. Planning
-Action requests may reuse `todo.md` or create a plan through the registered `planning` tool. `orchestrators/architect.py` is a legacy compatibility module and is not the normal `NexusLoop.stream_run()` path.
+Action requests may reuse `todo.md` or create a plan through the registered `planning` tool. The legacy `architect.py` module was removed and is not the normal `NexusLoop.stream_run()` path.
 
 ### 3. Inference
 Executes the LLM turn with pre/post-hook execution filters.
@@ -59,8 +59,8 @@ Acts as a compiler and test execution gate:
 
 ### 7. Finalization
 Consolidates training data and execution metrics:
-*   Saves final message lists to `logs/sessions/<session_id>.json`.
-*   Persists run identity and terminal status to `logs/run_contexts/<session_id>/<run_id>.json`.
+*   Saves final message lists to `.nexus/logs/sessions/<session_id>.json`.
+*   Persists run identity and terminal status to `.nexus/logs/run_contexts/<session_id>/<run_id>.json`.
 *   Records success/failure metrics to the ledger via `evolution_log`.
 *   Emits `run.completed`, `run.failed`, or `run.cancelled` as the final run lifecycle record.
 

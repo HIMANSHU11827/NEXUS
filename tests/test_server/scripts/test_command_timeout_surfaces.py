@@ -7,16 +7,16 @@ from fastapi.testclient import TestClient
 def test_server_command_stream_forwards_timeout_and_matches_failed_status(monkeypatch, tmp_path):
     patches = [
         patch("dotenv.load_dotenv"),
-        patch("authentication.check_auth", return_value=MagicMock()),
-        patch("authentication.is_public_path", return_value=True),
-        patch("authentication.validate_dashboard_token", return_value=True),
+        patch("security.core.auth.check_auth", return_value=MagicMock()),
+        patch("security.core.auth.is_public_path", return_value=True),
+        patch("security.core.auth.validate_dashboard_token", return_value=True),
         patch("yaml.safe_load", return_value={}),
     ]
     for item in patches:
         item.start()
     try:
         for mod in list(sys.modules):
-            if mod.startswith("server"):
+            if mod.startswith("apps.api"):
                 del sys.modules[mod]
         import apps.api
 

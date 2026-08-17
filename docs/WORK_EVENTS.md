@@ -7,7 +7,7 @@ Work events track the mission timeline — every file read/write, command run, t
 Events are stored as JSONL (one JSON object per line):
 
 ```
-workspace/work_events/<session_id>.jsonl
+.nexus/workspace/work_events/<session_id>.jsonl
 ```
 
 Each line is a self-contained event object:
@@ -67,14 +67,14 @@ Response: full event with defaults applied.
 The TUI `/work` command reads the JSONL file directly:
 
 ```
-/workspace/work_events/<session_id>.jsonl
+/.nexus/workspace/work_events/<session_id>.jsonl
 ```
 
 Shows last 12 events in compact format.
 
 ## GUI Integration
 
-The `WorkActivityTimeline` component (`gui/src/components/WorkActivityTimeline.tsx`) renders work events as a real-time scrolling timeline in the GUI sidebar. Events are color-coded by kind and show file paths, command strings, and timestamps.
+The `WorkActivityTimeline` component (`apps/web/src/components/WorkActivityTimeline.tsx`) renders work events as a real-time scrolling timeline in the GUI sidebar. Events are color-coded by kind and show file paths, command strings, and timestamps.
 
 ## Test Coverage
 

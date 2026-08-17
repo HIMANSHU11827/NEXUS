@@ -213,7 +213,7 @@ def test_gateway_handle_message_consumes_content_chunks(monkeypatch):
     from nexus.common import session_bus
     monkeypatch.setattr(session_bus, "set_active_session_id", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(session_bus, "sync_loop_from_disk", lambda _loop: None)
-    monkeypatch.setattr("authentication.is_gateway_authorized", lambda _platform, _sender: True)
+    monkeypatch.setattr("security.core.auth.is_gateway_authorized", lambda _platform, _sender: True)
 
     runner = GatewayRunner()
     adapter = FakeAdapter("telegram")
@@ -249,7 +249,7 @@ def test_gateway_handle_message_retains_legacy_string_chunk_support(monkeypatch)
     from nexus.common import session_bus
     monkeypatch.setattr(session_bus, "set_active_session_id", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(session_bus, "sync_loop_from_disk", lambda _loop: None)
-    monkeypatch.setattr("authentication.is_gateway_authorized", lambda _platform, _sender: True)
+    monkeypatch.setattr("security.core.auth.is_gateway_authorized", lambda _platform, _sender: True)
 
     runner = GatewayRunner()
     adapter = FakeAdapter("telegram")
@@ -282,7 +282,7 @@ def test_gateway_reasoning_error_uses_safe_public_message(monkeypatch):
     from nexus.common import session_bus
     monkeypatch.setattr(session_bus, "set_active_session_id", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(session_bus, "sync_loop_from_disk", lambda _loop: None)
-    monkeypatch.setattr("authentication.is_gateway_authorized", lambda _platform, _sender: True)
+    monkeypatch.setattr("security.core.auth.is_gateway_authorized", lambda _platform, _sender: True)
 
     runner = GatewayRunner()
     adapter = FakeAdapter("telegram")
@@ -328,7 +328,7 @@ def test_gateway_timeout_surfaces_timeout_message(monkeypatch):
     from nexus.common import session_bus
     monkeypatch.setattr(session_bus, "set_active_session_id", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(session_bus, "sync_loop_from_disk", lambda _loop: None)
-    monkeypatch.setattr("authentication.is_gateway_authorized", lambda _platform, _sender: True)
+    monkeypatch.setattr("security.core.auth.is_gateway_authorized", lambda _platform, _sender: True)
 
     runner = GatewayRunner()
     adapter = FakeAdapter("telegram")

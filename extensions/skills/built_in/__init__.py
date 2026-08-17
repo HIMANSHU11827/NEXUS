@@ -43,7 +43,7 @@ class NexusSkillMaster:
             return
         self._initialized_root = resolved
         self._root = resolved
-        primary = os.path.join(self._root, "skills")
+        primary = os.path.join(self._root, "extensions", "skills", "built_in")
         bundled = os.path.join(os.path.dirname(os.path.abspath(__file__)))
         # Auto-discover files in the project skills/ directory AND any
         # skills/ directory bundled alongside this module. This avoids losing

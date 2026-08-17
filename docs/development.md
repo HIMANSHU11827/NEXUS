@@ -29,14 +29,14 @@ pip install -e ".[voice]"    # voice (torch, transformers, whisper, TTS)
 ### GUI Setup
 
 ```powershell
-cd gui
+cd apps/web
 npm install
 ```
 
 ### TUI (Ink) Setup
 
 ```powershell
-cd tui
+cd apps/tui
 npm install
 ```
 
@@ -61,7 +61,7 @@ Options via environment variables:
 python -m nexus --gui
 ```
 
-Starts the GUI API backend on port 8000 and Vite on port 5173. For manual GUI development, run `python -m uvicorn gui.api:app --host 127.0.0.1 --port 8000` and `cd gui && npm run dev`.
+Starts the GUI API backend on port 8000 and Vite on port 5173. For manual GUI development, run `python -m uvicorn apps.web.api:app --host 127.0.0.1 --port 8000` and `cd apps/web && npm run dev`.
 
 ### TUI
 
@@ -77,12 +77,12 @@ Default Ink TUI with GUI API backend. Use `python -m nexus --shell` for the lega
 python -m nexus
 ```
 
-Boots `gui.api` as subprocess when needed, then starts the Ink TUI.
+Boots `apps.web.api` as subprocess when needed, then starts the Ink TUI.
 
 ### TUI (Ink)
 
 ```powershell
-cd tui && npm run build && npm test
+cd apps/tui && npm run build && npm test
 ```
 
 Development checks for the TypeScript Ink TUI.
@@ -97,7 +97,7 @@ python -m nexus --gateway
 
 ```powershell
 pip install -e ".[voice]"
-python -m voice_chat --warmup
+nexus-voice --warmup
 ```
 
 ## Configuration
@@ -105,7 +105,7 @@ python -m voice_chat --warmup
 Copy and edit:
 
 ```powershell
-copy config\.env.template config\.env
+copy configure\.env.template configure\.env
 ```
 
 Set at minimum:
@@ -118,11 +118,11 @@ Key config files:
 
 | File | Purpose |
 |------|---------|
-| `config/.env` | API keys and secrets |
-| `config/provider.yml` | LLM provider definitions; use `${ENV_VAR}` references, not raw secrets |
-| `config/settings.yml` | Runtime settings |
-| `config/settings.yml` | Runtime settings and preferences persisted by API/TUI |
-| `config/mcp_servers.json` | MCP server definitions |
+| `configure/.env` | API keys and secrets |
+| `configure/provider.yml` | LLM provider definitions; use `${ENV_VAR}` references, not raw secrets |
+| `configure/settings.yml` | Runtime settings |
+| `configure/settings.yml` | Runtime settings and preferences persisted by API/TUI |
+| `configure/mcp_servers.json` | MCP server definitions |
 
 ## Testing
 
@@ -144,7 +144,7 @@ python -m pytest tests/gui/ -v                          # GUI API tests
 ### GUI Tests
 
 ```powershell
-cd gui
+cd apps/web
 npm run build      # TypeScript compilation + Vite build
 npm run lint       # ESLint
 ```
@@ -152,7 +152,7 @@ npm run lint       # ESLint
 ### TUI Tests
 
 ```powershell
-cd tui
+cd apps/tui
 npx tsc --noEmit   # TypeScript compilation check
 ```
 
@@ -160,56 +160,47 @@ npx tsc --noEmit   # TypeScript compilation check
 
 ```
 NEXUS AI/
-  nexus/              # Boot loader, events
-  server/             # FastAPI backend
-  orchestrators/      # Agent loop, workflow engine
-  providers/          # LLM provider implementations
-  tools/              # Tool registry and implementations
-  gui/                # React frontend + GUI API
-  shell/              # Legacy Rich shell
-  mcp/                # MCP integration
-  plugins/            # Plugin system
-  prompts/            # Prompt templates
-  skills/             # Skill registry
-  memory/             # Memory manager
-  sandbox/            # Command sandbox
-  kernel/             # Runtime singleton
-  voice/              # Voice mode
-  gateway/            # Multi-platform gateway
-  config/             # Configuration files
-  evolution/          # Self-improvement modules
-  external/           # External integrations
-  reasoning/          # Hyper-reasoning engine
-  rag/                # Retrieval engine
-  knowledge/          # Knowledge store
-  context/            # Context compression
-  safety/             # Safety policies
-  security/           # Secret scanner
-  permissions/        # Permission modes
-  lifecycle/          # Lifecycle hooks
-  tasks/              # Task scheduler
-  telemetry/          # Telemetry database
-  hive/               # Multi-agent orchestration
-  router/             # Intent router
-  intelligence/       # Local brain, NATE
-  authentication/     # OAuth + token auth
-  cognition/          # Cognitive models
-  commands/           # CLI command definitions
-  neural/             # Nerve center, trainer
-  optimization/       # Performance optimization
-  hardware/           # Hardware manager
-  indexer/            # Indexer
-  integrations/       # Third-party integrations
-  utils/              # Utilities
-  scripts/            # Helper scripts
-  deploy/             # Docker deployment
-  tests/              # Test suite
+  src/nexus/              # Boot loader, events, commands, runtime
+  src/nexus/main_agent/   # V5 NexusLoop agent loop (core.py)
+  src/nexus/runtime/kernel/  # Runtime singleton (20 lazy-loaded subsystems)
+  src/nexus/capabilities/    # MoE router, NATE, HyperReasoningEngine, intent router
+  src/nexus/common/       # Shared utilities
+  src/nexus/context/      # Context persistence/compression
+  src/nexus/lifecycle/    # Lifecycle hooks
+  src/nexus/tasks/        # Task scheduler
+  apps/api/               # FastAPI backend
+  apps/web/               # React frontend + GUI API
+  apps/tui/               # Ink TUI
+  apps/voice/             # Voice mode
+  models/providers/       # LLM provider implementations (core/api/local/auth)
+  extensions/tools/built_in/  # Tool registry and implementations
+  extensions/skills/built_in/ # Skill registry
+  extensions/plugins/built_in/ # Plugin system
+  extensions/mcp/core/    # MCP integration
+  hive/                   # Multi-agent orchestration
+  gateways/               # Multi-platform gateway
+  memory/                 # Memory manager
+  sandbox/                # Command sandbox
+  security/               # Secret scanner
+  security/policies/      # Safety policies
+  security/permissions/   # Permission modes
+  security/core/auth.py   # OAuth + token auth
+  knowledge/rag/          # Retrieval engine
+  knowledge/              # Knowledge store
+  observability/telemetry/ # Telemetry database
+  evaluation/             # Evaluation ledger
+  maintenance/            # Roadmap maintenance
+  evolution/              # Self-improvement modules
+  configure/              # Configuration files
+  scripts/                # Helper scripts
+  deployment/             # Docker deployment
+  tests/                  # Test suite
 ```
 
 ## Notes
 
-- The kernel is lazily initialized on first access. Some subsystems referenced in `kernel/__init__.py` may not exist yet.
-- `orchestrators/architect.py` is legacy code with stub imports.
+- The kernel is lazily initialized on first access. Some subsystems referenced in `src/nexus/runtime/kernel/__init__.py` may not exist yet.
+- The legacy `architect.py` module is removed — planning uses `todo.md` + the `planning` tool.
 - Some tools have metadata (`.jsnol`) without handler scripts.
 - Event system supports ~50 event types but not all have production emitters.
 - No WebSocket yet - uses SSE + polling for real-time updates.

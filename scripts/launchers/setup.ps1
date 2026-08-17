@@ -109,7 +109,7 @@ function Update-Deps {
 function Install-NodeDeps {
     if ($SkipNode) { Write-Warn "Skipping node deps"; return }
     if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { Write-Warn "npm missing; skipped"; return }
-    foreach ($proj in @("gui", "tui")) {
+    foreach ($proj in @("apps\web", "apps\tui")) {
         if (-not (Test-Path (Join-Path $Root "$proj\package.json"))) { continue }
         Write-Step "npm install ($proj)..."
         pushd (Join-Path $Root $proj)
@@ -121,11 +121,11 @@ function Install-NodeDeps {
 
 function Seed-Env {
     if ($SkipEnv) { Write-Warn "Skipping .env seed"; return }
-    $t = Join-Path $Root "config\.env"
-    $tpl = Join-Path $Root "config\.env.template"
-    if (Test-Path $t) { Write-Ok "config\.env exists (left untouched)"; return }
-    if (Test-Path $tpl) { Copy-Item $tpl $t; Write-Ok "Created config\.env from template" }
-    else { Write-Warn "config\.env.template missing; nothing to seed" }
+    $t = Join-Path $Root ".env"
+    $tpl = Join-Path $Root ".env.example"
+    if (Test-Path $t) { Write-Ok ".env exists (left untouched)"; return }
+    if (Test-Path $tpl) { Copy-Item $tpl $t; Write-Ok "Created .env from template" }
+    else { Write-Warn ".env.example missing; nothing to seed" }
 }
 
 function Check-Backend {
@@ -144,7 +144,7 @@ function Show-Status {
     Write-Host "node        : $([bool](Get-Command node -ErrorAction SilentlyContinue))"
     Write-Host "npm         : $([bool](Get-Command npm -ErrorAction SilentlyContinue))"
     Write-Host "venv        : $(Test-Path $venvPy)"
-    Write-Host "config/.env : $(Test-Path (Join-Path $Root 'config\.env'))"
+    Write-Host "config/.env : $(Test-Path (Join-Path $Root '.env'))"
 }
 
 function Show-Go-Summary([string]$probe) {
@@ -154,7 +154,7 @@ function Show-Go-Summary([string]$probe) {
     Write-Host "------------------------------------------------------------"
     Write-Host "  action        : $Action"
     Write-Host "  venv          : $(if (Test-Path $venvPy) { 'OK' } else { 'MISSING' })"
-    Write-Host "  config/.env   : $(if (Test-Path (Join-Path $Root 'config\.env')) { 'present' } else { 'missing' })"
+    Write-Host "  config/.env   : $(if (Test-Path (Join-Path $Root '.env')) { 'present' } else { 'missing' })"
     Write-Host "  backend check : $(if ($probe -match 'server OK') { 'clean' } else { 'see above' })"
     Write-Host "============================================================"
     Write-Host ""
@@ -172,7 +172,7 @@ function Show-Doctor {
     Write-Host "root        : $Root"
     Write-Host "python      : $py ($(& $py --version 2>&1))"
     Write-Host "venv        : $(Test-Path $venvPy)"
-    Write-Host "config/.env : $(Test-Path (Join-Path $Root 'config\.env'))"
+    Write-Host "config/.env : $(Test-Path (Join-Path $Root '.env'))"
     Write-Host "imports:"
     $escRoot = $Root.Replace("\", "\\")
     $tmp = Join-Path $env:TEMP "nexus_doctor_probe.py"
@@ -224,13 +224,13 @@ function Show-Go-Inventory {
     Write-Host "Project components:"
     $venvSt = if (Test-Path $venvPy) { "OK" } else { "MISSING" }
     Write-Host ("  {0,-12} : {1}" -f ".venv", $venvSt)
-    $hasGui = Test-Path (Join-Path $Root "gui\node_modules")
+    $hasGui = Test-Path (Join-Path $Root "apps\web\node_modules")
     $guiSt = if ($hasGui) { "OK" } else { "MISSING" }
     Write-Host ("  {0,-12} : {1}" -f "gui deps", $guiSt)
-    $hasTui = Test-Path (Join-Path $Root "tui\node_modules")
+    $hasTui = Test-Path (Join-Path $Root "apps\tui\node_modules")
     $tuiSt = if ($hasTui) { "OK" } else { "MISSING" }
     Write-Host ("  {0,-12} : {1}" -f "tui deps", $tuiSt)
-    $hasEnv = Test-Path (Join-Path $Root "config\.env")
+    $hasEnv = Test-Path (Join-Path $Root ".env")
     $envSt = if ($hasEnv) { "present" } else { "missing" }
     Write-Host ("  {0,-12} : {1}" -f "config/.env", $envSt)
     Write-Host ""
@@ -240,9 +240,9 @@ function Do-Check {
     Show-Go-Inventory
     $missing = @()
     if (-not (Test-Path $venvPy)) { $missing += "1. Python venv + runtime deps" }
-    if (-not (Test-Path (Join-Path $Root "gui\node_modules"))) { $missing += "2. GUI (react) node deps" }
-    if (-not (Test-Path (Join-Path $Root "tui\node_modules"))) { $missing += "3. TUI (ink) node deps" }
-    if (-not (Test-Path (Join-Path $Root "config\.env"))) { $missing += "4. .env seed from template" }
+    if (-not (Test-Path (Join-Path $Root "apps\web\node_modules"))) { $missing += "2. GUI (react) node deps" }
+    if (-not (Test-Path (Join-Path $Root "apps\tui\node_modules"))) { $missing += "3. TUI (ink) node deps" }
+    if (-not (Test-Path (Join-Path $Root ".env"))) { $missing += "4. .env seed from template" }
     Write-Host "Missing items found: $($missing.Count)"
     if ($missing.Count -gt 0) {
         $missing | ForEach-Object { Write-Host ("    " + $_) }

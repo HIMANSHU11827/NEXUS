@@ -536,7 +536,7 @@ class PluginManager(ThreadSafeSingleton):
         self._kernel = get_nexus_kernel(root_dir=root_dir) if root_dir else None
         self.root = root_dir or (self._kernel.root if self._kernel else os.getcwd())
 
-        self._bundled_dir = os.path.join(self.root, "plugins")
+        self._bundled_dir = os.path.join(self.root, "extensions", "plugins", "built_in")
         self._user_dir = os.path.join(os.path.expanduser("~"), ".nexus", "plugins")
 
         self._hook_registry = HookRegistry()

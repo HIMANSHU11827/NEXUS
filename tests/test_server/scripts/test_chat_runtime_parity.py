@@ -11,18 +11,18 @@ from fastapi.testclient import TestClient
 def _server_mocks():
     patches = [
         patch("dotenv.load_dotenv"),
-        patch("orchestrators.NexusLoop"),
-        patch("authentication.check_auth", return_value=MagicMock()),
-        patch("authentication.is_public_path", return_value=True),
-        patch("authentication.AuthUser"),
-        patch("authentication.validate_dashboard_token", return_value=True),
+        patch("nexus.main_agent.NexusLoop"),
+        patch("security.core.auth.check_auth", return_value=MagicMock()),
+        patch("security.core.auth.is_public_path", return_value=True),
+        patch("security.core.auth.AuthUser"),
+        patch("security.core.auth.validate_dashboard_token", return_value=True),
         patch("yaml.safe_load", return_value={}),
         patch("yaml.safe_dump"),
     ]
     for item in patches:
         item.start()
     for mod in list(sys.modules.keys()):
-        if mod.startswith("server"):
+        if mod.startswith("apps.api"):
             del sys.modules[mod]
     yield
     for item in patches:
@@ -113,7 +113,7 @@ def test_set_model_can_switch_to_an_enabled_named_profile(tmp_path, monkeypatch)
         def get_profile(provider, name):
             return Profile() if (provider, name) == ("deepseek", "work") else None
 
-    monkeypatch.setattr("providers.profiles.load_profile_store", lambda: Store())
+    monkeypatch.setattr("models.providers.core.profiles.load_profile_store", lambda: Store())
     monkeypatch.setattr(server, "apply_runtime_to_all_loops", lambda: None)
     server._RUNTIME_SETTINGS.update({"model": "", "provider": "", "profile": ""})
 
@@ -133,7 +133,7 @@ def test_set_model_rejects_an_unavailable_profile(monkeypatch):
         def get_profile(_provider, _name):
             return None
 
-    monkeypatch.setattr("providers.profiles.load_profile_store", lambda: Store())
+    monkeypatch.setattr("models.providers.core.profiles.load_profile_store", lambda: Store())
     with TestClient(server.app) as client:
         response = client.post("/api/model", json={"model": "Friendly", "provider": "deepseek", "profile": "disabled"})
 

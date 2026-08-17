@@ -48,10 +48,10 @@ def main() -> int:
         fail("allow_unsandboxed_autonomous must be false")
 
     required = (
-        ROOT / "deploy" / "Dockerfile",
-        ROOT / "deploy" / "docker-compose.yml",
-        ROOT / "gui" / "Dockerfile",
-        ROOT / "gui" / "nginx.conf",
+        ROOT / "deployment" / "Dockerfile",
+        ROOT / "docker-compose.yml",
+        ROOT / "apps" / "web" / "Dockerfile",
+        ROOT / "apps" / "web" / "nginx.conf",
     )
     missing = [str(path.relative_to(ROOT)) for path in required if not path.is_file()]
     if missing:

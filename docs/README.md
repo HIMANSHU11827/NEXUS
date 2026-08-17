@@ -43,7 +43,7 @@ The project is not trying to be a chatbot with plugins. It is trying to become a
 - MediaPipe Holistic Vision integration (543 landmarks tracking for face, body, and hands); full MediaPipe suite status is documented in `docs/MEDIAPIPE_SUITE.md`.
 - **NATE-Route**: Zero-training embedding-based tool router (all-MiniLM-L6-v2 + FAISS). 88% schema token reduction, 67% input token savings. Solves all 12 skill alignment problems. See `docs/NATE.md`.
 - **Self-Improving Lifecycle**: `evolution/local_trainer/` — auto harvests tool logs, fine-tunes embedding + Zupra-50M models, exports to GGUF, reloads into NATE. Self-improving cycle improves routing + local inference over time.
-- **Zupra Local Provider**: `providers/zupra.py` — MultivexAI/Zupra-1.6-50M-Instruct-Ultra-exp for fully offline CPU inference. No API key needed. Registered as "zupra" in provider factory.
+- **Zupra Local Provider**: `models/providers/api/zupra.py` — MultivexAI/Zupra-1.6-50M-Instruct-Ultra-exp for fully offline CPU inference. No API key needed. Registered as "zupra" in provider factory.
 
 ## Architecture
 
@@ -80,14 +80,14 @@ A user can send a mission from **any** of these three interfaces:
 
 | Interface | Start | Path |
 |-----------|-------|------|
-| **TUI** (Ink client) | `python -m nexus` | `tui/` + `gui.api` backend on `:8000` |
-| **GUI** | `python -m nexus --gui` | React app + `gui.api` backend |
-| **Server** | `python -m nexus --server` | standalone `server:app` API |
-| **Gateway** | `python -m nexus --gateway` | `gateway/` — Telegram, Discord, WhatsApp, Slack |
+| **TUI** (Ink client) | `python -m nexus` | `apps/tui/` + `apps.web.api` backend on `:8000` |
+| **GUI** | `python -m nexus --gui` | React app + `apps.web.api` backend |
+| **Server** | `python -m nexus --server` | standalone `apps.api:app` API |
+| **Gateway** | `python -m nexus --gateway` | `gateways/` — Telegram, Discord, WhatsApp, Slack |
 
 TUI is **not** the terminal (host environment) — it is an Ink UI over the API.
 
-All interfaces are **internally connected** via `utils/session_bus.py`: one active `session_id`, shared chat history (`logs/sessions/`), and mission timelines (`workspace/work_events/`). Chat in GUI or TUI auto-join the same session and can continue without re-sending.
+All interfaces are **internally connected** via `src/nexus/common/session_bus.py`: one active `session_id`, shared chat history (`.nexus/logs/sessions/`), and mission timelines (`.nexus/workspace/work_events/`). Chat in GUI or TUI auto-join the same session and can continue without re-sending.
 
 ## Quick Start
 
@@ -132,8 +132,8 @@ python -m voice_chat --warmup
 
 ```powershell
 python -m pytest tests/ -v --tb=short
-cd tui && npm run build && npm test
-cd gui && npm run build
+cd apps/tui && npm run build && npm test
+cd apps/web && npm run build
 ```
 
 Version integrity:

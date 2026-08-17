@@ -9,7 +9,7 @@ def test_tool_inventory_fallback_returns_public_error_only(monkeypatch):
         def __init__(self, _root):
             raise RuntimeError("registry path=C:\\private\\tools token=sk-live-tools")
 
-    monkeypatch.setattr("tools.nexus_tools.registry.ToolRegistry", FailingRegistry)
+    monkeypatch.setattr("extensions.tools.built_in.nexus_tools.registry.ToolRegistry", FailingRegistry)
 
     payload = server.list_tools()
 

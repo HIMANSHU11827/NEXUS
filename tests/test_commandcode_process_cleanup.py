@@ -63,7 +63,7 @@ def test_commandcode_unary_timeout_terminates_and_reaps_process(monkeypatch):
         calls.append(kwargs)
         return process
 
-    monkeypatch.setattr("providers.commandcode.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("models.providers.api.commandcode.subprocess.Popen", fake_popen)
     result = _provider()._invoke_cmd("hello", timeout=2)
 
     assert "timed out" in result.lower()
@@ -74,7 +74,7 @@ def test_commandcode_unary_timeout_terminates_and_reaps_process(monkeypatch):
 
 def test_commandcode_stream_timeout_terminates_and_reaps_process(monkeypatch):
     process = _FakeProcess(timeout=True)
-    monkeypatch.setattr("providers.commandcode.subprocess.Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr("models.providers.api.commandcode.subprocess.Popen", lambda *args, **kwargs: process)
 
     result = list(_provider().stream_generate(prompt="hello", timeout=2))
 

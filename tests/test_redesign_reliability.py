@@ -236,7 +236,7 @@ async def test_handle_message_skips_duplicate_message_ids(monkeypatch, tmp_path)
     )
     monkeypatch.setattr(session_bus, "set_active_session_id", lambda *_a, **_k: None)
     monkeypatch.setattr(session_bus, "sync_loop_from_disk", lambda _loop: None)
-    monkeypatch.setattr("authentication.is_gateway_authorized", lambda *_a: True)
+    monkeypatch.setattr("security.core.auth.is_gateway_authorized", lambda *_a: True)
 
     gateway_run.ingress_dedupe.clear()
 

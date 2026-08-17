@@ -34,14 +34,14 @@ User
 ## Three User Interfaces
 
 A user can send a mission from **any** of these three interfaces. All three feed the same
-agent core (`orchestrators/v5/core.py`; `core/mission/` as the wrapper matures).
+agent core (`src/nexus/main_agent/core.py`; `core/mission/` as the wrapper matures).
 
 | Interface | Path | Role |
 |-----------|------|------|
-| **TUI** | `tui/`, `nexus/` | Ink API client launched by `python -m nexus`; starts/uses the `gui.api` backend. |
-| **Rich shell** | `shell/`, `nexus/` | Legacy in-process shell available with `python -m nexus --shell`. |
-| **GUI** | `gui/api.py`, `gui/src/App.tsx` | Visual mission cockpit and local FastAPI control plane. |
-| **Gateway** | `gateway/` | External channels (Telegram, Discord, WhatsApp, Meta) into the same runtime. |
+| **TUI** | `apps/tui/`, `src/nexus/` | Ink API client launched by `python -m nexus`; starts/uses the `apps.web.api` backend. |
+| **Rich shell** | `src/nexus/` | Legacy in-process shell available with `python -m nexus --shell` (`_run_rich_shell()` in the boot loader). |
+| **GUI** | `apps/web/api.py`, `apps/web/src/App.tsx` | Visual mission cockpit and local FastAPI control plane. |
+| **Gateway** | `gateways/` | External channels (Telegram, Discord, WhatsApp, Meta) into the same runtime. |
 
 Rules:
 
@@ -60,18 +60,18 @@ Shared state bus (local files today):
 
 | Store | Path | Contents |
 |-------|------|----------|
-| Active session | `workspace/active_session.json` | Current linked session for all three interfaces |
-| Session memory | `logs/sessions/{session_id}.json` | Conversation + loop memory |
-| Work events | `workspace/work_events/{session_id}.jsonl` | Mission timeline (tools, files, commands) |
-| Session meta | `logs/sessions/{session_id}.meta` | Title and session labels |
+| Active session | `.nexus/workspace/active_session.json` | Current linked session for all three interfaces |
+| Session memory | `.nexus/logs/sessions/{session_id}.json` | Conversation + loop memory |
+| Work events | `.nexus/workspace/work_events/{session_id}.jsonl` | Mission timeline (tools, files, commands) |
+| Session meta | `.nexus/logs/sessions/{session_id}.meta` | Title and session labels |
 
-Implementation: `core/session_bus.py` + `/api/sessions/active`.
+Implementation: `src/nexus/common/session_bus.py` + `/api/sessions/active`.
 
 Connection rules:
 
 - Use the **same `session_id`** on every interface (`default`, `session_173…`, or `gateway_{platform}_{chat_id}`).
 - Any interface that chats or switches session updates `active_session.json`.
-- GUI sync through `gui/api.py` (`/api/sessions/active`, `/api/work-events`).
+- GUI sync through `apps/web/api.py` (`/api/sessions/active`, `/api/work-events`).
 - TUI auto-joins the active session on start and calls `sync_memory` before each reply.
 - Gateway maps each chat to a stable session id on the same bus.
 - A mission started on any interface must be observable and continuable on the others without re-sending the prompt.
@@ -83,12 +83,12 @@ Connection rules:
 Most entry points are thin clients. They should not contain separate agent logic.
 **Legacy Rich shell is the exception**: it runs `NexusLoop` in-process via `shell/`.
 
-- `tui/` and `nexus/`: **TUI** — Ink client over the API backend.
-- `shell/` and `nexus/`: **Rich shell** — legacy direct operator interface with in-process `NexusLoop`.
-- `gui/api.py`: local FastAPI control plane for GUI.
-- `gui/src/App.tsx`: **GUI** — visual mission cockpit.
-- `gateway/`: **Gateway** — Telegram, WhatsApp, Discord, webhooks, and future channels.
-- `voice_chat.py` and `core/voice/`: speech input/output surface (supplementary).
+- `apps/tui/` and `src/nexus/`: **TUI** — Ink client over the API backend.
+- `src/nexus/`: **Rich shell** — legacy direct operator interface with in-process `NexusLoop`.
+- `apps/web/api.py`: local FastAPI control plane for GUI.
+- `apps/web/src/App.tsx`: **GUI** — visual mission cockpit.
+- `gateways/`: **Gateway** — Telegram, WhatsApp, Discord, webhooks, and future channels.
+- `apps/voice/voice_chat/`: speech input/output surface (supplementary).
 
 Each surface sends the same normalized request:
 
@@ -133,7 +133,7 @@ core/mission/
 
 ### 3. Reasoning Layer
 
-The current `orchestrators/v5/core.py` is the brain loop and emits
+The current `src/nexus/main_agent/core.py` is the brain loop and emits
 structured mission events instead of only plain stream text.
 
 Responsibilities:
@@ -162,7 +162,7 @@ mission.failed
 
 ### 4. Tool Execution Layer
 
-`tools/nexus_tools/registry.py` remains the executable capability layer.
+`extensions/tools/built_in/nexus_tools/registry.py` remains the executable capability layer.
 
 Every tool execution should produce a `WorkEvent`:
 
@@ -174,10 +174,10 @@ Every tool execution should produce a `WorkEvent`:
   "kind": "file",
   "action": "Edit file",
   "tool": "file_edit",
-  "target": "gui/src/App.tsx",
+  "target": "apps/web/src/App.tsx",
   "status": "done",
   "result": "Updated timeline renderer",
-  "preview_path": "gui/src/App.tsx"
+  "preview_path": "apps/web/src/App.tsx"
 }
 ```
 
@@ -203,9 +203,9 @@ Existing systems to preserve:
 - `core/world_model.py`
 - `core/autonomy/`
 - `core/os_power/`
-- `optimization/mission_replay.py`
+- `observability/mission_replay.py`
 - `tools/nexus_tools/advanced_power_tool.py`
-- `core/security/secret_scanner.py`
+- `security/scanners/secret_scanner.py`
 
 ### 6. Memory And Self-Improvement
 
@@ -354,7 +354,7 @@ transport, but the payload should follow this contract.
 - Add `core/mission/models.py`.
 - Add `core/mission/store.py`.
 - Store missions in `workspace/missions/`.
-- Keep existing `workspace/work_events/` compatibility.
+- Keep existing `.nexus/workspace/work_events/` compatibility.
 
 ### Phase B: Loop Integration
 
@@ -393,6 +393,6 @@ transport, but the payload should follow this contract.
 - Terminal and gateway must see the same truth as GUI.
 - Every file edit and command should be replayable.
 - Long missions must checkpoint and resume.
-- Runtime/generated data stays in `workspace/`, `logs/`, or configured stores.
+- Runtime/generated data stays in `.nexus/workspace/`, `.nexus/logs/`, or configured stores.
 - Claims must be backed by code, output, tests, or evidence.
 

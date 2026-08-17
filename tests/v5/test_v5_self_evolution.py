@@ -68,7 +68,7 @@ def test_multi_file_deployment_rolls_back_after_atomic_replace_failure(tmp_path,
         confidence=1.0,
     )
     original_replace = __import__(
-        "orchestrators.v5.self_evolution", fromlist=["os"]
+        "nexus.main_agent.self_evolution", fromlist=["os"]
     ).os.replace
     calls = 0
 
@@ -80,7 +80,7 @@ def test_multi_file_deployment_rolls_back_after_atomic_replace_failure(tmp_path,
         return original_replace(source, target)
 
     monkeypatch.setattr(
-        "orchestrators.v5.self_evolution.os.replace", fail_on_second_replace
+        "nexus.main_agent.self_evolution.os.replace", fail_on_second_replace
     )
     deployed = asyncio.run(layer._deploy_candidate(candidate))
 

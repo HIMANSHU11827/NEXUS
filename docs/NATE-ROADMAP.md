@@ -99,9 +99,9 @@ Query → all-MiniLM-L6-v2 (80MB, CPU) → 384-dim vector
 - `numpy`
 
 ## Files to Modify
-- `intelligence/nate/adaptive_schema.py` — replace `EmbeddingRouter` → `NATE_Route`
-- `intelligence/nate/nate_engine.py` — expose router stats, dual-path support
-- `intelligence/nate/__init__.py` — update exports
+- `src/nexus/capabilities/intelligence/nate/adaptive_schema.py` — replace `EmbeddingRouter` → `NATE_Route`
+- `src/nexus/capabilities/intelligence/nate/nate_engine.py` — expose router stats, dual-path support
+- `src/nexus/capabilities/intelligence/nate/__init__.py` — update exports
 - `pyproject.toml` — add deps
 
 ## Test

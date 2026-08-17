@@ -50,7 +50,7 @@ def test_mcp_catalog_resolves_env_references_only_when_starting(tmp_path, monkey
         )
     )
 
-    with patch("mcp.catalog.scripts.catalog.subprocess.Popen") as popen:
+    with patch("extensions.mcp.core.catalog.scripts.catalog.subprocess.Popen") as popen:
         popen.return_value.pid = 123
         catalog.start_server("github")
 

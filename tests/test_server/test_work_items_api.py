@@ -131,7 +131,7 @@ def test_work_item_api_validates_limit_and_preserves_legacy_tasks_route(tmp_path
 def test_work_event_sequences_are_unique_across_worker_processes(tmp_path):
     events_dir = tmp_path / "events"
     script = (
-        "import apps.api\n"
+        "import apps.api as server\n"
         f"server._WORK_EVENTS_DIR = {str(events_dir)!r}\n"
         "server._WORK_EVENT_SEQUENCES.clear()\n"
         "for index in range(10):\n"

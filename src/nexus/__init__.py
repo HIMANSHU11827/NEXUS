@@ -327,13 +327,13 @@ def _get_user_data_dirs(project_root: str):
         "configure": os.path.join(project_root, "configure"),
         "memory": os.path.join(project_root, "memory"),
         "knowledge": os.path.join(project_root, "knowledge"),
-        "workspace": os.path.join(project_root, "workspace"),
-        "logs": os.path.join(project_root, "logs"),
+        "workspace": os.path.join(project_root, ".nexus", "workspace"),
+        "logs": os.path.join(project_root, ".nexus", "logs"),
         "nexus_dotdir": os.path.join(project_root, ".nexus"),
         "opencode_memory": os.path.join(project_root, ".opencode", "memory"),
         "opencode_skills": os.path.join(project_root, ".opencode", "skills"),
         "evolution": os.path.join(project_root, "evolution", "memory_forge"),
-        "rag": os.path.join(project_root, "rag", "atlas"),
+        "rag": os.path.join(project_root, "knowledge", "rag", "atlas"),
     }
 
 
@@ -605,7 +605,7 @@ def _run_ink_tui(project_root: str, console, wait_for_api: bool = True) -> int:
         )
         return 1
 
-    tui_dir = os.path.join(project_root, "tui")
+    tui_dir = os.path.join(project_root, "apps", "tui")
     tui_entry = os.path.join(tui_dir, "nexus-tui.tsx")
     if not os.path.exists(tui_entry):
         console.print("[red]Ink TUI not found.[/red]")
@@ -966,7 +966,7 @@ def boot():
         try:
             command = (["npm.cmd"] if os.name == "nt" else ["npm"])
             command.extend(["run", "dev", "--", "--host", "127.0.0.1"])
-            _run_owned_foreground_process(command, os.path.join(project_root, "gui"))
+            _run_owned_foreground_process(command, os.path.join(project_root, "apps", "web"))
         finally:
             _terminate_server_process(proc)
         return

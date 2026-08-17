@@ -103,9 +103,9 @@ def test_legacy_voice_statistics_returns_public_error_only(monkeypatch):
         def from_config(cls, _config):
             raise RuntimeError(secret_error)
 
-    fake_voice = types.ModuleType("voice")
+    fake_voice = types.ModuleType("apps.voice")
     fake_voice.VoiceAssistant = FailingAssistant
-    monkeypatch.setitem(sys.modules, "voice", fake_voice)
+    monkeypatch.setitem(sys.modules, "apps.voice", fake_voice)
 
     payload = server.get_voice_statistics()
 

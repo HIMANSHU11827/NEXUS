@@ -8,7 +8,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from orchestrators.v5 import create_v5_loop
+from nexus.main_agent import create_v5_loop
 
 
 async def test_v5_basic():

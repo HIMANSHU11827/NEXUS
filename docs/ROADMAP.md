@@ -57,5 +57,5 @@ Build the best local-first autonomous engineering operating system: fast direct 
 ### Achieved this session
 - **NATE-Route**: Embedding-based tool router (all-MiniLM-L6-v2 + FAISS). 88% schema reduction, 67% token savings, 100% accuracy. Solves all 12 skill alignment problems at once with zero training.
 - **Self-Improving Lifecycle**: `evolution/local_trainer/` — auto harvests tool call logs → fine-tunes embedding + Zupra-50M → exports to GGUF → reloads into NATE. Runs autonomously on schedule.
-- **Zupra-50M Local Brain**: `providers/zupra.py` — MultivexAI/Zupra-1.6-50M-Instruct-Ultra-exp for fully offline CPU inference. No API key needed. Registered in provider factory.
+- **Zupra-50M Local Brain**: `models/providers/api/zupra.py` — MultivexAI/Zupra-1.6-50M-Instruct-Ultra-exp for fully offline CPU inference. No API key needed. Registered in provider factory.
 - **Lifecycle data pipeline**: `training_data/harvest/` collects structured JSONL from every tool call, routing decision, and OATS feedback event. Auto-triggers fine-tune at configurable thresholds.

@@ -6,30 +6,30 @@
 Custom local-first autonomous AI agent framework. Python backend + React/TypeScript GUI + Ink TUI.
 
 ## Project Structure
-- `nexus/` — Boot loader, canonical event system (`CanonicalEvent`, ~50 `EVENT_TYPES`)
-- `server/` — FastAPI HTTP/SSE server (port 8000, v2.1.0)
-- `orchestrators/` — `orchestrators/v5/core.py` (V5 `NexusLoop` — direct model/tool loop, stable)
-- `providers/` — 40+ LLM provider implementations with OAuth and fallback
-- `tools/` — 18 implemented tools + 13 unimplemented stubs, `.jsnol`/`.json` metadata discovery (BaseTool + ToolRegistry)
+- `src/nexus/` — Boot loader, canonical event system (`CanonicalEvent`, ~50 `EVENT_TYPES`)
+- `apps/api/` — FastAPI HTTP/SSE server (port 8000, v2.1.0)
+- `src/nexus/main_agent/` — `src/nexus/main_agent/core.py` (V5 `NexusLoop` — direct model/tool loop, stable)
+- `models/providers/` — 40+ LLM provider implementations (core/api/local/auth) with OAuth and fallback
+- `extensions/tools/built_in/` — implemented tools, `.jsnol`/`.json` metadata discovery (BaseTool + ToolRegistry)
 - `hive/` — Sub-agent engine (`NexusHiveEngine`) — spawn, consolidate, blackboard
-- `gui/` — React 18 + Vite + TypeScript GUI (port 5173) — rebuilt from scratch
-- `tui/` — Ink-based TUI (React 19, v3.0 redesign, 133 slash commands) launched by default
-- `mcp/` — MCP stdio client/server integration (NEXUSMCPServer + MCPClient + MCPTool)
-- `plugins/` — Plugin system with lifecycle hooks, trust model, tool registration
-- `skills/` — Skill registry with SKILL.md frontmatter format (69 skills, 14 categories)
+- `apps/web/` — React 18 + Vite + TypeScript GUI (port 5173) — rebuilt from scratch
+- `apps/tui/` — Ink-based TUI (React 19, v3.0 redesign, 133 slash commands) launched by default
+- `extensions/mcp/core/` — MCP stdio client/server integration (NEXUSMCPServer + MCPClient + MCPTool)
+- `extensions/plugins/built_in/` — Plugin system with lifecycle hooks, trust model, tool registration
+- `extensions/skills/built_in/` — Skill registry with SKILL.md frontmatter format (69 skills, 14 categories)
 - `memory/` — Multi-source MemoryManager with parallel prefetch + sync
 - `sandbox/` — 3-tier command sandbox (NO_SANDBOX/NORMAL/DOCKER) + risk scoring
-- `kernel/` — Central singleton with 20 lazy-loaded subsystems
-- `rag/` — BM25 + SimHash hybrid retrieval with Atlas deep indexing
-- `safety/` — Sovereign laws + logic prover + threat pattern scanning
-- `voice/` — Full voice pipeline (STT with 4 backends + KittenTTS + VAD)
-- `gateway/` — 21-platform messaging gateway (Telegram, Discord, WhatsApp, Slack, etc.)
+- `src/nexus/runtime/kernel/` — Central singleton with 20 lazy-loaded subsystems
+- `knowledge/rag/` — BM25 + SimHash hybrid retrieval with Atlas deep indexing
+- `security/policies/` — Sovereign laws + logic prover + threat pattern scanning
+- `apps/voice/` — Full voice pipeline (STT with 4 backends + KittenTTS + VAD)
+- `gateways/` — 21-platform messaging gateway (Telegram, Discord, WhatsApp, Slack, etc.)
 - `evolution/` — Self-improvement system with 6 forges + VersionManager
-- `intelligence/` — MoE Router + NATE 5-layer fused tool engine
-- `reasoning/` — HyperReasoningEngine (planner/critic/verifier)
-- `authentication/` — OAuth 2.0 (Google, GitHub) + token auth + gateway auth
+- `src/nexus/capabilities/intelligence/` — MoE Router + NATE 5-layer fused tool engine
+- `src/nexus/capabilities/reasoning/` — HyperReasoningEngine (planner/critic/verifier)
+- `security/core/auth.py` — OAuth 2.0 (Google, GitHub) + token auth + gateway auth
 - `security/` — Secret scanner + release hygiene
-- `config/` — YAML/JSON/env configuration with NexusConfigLoader
+- `configure/` — YAML/JSON/env configuration with NexusConfigLoader
 - `tests/` — 150+ test files
 
 ## Windows Setup
@@ -52,23 +52,23 @@ pip install -e .
 
 ## Test Commands
 - `python -m pytest tests/ -v`
-- `cd gui && npm run build`
-- `cd tui && npx tsx nexus-tui.tsx`
+- `cd apps/web && npm run build`
+- `cd apps/tui && npx tsx nexus-tui.tsx`
 
 ## Event Model
-Canonical events in `nexus/events.py`. ~50 event types covering run, message, plan, phase, tool, command, file, search, web, test, subagent lifecycles. Events flow via `work_event_sink` callback. Streamed to GUI via SSE.
+Canonical events in `src/nexus/events.py`. ~50 event types covering run, message, plan, phase, tool, command, file, search, web, test, subagent lifecycles. Events flow via `work_event_sink` callback. Streamed to GUI via SSE.
 
 ## Security Notes
 - Command risk scoring in `sandbox/risk.py`
 - 3-tier sandbox: NO_SANDBOX / NORMAL / DOCKER
-- Threat pattern detection in `tools/threat_patterns.py` (41 regex patterns, 3 scopes)
-- Plugin trust model in `plugins/trust.py`
-- Sovereign safety laws in `safety/laws.py` + LogicProver
+- Threat pattern detection in `extensions/tools/built_in/threat_patterns.py` (41 regex patterns, 3 scopes)
+- Plugin trust model in `extensions/plugins/built_in/trust.py`
+- Sovereign safety laws in `security/policies/laws.py` + LogicProver
 - No unsafe defaults; ask before destructive commands
 
 ## Known Limitations
-- `orchestrators/architect.py` and `mission_control.py` removed (legacy) — planning uses `todo.md` + `planning` tool
-- `intelligence/moa.py` (MixtureOfArchitects) and `intelligence/local_brain.py` (NexusLocalBrain) are stubs
+- Legacy `architect.py` and `mission_control.py` removed — planning uses `todo.md` + `planning` tool
+- `src/nexus/capabilities/intelligence/moa.py` (MixtureOfArchitects) and `src/nexus/capabilities/intelligence/local_brain.py` (NexusLocalBrain) are stubs
 - 13 tool directories are unimplemented stubs — registered but marked `unavailable` by `ToolRegistry`
 - `bash` tool is retired — `terminal` is the only command-execution tool
 - No WebSocket yet — uses SSE + polling
