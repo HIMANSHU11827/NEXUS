@@ -74,7 +74,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for full details.
 | **Gateway** | `gateway/` — 21-platform messaging gateway | **Beta** |
 | **Evolution** | `evolution/` — self-improvement (6 forges + VersionManager) | **Beta** |
 | **GUI** | `gui/` — React 18 + Vite + TypeScript (rebuilt from scratch) | **Stable** |
-| **TUI** | `tui/` — Ink (React 19) TUI with 133 slash commands | **Stable** |
+| **TUI** | `tui/` — Ink (React 19) TUI backed by the canonical 152-command registry | **Stable** |
 
 ---
 
@@ -142,7 +142,7 @@ orchestrators/      V5 NexusLoop agent loop (orchestrators/v5/core.py)
 providers/          40+ LLM provider implementations + OAuth
 tools/              Registry-discovered tools with .jsnol metadata + BaseTool
 gui/                React 18 + Vite + TypeScript frontend (port 5173, rebuilt)
-tui/                Ink-based TUI (React 19, v3.0 redesign, 133 slash commands)
+tui/                Ink-based TUI (React 19, v3.0 redesign, canonical 152-command registry)
 hive/               Sub-agent engine (spawn, consolidate, blackboard)
 kernel/             Central singleton (20 lazy-loaded subsystems)
 memory/             Multi-source MemoryManager (parallel prefetch/sync)
@@ -198,7 +198,7 @@ pip install -e ".[dev]"
 - `intelligence/moa.py` provides the hybrid provider-mesh facade and
   `intelligence/local_brain.py` provides lazy local-provider routing; true
   multi-model ensemble and local vision inference remain optional capabilities
-- 13 tool directories (`tools/<name>/`) are unimplemented stubs — registered but marked `unavailable` by `ToolRegistry` (e.g. `live_news_tool`, `workspace_path_guard`)
+- The 13 stale unimplemented stub tool directories were permanently deleted from the source tree — the model only ever sees executable tools
 - `bash` tool is retired — `terminal` is the only command-execution tool
 - No WebSocket — SSE + polling used for streaming
 

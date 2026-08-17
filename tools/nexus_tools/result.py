@@ -445,6 +445,16 @@ def parse_tool_arguments(raw: Any, *, tool_name: str = "") -> Dict[str, Any]:
     try:
         parsed = json.loads(repaired)
         if isinstance(parsed, dict):
+            # A dangling value such as ``{"path":`` used to be repaired to
+            # ``{}``, silently discarding the model's argument text.  That
+            # turns a transport/protocol defect into a misleading missing
+            # parameter error and makes the repair loop repeat the same call.
+            # Only accept an empty repaired object when the original payload
+            # was explicitly empty.
+            if not parsed and candidate.strip() not in {"{}", "{ }"}:
+                raise ToolArgumentError(
+                    f"Tool '{tool_name}' arguments were truncated before a usable value"
+                )
             return parsed
     except json.JSONDecodeError:
         pass

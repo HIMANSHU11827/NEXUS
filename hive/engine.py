@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import tempfile
 import uuid
@@ -165,6 +166,14 @@ class SubAgent:
         effect_reconciler: Callable[[str, str, Dict[str, Any]], Awaitable[Any] | Any] | None = None,
         pause_waiter: Callable[[], Awaitable[None]] | None = None,
         step_budget: Callable[[], bool] | None = None,
+        terminal_callback: Callable[[], Any] | None = None,
+        # New optional capability metadata (backward-compatible; all optional).
+        category: str = "",
+        specialization: str = "",
+        capabilities: Any = None,
+        model: str | None = None,
+        provider: str | None = None,
+        connection_mode: str = "inherit",
     ):
         self.agent_id = agent_id
         self.task = task
@@ -173,6 +182,13 @@ class SubAgent:
         self.sink = sink
         self.llm_call = llm_call
         self.root = root or os.getcwd()
+        # Capability metadata (Agent Team / specialization aware).
+        self.category = category or ""
+        self.specialization = specialization or persona
+        self.capabilities = capabilities
+        self.model = model
+        self.provider = provider
+        self.connection_mode = connection_mode
         # `tools` is an alias for `tool_registry`; either a ToolRegistry-like
         # object (with async .execute(name, **params)) or a plain callable
         # executor  fn(name, params) -> str | awaitable.
@@ -186,17 +202,68 @@ class SubAgent:
         self.effect_reconciler = effect_reconciler
         self.pause_waiter = pause_waiter
         self.step_budget = step_budget
+        self.terminal_callback = terminal_callback
         self.attempts: int = 0
         self.transcript: List[Dict[str, str]] = []
         self.tool_calls: List[Dict[str, Any]] = []
         self.steps_used: int = 0
         self.result: str = ""
+        self.error: str = ""
         self.status: str = "pending"
         self.started_at: float = 0.0
         self.finished_at: float = 0.0
         self.last_heartbeat: float = time.time()
+        self.last_progress_at: float = self.last_heartbeat
         self.replacement_count: int = 0
         self.hive_id: str = ""
+        self._lifecycle_generation: int = 0
+        self._fenced_through_generation: int = 0
+        self._inflight_sync_operations: set[asyncio.Task[Any]] = set()
+
+    def begin_generation(self) -> int:
+        """Start a new engine-owned execution generation."""
+        self._lifecycle_generation += 1
+        return self._lifecycle_generation
+
+    def fence_generation(self, generation: int | None = None) -> int:
+        """Prevent an old execution from publishing terminal state."""
+        target = self._lifecycle_generation if generation is None else int(generation)
+        self._fenced_through_generation = max(
+            self._fenced_through_generation, target
+        )
+        return target
+
+    def generation_is_current(self, generation: int) -> bool:
+        return (
+            int(generation) == self._lifecycle_generation
+            and int(generation) > self._fenced_through_generation
+        )
+
+    @property
+    def has_inflight_sync_operations(self) -> bool:
+        return any(not task.done() for task in self._inflight_sync_operations)
+
+    async def _run_sync_operation(self, fn: Callable[[], Any]) -> Any:
+        """Run sync work off-loop while retaining its true completion handle.
+
+        Shielding the worker task means cancellation of the owning agent does
+        not make an active worker thread look finished. Recovery can therefore
+        quarantine the uncertain operation instead of starting a duplicate.
+        """
+        task = asyncio.create_task(asyncio.to_thread(fn))
+        self._inflight_sync_operations.add(task)
+
+        def _finished(completed: asyncio.Task[Any]) -> None:
+            self._inflight_sync_operations.discard(completed)
+            if completed.cancelled():
+                return
+            try:
+                completed.exception()
+            except asyncio.CancelledError:
+                pass
+
+        task.add_done_callback(_finished)
+        return await asyncio.shield(task)
 
     @property
     def checkpoint_path(self) -> str:
@@ -219,10 +286,12 @@ class SubAgent:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "last_heartbeat": self.last_heartbeat,
+            "last_progress_at": self.last_progress_at,
             "replacement_count": self.replacement_count,
             "transcript": _safe_value(self.transcript[-40:]),
             "tool_calls": _safe_value(self.tool_calls[-40:]),
             "result": _safe_text(self.result, 6000),
+            "error": _safe_text(self.error, 2000),
             "updated_at": time.time(),
         }
         directory = os.path.dirname(self.checkpoint_path)
@@ -256,12 +325,15 @@ class SubAgent:
             self.started_at = float(payload.get("started_at", self.started_at) or self.started_at)
             self.finished_at = float(payload.get("finished_at", self.finished_at) or self.finished_at)
             self.last_heartbeat = float(payload.get("last_heartbeat", self.last_heartbeat) or self.last_heartbeat)
+            self.last_progress_at = float(payload.get("last_progress_at", self.last_progress_at) or self.last_progress_at)
             self.replacement_count = int(payload.get("replacement_count", self.replacement_count) or self.replacement_count)
             self.transcript = [dict(item) for item in payload.get("transcript", []) if isinstance(item, dict)]
             self.tool_calls = [dict(item) for item in payload.get("tool_calls", []) if isinstance(item, dict)]
             self.result = str(payload.get("result") or self.result)
+            self.error = str(payload.get("error") or self.error)
             self.status = str(payload.get("status") or self.status)
             return True
+
         except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError, ValueError):
             return False
 
@@ -270,6 +342,16 @@ class SubAgent:
             self.checkpoint()
         except Exception as exc:
             logger.debug("SubAgent %s checkpoint failed: %s", self.agent_id, exc)
+
+    def _notify_terminal(self) -> None:
+        if not callable(self.terminal_callback):
+            return
+        try:
+            self.terminal_callback()
+        except Exception:
+            logger.debug(
+                "SubAgent %s terminal callback failed", self.agent_id, exc_info=True
+            )
 
     async def _emit(self, event_type: str, status: str, **extra) -> None:
         if not self.sink:
@@ -280,6 +362,9 @@ class SubAgent:
             "kind": "subagent",
             "run_id": self.parent_run_id,
             "turn_id": self.parent_run_id,
+            "parent_run_id": self.parent_run_id,
+            "agent_id": self.agent_id,
+            "task_id": self.agent_id,
             "related_subagent": self.agent_id,
             "title": f"{self.persona}: {self.task[:80]}",
             "action": self.persona,
@@ -300,19 +385,46 @@ class SubAgent:
     def _touch_heartbeat(self) -> None:
         self.last_heartbeat = time.time()
 
+    def _touch_progress(self) -> None:
+        self.last_progress_at = time.time()
+        self.last_heartbeat = self.last_progress_at
+
+    async def _heartbeat_keeper(self, interval: float = 15.0) -> None:
+        """Keep the durable heartbeat fresh while the agent is mid-operation.
+
+        ``run()`` can spend minutes inside a single LLM call or tool execution
+        without touching any pause boundary; without this keeper the recovery
+        sweeper would cancel a healthy agent as "stale" and its uncancellable
+        worker thread would duplicate side effects.
+        """
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                self._touch_heartbeat()
+                # Recovery may run in another process, so liveness must be
+                # durable rather than only fresh in this engine's memory.
+                self._safe_checkpoint()
+        except asyncio.CancelledError:
+            return
+
     async def _wait_if_paused(self) -> None:
         """Cooperatively stop at a safe boundary while the Hive is paused."""
         if self.pause_waiter is not None:
             await self.pause_waiter()
-        self._touch_heartbeat()
+        self._touch_progress()
 
-    async def run(self) -> str:
+    async def run(self, generation: int | None = None) -> str:
+        if generation is None:
+            generation = self.begin_generation()
+        if not self.generation_is_current(generation):
+            raise asyncio.CancelledError("sub-agent generation was fenced")
         self.attempts += 1
         self.started_at = time.time()
-        self._touch_heartbeat()
+        self._touch_progress()
         self.status = "running"
         self._safe_checkpoint()
         await self._emit("subagent.started", "running")
+        keeper = asyncio.create_task(self._heartbeat_keeper())
 
         messages = [
             {"role": "system", "content": self._system_prompt()},
@@ -326,17 +438,21 @@ class SubAgent:
             if self.step_budget is not None and not self.step_budget():
                 raise RuntimeError("Hive aggregate step budget exhausted")
             if self.tool_registry is not None:
-                self.result = await self._run_tool_loop(messages)
+                candidate_result = await self._run_tool_loop(messages)
             else:
-                self.result = await self._llm(messages)
+                candidate_result = await self._llm(messages)
 
-            if not str(self.result or "").strip():
+            if not str(candidate_result or "").strip():
                 raise RuntimeError("sub-agent returned an empty result")
 
+            if not self.generation_is_current(generation):
+                raise asyncio.CancelledError("sub-agent generation was fenced")
+            self.result = str(candidate_result)
             self.finished_at = time.time()
             duration_ms = int((self.finished_at - self.started_at) * 1000)
             self.status = "success"
             self._safe_checkpoint()
+            self._notify_terminal()
 
             await self._emit(
                 "subagent.result", "success",
@@ -347,11 +463,15 @@ class SubAgent:
             return self.result
 
         except Exception as e:
+            if not self.generation_is_current(generation):
+                raise asyncio.CancelledError("sub-agent generation was fenced") from None
             self.finished_at = time.time()
             duration_ms = int((self.finished_at - self.started_at) * 1000)
             self.status = "failed"
-            self._safe_checkpoint()
             err_str = _safe_text(e, 2000)
+            self.error = err_str
+            self._safe_checkpoint()
+            self._notify_terminal()
             await self._emit(
                 "subagent.failed", "failed",
                 error={"message": err_str},
@@ -360,16 +480,29 @@ class SubAgent:
             raise
 
         except asyncio.CancelledError:
-            self.finished_at = time.time()
-            duration_ms = int((self.finished_at - self.started_at) * 1000)
-            self.status = "cancelled"
-            self._safe_checkpoint()
-            await self._emit(
-                "subagent.failed", "cancelled",
-                error={"message": "Sub-agent cancelled"},
-                duration_ms=duration_ms,
-            )
+            if self.generation_is_current(generation):
+                self.finished_at = time.time()
+                duration_ms = int((self.finished_at - self.started_at) * 1000)
+                self.status = "cancelled"
+                self.error = "Sub-agent cancelled"
+                self._safe_checkpoint()
+                self._notify_terminal()
+                await self._emit(
+                    "subagent.failed", "cancelled",
+                    error={"message": "Sub-agent cancelled"},
+                    duration_ms=duration_ms,
+                )
             raise
+        finally:
+            keeper.cancel()
+            done, pending = await asyncio.wait({keeper}, timeout=0.25)
+            if done:
+                await asyncio.gather(*done, return_exceptions=True)
+            if pending:
+                logger.warning(
+                    "SubAgent %s heartbeat keeper ignored bounded cancellation",
+                    self.agent_id,
+                )
 
     # ------------------------------------------------------------------
     # LLM + tool mini-loop
@@ -388,8 +521,37 @@ class SubAgent:
             base += skills_context
         if self.tool_registry is None:
             return base
+        header = ""
+        if self.specialization and self.specialization != self.persona:
+            header += f"\nYour specialization is '{self.specialization}'."
+        if self.category:
+            header += f"\nYour agent category is '{self.category}'."
+        if self.model:
+            header += f"\nPreferred model: {self.model}."
+        if self.provider:
+            header += f"\nPreferred provider/connection: {self.provider}."
+        # Surface resolved capability allow-lists so the agent (and the human
+        # operator reading the prompt) can see exactly what it may use (§14).
+        caps = self.capabilities
+        if caps is not None:
+            allowed: List[str] = []
+            for label, items in (
+                ("tools", getattr(caps, "tools", None)),
+                ("skills", getattr(caps, "skills", None)),
+                ("plugins", getattr(caps, "plugins", None)),
+                ("mcp_servers", getattr(caps, "mcp_servers", None)),
+            ):
+                if items:
+                    allowed.append(f"{label}={', '.join(items)}")
+            if allowed:
+                header += "\nGranted capabilities: " + "; ".join(allowed) + "."
+            mode = getattr(caps, "mode", None)
+            if mode:
+                header += f"\nCapability mode: {mode}."
+
         return (
             base
+            + header
             + "\n\nYou may call ONE tool per turn using exactly this format:\n"
             '<tool_call>{"tool": "<tool_name>", "params": {...}}</tool_call>\n'
             f"Available tools: {', '.join(self._available_tools()) or 'unknown'}\n"
@@ -493,11 +655,17 @@ class SubAgent:
 
     async def _llm(self, messages: List[Dict[str, str]]) -> str:
         if not self.llm_call:
-            return await self._default_llm_call(messages)
-        if inspect.iscoroutinefunction(self.llm_call):
-            return await self.llm_call(messages)
-        result = await asyncio.to_thread(self.llm_call, messages)
-        return await result if inspect.isawaitable(result) else result
+            result = await self._default_llm_call(messages)
+        elif inspect.iscoroutinefunction(self.llm_call):
+            result = await self.llm_call(messages)
+        else:
+            result = await self._run_sync_operation(
+                lambda: self.llm_call(messages)
+            )
+            if inspect.isawaitable(result):
+                result = await result
+        self._touch_progress()
+        return result
 
     async def _execute_tool(self, name: str, params: Dict[str, Any]) -> str:
         """Run a tool via a ToolRegistry-like object, dict, or callable executor."""
@@ -518,9 +686,10 @@ class SubAgent:
         # pause/cancel signals from reaching sibling workers. Calling the
         # function in a worker also safely handles async callables: they return
         # their coroutine, which is awaited back on the owning loop below.
-        out = await asyncio.to_thread(fn)
+        out = await self._run_sync_operation(fn)
         if inspect.isawaitable(out):
             out = await out
+        self._touch_progress()
         # Normalize ToolResult-like objects.
         if hasattr(out, "success") and hasattr(out, "output"):
             text = out.output if out.success else f"ERROR: {getattr(out, 'error', '') or out.output}"
@@ -634,7 +803,7 @@ class SubAgent:
                 router = NexusMoERouter()
                 return router, router.chat(messages)
 
-            router, out = await asyncio.to_thread(_router_chat)
+            router, out = await self._run_sync_operation(_router_chat)
             is_err = getattr(router, "_is_provider_error", None)
             if isinstance(out, str) and callable(is_err) and is_err(out):
                 raise RuntimeError(out)
@@ -647,14 +816,16 @@ class SubAgent:
             factory = NexusProviderFactory()
             provider = factory.get_provider_by_name("cloud", "lm_studio")
             if provider and hasattr(provider, "chat"):
-                out = await asyncio.to_thread(provider.chat, messages)
+                out = await self._run_sync_operation(
+                    lambda: provider.chat(messages)
+                )
                 if isinstance(out, str) and (
                     out.startswith("Error:") or out.startswith("[PROVIDER_ERROR]")
                 ):
                     raise RuntimeError(out)
                 return out
             if provider and hasattr(provider, "stream_chat"):
-                out = await asyncio.to_thread(
+                out = await self._run_sync_operation(
                     lambda: "".join(provider.stream_chat(messages))
                 )
                 if isinstance(out, str) and (
@@ -689,15 +860,31 @@ class NexusHiveEngine:
         max_agent_retries: int = 2,
         max_concurrency: int | None = None,
         max_total_steps: int | None = None,
+        max_agent_replacements: int = 2,
+        replacement_cancel_timeout: float = 5.0,
         effect_reconciler: Callable[[str, str, Dict[str, Any]], Awaitable[Any] | Any] | None = None,
+        shutdown_timeout: float = 5.0,
     ):
         self.root = root
         self.consolidation_timeout = consolidation_timeout
         self.tool_registry = tool_registry
         self.max_agent_steps = max(1, int(max_agent_steps or 1))
         self.max_agent_retries = max(0, int(max_agent_retries or 0))
+        # Resource protection: an unattended 24/7 runtime must never let a
+        # single hive spawn an unbounded number of parallel sub-agents.
+        # ``None`` (the default) now resolves to an env-configurable cap
+        # (``NEXUS_HIVE_MAX_CONCURRENCY``, default 8); an explicit ``0`` keeps
+        # the documented legacy unlimited behavior.
+        if max_concurrency is None:
+            try:
+                max_concurrency = max(0, int(os.environ.get("NEXUS_HIVE_MAX_CONCURRENCY", "8")))
+            except (TypeError, ValueError):
+                max_concurrency = 8
         self.max_concurrency = max(0, int(max_concurrency or 0))
         self.max_total_steps = max(0, int(max_total_steps or 0))
+        self.max_agent_replacements = max(0, int(max_agent_replacements or 0))
+        self.replacement_cancel_timeout = max(0.01, float(replacement_cancel_timeout))
+        self.shutdown_timeout = max(0.01, float(shutdown_timeout))
         self.effect_reconciler = effect_reconciler
         self._agent_semaphore = asyncio.Semaphore(self.max_concurrency) if self.max_concurrency else None
         self.effect_ledger = HiveEffectLedger(self.root)
@@ -707,10 +894,15 @@ class NexusHiveEngine:
         self._blackboard: Dict[str, Any] = {
             key: item.get("value") for key, item in self.state_store.get_blackboard().items()
         }
+        self._blackboard_lock = threading.Lock()
         self._agents: Dict[str, SubAgent] = {}
         self._hives: Dict[str, List[SubAgent]] = {}
         self._agent_tasks: Dict[str, asyncio.Task[str]] = {}
+        self._agent_task_generations: Dict[str, int] = {}
         self._hive_tasks: Dict[str, asyncio.Task[None]] = {}
+        self._detached_tasks: set[asyncio.Task[Any]] = set()
+        self._detached_task_count = 0
+        self._closing = False
         self._hive_resume_events: Dict[str, asyncio.Event] = {}
         self._hive_controls: Dict[str, Dict[str, Any]] = {}
         self._hive_consensus: Dict[str, Dict[str, Any]] = {}
@@ -730,6 +922,38 @@ class NexusHiveEngine:
 
     def _make_hive_id(self) -> str:
         return f"hive_{uuid.uuid4().hex[:8]}"
+
+    async def _emit_hive_event(
+        self,
+        hive_id: str,
+        parent_run_id: str,
+        event_type: str,
+        status: str,
+        **extra,
+    ) -> None:
+        """Publish a hive-level correlation event through the work event sink."""
+        if not self._sink:
+            return
+        event: Dict[str, Any] = {
+            "event_id": f"hive_{hive_id}_{uuid.uuid4().hex[:12]}",
+            "event_type": event_type,
+            "kind": "handoff" if event_type.startswith("handoff") else "hive",
+            "run_id": hive_id,
+            "turn_id": hive_id,
+            "parent_run_id": parent_run_id or hive_id,
+            "hive_id": hive_id,
+            "title": event_type,
+            "status": status,
+            "visibility": "public",
+            "timestamp": time.time(),
+            **extra,
+        }
+        try:
+            result = self._sink(event)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as e:
+            logger.debug("Hive event sink failed for %s: %s", event_type, e)
 
     @property
     def _hive_control_dir(self) -> str:
@@ -840,18 +1064,66 @@ class NexusHiveEngine:
             agent for agent in self._agents.values()
             if (hive_id is None or agent.hive_id == hive_id)
             and agent.status == "running"
-            and now - float(getattr(agent, "last_heartbeat", 0.0) or 0.0) >= threshold
+            and now - max(
+                float(getattr(agent, "last_heartbeat", 0.0) or 0.0),
+                float(getattr(agent, "last_progress_at", 0.0) or 0.0),
+            ) >= threshold
         ]
         replaced: List[str] = []
         for agent in candidates[:allowed]:
+            if agent.replacement_count >= self.max_agent_replacements:
+                agent.status = "failed"
+                agent.error = "stale agent replacement budget exhausted"
+                agent.finished_at = time.time()
+                agent._safe_checkpoint()
+                await agent._emit(
+                    "subagent.failed", "failed",
+                    payload={
+                        "quarantined": True,
+                        "replacement_count": agent.replacement_count,
+                    },
+                    error=agent.error,
+                )
+                continue
             task = self._agent_tasks.get(agent.agent_id)
+            generation = self._agent_task_generations.get(
+                agent.agent_id, agent._lifecycle_generation
+            )
             if task is not None and not task.done():
+                agent.fence_generation(generation)
                 task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                done, pending = await asyncio.wait(
+                    {task}, timeout=self.replacement_cancel_timeout
+                )
+                if done:
+                    await asyncio.gather(*done, return_exceptions=True)
+                if pending or agent.has_inflight_sync_operations:
+                    agent.status = "failed"
+                    agent.error = (
+                        "stale agent has cancellation-resistant or uncertain work; "
+                        "replacement fenced to prevent duplicate effects"
+                    )
+                    agent.finished_at = time.time()
+                    agent._safe_checkpoint()
+                    for resistant in pending:
+                        self._detach_task(
+                            resistant,
+                            owner=f"stale-agent:{agent.agent_id}",
+                        )
+                    await agent._emit(
+                        "subagent.failed", "failed",
+                        payload={
+                            "quarantined": True,
+                            "cancellation_timed_out": bool(pending),
+                            "uncertain_sync_operation": agent.has_inflight_sync_operations,
+                        },
+                        error=agent.error,
+                    )
+                    continue
             agent.replacement_count += 1
             agent.status = "pending"
             agent.finished_at = 0.0
-            agent._touch_heartbeat()
+            agent._touch_progress()
             agent._safe_checkpoint()
             await agent._emit(
                 "subagent.replaced", "restarting",
@@ -885,26 +1157,91 @@ class NexusHiveEngine:
         task.add_done_callback(cleanup)
         return task
 
+    def _detach_task(self, task: asyncio.Task[Any], *, owner: str) -> None:
+        """Observe, but never await, work that exceeded a cancellation bound."""
+        self._detached_tasks.add(task)
+        self._detached_task_count += 1
+
+        def _observe(completed: asyncio.Task[Any]) -> None:
+            self._detached_tasks.discard(completed)
+            if completed.cancelled():
+                return
+            try:
+                error = completed.exception()
+            except asyncio.CancelledError:
+                return
+            if error is not None:
+                logger.warning(
+                    "Detached Hive task %s failed after fencing: %s", owner, error
+                )
+            else:
+                logger.info("Detached Hive task %s exited after fencing", owner)
+
+        task.add_done_callback(_observe)
+
+    async def _cancel_tasks_bounded(
+        self,
+        tasks: List[asyncio.Task[Any]] | set[asyncio.Task[Any]],
+        *,
+        owner: str,
+        timeout: float | None = None,
+    ) -> set[asyncio.Task[Any]]:
+        active = {task for task in tasks if task is not None and not task.done()}
+        for task in active:
+            task.cancel()
+        if not active:
+            return set()
+        done, pending = await asyncio.wait(
+            active,
+            timeout=self.shutdown_timeout if timeout is None else max(0.0, timeout),
+        )
+        if done:
+            await asyncio.gather(*done, return_exceptions=True)
+        for task in pending:
+            self._detach_task(task, owner=owner)
+        if pending:
+            logger.warning(
+                "Detached %d cancellation-resistant Hive task(s) for %s",
+                len(pending),
+                owner,
+            )
+        return pending
+
     def _start_agent(self, agent: SubAgent) -> asyncio.Task[str]:
+        if self._closing:
+            raise RuntimeError("Hive engine is closing")
+        generation = agent.begin_generation()
+        self._agent_task_generations[agent.agent_id] = generation
         return self._track_task(
-            self._agent_tasks, agent.agent_id, self._run_agent_with_retry(agent)
+            self._agent_tasks,
+            agent.agent_id,
+            self._run_agent_with_retry(agent, generation),
         )
 
-    async def _run_agent_with_retry(self, agent: SubAgent) -> str:
+    async def _run_agent_with_retry(
+        self, agent: SubAgent, generation: int | None = None
+    ) -> str:
         """Retry transient sub-agent failures with bounded backoff.
 
         The retry is at the agent boundary, so the parent Hive retains one
         stable agent identity and its lifecycle events can be reconciled after
         a process restart. Cancellation is never retried.
         """
+        if generation is None:
+            generation = agent.begin_generation()
+
         async def _attempts() -> str:
             attempts = max(0, int(getattr(agent, "max_retries", self.max_agent_retries)))
             for retry_index in range(attempts + 1):
                 try:
-                    return await agent.run()
+                    if not agent.generation_is_current(generation):
+                        raise asyncio.CancelledError("sub-agent generation was fenced")
+                    return await agent.run(generation)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    if not agent.generation_is_current(generation):
+                        raise asyncio.CancelledError("sub-agent generation was fenced") from None
                     if retry_index >= attempts:
                         raise
                     await agent._emit(
@@ -929,7 +1266,8 @@ class NexusHiveEngine:
             # _hive_tasks runner to refresh durable control state.  Refresh at
             # the shared agent boundary so success, failure, and cancellation
             # all leave the persisted Hive lifecycle truthful.
-            self._refresh_hive_control(agent.hive_id)
+            if agent.generation_is_current(generation):
+                self._refresh_hive_control(agent.hive_id)
 
     async def spawn_agent(
         self,
@@ -969,6 +1307,7 @@ class NexusHiveEngine:
         agent.hive_id = hive_id
         self._agents[agent_id] = agent
         self._hives[hive_id] = [agent]
+        agent.terminal_callback = lambda: self._refresh_hive_control(hive_id)
         self._hive_resume_events[hive_id] = asyncio.Event()
         self._hive_resume_events[hive_id].set()
         self._persist_hive_control(hive_id, "running")
@@ -984,12 +1323,22 @@ class NexusHiveEngine:
         dependencies: Optional[Dict[int, List[int]]] = None,
         agent_ids: Optional[List[str]] = None,
         total_step_budget: int | None = None,
+        agent_capabilities: Optional[List[Optional[Any]]] = None,
+        agent_categories: Optional[List[str]] = None,
+        agent_specializations: Optional[List[str]] = None,
     ) -> tuple[str, List[SubAgent]]:
         """Spawn multiple sub-agents concurrently (a "hive").
 
         Args:
             tasks: List of (task, persona) tuples.
             parent_run_id: Run/turn ID for event linkage.
+            agent_capabilities: optional parallel list of resolved
+                :class:`CapabilitySpec` (or ``hive.models.CapabilitySpec``)
+                instances to attach to each agent, surfacing granted
+                capabilities in the agent prompt and for inspection.
+            agent_categories: optional parallel list of agent category strings
+                (parallel / sequential / specialized / sub_agent / agent_team).
+            agent_specializations: optional parallel list of specialization keys.
 
         Returns:
             (hive_id, list of SubAgent instances).
@@ -1032,6 +1381,9 @@ class NexusHiveEngine:
                 effect_reconciler=self.effect_reconciler,
                 pause_waiter=None,
                 step_budget=step_budget.consume if step_budget is not None else None,
+                category=(agent_categories[index] if agent_categories and index < len(agent_categories) else ""),
+                specialization=(agent_specializations[index] if agent_specializations and index < len(agent_specializations) else persona),
+                capabilities=(agent_capabilities[index] if agent_capabilities and index < len(agent_capabilities) else None),
             )
             agent.hive_id = hive_id
             if requested_id:
@@ -1044,6 +1396,8 @@ class NexusHiveEngine:
             agents.append(agent)
 
         self._hives[hive_id] = agents
+        for agent in agents:
+            agent.terminal_callback = lambda hive_id=hive_id: self._refresh_hive_control(hive_id)
         self._hive_resume_events[hive_id] = asyncio.Event()
         self._hive_resume_events[hive_id].set()
         for agent in agents:
@@ -1094,6 +1448,7 @@ class NexusHiveEngine:
                 completed[index] = False
                 agents[index].status = "failed"
                 agents[index].result = "dependency failed; agent was not executed"
+                agents[index].error = agents[index].result
                 agents[index]._safe_checkpoint()
                 await agents[index]._emit(
                     "subagent.blocked", "failed",
@@ -1108,6 +1463,7 @@ class NexusHiveEngine:
                         completed[index] = False
                         agents[index].status = "failed"
                         agents[index].result = "dependency cycle or unresolved prerequisite"
+                        agents[index].error = agents[index].result
                         agents[index]._safe_checkpoint()
                         await agents[index]._emit(
                             "subagent.blocked", "failed",
@@ -1116,8 +1472,25 @@ class NexusHiveEngine:
                 continue
             wave = [self._start_agent(agents[index]) for index in ready]
             results = await asyncio.gather(*wave, return_exceptions=True)
+            parent_run_id = agents[0].parent_run_id if agents else hive_id
             for index, result in zip(ready, results):
                 completed[index] = not isinstance(result, BaseException)
+                dependents = sorted(
+                    agent_index for agent_index, deps in dependencies.items()
+                    if index in deps and 0 <= agent_index < len(agents)
+                )
+                if dependents:
+                    await self._emit_hive_event(
+                        hive_id,
+                        parent_run_id,
+                        "handoff.completed",
+                        "success" if completed[index] else "failed",
+                        payload={
+                            "from": agents[index].agent_id,
+                            "to": [agents[agent_index].agent_id for agent_index in dependents],
+                            "from_status": agents[index].status,
+                        },
+                    )
                 if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
                     logger.warning("Hive %s dependency agent %s failed: %s", hive_id, agents[index].agent_id, _safe_text(result, 1000))
                 pending.discard(index)
@@ -1146,7 +1519,12 @@ class NexusHiveEngine:
         self._refresh_hive_control(hive_id)
 
     async def cancel_hive(self, hive_id: str) -> None:
-        """Cancel and await all work owned by a hive."""
+        """Cancel hive work within a hard bound and fence late completion."""
+        agents = self._hives.get(hive_id, [])
+        terminal = {"success", "failed", "cancelled", "canceled", "error"}
+        if agents and all(str(agent.status or "").lower() in terminal for agent in agents):
+            self._refresh_hive_control(hive_id)
+            return
         # Publish the durable decision before waiting on local tasks. A worker
         # in another server process may be inside a model/tool call and only
         # observe cancellation at its next safe boundary; persisting last
@@ -1162,17 +1540,42 @@ class NexusHiveEngine:
             hive_task.cancel()
             tasks.append(hive_task)
 
-        for agent in self._hives.get(hive_id, []):
+        for agent in agents:
             agent_task = self._agent_tasks.get(agent.agent_id)
             if agent_task is not None and not agent_task.done():
+                if str(agent.status or "").lower() in {
+                    "success", "failed", "cancelled", "canceled", "error"
+                }:
+                    # The terminal state is already authoritative. The small
+                    # remaining task tail is only event/checkpoint cleanup and
+                    # must not be rewritten as cancellation.
+                    tasks.append(agent_task)
+                    continue
+                generation = self._agent_task_generations.get(
+                    agent.agent_id, agent._lifecycle_generation
+                )
+                agent.fence_generation(generation)
+                agent.status = "cancelled"
+                agent.error = "Hive cancellation fenced late completion"
+                agent.finished_at = time.time()
+                agent._safe_checkpoint()
                 agent_task.cancel()
                 tasks.append(agent_task)
 
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            pending = await self._cancel_tasks_bounded(
+                tasks, owner=f"hive-cancel:{hive_id}"
+            )
+            if pending:
+                self._persist_hive_control(
+                    hive_id,
+                    "cancelled",
+                    f"detached {len(pending)} cancellation-resistant local task(s)",
+                )
 
     async def aclose(self) -> None:
-        """Cancel and await every outstanding engine-owned task."""
+        """Fence and boundedly cancel every outstanding engine-owned task."""
+        self._closing = True
         hive_ids = list(self._hives)
         if hive_ids:
             await asyncio.gather(
@@ -1180,13 +1583,17 @@ class NexusHiveEngine:
                 return_exceptions=True,
             )
 
-        remaining = [
-            task for task in self._agent_tasks.values() if not task.done()
-        ]
+        remaining = list({
+            task
+            for task in [*self._agent_tasks.values(), *self._hive_tasks.values()]
+            if not task.done()
+        })
         for task in remaining:
             task.cancel()
         if remaining:
-            await asyncio.gather(*remaining, return_exceptions=True)
+            await self._cancel_tasks_bounded(
+                remaining, owner="hive-engine-shutdown"
+            )
 
     async def consolidate_hive(
         self,
@@ -1304,6 +1711,16 @@ class NexusHiveEngine:
         if len(winning_agents) < target:
             reasons.append(f"no vote reached quorum ({len(winning_agents)} < {target})")
         accepted = not reasons
+        failed = [
+            {
+                "agent_id": agent.agent_id,
+                "persona": agent.persona,
+                "status": agent.status,
+                "error": _safe_text(getattr(agent, "error", "") or "", 500),
+            }
+            for agent in agents
+            if str(agent.status or "").lower() != "success"
+        ]
         assessment = {
             "hive_id": hive_id,
             "accepted": accepted,
@@ -1314,6 +1731,7 @@ class NexusHiveEngine:
             "winning_vote": winning_vote,
             "votes": {key: list(value) for key, value in sorted(votes.items())},
             "missing_personas": missing_personas,
+            "failed": failed,
             "reasons": reasons,
             "assessed_at": time.time(),
         }
@@ -1346,8 +1764,13 @@ class NexusHiveEngine:
             # not silently dropped, and keep a meaningful chunk for the LLM path.
             if agent.result:
                 parts.append(_safe_text(agent.result, 3000))
-            elif agent.status != "success":
-                parts.append("    (agent failed with no output)")
+            else:
+                parts.append("    (agent produced no output)")
+            # Failure reasons must not vanish: surface the recorded error for
+            # every non-successful agent, even when it has a partial result.
+            error_text = _safe_text(getattr(agent, "error", "") or "", 1000)
+            if str(agent.status or "").lower() != "success" and error_text:
+                parts.append(f"    (error: {error_text})")
             if getattr(agent, "tool_calls", None):
                 used = ", ".join(sorted({c["tool"] for c in agent.tool_calls}))
                 parts.append(f"    (tools used: {used})")
@@ -1362,10 +1785,15 @@ class NexusHiveEngine:
     ) -> str:
         summary_parts: List[str] = []
         for i, agent in enumerate(agents, 1):
+            status = str(agent.status or "").lower()
+            error_text = _safe_text(getattr(agent, "error", "") or "", 1000)
+            result_line = _safe_text(agent.result or "(no output)", 3000)
+            if status != "success" and error_text:
+                result_line += f"\nERROR: {error_text}"
             summary_parts.append(
                 f"--- AGENT {i} [{agent.persona}] status={agent.status} ---\n"
                 f"TASK: {_safe_text(agent.task, 2000)}\n"
-                f"RESULT:\n{_safe_text(agent.result or '(no output)', 3000)}"
+                f"RESULT:\n{result_line}"
             )
         messages = [
             {
@@ -1375,7 +1803,8 @@ class NexusHiveEngine:
                     "on parts of one task. Merge their outputs into ONE coherent answer: "
                     "de-duplicate, resolve contradictions (state them if unresolved), keep "
                     "concrete details (file paths, commands, findings), and note any agent "
-                    "that failed. Output the unified answer only — no preamble."
+                    "that failed. Never invent output for an agent marked failed. "
+                    "Output the unified answer only — no preamble."
                 ),
             },
             {"role": "user", "content": "\n\n".join(summary_parts)},
@@ -1389,7 +1818,25 @@ class NexusHiveEngine:
                 out = await out
 
         text = str(out or "").strip()
-        return text or raw
+        if not text:
+            return raw
+        # Verified consolidation: a deterministic footnote guarantees every
+        # failed agent stays visible in the final answer, independent of the
+        # LLM's compliance with the note-above instruction.
+        failed = [
+            agent for agent in agents
+            if str(agent.status or "").lower() != "success"
+        ]
+        if failed:
+            lines = []
+            for agent in failed:
+                line = f"- {agent.agent_id} ({agent.persona}): status={agent.status}"
+                error_text = _safe_text(getattr(agent, "error", "") or "", 500)
+                if error_text:
+                    line += f" - {error_text}"
+                lines.append(line)
+            text += "\n\nFAILED AGENTS (verified, not consolidated):\n" + "\n".join(lines)
+        return text
 
     # ------------------------------------------------------------------
     # Auto-decomposition
@@ -1506,13 +1953,15 @@ class NexusHiveEngine:
         record = self.state_store.put_blackboard(
             key, value, expected_version=expected_version, writer=writer,
         )
-        self._blackboard[str(key)] = value
+        with self._blackboard_lock:
+            self._blackboard[str(key)] = value
         return record
 
     def get_live_signals(self) -> Dict[str, Any]:
         durable = self.state_store.get_blackboard()
-        self._blackboard = {key: item.get("value") for key, item in durable.items()}
-        return dict(self._blackboard)
+        with self._blackboard_lock:
+            self._blackboard = {key: item.get("value") for key, item in durable.items()}
+            return dict(self._blackboard)
 
     def get_blackboard_snapshot(self) -> Dict[str, Dict[str, Any]]:
         """Return values plus versions for conflict-safe agent handoffs."""

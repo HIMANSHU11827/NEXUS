@@ -52,6 +52,8 @@ class V5ParallelExecutor:
     @staticmethod
     def _normalise_result(result: Any) -> Tuple[bool, str, Optional[str]]:
         """Preserve structured tool failure/success results exactly."""
+        if isinstance(result, asyncio.CancelledError):
+            return False, "", "tool cancelled"
         if isinstance(result, Exception):
             return False, "", redact_secrets(result)[:4000]
         if isinstance(result, dict) and "success" in result:
@@ -67,6 +69,19 @@ class V5ParallelExecutor:
                 redact_secrets(getattr(result, "error", "") or "")[:4000] or None,
             )
         return True, str(result), None
+
+    def _is_run_level_cancellation(self) -> bool:
+        """Keep an intentional run cancellation distinct from branch failure."""
+        try:
+            registry = getattr(self, "_run_controls", None)
+            turn_id = str(getattr(self, "_current_turn_id", "") or "")
+            control = registry.get(turn_id) if registry is not None and turn_id else None
+            if control is not None and bool(getattr(control, "cancelled", False)):
+                return True
+            task = asyncio.current_task()
+            return bool(task is not None and task.cancelling())
+        except Exception:
+            return True
 
     def _is_read_only_tool(self, name: str, params: Dict[str, Any]) -> bool:
         """Classify a tool step as read-only (parallel) or write (sequential)."""
@@ -175,6 +190,10 @@ class V5ParallelExecutor:
         for index, call in write_steps:
             try:
                 result = await self._run_tool(call)
+            except asyncio.CancelledError as exc:
+                if self._is_run_level_cancellation():
+                    raise
+                result = exc
             except Exception as e:
                 result = e
             actions[index] = self._step_action(index, steps[index].get("description") or "", result)
@@ -252,7 +271,13 @@ class V5ParallelExecutor:
                     return_exceptions=True,
                 )
                 for (index, call), outcome in zip(pending, outcomes):
-                    if isinstance(outcome, Exception):
+                    if isinstance(outcome, asyncio.CancelledError):
+                        if self._is_run_level_cancellation():
+                            raise outcome
+                        results.append(
+                            {"index": index, "success": False, "error": "tool cancelled"}
+                        )
+                    elif isinstance(outcome, Exception):
                         results.append(
                             {"index": index, "success": False, "error": str(outcome)}
                         )
@@ -321,6 +346,10 @@ class V5ParallelExecutor:
             if error:
                 result["error"] = error
             return result
+        except asyncio.CancelledError:
+            if self._is_run_level_cancellation():
+                raise
+            return {"index": index, "success": False, "error": "tool cancelled"}
         except Exception as e:  # noqa: BLE001
             return {"index": index, "success": False, "error": redact_secrets(e)[:4000]}
 

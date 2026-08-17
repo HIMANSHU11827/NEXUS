@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Dino Runner — NEXUS</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background: linear-gradient(#0f172a, #1e293b);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: #e2e8f0;
+    padding: 20px;
+  }
+  .wrap { width: min(900px, 96vw); }
+  .hud {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 16px; margin-bottom: 10px; font-weight: 800; font-variant-numeric: tabular-nums;
+  }
+  .hud .title { letter-spacing: .5px; }
+  .badge { background: #334155; padding: 6px 12px; border-radius: 999px; font-size: 14px; }
+  #best { color: #fbbf24; }
+  .hint { color: #94a3b8; font-weight: 600; font-size: 14px; }
+  #game {
+    position: relative; width: 100%; height: 300px; overflow: hidden;
+    border: 2px solid #475569; border-radius: 18px; cursor: pointer; user-select: none;
+    background: linear-gradient(#bae6fd 0 54%, #f59e0b 54% 58%, #34d399 58% 100%);
+    box-shadow: 0 20px 50px rgba(0,0,0,.45);
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #ground {
+    position: absolute; left: 0; right: 0; bottom: 44px; height: 6px;
+    background: #312e81; border-radius: 3px;
+  }
+  .cloud { position: absolute; background: #ffffff; opacity: .85; border-radius: 999px; }
+  .cloud::before, .cloud::after {
+    content: ""; position: absolute; background: inherit; border-radius: 999px;
+  }
+  .mount { position: absolute; background: #7dd3fc; opacity: .5; }
+  #dino {
+    position: absolute; left: 70px; bottom: 50px; width: 52px; height: 56px;
+    transform-origin: bottom center;
+  }
+  .body {
+    position: absolute; left: 0; bottom: 0; width: 52px; height: 46px;
+    background: #16a34a; border-radius: 16px 16px 8px 8px;
+    box-shadow: inset -9px 0 rgba(21,128,61,.55), inset 0 -4px 0 rgba(21,128,61,.4);
+  }
+  .eye::before {
+    content: ""; position: absolute; right: 8px; top: 11px; width: 8px; height: 8px;
+    background: #fff; border-radius: 50%; box-shadow: 2px 2px 0 #111827, 7px 0 0 3px #16a34a;
+  }
+  .tail {
+    position: absolute; left: -16px; bottom: 16px; width: 18px; height: 10px;
+    background: #15803d; border-radius: 8px 0 0 8px;
+  }
+  .arm {
+    position: absolute; left: 12px; bottom: 2px; width: 12px; height: 6px;
+    background: #15803d; border-radius: 6px;
+  }
+  .leg {
+    position: absolute; bottom: -10px; width: 16px; height: 12px; background: #14532d;
+    border-radius: 5px;
+  }
+  .leg.l { left: 8px; }
+  .leg.r { right: 8px; }
+  .jump .leg.l, .jump .leg.r { opacity: 0; }
+  .obstacle {
+    position: absolute; bottom: 50px; background: #065f46; border-radius: 8px 8px 4px 4px;
+    box-shadow: inset -7px 0 rgba(4,120,87,.6);
+  }
+  .obstacle.small { width: 22px; height: 38px; }
+  .obstacle.med   { width: 30px; height: 54px; }
+  .obstacle.big   { width: 40px; height: 72px; }
+  .obstacle.tall  { width: 26px; height: 92px; }
+  .obstacle::before, .obstacle::after {
+    content: ""; position: absolute; background: #065f46; border-radius: 6px;
+    box-shadow: inset -5px 0 rgba(4,120,87,.6);
+  }
+  .obstacle.small::before { left: -11px; top: 8px;  width: 12px; height: 20px; }
+  .obstacle.small::after  { right: -11px; top: 16px; width: 12px; height: 16px; }
+  .bird {
+    position: absolute; width: 46px; height: 34px; bottom: auto;
+  }
+  .bird .w { position: absolute; width: 46px; height: 10px; background: #b45309; border-radius: 999px; }
+  .bird .w.up   { top: 2px;  transform: rotate(-14deg); }
+  .bird .w.down { top: 20px; transform: rotate(14deg); }
+  .bird .beak {
+    position: absolute; left: 44px; top: 12px; width: 10px; height: 6px;
+    background: #fbbf24; border-radius: 3px; border: 2px solid #92400e;
+  }
+  #msg {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    pointer-events: none; text-align: center; padding: 16px;
+  }
+  #msg .inner {
+    background: rgba(15,23,42,.78); color: #fff; padding: 22px 34px; border-radius: 18px;
+    backdrop-filter: blur(3px);
+  }
+  #msg h1 { font-size: clamp(24px, 5vw, 40px); letter-spacing: 1px; }
+  #msg p { margin-top: 8px; color: #cbd5e1; font-weight: 600; }
+  #msg .kbd {
+    display: inline-block; background: #334155; border: 1px solid #64748b; border-bottom-width: 3px;
+    border-radius: 6px; padding: 1px 8px; margin: 0 2px; font-family: monospace; font-size: 14px;
+  }
+  .running #msg { display: none; }
+  #flash { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="hud">
+      <div class="title game--title">🦖 Dino Runner</div>
+      <div class="badge">Score: <span id="score">0</span></div>
+      <div class="badge">Best: <span id="best">0</span></div>
+      <div class="hint">Space / Up / Click / Tap</div>
+    </div>
+    <section id="game" aria-label="Dino runner game">
+      <div id="ground"></div>
+      <div id="dino" class="dino">
+        <div class="body eye"></div>
+        <div class="tail"></div>
+        <div class="arm"></div>
+        <div class="leg l"></div>
+        <div class="leg r"></div>
+      </div>
+      <div id="msg">
+        <div class="inner">
+          <h1>DINO RUNNER</h1>
+          <p>Press <span class="kbd">Space</span> or <span class="kbd">↑</span> / click / tap to start &amp; jump</p>
+        </div>
+      </div>
+      <div id="flash"></div>
+    </section>
+  </main>
+
+<script>
+(() => {
+  const game = document.getElementById('game');
+  const dino = document.getElementById('dino');
+  const msg = document.getElementById('msg').innerHTML;
+  const scoreEl = document.getElementById('score');
+  const bestEl = document.getElementById('best');
+  const flash = document.getElementById('flash');
+
+  // ---- state ----
+  const BEST_KEY = 'dino_best_v2';
+  let best = +(localStorage.getItem(BEST_KEY) || 0);
+  bestEl.textContent = String(best);
+
+  let running = false, over = false;
+  let y = 0, vy = 0;            // dino vertical
+  let score = 0, speed = 6;
+  let speedTimer = 0, scoreTimer = 0;
+  let obstacles = [], clouds = [], mountains = [], birds = [];
+  let spawnTimer = 0, birdTimer = 0;
+  let frame = 0, last = 0, leg = 0, legTimer = 0;
+  let duck = false;
+
+  const W = () => game.clientWidth;
+
+  // ---- helpers ----
+  function reset() {
+    running = true; over = false;
+    score = 0; speed = 6; y = 0; vy = 0;
+    obstacles = []; birds = [];
+    spawnTimer = 90; birdTimer = 500; speedTimer = 0;
+    dino.classList.add('jump');
+    dino.classList.remove('duck');
+    document.getElementById('msg').style.display = 'grid';
+    document.getElementById('msg').innerHTML =
+      '<div class="inner"><h1>GO!</h1></div>';
+    setTimeout(() => { document.getElementById('msg').style.display = 'none'; }, 400);
+    buildScene();
+  }
+
+  function buildScene() {
+    const g = document.getElementById('game');
+    g.querySelectorAll('.cloud,.mount,.obstacle,.bird').forEach(n => n.remove());
+    clouds = []; mountains = []; obstacles = []; birds = [];
+    // clouds
+    for (let i = 0; i < 4; i++) {
+      spawnCloud(true);
+    }
+    // mountains
+    for (let i = 0; i < 6; i++) {
+      const m = document.createElement('div');
+      m.className = 'mount';
+      const base = 44 + Math.random() * 60;
+      m.style.width = base + 'px';
+      m.style.height = Math.random() * 40 + 24 + 'px';
+      m.style.left = (Math.random() * W()) + 'px';
+      m.style.bottom = '44px';
+      m.style.borderRadius = '12px 12px 0 0';
+      m.dataset.x = parseFloat(m.style.left) * 0.4;
+      game.appendChild(m); mountains.push(m);
+    }
+  }
+
+  function spawnCloud(initial) {
+    const c = document.createElement('div');
+    c.className = 'cloud';
+    const s = Math.random() * 22 + 18;
+    c.style.width = s + 'px'; c.style.height = s * 0.45 + 'px';
+    c.style.top = (Math.random() * 90 + 12) + 'px';
+    c.dataset.speed = Math.random() * 0.5 + 0.3;
+    c.style.left = (initial ? Math.random() * W() : W() + 80) + 'px';
+    clouds.push(c); game.appendChild(c);
+  }
+
+  function spawnObstacle() {
+    const o = document.createElement('div');
+    const roll = Math.random();
+    o.className = 'obstacle ' +
+      (roll < .4 ? 'small' : roll < .7 ? 'med' : roll < .9 ? 'big' : 'tall');
+    o.style.left = (W() + 60) + 'px';
+    obstacles.push(o); game.appendChild(o);
+  }
+
+  function spawnBird() {
+    const b = document.createElement('div');
+    b.className = 'bird';
+    const h = 90 + Math.random() * 60;  // altitude above ground
+    b.style.bottom = (50 + h) + 'px';
+    b.style.left = (W() + 40) + 'px';
+    b.innerHTML = '<div class="w up"></div><div class="w down"></div><div class="beak"></div>';
+    birds.push(b); game.appendChild(b);
+  }
+
+  // ---- jump ----
+  function jump() {
+    if (over) { restart(); return; }
+    if (!running) { reset(); return; }
+    if (y === 0) {
+      vy = 15.5;
+      dino.classList.add('jump');
+    }
+  }
+
+  function restart() {
+    dino.classList.remove('jump');
+    reset();
+  }
+
+  // ---- game over ----
+  function gameOver() {
+    over = true; running = false;
+    if (score > best) {
+      best = score;
+      localStorage.setItem(BEST_KEY, String(best));
+      bestEl.textContent = String(best);
+    }
+    flash.style.transition = 'none'; flash.style.opacity = '.5';
+    requestAnimationFrame(() => {
+      flash.style.transition = 'opacity .5s'; flash.style.opacity = '0';
+    });
+    const m = document.getElementById('msg');
+    m.style.display = 'grid';
+    m.innerHTML =
+      '<div class="inner"><h1>GAME OVER</h1>' +
+      '<p>Score: <b>' + score + '</b> &nbsp;·&nbsp; Best: <b>' + best + '</b></p>' +
+      '<p>Press <span class="kbd">Space</span> or click / tap to play again</p></div>';
+  }
+
+  function hit(a, b) {
+    const ar = a.getBoundingClientRect(), br = b.getBoundingClientRect();
+    const pad = 4;
+    return ar.left + pad < br.right - pad && ar.right - pad > br.left + pad &&
+           ar.top + pad < br.bottom - pad && ar.bottom - pad > br.top + pad;
+  }
+
+  // ---- main loop ----
+  function loop(now) {
+    const dt = Math.min(50, now - last || 16);
+    last = now;
+    frame++;
+    if (running) {
+      // score & difficulty
+      scoreTimer += dt;
+      if (scoreTimer > 100) { scoreTimer = 0; score += 1; scoreEl.textContent = String(score); }
+      speedTimer += dt;
+      if (speedTimer > 550) { speedTimer = 0; speed += 0.25; }
+      speed = Math.min(speed, 16);
+
+      // physics
+      vy -= 0.011 * dt;
+      y = Math.max(0, y + vy);
+      if (y === 0 && vy < 0) {
+        vy = 0;
+        dino.classList.remove('jump');
+      }
+      dino.style.transform = 'translateY(' + (-y) + 'px)';
+
+      // leg animation
+      if (y === 0) {
+        legTimer += dt;
+        if (legTimer > 90) { legTimer = 0; leg ^= 1; }
+        dino.querySelector('.leg.l').style.transform = 'rotate(' + (leg ? -28 : 22) + 'deg)';
+        dino.querySelector('.leg.r').style.transform = 'rotate(' + (leg ? 22 : -28) + 'deg)';
+      }
+
+      // obstacles
+      spawnTimer -= dt;
+      if (spawnTimer <= 0) {
+        spawnObstacle();
+        const gap = Math.max(340, 620 - score * 3 - Math.random() * 260);
+        spawnTimer = gap;
+      }
+      for (const o of obstacles) {
+        o.style.left = (parseFloat(o.style.left) - speed * 0.35 * dt / 16) + 'px';
+      }
+      obstacles = obstacles.filter(o => parseFloat(o.style.left) > -120);
+
+      // birds
+      birdTimer -= dt;
+      if (birdTimer <= 0) {
+        spawnBird();
+        birdTimer = 480 + Math.random() * 500;
+      }
+      for (const b of birds) {
+        b.style.left = (parseFloat(b.style.left) - speed * 0.42 * dt / 16) + 'px';
+        b.querySelector('.w.up').style.transform = 'rotate(' + (frame % 20 < 10 ? -40 : -8) + 'deg)';
+        b.querySelector('.w.down').style.transform = 'rotate(' + (frame % 20 < 10 ? 40 : 8) + 'deg)';
+      }
+      birds = birds.filter(b => parseFloat(b.style.left) > -140);
+
+      // ground/celestial scrolling
+      clouds.forEach((c, i) => {
+        c.style.left = (parseFloat(c.style.left) - c.dataset.speed * 0.35) + 'px';
+        if (parseFloat(c.style.left) < -120) { c.remove(); clouds.splice(i, 1); spawnCloud(false); }
+      });
+      mountains.forEach((m, i) => {
+        m.style.left = (parseFloat(m.style.left) - speed * 0.12 * dt / 16) + 'px';
+        if (parseFloat(m.style.left) < -100) { m.remove(); mountains.splice(i, 1); const mt = document.createElement('div'); mt.className='mount'; const base=44+Math.random()*60; mt.style.width=base+'px'; mt.style.height=(Math.random()*40+24)+'px'; mt.style.left=(W()+100)+'px'; mt.style.bottom='44px'; mt.style.borderRadius='12px 12px 0 0'; game.appendChild(mt); mountains.push(mt); }
+      });
+
+      // collisions
+      for (const o of obstacles) {
+        if (hit(dino, o)) { gameOver(); break; }
+      }
+      for (const b of birds) {
+        if (hit(dino, b)) { gameOver(); break; }
+      }
+    }
+    requestAnimationFrame(loop);
+  }
+
+  // ---- input ----
+  addEventListener('keydown', e => {
+    if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); jump(); }
+  });
+  game.addEventListener('pointerdown', e => { e.preventDefault(); jump(); });
+
+  // ---- boot ----
+  buildScene();
+  document.getElementById('msg').style.display = 'grid';
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

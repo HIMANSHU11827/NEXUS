@@ -70,12 +70,9 @@ class GoogleGeminiProvider(NexusBaseProvider):
             if function_call:
                 name = str(function_call.get("name") or "").strip()
                 if name:
-                    args = function_call.get("args")
-                    if not isinstance(args, dict):
-                        try:
-                            args = json.loads(args) if args else {}
-                        except (json.JSONDecodeError, TypeError):
-                            args = {}
+                    args = NexusBaseProvider.normalize_tool_arguments(
+                        function_call.get("args", {}), tool_name=name
+                    )
                     outputs.append(f"<function={name}>{json.dumps(args, ensure_ascii=False)}")
             text = part.get("text")
             if text:

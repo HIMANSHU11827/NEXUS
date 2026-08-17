@@ -179,6 +179,12 @@ class LineAdapter(BasePlatformAdapter):
         try:
             url, payload = self._build_text_payload(chat_id, text, reply_to)
             resp = await self._client.post(url, json=payload)
+            if reply_to and not resp.is_success:
+                # replyToken is single-use: a failed reply can never be
+                # retried with the same token. Fall back to a push so the
+                # durable delivery ledger's retries have a chance to land.
+                url, payload = self._build_text_payload(chat_id, text, None)
+                resp = await self._client.post(url, json=payload)
             data = resp.json()
             return SendResult(
                 success=resp.is_success,

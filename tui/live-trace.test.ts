@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {activityFromWorkEvent, mergeActivityTargetFields, type ActivityItem} from './helpers.js';
+import {activityFromWorkEvent, fileStatusFromWorkEvent, mergeActivityTargetFields, type ActivityItem} from './helpers.js';
 import {activityKindLabel, activityStatusWord} from './inline-activity.js';
 import {phaseDisplayLabel} from './banner.js';
 
@@ -59,6 +59,21 @@ const mergedFile = mergeActivityTargetFields(
 );
 assert.equal(mergedFile.summary, 'src/providers/fallback.ts');
 assert.deepEqual(mergedFile.files, ['src/providers/fallback.ts']);
+
+assert.equal(fileStatusFromWorkEvent({
+    event_type: 'file.read', kind: 'file', action: 'Read file', path: 'src/readme.md', status: 'done'
+}), null, 'reads do not appear as changes');
+assert.deepEqual(fileStatusFromWorkEvent({
+    event_type: 'file.edited', kind: 'file', action: 'Edit file', path: 'src/app.ts', status: 'done',
+    changed_lines: {added: 4, removed: 2}
+}), {
+    name: 'src/app.ts', status: 'EDIT FILE', additions: 4, deletions: 2
+});
+assert.deepEqual(fileStatusFromWorkEvent({
+    event_type: 'file.created', kind: 'file', action: 'Create file', path: 'src/new.ts', status: 'done'
+}), {
+    name: 'src/new.ts', status: 'CREATE FILE'
+}, 'unknown counts stay unknown instead of becoming +0/-0');
 
 assert.equal(activityStatusWord('running'), 'LIVE');
 assert.equal(activityStatusWord('done'), 'DONE');

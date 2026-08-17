@@ -61,6 +61,18 @@ class IngressDedupe:
         with self._lock:
             self._recent.clear()
 
+    def forget(self, key: str) -> None:
+        """Forget a key so a failed delivery can be retried (at-least-once).
+
+        Outer ingress layers (webhooks) record a key before dispatching; if
+        the handler fails, the platform retry must not be dropped as a
+        duplicate. Callers forget the key on handler failure.
+        """
+        if not key:
+            return
+        with self._lock:
+            self._recent.pop(key, None)
+
 
 ingress_dedupe = IngressDedupe()
 
@@ -144,8 +156,14 @@ class GatewayRunner:
 
     DELIVERY_LEASE_SECONDS = 60.0
     DELIVERY_LOOP_INTERVAL_SECONDS = 2.0
+    DEFAULT_RUN_TIMEOUT_SECONDS = 120.0
 
     def __init__(self, root: Optional[str] = None, delivery_ledger: Optional[DeliveryLedger] = None):
+        self._root = os.path.abspath(root or os.environ.get("NEXUS_ROOT") or os.getcwd())
+        self._deadline_seconds = float(
+            os.getenv("NEXUS_GATEWAY_TIMEOUT", str(self.DEFAULT_RUN_TIMEOUT_SECONDS))
+        )
+        self._deadline_seconds = min(3600.0, max(1.0, self._deadline_seconds))
         self.adapters: Dict[str, BasePlatformAdapter] = {}
         self._loops: Dict[str, NexusLoop] = {}
         self._running = False
@@ -160,7 +178,7 @@ class GatewayRunner:
     def _get_loop(self, event: MessageEvent) -> NexusLoop:
         session_id = self.session_id_for(event)
         if session_id not in self._loops:
-            loop = NexusLoop()
+            loop = NexusLoop(root_dir=self._root)
             loop.load_memory(session_id)
             self._loops[session_id] = loop
         return self._loops[session_id]
@@ -207,18 +225,51 @@ class GatewayRunner:
                 if getattr(result, "success", False):
                     self._delivery_ledger.ack(item["delivery_id"], self._delivery_owner, getattr(result, "message_id", "") or "")
                 else:
+                    error = redact_secrets(getattr(result, "error", "send failed") or "send failed")
                     self._delivery_ledger.fail(
                         item["delivery_id"],
                         self._delivery_owner,
-                        redact_secrets(getattr(result, "error", "send failed") or "send failed"),
+                        error,
                     )
+                    await self._notify_permanent_delivery_failure(item, adapter, error)
             except Exception as exc:
+                error = redact_secrets(exc)
                 self._delivery_ledger.fail(
-                    item["delivery_id"], self._delivery_owner, redact_secrets(exc)
+                    item["delivery_id"], self._delivery_owner, error
                 )
+                await self._notify_permanent_delivery_failure(item, adapter, error)
             finally:
                 renewal_task.cancel()
                 await asyncio.gather(renewal_task, return_exceptions=True)
+
+    async def _notify_permanent_delivery_failure(
+        self, item: Dict[str, Any], adapter: BasePlatformAdapter, error: str
+    ) -> None:
+        """Surface a permanently-undeliverable message instead of losing it.
+
+        When a delivery exhausts its attempt budget the message is lost to the
+        platform; log it loudly and make one final best-effort notification to
+        the chat so the user knows rather than silently never receiving it.
+        """
+        record = self._delivery_ledger.get(str(item.get("delivery_id") or ""))
+        if record is None or str(record.get("status") or "") != "failed":
+            return
+        logger.error(
+            "delivery %s to %s:%s permanently failed after max attempts: %s",
+            item.get("delivery_id"), item.get("platform"), item.get("chat_id"), error,
+        )
+        try:
+            await adapter.send_text(
+                str(item.get("chat_id") or ""),
+                "[GATEWAY_ERROR]: A previous message could not be delivered after repeated attempts and may be lost.",
+                reply_to=str(item.get("reply_to") or "") or None,
+            )
+        except Exception:
+            logger.warning(
+                "failed to notify %s:%s about the lost delivery %s",
+                item.get("platform"), item.get("chat_id"), item.get("delivery_id"),
+                exc_info=True,
+            )
 
     async def _renew_delivery_lease(self, delivery_id: str, lease_seconds: float) -> None:
         """Keep a slow external send owned until it reaches a terminal result."""
@@ -317,11 +368,11 @@ class GatewayRunner:
 
         try:
             loop = self._get_loop(event)
-            set_active_session_id(loop.root, session_id, source=f"gateway:{event.platform}")
+            set_active_session_id(self._root, session_id, source=f"gateway:{event.platform}")
             sync_loop_from_disk(loop)
             response_buffer = ""
             response_sequence = 0
-            async for chunk in loop.stream_run(event.text):
+            async for chunk in loop.stream_run(event.text, deadline_seconds=self._deadline_seconds):
                 if isinstance(chunk, dict):
                     if chunk.get("type") != "content":
                         continue
@@ -346,10 +397,27 @@ class GatewayRunner:
                 self._enqueue_delivery(event, response_sequence, response_buffer)
             await self._drain_deliveries()
 
+        except asyncio.TimeoutError:
+            logger.error(
+                "Gateway reasoning timed out after %.0fs (session=%s)",
+                self._deadline_seconds,
+                session_id,
+            )
+            seq = response_sequence if "response_sequence" in locals() else 0
+            self._enqueue_delivery(
+                event,
+                seq + 1,
+                "[GATEWAY_ERROR]: The gateway request timed out. Please try again.",
+            )
+            await self._drain_deliveries()
         except Exception as e:
             safe_error = redact_secrets(e)
             logger.error("Error in gateway reasoning: %s", safe_error)
-            self._enqueue_delivery(event, 1, "[GATEWAY_ERROR]: The gateway could not complete this request.")
+            # Never reuse sequence 1 here: it collides with the first flushed
+            # chunk's idempotency key and the ledger silently drops the error
+            # message. Track the real counter so the error always lands.
+            seq = response_sequence if "response_sequence" in locals() else 0
+            self._enqueue_delivery(event, seq + 1, "[GATEWAY_ERROR]: The gateway could not complete this request.")
             await self._drain_deliveries()
 
     async def _connect_adapter(self, adapter: BasePlatformAdapter) -> bool:

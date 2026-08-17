@@ -38,7 +38,7 @@ export const NexusWelcomeLogo = React.memo(({width, height}: NexusWelcomeLogoPro
         >
             {showLargeMark ? (
                 <Box flexDirection="column" alignItems="center">
-                    <Gradient colors={['#4da3ff', '#7687f5', '#a576cf', '#d16f94']}>
+                    <Gradient colors={['#4da3ff', '#72b7ff', '#ffb454', '#ff8a3d']}>
                         <Text backgroundColor={THEME.panelAltBg}>{LARGE_WORDMARK}</Text>
                     </Gradient>
                     <Text color="grey">Local-first autonomous engineering agent</Text>
@@ -46,7 +46,7 @@ export const NexusWelcomeLogo = React.memo(({width, height}: NexusWelcomeLogoPro
                 </Box>
             ) : (
                 <Box flexDirection="column">
-                    <Gradient colors={['#4da3ff', '#a576cf', '#d16f94']}>
+                    <Gradient colors={['#4da3ff', '#ffb454', '#ff8a3d']}>
                         <Text bold>NEXUS</Text>
                     </Gradient>
                     {height >= 4 && <Text color="grey">Ask · edit · run · /help</Text>}

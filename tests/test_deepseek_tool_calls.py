@@ -76,3 +76,24 @@ def test_deepseek_stream_buffers_native_tool_call_fragments(monkeypatch):
     ))
 
     assert result == ['<function=web_search>{"query": "latest news"}']
+
+
+def test_deepseek_stream_preserves_provider_usage(monkeypatch):
+    provider = DeepSeekProvider()
+    provider.api_key = "live-test-key"
+
+    class Response:
+        status_code = 200
+
+        def iter_lines(self, **kwargs):
+            chunks = [
+                {"choices": [{"delta": {"content": "ok"}}]},
+                {"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 2}},
+            ]
+            return [
+                ("data: " + json.dumps(chunk)).encode() for chunk in chunks
+            ] + [b"data: [DONE]"]
+
+    monkeypatch.setattr(provider.session, "post", lambda *args, **kwargs: Response())
+    assert list(provider.stream_generate(messages=[{"role": "user", "content": "hi"}])) == ["ok"]
+    assert provider._last_usage == {"prompt_tokens": 9, "completion_tokens": 2}

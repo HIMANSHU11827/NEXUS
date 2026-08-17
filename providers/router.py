@@ -434,6 +434,7 @@ class ModelRouter:
     def _invoke(self, provider: Any, provider_id: str, messages: List[Dict[str, str]],
                 streaming: bool = False, **kwargs) -> str:
         """Single provider call guarded by retry/backoff + circuit breaker."""
+        self._last_usage = None
         attempt_started = time.time()
         self.attempts.record(
             provider_id,
@@ -484,21 +485,11 @@ class ModelRouter:
                 on_attempt_failure=_on_failure,
                 **call_kwargs,
             )
-        except TypeError:
-            # Provider does not accept the clamped kwargs (e.g. no max_tokens
-            # parameter) — retry once with the caller's original kwargs.
-            result = call_with_reliability(
-                provider_id,
-                provider.generate,
-                messages=messages,
-                policy=self.retry_policy,
-                breakers=self.breakers,
-                on_attempt_failure=_on_failure,
-                **kwargs,
-            )
         finally:
             self._release_profile_lease(provider)
         self.health.mark_success(provider_id, (time.time() - start) * 1000)
+        provider_usage = getattr(provider, "_last_usage", None)
+        self._last_usage = dict(provider_usage) if isinstance(provider_usage, dict) else None
         self.attempts.record(
             provider_id,
             credential_id=getattr(provider, "_credential_id", ""),
@@ -607,24 +598,38 @@ class ModelRouter:
         return messages
 
     def _generate_with_fallbacks(self, messages: List[Dict[str, str]], fallback_mesh: List[str], **kwargs) -> str:
-        last_error = "No responsive brain found in mesh."
+        """Try every provider in the mesh once (bounded by the mesh itself).
+
+        Every failure contributes a redacted per-provider diagnostic —
+        provider id, model, failure class, reason, elapsed — to the final
+        ``Error: ...`` string so callers can see what was tried and why.
+        """
+        diagnostics: List[str] = []
         for fallback_id in fallback_mesh:
             if not self.breakers.allows(fallback_id):
                 logger.info("⛔ [MESH_SKIP]: circuit open for %s", fallback_id)
+                self.attempts.record(fallback_id, status="skipped", reason="circuit open")
+                diagnostics.append(f"{fallback_id}: skipped (circuit open)")
                 continue
+            started = time.time()
+            model = kwargs.get("model") or ""
             try:
                 logger.info("🔄 [MESH_RECOVERY]: Attempting fallback to %s...", fallback_id)
                 self.attempts.record(fallback_id, status="fallback", reason="mesh recovery")
                 fallback_provider = self.factory.get_provider_by_id(fallback_id)
                 if not fallback_provider:
+                    self.attempts.record(fallback_id, status="skipped", reason="provider construction failed")
+                    diagnostics.append(f"{fallback_id}: unavailable (provider construction failed)")
                     continue
                 res = self._invoke(fallback_provider, fallback_id, messages, **kwargs)
                 logger.info("✅ [MESH_RECOVERY]: Success via %s", fallback_id)
                 return res
-            except CircuitOpenError as exc:
-                last_error = redact_secrets(exc)
+            except CircuitOpenError:
+                diagnostics.append(f"{fallback_id}: skipped (circuit open)")
             except ProviderCallError as exc:
-                last_error = redact_secrets(exc)
+                diagnostics.append(
+                    self._failure_diagnostic(fallback_id, model, exc.classification, time.time() - started)
+                )
                 if exc.classification.failure_class is FailureClass.AUTH_ERROR:
                     # Credentials are broken for this provider: no point retrying
                     # it, move straight on to the next provider in the mesh.
@@ -633,8 +638,24 @@ class ModelRouter:
                 classification = classify_failure(fallback_error)
                 self.last_failure = classification
                 self.health.mark_failure(fallback_id, classification.failure_class.value)
-                last_error = redact_secrets(classification.message) or classification.failure_class.value
-        return f"Error: {last_error}"
+                diagnostics.append(
+                    self._failure_diagnostic(fallback_id, model, classification, time.time() - started)
+                )
+        if not diagnostics:
+            return "Error: No responsive brain found in mesh."
+        return f"Error: {'; '.join(diagnostics)}"
+
+    @staticmethod
+    def _failure_diagnostic(provider_id: str, model: str, classification: Classification, elapsed: float) -> str:
+        """One redacted per-provider failure entry for fallback diagnostics."""
+        reason = redact_secrets(classification.message)[:160] or classification.failure_class.value
+        return f"{provider_id}({model or '?'}): {classification.failure_class.value}: {reason} ({elapsed:.1f}s)"
+
+    @staticmethod
+    def _stream_error_payload(provider_id: str, message: str, classification: Classification, elapsed: float) -> str:
+        """``[PROVIDER_ERROR]`` stream marker: redacted reason first, then
+        provider id, failure class and elapsed so diagnostics are complete."""
+        return f"[PROVIDER_ERROR]: {message} ({provider_id}: {classification.failure_class.value}, {elapsed:.1f}s)"
 
     def provider_attempts(self) -> List[Dict[str, Any]]:
         """Return bounded, redacted provider-attempt diagnostics."""
@@ -676,6 +697,9 @@ class ModelRouter:
             max_attempts = max(1, int(getattr(retry_policy, "max_attempts", 1)))
             emitted_any = False
             last_error = "provider stream failed"
+            last_classification = classify_failure(body="provider stream failed")
+            last_elapsed = 0.0
+            failed_provider_id = primary_id
             stream_messages = messages
             overflow_compacted = False
             # Permit one additional attempt only when the first overflow was
@@ -699,11 +723,17 @@ class ModelRouter:
                             emitted_any = True
                             yield chunk
                     else:
-                        result = request_provider.generate(messages=stream_messages, **stream_kwargs)
-                        if self._looks_like_provider_error(result):
-                            raise RuntimeError(str(result))
-                        emitted_any = True
-                        yield result
+                        # Non-stream adapters have no ``_leased_stream`` guard,
+                        # so a consumer closing the generator mid-yield must
+                        # still release the profile lease.
+                        try:
+                            result = request_provider.generate(messages=stream_messages, **stream_kwargs)
+                            if self._looks_like_provider_error(result):
+                                raise RuntimeError(str(result))
+                            emitted_any = True
+                            yield result
+                        finally:
+                            self._release_profile_lease(request_provider)
                     breaker.record_success()
                     self.health.mark_success(primary_id, (time.time() - start) * 1000)
                     self._release_profile_lease(request_provider)
@@ -718,13 +748,16 @@ class ModelRouter:
                     self.last_failure = classification
                     self.health.mark_failure(provider_id, classification.failure_class.value)
                     last_error = redact_secrets(classification.message) or classification.failure_class.value
+                    last_classification = classification
+                    last_elapsed = time.time() - start
+                    failed_provider_id = provider_id
                     # Once bytes from a provider have reached the caller,
                     # switching providers would splice two unrelated answers
                     # into one stream. Explicit provider selection is also
                     # authoritative and must not silently reroute.
                     if emitted_any or requested_provider:
                         self._release_profile_lease(request_provider)
-                        yield f"[PROVIDER_ERROR]: {last_error}"
+                        yield self._stream_error_payload(provider_id, last_error, last_classification, last_elapsed)
                         return
                     if classification.failure_class is FailureClass.CONTEXT_OVERFLOW and not overflow_compacted:
                         compacted = self._compact_after_context_overflow(
@@ -751,6 +784,7 @@ class ModelRouter:
                         continue
                     fallback_provider = None
                     try:
+                        start = time.time()
                         fb_breaker.before_call()
                         fallback_provider = self.factory.get_provider_by_id(fallback_id)
                         if fallback_provider and not self._provider_credentials_usable(
@@ -764,26 +798,24 @@ class ModelRouter:
                             self._release_profile_lease(fallback_provider)
                             continue
                         if fallback_provider:
-                            start = time.time()
                             fb_kwargs = self._apply_model_limits(fallback_provider, kwargs)
                             if hasattr(fallback_provider, "stream_generate"):
-                                for chunk in self._leased_stream(
+                                fb_iterator = self._leased_stream(
                                     fallback_provider,
                                     fallback_provider.stream_generate(messages=stream_messages, **fb_kwargs),
-                                ):
+                                )
+                            else:
+                                fb_iterator = iter([fallback_provider.generate(messages=stream_messages, **fb_kwargs)])
+                            try:
+                                for chunk in fb_iterator:
                                     if self._looks_like_provider_error(chunk):
                                         raise RuntimeError(str(chunk))
                                     fallback_emitted = True
                                     yield chunk
-                            else:
-                                result = fallback_provider.generate(messages=stream_messages, **fb_kwargs)
-                                if self._looks_like_provider_error(result):
-                                    raise RuntimeError(str(result))
-                                fallback_emitted = True
-                                yield result
+                            finally:
+                                self._release_profile_lease(fallback_provider)
                             fb_breaker.record_success()
                             self.health.mark_success(fallback_id, (time.time() - start) * 1000)
-                            self._release_profile_lease(fallback_provider)
                             return
                     except Exception as fallback_error:
                         self._release_profile_lease(fallback_provider)
@@ -797,9 +829,12 @@ class ModelRouter:
                         self.last_failure = fb_classification
                         self.health.mark_failure(fallback_id, fb_classification.failure_class.value)
                         last_error = redact_secrets(fb_classification.message) or fb_classification.failure_class.value
+                        last_classification = fb_classification
+                        last_elapsed = time.time() - start
+                        failed_provider_id = fallback_id
                         if fallback_emitted:
                             break
-                yield f"[PROVIDER_ERROR]: {last_error}"
+                yield self._stream_error_payload(failed_provider_id, last_error, last_classification, last_elapsed)
 
     def provider_health(self) -> List[Dict[str, Any]]:
         return self.health.all()

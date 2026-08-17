@@ -92,7 +92,7 @@ class MemoryForge:
     @forge_guard("memory")
     def refine(self, name: str, updates: Dict[str, Any] = None) -> Dict[str, Any]:
         updates = updates or {}
-        name = self._safe_name(name)
+        name = self._safe_name(name).replace("-", "_")
         mem_dir = os.path.join(self.memory_dir, name)
         path = os.path.join(mem_dir, "memory.json")
         if not os.path.exists(path):

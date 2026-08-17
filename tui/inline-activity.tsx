@@ -1,6 +1,6 @@
 import React from 'react';
 import {Box, Text} from 'ink';
-import {getTheme, activityColor, activityGlyph, TRANSCRIPT_SURFACE_BG} from './theme.js';
+import {getTheme, activityColor, activityGlyph, TRANSCRIPT_SURFACE_BG, NEXUS_ORANGE_BRIGHT} from './theme.js';
 
 export interface InlineActivityItem {
     kind?: string;
@@ -21,6 +21,7 @@ export interface InlineActivityItem {
     logo?: string;
     logoColor?: string;
     number?: number;
+    relatedSubagent?: string;
 }
 
 const cleanToolName = (raw: unknown): string => String(raw || '')
@@ -39,8 +40,11 @@ const compactTarget = (raw: unknown): string => {
     const value = String(raw || '').trim().replace(/^['"]|['"]$/g, '');
     if (!value) return '';
     try {
+        // Web rows keep the URL (host + path) so the destination is visible;
+        // the scheme prefix only wastes a compact row's budget.
         const url = new URL(value.startsWith('www.') ? `https://${value}` : value);
-        return url.hostname.replace(/^www\./, '');
+        const host = url.hostname.replace(/^www\./, '');
+        return url.pathname && url.pathname !== '/' ? `${host}${url.pathname}` : host;
     } catch {
         return value;
     }
@@ -76,7 +80,7 @@ const isBlocked = (status?: string) =>
 export const activityKindLabel = (kind?: string): string => {
     const labels: Record<string, string> = {
         plan: 'PLAN', todo: 'PLAN', terminal: 'TERMINAL', run: 'TERMINAL', command: 'TERMINAL',
-        file: 'FILE', test: 'TEST', search: 'SEARCH', browser: 'WEB', hive: 'HIVE',
+        file: 'FILE', test: 'TEST', search: 'SEARCH', browser: 'BROWSER', hive: 'HIVE',
         agent: 'AGENT', worker: 'AGENT', approval: 'APPROVAL', error: 'ERROR', retry: 'RETRY',
         mcp: 'MCP', skill: 'SKILL', plugin: 'PLUGIN', provider: 'MODEL', rag: 'CONTEXT',
         memory: 'MEMORY', compact: 'CONTEXT', background: 'BACKGROUND', config: 'CONFIG',
@@ -139,7 +143,19 @@ const InlineActivityBody = ({activity, maxLabel}: {
     const duration = formatCompactDuration(
         activity.durationMs ?? (running && activity.startedAt ? Date.now() - activity.startedAt : undefined)
     );
-    let label = [name, target, duration].filter(Boolean).join(' · ');
+    // One compact row per event: kind label · tool name · meaningful target ·
+    // elapsed time. A name that merely repeats the kind word is dropped.
+    const genericKindName = humanize(kind).toLowerCase();
+    const labelParts: string[] = [activityKindLabel(kind)];
+    if (name.toLowerCase() !== genericKindName) labelParts.push(name);
+    if (target) labelParts.push(target);
+    // Hive rows append the raw sub-agent id so the worker is always
+    // identifiable without hiding the task target.
+    if (kind === 'hive' && activity.relatedSubagent) {
+        labelParts.push(String(activity.relatedSubagent).trim());
+    }
+    if (duration) labelParts.push(duration);
+    let label = labelParts.filter(Boolean).join(' · ');
     const budget = Math.max(8, maxLabel - 2);
     if (label.length > budget) label = `${label.slice(0, Math.max(1, budget - 1))}…`;
     // Status is conveyed by the row itself: failed/blocked/cancelled is wholly
@@ -207,7 +223,7 @@ export const MCPPanelBody = React.memo(({servers}: {servers: McpServerItem[]}) =
                     <Box key={server.id} flexDirection="column" marginBottom={1}>
                         <Box>
                             <Text color={dotColor}>{active ? '●' : '○'} </Text>
-                            <Text color={active ? 'magentaBright' : 'grey30'} bold>{server.id}</Text>
+                            <Text color={active ? NEXUS_ORANGE_BRIGHT : 'grey30'} bold>{server.id}</Text>
                             <Text color="grey30">  {active ? 'active' : 'inactive'}</Text>
                         </Box>
                         {server.command ? (

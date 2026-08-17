@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import gateway.supervisor as sup
@@ -43,6 +44,7 @@ from gateway.run import GatewayRunner
 FAST_CONFIG = {
     "backoff_base": 0.05,
     "backoff_cap": 0.10,
+    "connect_timeout": 0.20,
     "max_restarts": 5,
     "crash_window": 60.0,
     "disabled_cooldown": 60.0,
@@ -90,6 +92,54 @@ async def test_supervisor_redacts_adapter_connect_errors():
 
     assert runtime.last_error is not None
     assert "sk-secret-value" not in runtime.last_error
+
+
+async def test_connect_timeout_is_hard_for_cancellation_resistant_adapter():
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+
+    class StubbornAdapter(FakeAdapter):
+        async def connect(self) -> bool:
+            self.connect_calls += 1
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release.wait()
+            return True
+
+    config = dict(FAST_CONFIG)
+    config["connect_timeout"] = 0.02
+    runtime = PlatformRuntime(StubbornAdapter("stubborn"), config)
+
+    began = time.monotonic()
+    await runtime.connect_once(now=100.0)
+    elapsed = time.monotonic() - began
+
+    assert elapsed < 0.20
+    assert runtime.state == STATE_RECOVERING
+    assert runtime.health == HEALTH_UNAVAILABLE
+    assert runtime.restarts == 1
+    assert "timed out" in str(runtime.last_error)
+    await asyncio.wait_for(cancelled.wait(), timeout=1)
+
+    release.set()
+    pending = runtime._connect_task
+    assert pending is not None
+    await asyncio.wait_for(asyncio.shield(pending), timeout=1)
+    await runtime.connect_once(now=101.0)
+    assert runtime.state == STATE_RUNNING
+    assert runtime.health == HEALTH_HEALTHY
+
+
+def test_supervisor_connect_timeout_can_be_configured_from_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("NEXUS_GATEWAY_CONNECT_TIMEOUT", "12.5")
+
+    supervisor = GatewaySupervisor(state_file=str(tmp_path / "state.json"))
+
+    assert supervisor.config["connect_timeout"] == 12.5
 
 
 async def test_supervisor_delivery_worker_drains_restart_queue(tmp_path):
@@ -370,6 +420,48 @@ async def test_shutdown_waits_for_inflight_connect_before_persisting_stopped(tmp
     assert adapter.state == STATE_STOPPED
     persisted = json.loads(Path(state_file).read_text(encoding="utf-8"))
     assert persisted["platforms"]["telegram"]["state"] == STATE_STOPPED
+
+
+async def test_shutdown_is_bounded_when_manual_connect_ignores_cancellation(tmp_path):
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+
+    class StubbornAdapter(FakeAdapter):
+        async def connect(self) -> bool:
+            self.connect_calls += 1
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release.wait()
+            return True
+
+    config = dict(FAST_CONFIG)
+    config["connect_timeout"] = 10.0
+    config["shutdown_timeout"] = 0.05
+    adapter = StubbornAdapter("telegram")
+    sv = GatewaySupervisor(config=config, state_file=str(tmp_path / "state.json"))
+    sv.register_runtime(adapter)
+    await sv.start_all()
+
+    manual_tick = asyncio.create_task(sv._tick_once())
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    began = time.monotonic()
+    await asyncio.wait_for(sv.stop_all(), timeout=0.30)
+    elapsed = time.monotonic() - began
+
+    assert elapsed < 0.25
+    assert adapter.disconnect_calls == 1
+    assert adapter.state == STATE_STOPPED
+    assert adapter.health == HEALTH_UNAVAILABLE
+    await asyncio.wait_for(cancelled.wait(), timeout=1)
+
+    release.set()
+    await asyncio.wait_for(asyncio.gather(manual_tick, return_exceptions=True), timeout=1)
+    assert adapter.state == STATE_STOPPED
 
 
 # --------------------------------------------------------------------------- #

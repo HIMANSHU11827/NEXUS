@@ -36,12 +36,16 @@ export const resolveTuiLayout = (
     const width = Math.max(20, Math.floor(columns || 0));
     const height = Math.max(8, Math.floor(rows || 0));
     const isWide = width >= 120;
+    // Never let the sidebar budget go negative, whatever the terminal size;
+    // callers must be able to rely on non-negative widths at all times.
     const sidebarWidth = isWide
-        ? clamp(Math.floor(width * 0.28), 36, Math.min(52, width - 48))
+        ? Math.max(0, clamp(Math.floor(width * 0.28), 36, Math.min(52, width - 48)))
         : 0;
     const mainWidth = Math.max(1, width - sidebarWidth);
     const chatContentWidth = Math.max(1, mainWidth - 2);
-    const headerHeight = 3;
+    // The persistent NEXUS/Ready status header is intentionally omitted from
+    // the main TUI; keep the layout budget aligned with the rendered surface.
+    const headerHeight = 0;
     // Hint rows contain several shortcuts and must never be allowed to wrap
     // inside the fixed-height composer on compact terminals.
     const showComposerHints = height >= 12 && mainWidth >= 58;

@@ -16,7 +16,7 @@ npm start
 
 ## Components
 - `nexus-tui.tsx` (2517 lines) — main entry / app shell
-- `helpers.ts` — shared command-registry adapter, matching, and safe palette normalization. Slash commands come from `nexus/commands.py` through `GET /api/commands`; the TUI has no separate hard-coded command catalog.
+- `helpers.ts` — shared command-registry adapter, matching, and safe palette normalization. Slash commands come from `nexus/commands.py` through `GET /api/commands`; the active Ink palette has no separate hard-coded catalog. The headless and legacy clients use the same registry for discovery/validation and retain only surface-specific execution adapters.
 - `workspace-panel.tsx`, `chat-view.tsx`, `activity-card.tsx`, `inline-activity.tsx` — workspace sidebar, chat, activity stream
 - `hive-panel.tsx`, `task-list.tsx`, `status-bar.tsx`, `details-panel.tsx` — hive agents, tasks, status, details
 - `command-palette.tsx`, `input-composer.tsx`, `banner.tsx` — command palette, input, banner

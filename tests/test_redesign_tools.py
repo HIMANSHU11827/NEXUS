@@ -157,6 +157,72 @@ def test_elision_flag_result_is_persisted_too(tmp_path):
     assert "output_persisted" in result.metadata
 
 
+def test_reading_policy_persists_large_source_previews(tmp_path):
+    """Large source reads must not consume the V5 run deadline as a stream."""
+    from pathlib import Path
+    from tools.nexus_tools.registry import ToolEntry
+    from tools.reading.scripts.reading import ReadingTool
+
+    metadata = json.loads(Path("tools/reading/reading.jsnol").read_text(encoding="utf-8"))
+    assert metadata["execution"]["max_output_chars"] == 32000
+
+    source = tmp_path / "large_source.py"
+    source.write_text("# source\n" + ("value = 1\n" * 6000), encoding="utf-8")
+    entry = ToolEntry(
+        "reading",
+        {
+            "params": {"path": {"type": "string", "required": True}},
+            "execution": {"max_output_chars": 32000},
+        },
+        ReadingTool(root_dir=str(tmp_path)),
+    )
+    registry = _registry_with(tmp_path, entry)
+
+    async def collect():
+        return [item async for item in registry.stream_execute("reading", path="large_source.py")]
+
+    results = asyncio.run(collect())
+    assert len(results) == 1
+    result = results[0]
+
+    assert result.success is True
+    assert result.output.startswith("[Persisted to ")
+    assert "showing first 4000" in result.output
+    archived = list((tmp_path / "context_archive" / "tool-results").glob("*.txt"))
+    assert len(archived) == 1
+    assert archived[0].read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+
+
+def test_reading_supports_targeted_line_ranges(tmp_path):
+    from tools.nexus_tools.registry import ToolEntry
+    from tools.reading.scripts.reading import ReadingTool
+
+    source = tmp_path / "source.py"
+    source.write_text("".join(f"line_{index}\n" for index in range(1, 21)), encoding="utf-8")
+    registry = _registry_with(
+        tmp_path,
+        ToolEntry(
+            "reading",
+            {
+                "params": {
+                    "path": {"type": "string", "required": True},
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                },
+                "execution": {"max_output_chars": 32000},
+            },
+            ReadingTool(root_dir=str(tmp_path)),
+        ),
+    )
+
+    result = asyncio.run(registry.execute(
+        "reading", path="source.py", start_line=7, end_line=9
+    ))
+
+    assert result.success is True
+    assert result.output == "line_7\nline_8\nline_9\n"
+
+
 # ─────────────────────────────────────────────────────────────────────
 # 3. Edit precision (modifying)
 # ─────────────────────────────────────────────────────────────────────

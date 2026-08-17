@@ -60,12 +60,17 @@ class MCPClient:
         self.responses: Dict[str, queue.Queue] = {}
         self.id_counter = 0
         self._lock = threading.Lock()
+        # Serializes writes to the child's stdin. Concurrent tool calls run in
+        # worker threads; without this, two interleaved write()/flush() pairs
+        # corrupt the JSON-RPC message framing for everyone.
+        self._stdin_lock = threading.Lock()
         # ``call_tool`` is commonly dispatched through worker threads. Keep
         # process lifecycle transitions single-owner so concurrent first calls
         # cannot launch multiple MCP children for one configured server.
         self._lifecycle_lock = threading.RLock()
         self._running = False
         self._reader_thread: Optional[threading.Thread] = None
+        self._stderr_thread: Optional[threading.Thread] = None
         # Lifecycle state for reconnect/parking.  "unavailable" until the first
         # successful start(); flipped to "degraded" on transport failure and
         # back to "healthy" after a successful re-probe.
@@ -139,7 +144,8 @@ class MCPClient:
         self._reader_thread.start()
 
         # Monitor stderr
-        threading.Thread(target=self._read_stderr, daemon=True).start()
+        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+        self._stderr_thread.start()
 
         # Initialize
         init_result = self.call("initialize", {
@@ -178,11 +184,22 @@ class MCPClient:
                 except subprocess.TimeoutExpired:
                     self.process.kill()
                 self.process = None
+            for thread in (self._reader_thread, self._stderr_thread):
+                if thread is not None and thread.is_alive():
+                    thread.join(timeout=2)
+            self._reader_thread = None
+            self._stderr_thread = None
 
     def _read_stdout(self):
         """Reader loop for stdout."""
-        while self._running and self.process and self.process.stdout:
-            line, oversized = read_bounded_line(self.process.stdout)
+        # Capture the process for this generation: after a recovery the old
+        # thread must keep draining the OLD pipe (until EOF) and must never
+        # read the new process's stdout, or it can steal the new server's
+        # responses.
+        process = self.process
+        reader = process.stdout if process is not None else None
+        while self._running and process is self.process and reader is not None:
+            line, oversized = read_bounded_line(reader)
             if oversized:
                 logger.error("Rejected oversized MCP stdout message")
                 continue
@@ -204,8 +221,10 @@ class MCPClient:
 
     def _read_stderr(self):
         """Monitor stderr for debug logs."""
-        while self._running and self.process and self.process.stderr:
-            line, oversized = read_bounded_line(self.process.stderr)
+        process = self.process
+        reader = process.stderr if process is not None else None
+        while self._running and process is self.process and reader is not None:
+            line, oversized = read_bounded_line(reader)
             if oversized:
                 logger.error("Rejected oversized MCP stderr message")
                 continue
@@ -244,8 +263,9 @@ class MCPClient:
         }
 
         try:
-            self.process.stdin.write(json.dumps(request) + "\n")
-            self.process.stdin.flush()
+            with self._stdin_lock:
+                self.process.stdin.write(json.dumps(request) + "\n")
+                self.process.stdin.flush()
         except OSError as e:
             logger.error("Failed to write to MCP server: %s", redact_secret_text(str(e)))
             self.stop()
@@ -268,7 +288,10 @@ class MCPClient:
             return response.get("result")
         except queue.Empty:
             logger.error(f"MCP call timed out: {method}")
-            self._clear_exited_process()
+            # A server that stops answering is dead-weight: every later call
+            # would re-pay the full timeout against the same hung process.
+            # Tear it down so the next call starts fresh via start()/recovery.
+            self.stop()
             return {"error": f"Timeout calling {method}"}
         finally:
             with self._lock:
@@ -356,8 +379,9 @@ class MCPClient:
         }
 
         try:
-            self.process.stdin.write(json.dumps(notification) + "\n")
-            self.process.stdin.flush()
+            with self._stdin_lock:
+                self.process.stdin.write(json.dumps(notification) + "\n")
+                self.process.stdin.flush()
         except OSError as e:
             logger.error(f"Failed to write notification to MCP server: {e}")
 

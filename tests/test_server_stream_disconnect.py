@@ -43,8 +43,11 @@ async def test_server_stream_disconnect_aborts_underlying_run(monkeypatch):
             return True
 
         async def stream_run(self, prompt, **kwargs):
-            yield {"type": "content", "data": "first"}
-            await asyncio.sleep(30)
+            try:
+                yield {"type": "content", "data": "first"}
+                await asyncio.sleep(30)
+            finally:
+                captured["stream_closed"] = True
 
     monkeypatch.setattr(server, "get_loop", lambda _sid: FakeLoop())
     monkeypatch.setattr(server, "set_active_session", lambda *args, **kwargs: None)
@@ -66,3 +69,4 @@ async def test_server_stream_disconnect_aborts_underlying_run(monkeypatch):
     await iterator.aclose()
 
     assert captured["abort"] == ("disconnect-turn", "client_disconnect")
+    assert captured["stream_closed"] is True

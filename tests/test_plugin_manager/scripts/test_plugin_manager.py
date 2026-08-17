@@ -7,6 +7,7 @@ import tempfile
 
 import pytest
 
+from tools.nexus_tools.base_tool import ToolResult
 from plugins.manager import (
     HookRegistry,
     PluginContext,
@@ -111,6 +112,58 @@ class TestPluginToolAdapter:
         result = asyncio.run(adapter2.execute())
         assert not result.success
         assert "bad" in result.error
+
+    def test_none_result_is_not_reported_as_success(self):
+        adapter = PluginToolAdapter("empty", lambda: None)
+
+        result = asyncio.run(adapter.execute())
+
+        assert not result.success
+        assert "no result" in result.error.lower()
+
+    @pytest.mark.parametrize("failure", [
+        {"success": False, "error": "declared failure"},
+        {"status": "error", "error": "status failure"},
+        {"isError": True, "content": [{"type": "text", "text": "mcp failure"}]},
+    ])
+    def test_mapping_failures_are_canonicalized(self, failure):
+        adapter = PluginToolAdapter("mapping-failure", lambda: failure)
+
+        result = asyncio.run(adapter.execute())
+
+        assert not result.success
+        assert result.status == "error"
+        assert result.error
+
+    def test_stream_mapping_failure_remains_structured(self):
+        async def failure_stream():
+            yield "partial output"
+            yield {"isError": True, "content": "stream declared failure"}
+
+        async def collect():
+            adapter = PluginToolAdapter("mapping-stream", failure_stream)
+            return [item async for item in adapter.stream_execute()]
+
+        items = asyncio.run(collect())
+        assert items[0] == "partial output"
+        assert isinstance(items[1], ToolResult)
+        assert not items[1].success
+        assert items[1].status == "error"
+        assert "stream declared failure" in items[1].error
+
+    def test_stream_failure_remains_structured(self):
+        async def bad_stream():
+            raise RuntimeError("stream exploded")
+            yield "unreachable"
+
+        async def collect():
+            return [item async for item in PluginToolAdapter("bad-stream", bad_stream).stream_execute()]
+
+        items = asyncio.run(collect())
+        assert len(items) == 1
+        assert isinstance(items[0], ToolResult)
+        assert not items[0].success
+        assert "stream exploded" in items[0].error
 
 
 class TestPluginContext:

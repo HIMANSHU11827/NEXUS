@@ -31,6 +31,7 @@
     "parallel": true,
     "max_parallel": 10,
     "cooldown_ms": 250,
+    "max_retries": 2,
     "defaults": {
       "max_results": 10
     }

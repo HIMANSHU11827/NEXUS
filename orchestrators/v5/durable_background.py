@@ -268,6 +268,18 @@ class DurableBackgroundStore:
             )
             return int(cursor.rowcount or 0)
 
+    def interrupt_owned(self, owner_pid: int, reason: str = "owner shutdown") -> int:
+        """Durably release this process's running jobs for restart recovery."""
+        now = time.time()
+        with self._lock, self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE background_tasks SET status='interrupted', owner_token='', "
+                "owner_pid=0, last_error=?, updated_at=? "
+                "WHERE status='running' AND owner_pid=?",
+                (str(reason or "owner shutdown")[:2000], now, int(owner_pid or 0)),
+            )
+            return int(cursor.rowcount or 0)
+
     def recover_stalled(self, stale_after: float = 300.0) -> List[str]:
         """Move jobs with an expired heartbeat back to the recovery queue.
 

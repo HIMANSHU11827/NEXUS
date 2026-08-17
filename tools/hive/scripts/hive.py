@@ -67,6 +67,7 @@ class HiveTool(BaseTool):
         **kwargs,
     ) -> ToolResult:
         try:
+            self.assert_execution_active()
             hive = self._get_hive()
             parent_run_id = str(
                 kwargs.get("parent_run_id")
@@ -78,20 +79,32 @@ class HiveTool(BaseTool):
 
             if mode == "single":
                 agent = await hive.spawn_agent(task=task, persona=persona, parent_run_id=parent_run_id)
-                # Await the underlying agent task with a hard timeout instead of
-                # an unbounded 0.1s busy-wait (a stalled provider would hang forever).
                 task_fut = hive._agent_tasks.get(agent.agent_id)
+                deadline = asyncio.get_running_loop().time() + hive.consolidation_timeout
                 try:
-                    if task_fut is not None:
-                        await asyncio.wait_for(asyncio.shield(task_fut), timeout=hive.consolidation_timeout)
-                    else:
-                        while agent.status in ("pending", "running"):
-                            await asyncio.sleep(0.1)
-                except asyncio.TimeoutError:
-                    return ToolResult(
-                        success=False,
-                        error=f"Sub-agent {agent.agent_id} timed out after {hive.consolidation_timeout:g}s",
-                    )
+                    while agent.status in ("pending", "running"):
+                        self.assert_execution_active()
+                        remaining = deadline - asyncio.get_running_loop().time()
+                        if remaining <= 0:
+                            await hive.cancel_hive(agent.hive_id)
+                            return ToolResult(
+                                success=False,
+                                error=(
+                                    f"Sub-agent {agent.agent_id} timed out after "
+                                    f"{hive.consolidation_timeout:g}s"
+                                ),
+                            )
+                        if task_fut is None:
+                            await asyncio.sleep(min(0.1, remaining))
+                        else:
+                            await asyncio.wait({task_fut}, timeout=min(0.1, remaining))
+                    self.assert_execution_active()
+                except asyncio.CancelledError:
+                    await hive.cancel_hive(agent.hive_id)
+                    raise
+                except RuntimeError:
+                    await hive.cancel_hive(agent.hive_id)
+                    raise
 
                 if agent.status == "success":
                     return ToolResult(
@@ -103,11 +116,10 @@ class HiveTool(BaseTool):
                             "duration_ms": int((agent.finished_at - agent.started_at) * 1000),
                         },
                     )
-                else:
-                    return ToolResult(
-                        success=False,
-                        error=f"Sub-agent {agent.agent_id} failed",
-                    )
+                return ToolResult(
+                    success=False,
+                    error=f"Sub-agent {agent.agent_id} failed",
+                )
 
             elif mode in ("parallel", "hive"):
                 tasks_to_spawn = []
@@ -118,10 +130,25 @@ class HiveTool(BaseTool):
                     tasks_to_spawn.append((task, persona))
 
                 hive_id, agents = await hive.spawn_hive(tasks_to_spawn, parent_run_id=parent_run_id)
-
-                for agent in agents:
-                    while agent.status in ("pending", "running"):
-                        await asyncio.sleep(0.1)
+                deadline = asyncio.get_running_loop().time() + hive.consolidation_timeout
+                try:
+                    while any(agent.status in ("pending", "running") for agent in agents):
+                        self.assert_execution_active()
+                        remaining = deadline - asyncio.get_running_loop().time()
+                        if remaining <= 0:
+                            await hive.cancel_hive(hive_id)
+                            return ToolResult(
+                                success=False,
+                                error=f"Hive {hive_id} timed out after {hive.consolidation_timeout:g}s",
+                            )
+                        await asyncio.sleep(min(0.1, remaining))
+                    self.assert_execution_active()
+                except asyncio.CancelledError:
+                    await hive.cancel_hive(hive_id)
+                    raise
+                except RuntimeError:
+                    await hive.cancel_hive(hive_id)
+                    raise
 
                 results = []
                 successes = 0

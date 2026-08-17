@@ -4,6 +4,12 @@
  */
 import type {TuiTheme} from './types.js';
 
+/** NEXUS brand accents: cool blue for the core, warm orange for emphasis. */
+export const NEXUS_BLUE = '#4da3ff';
+export const NEXUS_BLUE_BRIGHT = '#72b7ff';
+export const NEXUS_ORANGE = '#ff9f43';
+export const NEXUS_ORANGE_BRIGHT = '#ffb454';
+
 /** Shared filled transcript surface for user, assistant, and activity rows. */
 export const TRANSCRIPT_SURFACE_BG = '#292929';
 
@@ -20,21 +26,21 @@ export const DARK_THEME: TuiTheme = {
     textMuted: '#7f8794',
 
     // Accent
-    primary: '#4db5ff',
-    secondary: '#22d3ee',
+    primary: NEXUS_BLUE,
+    secondary: NEXUS_BLUE_BRIGHT,
     success: '#22c55e',
-    warning: '#f59e0b',
+    warning: NEXUS_ORANGE,
     error: '#ef4444',
     info: '#3b82f6',
 
     // Roles
-    userColor: '#4d8dff',
-    assistantColor: '#48c8e8',
-    toolColor: '#4db5ff',
-    hiveColor: '#a78bfa',
-    planColor: '#f59e0b',
-    mcpColor: '#ec4899',
-    skillColor: '#10b981',
+    userColor: NEXUS_BLUE,
+    assistantColor: NEXUS_BLUE_BRIGHT,
+    toolColor: NEXUS_BLUE,
+    hiveColor: NEXUS_ORANGE_BRIGHT,
+    planColor: NEXUS_ORANGE,
+    mcpColor: NEXUS_ORANGE,
+    skillColor: NEXUS_BLUE_BRIGHT,
 
     // Status
     statusRunning: '#3b82f6',
@@ -53,20 +59,20 @@ export const LIGHT_THEME: TuiTheme = {
     textDim: '#666666',
     textMuted: '#999999',
 
-    primary: '#7c3aed',
-    secondary: '#0891b2',
+    primary: '#2563eb',
+    secondary: '#1d4ed8',
     success: '#16a34a',
-    warning: '#d97706',
+    warning: '#ea7b12',
     error: '#dc2626',
     info: '#2563eb',
 
     userColor: '#2563eb',
-    assistantColor: '#7c3aed',
-    toolColor: '#4f46e5',
-    hiveColor: '#6d28d9',
-    planColor: '#d97706',
-    mcpColor: '#db2777',
-    skillColor: '#059669',
+    assistantColor: '#1d4ed8',
+    toolColor: '#2563eb',
+    hiveColor: '#c76b12',
+    planColor: '#ea7b12',
+    mcpColor: '#c76b12',
+    skillColor: '#1d4ed8',
 
     statusRunning: '#2563eb',
     statusDone: '#16a34a',

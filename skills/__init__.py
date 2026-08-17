@@ -251,7 +251,11 @@ class NexusSkillMaster:
         return name in self._cache
 
     def craft_skill(self, name: str, prompt: str) -> Dict[str, Any]:
+        import re as _re
         safe_name = name.lower().replace(" ", "_").replace("-", "_")
+        safe_name = _re.sub(r"[^a-z0-9_]", "", safe_name)[:64]
+        if not safe_name:
+            return {"error": "invalid skill name", "created": False}
         fpath = Path(self._root) / ".opencode" / "skills" / safe_name / "SKILL.md"
         fpath.parent.mkdir(parents=True, exist_ok=True)
         content = f"""---

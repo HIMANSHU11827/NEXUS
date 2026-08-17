@@ -3,7 +3,6 @@ import {mkdir, writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {Box} from 'ink';
 import chalk from 'chalk';
-import {NexusBanner} from './banner.js';
 import {InputComposer} from './input-composer.js';
 import {resolveTuiLayout} from './layout.js';
 import {renderInkFrame} from './render-test-utils.js';
@@ -18,7 +17,6 @@ const layout = resolveTuiLayout(WIDTH, HEIGHT);
 
 const frame = await renderInkFrame(
     <Box width={WIDTH} height={HEIGHT} flexDirection="column" backgroundColor={THEME.appBg}>
-        <NexusBanner width={layout.chatContentWidth} connectionState="online" />
         <Box
             width={layout.chatContentWidth + 2}
             height={layout.chatViewportHeight}

@@ -36,6 +36,8 @@ for (const width of widths) {
 
 const below = resolveTuiLayout(119, 30);
 const at = resolveTuiLayout(120, 30);
+assert.equal(resolveTuiLayout(80, 30).headerHeight, 0);
+assert.equal(resolveTuiLayout(80, 30).chatStartRow, 1);
 assert.equal(below.isWide, false);
 assert.equal(at.isWide, true);
 assert.equal(below.sidebarWidth, 0);

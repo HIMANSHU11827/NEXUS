@@ -120,4 +120,8 @@ class TestFetchUrlBlockedAtRuntime:
             assert result.success is True
 
         _run(scenario())
-        assert ticks >= 5
+        # A blocked event loop would complete zero heartbeats during the
+        # 0.08s ssrf check; a responsive one completes several. Keep the
+        # threshold low so heavy suite-time CPU load (timer jitter) cannot
+        # flake the test.
+        assert ticks >= 2

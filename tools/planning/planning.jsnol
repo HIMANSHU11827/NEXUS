@@ -1,12 +1,12 @@
 {
   "name": "planning",
   "version": "2.0.0",
-  "description": "Create and maintain the canonical task checklist plan in todo.md; task operations use the same file",
+  "description": "Create and maintain the canonical task checklist plan. The file is workspace/todo.md when that directory exists. For action=create, plan_spec must be {plan_type:'simple',steps:[3-8 strings]} or {plan_type:'phased',phases:[{title:'...',subgoals:[...]}]}; equivalent legacy name/tasks phase fields are accepted.",
   "entry": "scripts/planning.py",
   "class": "PlanningTool",
   "params": {
     "goal": {"type": "string", "description": "Goal or task to plan; required for action=create"},
-    "plan_spec": {"type": "object", "description": "Validated LLM-generated plan JSON with plan_type plus steps or phases"},
+    "plan_spec": {"type": "object", "description": "Validated plan JSON: simple uses 3-8 string steps; phased uses 2-7 phases with title and non-empty subgoals"},
     "action": {"type": "string", "description": "create, add, complete, or update", "default": "create"},
     "item": {"type": "string", "description": "Todo item for add or complete"},
     "phase": {"type": "string", "description": "Phase name for adding a phased sub-goal"},

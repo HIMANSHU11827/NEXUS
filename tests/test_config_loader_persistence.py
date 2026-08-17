@@ -9,8 +9,8 @@ def test_config_loader_data_setter_and_save_round_trip(tmp_path, monkeypatch):
     (tmp_path / "model_tasks.json").write_text(
         json.dumps({"tasks": ["initial"]}), encoding="utf-8"
     )
-    module.NexusConfigLoader._instance = None
-    module.NexusConfigLoader._cache = {}
+    monkeypatch.setattr(module.NexusConfigLoader, "_instance", None)
+    monkeypatch.setattr(module.NexusConfigLoader, "_cache", {})
 
     loader = module.NexusConfigLoader()
     data = loader.data

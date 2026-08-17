@@ -15,7 +15,17 @@ imports). The host must provide ``_llm_plan``, ``_planning_system_prompt``,
 
 from __future__ import annotations
 
+import asyncio
+import os
+import random
 from typing import Any, Dict, List
+
+
+def _env_float(name: str, default: float, minimum: float) -> float:
+    try:
+        return max(minimum, float(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
 
 
 class V5RetryPolicy:
@@ -116,11 +126,21 @@ class V5RetryPolicy:
 
         task = str(getattr(perceived, "original_input", ""))
         intent = getattr(getattr(perceived, "intent", None), "value", "chat")
+        backoff_base = _env_float("NEXUS_PLAN_RETRY_BACKOFF_BASE", 0.3, 0.0)
+        backoff_max = _env_float("NEXUS_PLAN_RETRY_BACKOFF_MAX", 2.0, 0.0)
         for attempt in range(1, max_retries + 1):
             self.logger.info(
                 f"[ENFORCEMENT] retry {attempt}/{max_retries} for task "
                 f"requiring real tooling: {task[:120]}"
             )
+            if attempt > 1 and (backoff_base > 0 or backoff_max > 0):
+                delay = min(backoff_max, backoff_base * (2.0 ** (attempt - 1)))
+                delay *= 1.0 + random.uniform(-0.25, 0.25)
+                self.logger.info(
+                    "[ENFORCEMENT] backing off %.2fs before retry %d",
+                    delay, attempt,
+                )
+                await asyncio.sleep(delay)
             messages = [
                 {"role": "system", "content": self._planning_system_prompt()},
                 {

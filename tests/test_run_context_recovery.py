@@ -96,3 +96,22 @@ def test_recovery_does_not_retire_a_live_leased_run(tmp_path):
     assert context is not None
     assert context["status"] == "running"
     assert context["lease_expires_at"] > context["updated_at"]
+
+
+def test_recovery_can_retire_expired_run_owned_by_dead_process(tmp_path):
+    context = start_run_context(
+        root=str(tmp_path), session_id="dead-owner", run_id="run-dead",
+        prompt="unfinished", lease_seconds=60,
+    )
+    payload = context.to_dict()
+    payload["owner_process_id"] = 999999
+    payload["lease_expires_at"] = 0
+    context._persist_payload(payload)
+
+    recovered = recover_orphaned_runs(
+        root=str(tmp_path), session_id="dead-owner",
+        event_log_dir=str(tmp_path / "events"),
+    )
+
+    assert len(recovered) == 1
+    assert load_run_context(str(tmp_path), "dead-owner", "run-dead")["status"] == "failed"

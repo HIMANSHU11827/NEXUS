@@ -141,11 +141,16 @@ class SignalAdapter(BasePlatformAdapter):
                 tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
                 tmp.write(img_resp.content)
                 tmp.close()
-
-            files = {"file": (tmp.name, open(tmp.name, "rb"), "image/jpeg")}
-            resp = await self._client.post("/v2/send", data=json.dumps(payload), files=files)
-            os.unlink(tmp.name)
-            return SendResult(success=resp.is_success, message_id=str(resp.json().get("timestamp", "")))
+            try:
+                # Keep the handle open only for the duration of the request;
+                # on Windows an unlinked-but-open file makes the cleanup fail,
+                # turning a successful send into a reported error + duplicate.
+                with open(tmp.name, "rb") as fh:
+                    files = {"file": (tmp.name, fh, "image/jpeg")}
+                    resp = await self._client.post("/v2/send", data=json.dumps(payload), files=files)
+                return SendResult(success=resp.is_success, message_id=str(resp.json().get("timestamp", "")))
+            finally:
+                os.unlink(tmp.name)
         except Exception as e:
             return SendResult(success=False, error=str(e))
 

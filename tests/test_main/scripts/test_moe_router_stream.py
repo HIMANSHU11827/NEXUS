@@ -2,8 +2,9 @@ from intelligence.moe_router import NexusMoERouter
 
 
 class _Provider:
-    def __init__(self, chunks):
+    def __init__(self, chunks, usage=None):
         self._chunks = chunks
+        self._last_usage = usage
         self.model = "default-model"
         self.kwargs = {}
 
@@ -87,6 +88,20 @@ def test_run_scoped_provider_model_and_token_overrides_are_forwarded():
     assert selected.model == "chosen-model"
     assert selected.kwargs["max_tokens"] == 123
     assert router.provider_override == "deepseek"
+
+
+def test_moe_router_exposes_provider_usage_after_stream():
+    router = object.__new__(NexusMoERouter)
+    router.factory = _Factory()
+    router.factory.providers["deepseek"] = _Provider(
+        ["hello"], {"prompt_tokens": 14, "completion_tokens": 3}
+    )
+    router.provider_override = "deepseek"
+    router.profile_override = ""
+    router._load_task_routing = lambda: {}
+
+    assert list(router.stream_generate([{"role": "user", "content": "hello"}])) == ["hello"]
+    assert router._last_usage == {"prompt_tokens": 14, "completion_tokens": 3}
 
 
 def test_partial_stream_failure_does_not_mix_provider_answers():

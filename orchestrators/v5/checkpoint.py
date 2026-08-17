@@ -11,6 +11,7 @@ never raises.
 from __future__ import annotations
 
 import glob
+import hashlib
 import re
 import json
 import logging
@@ -178,9 +179,14 @@ class V5Checkpoint:
             directory = self._checkpoint_dir()
             if not directory:
                 return ""
-            safe_turn = self._checkpoint_sanitize(turn_id) or "turn"
-            safe_phase = self._checkpoint_sanitize(phase)
-            return os.path.join(directory, f"{safe_turn}_{safe_phase}.json")
+            raw_turn = str(turn_id or "")
+            raw_phase = str(phase or "")
+            safe_turn = (self._checkpoint_sanitize(raw_turn) or "turn")[:80]
+            safe_phase = self._checkpoint_sanitize(raw_phase)[:40]
+            identity = hashlib.sha256(
+                (raw_turn + "\0" + raw_phase).encode("utf-8", errors="replace")
+            ).hexdigest()[:16]
+            return os.path.join(directory, f"{safe_turn}_{safe_phase}_{identity}.json")
         except Exception:
             return ""
 
@@ -303,7 +309,15 @@ class V5Checkpoint:
                     if os.path.exists(temp_path):
                         os.unlink(temp_path)
             return path
-        except Exception:
+        except Exception as exc:
+            # A lost checkpoint means resume durability is degraded; make it
+            # visible on the final result instead of failing silently.
+            logger = getattr(self, "logger", None)
+            if logger is not None:
+                logger.warning("checkpoint save failed: %s", exc)
+            record = getattr(self, "_record_degradation", None)
+            if callable(record):
+                record(f"checkpoint persistence failed: {exc}")
             return None
 
     def _checkpoint_prune(self, keep: int = MAX_CHECKPOINT_FILES) -> int:
@@ -362,13 +376,16 @@ class V5Checkpoint:
                 if not path or not os.path.exists(path):
                     return {}
                 data = self._checkpoint_read(path)
-                if data:
+                if (
+                    data
+                    and str(data.get("turn_id") or "") == str(turn_id or "")
+                    and str(data.get("phase") or "") == str(phase or "")
+                ):
                     data["file"] = path
-                return data
+                    return data
+                return {}
             entries = self._checkpoint_list(limit=0)
-            resolved = self._checkpoint_sanitize(
-                turn_id or self._checkpoint_turn_id()
-            ) or "turn"
+            resolved = str(turn_id or self._checkpoint_turn_id() or "")
             matches = [e for e in entries if e.get("turn_id") == resolved]
             if not matches:
                 return {}
@@ -446,8 +463,9 @@ class V5Checkpoint:
     def _checkpoint_list(self, limit: int = 50) -> List[Dict[str, Any]]:
         """List checkpoints newest-first; [] on failure.
 
-        Each entry carries ``file``, ``turn_id``, ``phase`` and ``ts``,
-        parsed from the ``<turn_id>_<phase>.json`` filenames.
+        Each entry carries ``file``, ``turn_id``, ``phase`` and ``ts`` from
+        the checkpoint payload. Filenames are not an identity format because
+        both turn ids and phases may contain underscores.
         """
         try:
             directory = self._checkpoint_dir()
@@ -458,8 +476,13 @@ class V5Checkpoint:
                 try:
                     if path.endswith(".resume.claim.json"):
                         continue
-                    stem = os.path.basename(path)[:-5]
-                    turn_id, phase = stem.rsplit("_", 1)
+                    payload = self._checkpoint_read(path)
+                    if not payload:
+                        continue
+                    turn_id = str(payload.get("turn_id") or "")
+                    phase = str(payload.get("phase") or "")
+                    if not turn_id:
+                        continue
                     entries.append(
                         {
                             "file": path,

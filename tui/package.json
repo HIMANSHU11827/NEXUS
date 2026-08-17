@@ -6,7 +6,7 @@
   "scripts": {
     "start": "npx tsx nexus-tui.tsx",
     "build": "tsc --noEmit",
-    "test": "tsx modularization.test.ts && tsx command-registry.test.ts && tsx layout.test.ts && tsx compact-render.test.tsx && tsx welcome-logo.test.tsx && tsx interaction-state.test.ts && tsx question-panel.test.tsx && tsx live-trace.test.ts && tsx live-trace-integration.test.tsx && tsx choice-question.test.ts && tsx terminal-markdown.test.ts && tsx startup-session.test.ts && tsx sse-parser.test.ts && tsx live-agent-state.test.ts && tsx tool-call-state.test.ts && tsx submission-state.test.ts && tsx cancellation-contract.test.ts && tsx v3-smoke.test.ts"
+    "test": "tsx modularization.test.ts && tsx command-registry.test.ts && tsx layout.test.ts && tsx compact-render.test.tsx && tsx welcome-logo.test.tsx && tsx interaction-state.test.ts && tsx question-panel.test.tsx && tsx workspace-panel.test.tsx && tsx approval-panel.test.tsx && tsx question-tool-event.test.ts && tsx question-marker.test.ts && tsx live-trace.test.ts && tsx live-trace-integration.test.tsx && tsx progress-summary.test.tsx && tsx plan-checklist.test.tsx && tsx compact-rows.test.tsx && tsx terminal-markdown.test.ts && tsx assistant-text.test.ts && tsx startup-session.test.ts && tsx queue-status.test.ts && tsx sse-parser.test.ts && tsx live-agent-state.test.ts && tsx tool-call-state.test.ts && tsx submission-state.test.ts && tsx cancellation-contract.test.ts && tsx task-subject.test.ts && tsx v3-smoke.test.ts"
   },
   "dependencies": {
     "cfonts": "^3.3.1",

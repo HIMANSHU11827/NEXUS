@@ -1,6 +1,16 @@
 # NEXUS TUI (Ink) Commands Reference
 
+On direct TUI startup, the client waits for the local API before creating a
+fresh session. If it launches the API itself, it enables the embedded durable
+queue worker unless `NEXUS_EMBED_QUEUE_DRIVER` was explicitly set. `/tasks`
+and `/queue` intentionally show different stores: session work-items versus
+the project SQLite queue.
+
 The TUI (`tui/nexus-tui.tsx`) is an Ink-based TypeScript thin client that talks to the local FastAPI backend on port 8000. `python -m nexus` launches this TUI by default and starts `gui.api:app` when needed, because that backend exposes the full TUI/GUI control-plane endpoints. This document catalogs every command with its current behavior.
+
+## Source of truth
+
+The canonical command catalog is `nexus/commands.py`, exposed at `GET /api/commands` and executed at `POST /api/command`. Both the TUI palette and GUI palette load that catalog; neither should add a private suggestion list. Entries marked `execution: client` are real catalog entries whose behavior needs interactive state (for example clipboard, local terminal, or browser controls), so the client dispatcher handles them and the API returns an honest capability response when called from a stateless surface.
 
 ## Command Categories
 
@@ -90,6 +100,7 @@ Uses `.venv\Scripts\python.exe` when available (Windows fix). stderr output capt
 |---------|---------|----------|
 | `/status` | — | Shows full system status via `GET /api/status` |
 | `/health` | — | Shows API + runtime health |
+| `/queue` | — | Shows durable SQLite queue state, worker mode, and unfinished queued/autonomous work via `GET /api/queue` |
 | `/debug` | — | Shows debug diagnostics |
 | `/doctor` | — | Runs health checks (API, git, tsc, Python compile) |
 | `/features` | — | Lists runtime feature flags |
@@ -103,7 +114,7 @@ Uses `.venv\Scripts\python.exe` when available (Windows fix). stderr output capt
 ### Task & Todo
 | Command | Aliases | Behavior |
 |---------|---------|----------|
-| `/tasks` | `/bashes` | Lists tasks via `GET /api/tasks` |
+| `/tasks` | `/bashes` | Lists current-session canonical work-items via `GET /api/work-items` |
 | `/todo` | — | `add <text>` creates task. `done <id>` completes. `open <id>` shows detail. `list` shows all. |
 | `/goal` | — | Shows/sets/clears active goal via `GET/POST /api/goal` |
 

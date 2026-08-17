@@ -1,6 +1,7 @@
 from orchestrators.v5.core import NexusLoopV5
 from orchestrators.v5.perceive import PerceivedInput, InputType, Intent
 import asyncio
+from tools.nexus_tools.base_tool import ToolResult
 
 
 def test_v5_planning_gate_skips_conversation_and_factual_questions(tmp_path):
@@ -19,6 +20,20 @@ def test_v5_planning_gate_plans_only_actionable_work(tmp_path):
     assert loop._requires_planning("tell me today's news") is True
 
 
+def test_complex_actionable_work_auto_routes_hive_but_simple_work_does_not(tmp_path, monkeypatch):
+    loop = NexusLoopV5(root_dir=str(tmp_path))
+    monkeypatch.delenv("NEXUS_HIVE", raising=False)
+    loop._v5_auto_hive = True
+    assert loop._should_auto_hive("compare the providers and research the latest limits") is True
+    assert loop._hive_enabled() is True
+    loop._v5_auto_hive = False
+    assert loop._should_auto_hive("read one file") is False
+    assert loop._hive_enabled() is False
+    monkeypatch.setenv("NEXUS_HIVE", "0")
+    loop._v5_auto_hive = True
+    assert loop._hive_enabled() is False
+
+
 def test_v5_model_planning_decision_overrides_heuristic(tmp_path, monkeypatch):
     loop = NexusLoopV5(root_dir=str(tmp_path))
     perceived = PerceivedInput(
@@ -35,6 +50,47 @@ def test_v5_model_planning_decision_overrides_heuristic(tmp_path, monkeypatch):
     asyncio.run(loop._decide_planning(perceived))
     assert perceived.metadata["planning_required"] is False
     assert perceived.metadata["planning_decision"] == "model:direct"
+
+
+def test_v5_actionable_request_cannot_be_routed_direct(tmp_path, monkeypatch):
+    """A fast router must not disable planning for real project work."""
+    loop = NexusLoopV5(root_dir=str(tmp_path))
+    perceived = PerceivedInput(
+        original_input="fix the failing test and run pytest",
+        input_type=InputType.TEXT,
+        intent=Intent.DEBUGGING,
+        confidence=1.0,
+    )
+
+    async def direct(*_args, **_kwargs):
+        return "DIRECT"
+
+    monkeypatch.setattr(loop, "_safe_model_call", direct)
+    asyncio.run(loop._decide_planning(perceived))
+
+    assert perceived.metadata["planning_required"] is True
+    assert perceived.metadata["planning_decision"] == "model:direct-overridden"
+    assert perceived.metadata["decision_source"] == "deterministic-action-boundary"
+
+
+def test_v5_json_direct_route_cannot_disable_actionable_planning(tmp_path, monkeypatch):
+    loop = NexusLoopV5(root_dir=str(tmp_path))
+    perceived = PerceivedInput(
+        original_input="inspect the repository and update the failing code",
+        input_type=InputType.TEXT,
+        intent=Intent.DEBUGGING,
+        confidence=1.0,
+    )
+
+    async def direct_route(*_args, **_kwargs):
+        return '{"mode":"DIRECT","tool":"none","model":"fast"}'
+
+    monkeypatch.setattr(loop, "_safe_model_call", direct_route)
+    asyncio.run(loop._decide_planning(perceived))
+
+    assert perceived.metadata["planning_required"] is True
+    assert perceived.metadata["planning_decision"] == "model:direct-overridden"
+    assert perceived.metadata["model_route"] == "strong"
 
 
 def test_v5_router_returns_full_runtime_policy(tmp_path, monkeypatch):
@@ -94,6 +150,32 @@ def test_planning_route_persists_through_registered_planning_tool(tmp_path, monk
     assert captured[0].params["plan_spec"]["steps"] == [
         "Inspect the project", "Implement the application", "Run the application tests"
     ]
+
+
+def test_failed_planning_tool_cannot_open_execution_path(tmp_path, monkeypatch):
+    loop = NexusLoopV5(root_dir=str(tmp_path))
+    perceived = PerceivedInput(
+        original_input="build and test the small application",
+        input_type=InputType.TEXT,
+        intent=Intent.TASK,
+        confidence=1.0,
+    )
+
+    async def plan_model(_perceived):
+        return [
+            {"description": "Inspect the project", "tool": "reading", "params": {}},
+            {"description": "Implement the application", "tool": "creating", "params": {}},
+            {"description": "Run the application tests", "tool": "test_runner", "params": {}},
+        ]
+
+    async def run_tool(_call):
+        return ToolResult(success=False, error="planning storage unavailable")
+
+    monkeypatch.setattr(loop, "_llm_plan_with_enforcement", plan_model)
+    loop._run_tool = run_tool
+
+    assert asyncio.run(loop._plan_with_tool(perceived)) == []
+    assert loop._active_execution_plan == {}
 
 
 def test_active_hive_gate_runs_before_plan_persistence(tmp_path, monkeypatch):

@@ -3,7 +3,6 @@ import {existsSync} from 'node:fs';
 import {mkdir, readFile, readdir, stat, writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {render, Box, Text, useApp, useInput} from 'ink';
-import {detectChoiceQuestion, formatChoiceQuestionForChat} from './choice-question.js';
 import {resolveRetryPrompt} from './retry.js';
 import {mcpServerActive} from './inline-activity.js';
 import type {McpServerItem} from './inline-activity.js';
@@ -11,18 +10,21 @@ import {StatusBar} from './status-bar.js';
 import {InputComposer} from './input-composer.js';
 import {activeHiveAgents} from './live-agent-state.js';
 import {appendToolOutput, isSyntheticAgentLifecycle, toolActivityIdentity, toolEventDeliveryIdentity} from './tool-call-state.js';
-import {NexusBanner, WorkingStatus, VoiceEqualizer} from './banner.js';
+import {WorkingStatus, VoiceEqualizer} from './banner.js';
 import {NexusWelcomeLogo} from './welcome-logo.js';
 import {ChatLineView, activityIdsFromChatLines, buildChatLines, appendVoicePreviewLines, buildThinkingRows, nextActivityFocus, toggleActivityExpansion} from './chat-view.js';
 import {CommandPalette} from './command-palette.js';
 import {NexusWorkspacePanel} from './workspace-panel.js';
+import {approvalDecisionFromInput} from './approval-state.js';
 import {resolveTuiLayout} from './layout.js';
-import {isExplicitInspectorShortcut, moveQuestionSelection, nextInspectorPanel, resolveQuestionSelection} from './interaction-state.js';
+import {isExplicitInspectorShortcut, moveQuestionSelection, nextInspectorPanel, panelModeAfterActivitySelection, QuestionAnswerQueue, resolveQuestionAnswerSubmission, resolveQuestionSelection, resolveTabIntent} from './interaction-state.js';
 import {
     API_BASE,
+    DASHBOARD_TOKEN,
     API_AUTH_HEADERS,
     API_JSON_HEADERS,
     PROJECT_ROOT,
+    PYTHON_EXECUTABLE,
     syncStopVoiceProcess,
     adaptCanonicalEvent,
     canonicalActivityFromSseFrame,
@@ -38,11 +40,13 @@ import {
     estimateTokens,
     formatTokens,
     formatContextPercent,
+    fileStatusFromWorkEvent,
     normalizeActivityStatus,
     cleanPreview,
     cleanVisibleAssistantText,
     stripQuestionMarkers,
     parseQuestionMarker,
+    questionFromToolEvent,
     activityFromWorkEvent,
     mergeActivityTargetFields,
     withActivityIdentity,
@@ -51,7 +55,16 @@ import {
     classifyTool,
     resolveInputAttachments,
     attachmentPrompt,
-    readTodoMarkdown,
+    cleanTaskSubject,
+    taskItemsFromWorkItems,
+    progressSummaryFromWorkEvent,
+    progressSummaryText,
+    mergePlanChecklistEvent,
+    mergePlanChecklistTasks,
+    mergeProgressIntoPlanChecklist,
+    finalizePlanChecklist,
+    planChecklistStatus,
+    queueSnapshotLines,
     safeRelativePath,
     listDirectory,
     treeDirectory,
@@ -67,7 +80,6 @@ import {
     mouseWheelDirection,
     mouseWheelDirections,
     mousePointer,
-    CONTEXT_LIMIT,
     MAX_TIMELINE_ITEMS,
     clearTerminalForInk,
     THEME,
@@ -79,9 +91,12 @@ import {
     type UsageStats,
     type AgentInfo,
     type TaskItem,
+    type PlanChecklistItem,
     type ActivityItem,
     type PanelMode,
     type PendingQuestion,
+    type PendingApproval,
+    approvalFromWorkEvent,
     type WorkingPhase,
     type SandboxTier,
     type PermissionMode,
@@ -99,6 +114,7 @@ const App = () => {
     const [sessionId, setSessionId] = useState(() => `tui_${Date.now()}`);
     const [provider, setProvider] = useState('');
     const [model, setModel] = useState('');
+    const [providerUsage, setProviderUsage] = useState<UsageStats | null>(null);
     const [extraDirs, setExtraDirs] = useState<string[]>([]);
     const [activities, setActivities] = useState<string[]>([]);
     const [touchedFiles, setTouchedFiles] = useState<FileStatus[]>([]);
@@ -106,26 +122,32 @@ const App = () => {
     const [panelMode, setPanelMode] = useState<PanelMode>('workspace');
     const [voiceMode, setVoiceMode] = useState<'off' | 'auto' | 'manual' | 'text'>('off');
     const [voicePhase, setVoicePhase] = useState('off');
-    const [sandboxTier, setSandboxTier] = useState<SandboxTier>('no_sandbox');
+    const [sandboxTier, setSandboxTier] = useState<SandboxTier>('normal');
     const [permissionMode, setPermissionMode] = useState<PermissionMode>('auto');
     const [voiceTranscriptPreview, setVoiceTranscriptPreview] = useState('');
     const [voiceReplyPreview, setVoiceReplyPreview] = useState('');
     const [connectionState, setConnectionState] = useState<'connecting' | 'online' | 'offline'>('connecting');
+    const [startupReady, setStartupReady] = useState(false);
     const voiceSessionIdRef = useRef<string | null>(null);
     const voiceShutdownRef = useRef(false);
     const [agents, setAgents] = useState<AgentInfo[]>([]);
     const [tasks, setTasks] = useState<TaskItem[]>([]);
+    const [queuePending, setQueuePending] = useState<number | null>(null);
+    const [queueWorker, setQueueWorker] = useState<string>('unknown');
     const [mcpConnectedCount, setMcpConnectedCount] = useState(0);
     const [mcpServers, setMcpServers] = useState<McpServerItem[]>([]);
     const [activityItems, setActivityItems] = useState<ActivityItem[]>([]);
     const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
+    const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+    const pendingApprovalRef = useRef<PendingApproval | null>(null);
     const [questionCustomMode, setQuestionCustomMode] = useState(false);
     const [selectedQuestionIndex, setSelectedQuestionIndex] = useState(0);
-    const [planItems, setPlanItems] = useState<string[]>([]);
+    const [planItems, setPlanItems] = useState<PlanChecklistItem[]>([]);
     const [planStatus, setPlanStatus] = useState('planning');
     const [planExpanded, setPlanExpanded] = useState(false);
     const activePlanRef = useRef(false);
     const questionSubmitRef = useRef<(answer: string) => void>(() => {});
+    const queuedQuestionAnswerRef = useRef(new QuestionAnswerQueue());
     const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null);
     const [focusedChatActivityId, setFocusedChatActivityId] = useState<string | null>(null);
     const [expandedChatActivityId, setExpandedChatActivityId] = useState<string | null>(null);
@@ -141,6 +163,8 @@ const App = () => {
     // show real elapsed duration across /tasks polls, never a fabricated value.
     const taskStartTimesRef = useRef(new Map<string, number>());
     const panelRefreshRef = useRef<Promise<{agents: AgentInfo[]; tasks: TaskItem[]}> | null>(null);
+    const apiBootstrapRef = useRef<Promise<boolean> | null>(null);
+    const sessionEpochRef = useRef(0);
     // SSE reconnects and server history replay can deliver the same canonical
     // event more than once. Keep a bounded identity set so replay is harmless
     // before it reaches timeline/history side effects.
@@ -151,7 +175,6 @@ const App = () => {
     // The browser/Ink stream is only a transport. Keep the server-owned run
     // identity so Stop can cancel provider and tool work as well.
     const activeRunIdRef = useRef<string | null>(null);
-    const [activeRunId, setActiveRunId] = useState<string | null>(null);
     const turnInFlightRef = useRef(false);
     const [isThinking, setIsThinking] = useState(false);
     const [workingPhase, setWorkingPhase] = useState<WorkingPhase>('thinking');
@@ -166,6 +189,7 @@ const App = () => {
     const {exit} = useApp();
 
     const cancelActiveTurn = () => {
+        queuedQuestionAnswerRef.current.clear();
         const runId = activeRunIdRef.current;
         const suffix = runId ? `?turn_id=${encodeURIComponent(runId)}` : '';
         void fetch(`${API_BASE}/chat/${encodeURIComponent(sessionId)}/cancel${suffix}`, {
@@ -219,7 +243,7 @@ const App = () => {
     const safeChatScroll = Math.min(chatScroll, maxChatScroll);
     // Inspector content is a user choice. A new plan or agent may update its
     // data, but it must not unexpectedly steal the user's current view.
-    const displayedPanelMode: PanelMode = pendingQuestion ? 'question' : panelMode;
+    const displayedPanelMode: PanelMode = pendingApproval ? 'approval' : pendingQuestion ? 'question' : panelMode;
     // A custom answer needs the normal composer even though its question body
     // lives in the inspector on narrow terminals.
     const showNarrowInspector = !isWide
@@ -298,7 +322,8 @@ const App = () => {
                 if (pointer.button === 0) {
                     setSelectedActivityId(activityId);
                     setExpandedChatActivityId(current => toggleActivityExpansion(current, activityId));
-                    setPanelMode(current => current === 'activity' ? 'workspace' : current);
+                    const activity = activityItems.find(item => item.id === activityId);
+                    setPanelMode(current => panelModeAfterActivitySelection(current, activity?.kind));
                 }
             } else if (isThinking && lineIndex >= visibleChatLines.length && lineIndex < visibleChatLines.length + thinkingLineCount) {
                 setFocusedChatActivityId(null);
@@ -361,6 +386,14 @@ const App = () => {
     useInput((value, key) => {
         const scrollPage = Math.max(1, visibleChatLineCount - 2);
         const wheelDirection = mouseWheelDirection(value, leftPanelWidth);
+
+        if (pendingApproval) {
+            const decision = approvalDecisionFromInput(value, key.escape);
+            if (decision) {
+                void resolveApproval(decision);
+            }
+            return;
+        }
 
         if (panelMode === 'question' && pendingQuestion) {
             if (questionCustomMode && key.escape) {
@@ -431,16 +464,27 @@ const App = () => {
         if (key.tab && !showCommandPalette) {
             const activityIds = activityIdsFromChatLines(visibleChatLines);
             // Ctrl+I and Tab are the same ASCII control byte. Ink therefore
-            // reports Ctrl+I as Tab in Windows Terminal. If no trace row can
-            // consume Tab, honor that byte as the documented inspector key.
-            if (activityIds.length === 0) {
+            // reports Ctrl+I as Tab in Windows Terminal. Route the byte
+            // deterministically: with rows present it moves row focus (Shift
+            // goes backwards); otherwise it honors the documented inspector
+            // key; a surviving ctrl bit always means inspector intent.
+            const intent = resolveTabIntent({
+                paletteOpen: showCommandPalette,
+                hasActivityRows: activityIds.length > 0,
+                ctrl: Boolean(key.ctrl),
+                shift: Boolean(key.shift)
+            });
+            if (intent === 'cycle-inspector') {
                 cycleInspectorPane();
                 return;
             }
-            const nextId = nextActivityFocus(activityIds, focusedChatActivityId, key.shift);
-            if (!nextId) return;
-            setFocusedChatActivityId(nextId);
-            setSelectedActivityId(nextId);
+            if (intent === 'cycle-activity') {
+                const nextId = nextActivityFocus(activityIds, focusedChatActivityId, key.shift);
+                if (!nextId) return;
+                setFocusedChatActivityId(nextId);
+                setSelectedActivityId(nextId);
+                return;
+            }
             return;
         }
 
@@ -503,6 +547,38 @@ const App = () => {
     }, []);
 
     const refreshPanelData = async () => {
+        const refreshEpoch = sessionEpochRef.current;
+        const isCurrentSession = () => refreshEpoch === sessionEpochRef.current;
+        // Approval events can be missed during an SSE reconnect. Rehydrate the
+        // durable broker row so the TUI can always present a live decision.
+        try {
+            const approvalResponse = await fetch(
+                `${API_BASE}/approve/pending?session_id=${encodeURIComponent(sessionId)}`,
+                {headers: API_AUTH_HEADERS}
+            );
+            if (approvalResponse.ok) {
+                const approvalData = await approvalResponse.json();
+                const approval = Array.isArray(approvalData.pending) && approvalData.pending.length > 0
+                    ? approvalFromWorkEvent(approvalData.pending[0])
+                    : null;
+                if (!isCurrentSession()) return {agents: [], tasks: []};
+                if (approval) {
+                    pendingApprovalRef.current = approval;
+                    setPendingApproval(approval);
+                    setPanelMode('approval');
+                } else {
+                    if (pendingApprovalRef.current?.sessionId === sessionId) {
+                        pendingApprovalRef.current = null;
+                    }
+                    setPendingApproval(current => current && current.sessionId === sessionId ? null : current);
+                    setPanelMode(current => current === 'approval' ? 'workspace' : current);
+                }
+            }
+        } catch {
+            // The SSE path remains authoritative while the broker endpoint is
+            // temporarily unavailable.
+        }
+
         // `/agents` is a catalog of configured personas and commonly contains
         // idle entries. The Hive panel must show live execution only, so use
         // `/hives` as the source of truth for currently running sub-agents.
@@ -514,42 +590,95 @@ const App = () => {
             if (Array.isArray(hivesData.hives)) {
                 nextAgents = activeHiveAgents(hivesData) as AgentInfo[];
             }
-            setAgents(nextAgents);
+            if (isCurrentSession()) setAgents(nextAgents);
         } catch {
             // Do not retain a stale live-agent list when the live endpoint is
             // unavailable; the panel should fail closed instead of claiming
             // that sub-agents are still running.
-            setAgents([]);
+            if (isCurrentSession()) setAgents([]);
         }
 
         const liveTaskIds = new Set<string>();
         try {
-            const tasksResponse = await fetch(`${API_BASE}/tasks`, {headers: API_AUTH_HEADERS});
+            // Tasks are session-owned. The legacy /tasks endpoint is a global
+            // task registry and would leak the previous session's plan into a
+            // freshly started TUI session.
+            const tasksResponse = await fetch(
+                `${API_BASE}/work-items?session_id=${encodeURIComponent(sessionId)}&limit=100`,
+                {headers: API_AUTH_HEADERS}
+            );
             const tasksData = await tasksResponse.json();
-            if (Array.isArray(tasksData.tasks)) {
-                nextTasks = tasksData.tasks.map((task: any) => {
-                    const id = String(task.id || task.subject || '');
+            if (Array.isArray(tasksData.work_items)) {
+                nextTasks = taskItemsFromWorkItems(tasksData.work_items).map(task => {
+                    const id = task.id;
                     liveTaskIds.add(id);
                     if (!taskStartTimesRef.current.has(id)) {
-                        taskStartTimesRef.current.set(id, Date.now());
+                        taskStartTimesRef.current.set(id, task.startedAt || Date.now());
                     }
                     return {
-                        id,
-                        subject: String(task.subject || task.title || 'Task'),
-                        status: String(task.status || 'pending'),
-                        agent: task.agent ? String(task.agent) : undefined,
+                        ...task,
                         startedAt: taskStartTimesRef.current.get(id)
                     };
-                }).filter((task: TaskItem) => task.id);
-                setTasks(nextTasks);
+                });
+                if (isCurrentSession()) {
+                    setTasks(nextTasks);
+                    setPlanItems(previous => {
+                        const restoredPlan = tasksData.active_plan && typeof tasksData.active_plan === 'object'
+                            ? tasksData.active_plan as {plan_id?: unknown; steps?: unknown}
+                            : null;
+                        const restoredTasks = taskItemsFromWorkItems(restoredPlan?.steps);
+                        const source = !activePlanRef.current && restoredTasks.length > 0
+                            ? []
+                            : previous;
+                        const overlay = !activePlanRef.current && restoredTasks.length > 0
+                            ? restoredTasks
+                            : nextTasks;
+                        const merged = mergePlanChecklistTasks(
+                            source,
+                            overlay,
+                            !activePlanRef.current
+                        ).map(item => restoredPlan?.plan_id && !item.planId
+                            ? {...item, planId: String(restoredPlan.plan_id)}
+                            : item
+                        );
+                        setPlanStatus(planChecklistStatus(merged));
+                        return merged;
+                    });
+                }
             }
         } catch {
-            // Tasks are optional; the clean panel is better than stale error text.
+            // Session tasks are optional; clear rather than retaining a stale
+            // previous-session list after a restart or API reconnect.
+            nextTasks = [];
+            if (isCurrentSession()) setTasks([]);
         }
         // Drop start-times for tasks that disappeared server-side so elapsed time
         // stays honest when a task id is later reused.
         for (const key of [...taskStartTimesRef.current.keys()]) {
             if (!liveTaskIds.has(key)) taskStartTimesRef.current.delete(key);
+        }
+
+        try {
+            // This is deliberately separate from session work-items above:
+            // queued cron/autonomous work can exist before it has a session
+            // work-item projection, and must remain observable after restart.
+            const queueResponse = await fetch(
+                `${API_BASE}/queue?session_id=${encodeURIComponent(sessionId)}&include_global=false&limit=20`,
+                {headers: API_AUTH_HEADERS}
+            );
+            if (!queueResponse.ok) throw new Error(`queue returned ${queueResponse.status}`);
+            const queueData = await queueResponse.json();
+            if (isCurrentSession()) {
+                setQueuePending(Number.isFinite(Number(queueData.pending)) ? Number(queueData.pending) : null);
+                setQueueWorker(String(queueData.worker || 'unknown'));
+            }
+        } catch {
+            // Queue status is optional for interactive chat. Do not retain a
+            // stale count after an API restart or a session reconnect.
+            if (isCurrentSession()) {
+                setQueuePending(null);
+                setQueueWorker('unknown');
+            }
         }
 
         try {
@@ -565,8 +694,10 @@ const App = () => {
                     connected: Boolean(server.connected),
                     status: server.status ? String(server.status) : undefined
                 })).filter((server: {id: string}) => server.id);
-                setMcpServers(servers);
-                setMcpConnectedCount(servers.filter(mcpServerActive).length);
+                if (isCurrentSession()) {
+                    setMcpServers(servers);
+                    setMcpConnectedCount(servers.filter(mcpServerActive).length);
+                }
             }
         } catch {
             // Keep the last verified MCP list while the API is unavailable.
@@ -575,7 +706,7 @@ const App = () => {
         try {
             const commandResponse = await fetch(`${API_BASE}/commands`, {headers: API_AUTH_HEADERS});
             if (!commandResponse.ok) throw new Error(`command registry returned ${commandResponse.status}`);
-            setCommandRegistry(normalizeCommandRegistry(await commandResponse.json()));
+            if (isCurrentSession()) setCommandRegistry(normalizeCommandRegistry(await commandResponse.json()));
         } catch {
             // Never invent a second client-side command catalog. Keep the last
             // verified registry snapshot until the backend is reachable again.
@@ -583,39 +714,39 @@ const App = () => {
 
         try {
             const status = await apiJson('/status');
-            setConnectionState('online');
-            setSandboxTier(normalizeSandboxTier(String(status.sandbox_tier || 'no_sandbox')));
-            setPermissionMode(normalizePermissionMode(String(status.mode || 'auto')));
+            if (isCurrentSession()) {
+                setConnectionState('online');
+                setSandboxTier(normalizeSandboxTier(String(status.sandbox_tier || 'no_sandbox')));
+                setPermissionMode(normalizePermissionMode(String(status.mode || 'auto')));
+            }
             // The status bar shows the ACTIVE provider/model from the backend, not
             // a cached override. Local /model and /provider overrides win when set.
-            if (status.model) setModel(String(status.model));
-            if (status.provider) setProvider(String(status.provider));
+            if (isCurrentSession()) {
+                if (status.model) setModel(String(status.model));
+                if (status.provider) setProvider(String(status.provider));
+            }
         } catch {
             // Keep connection failure visible without adding noisy polling rows to chat.
-            setConnectionState('offline');
-        }
-
-        if (nextTasks.length === 0) {
-            const markdownTasks = await readTodoMarkdown();
-            if (markdownTasks.length > 0) {
-                nextTasks = markdownTasks;
-                setTasks(nextTasks);
-            }
+            if (isCurrentSession()) setConnectionState('offline');
         }
 
         try {
             const voiceResponse = await fetch(`${API_BASE}/voice/status`, {headers: API_AUTH_HEADERS});
             const voiceData = await voiceResponse.json();
             if (voiceData.running) {
-                setVoiceMode(voiceData.mode || 'auto');
-                setVoicePhase(String(voiceData.phase || 'idle'));
-                setVoiceTranscriptPreview(String(voiceData.transcript_preview || ''));
-                setVoiceReplyPreview(String(voiceData.reply_preview || ''));
+                if (isCurrentSession()) {
+                    setVoiceMode(voiceData.mode || 'auto');
+                    setVoicePhase(String(voiceData.phase || 'idle'));
+                    setVoiceTranscriptPreview(String(voiceData.transcript_preview || ''));
+                    setVoiceReplyPreview(String(voiceData.reply_preview || ''));
+                }
             } else {
-                setVoiceMode('off');
-                setVoicePhase('off');
-                setVoiceTranscriptPreview('');
-                setVoiceReplyPreview('');
+                if (isCurrentSession()) {
+                    setVoiceMode('off');
+                    setVoicePhase('off');
+                    setVoiceTranscriptPreview('');
+                    setVoiceReplyPreview('');
+                }
             }
         } catch {
             // Ignore errors querying voice status
@@ -634,23 +765,36 @@ const App = () => {
     };
 
     useEffect(() => {
+        sessionEpochRef.current += 1;
+        if (!startupReady) return;
         void loadPanelData();
         const timer = setInterval(() => {
             void loadPanelData();
         }, 6000);
         return () => clearInterval(timer);
-    }, []);
+    }, [sessionId, startupReady]);
 
     useEffect(() => {
         const startFreshSession = async () => {
             try {
+                const apiReady = await ensureApiAvailable();
+                if (!apiReady) {
+                    setConnectionState('offline');
+                    setStartupReady(true);
+                    return;
+                }
                 const created = await apiJson('/sessions/new', {method: 'POST'});
                 if (created?.id) {
                     setSessionId(String(created.id));
                     setHistory(INITIAL_HISTORY);
+                    resetSessionView();
                 }
+                setStartupReady(true);
             } catch {
-                // Keep local defaults if the API is still starting.
+                // Keep local defaults if the API is still starting; the panel
+                // poll will retry state hydration without fabricating a turn.
+                setConnectionState('offline');
+                setStartupReady(true);
             }
         };
 
@@ -708,25 +852,12 @@ const App = () => {
         return () => clearInterval(interval);
     }, [voiceMode, sessionId]);
 
-    const inputTokens = history
-        .filter(msg => msg.role === 'user')
-        .reduce((total, msg) => total + estimateTokens(msg.content), 0);
-    const outputTokens = history
-        .filter(msg => msg.role === 'assistant')
-        .reduce((total, msg) => total + estimateTokens(msg.content), 0);
-    const contextTokens = Math.min(
-        CONTEXT_LIMIT,
-        inputTokens +
-        outputTokens +
-        estimateTokens(lastChange) +
-        activities.length * 12 +
-        touchedFiles.length * 8
-    );
-    const usage: UsageStats = {
-        contextTokens,
-        contextLimit: CONTEXT_LIMIT,
-        inputTokens,
-        outputTokens
+    const usage: UsageStats = providerUsage || {
+        contextTokens: 0,
+        contextLimit: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        source: 'unavailable'
     };
 
     const appendTimeline = (event: TimelineEvent) => {
@@ -899,19 +1030,66 @@ const App = () => {
         setHistory(prev => [...prev, {role: 'system', content}]);
     };
 
+    const resetSessionView = () => {
+        // Session-scoped projections must not survive /new or /resume. The
+        // backend owns persistence; this only clears the old session's local
+        // view before the next panel refresh arrives.
+        seenWorkEventIds.current.clear();
+        streamedActivityIds.current.clear();
+        taskStartTimesRef.current.clear();
+        activityCounter.current = 0;
+        queuedQuestionAnswerRef.current.clear();
+        setTasks([]);
+        setQueuePending(null);
+        setQueueWorker('unknown');
+        setActivityItems([]);
+        setActivities([]);
+        setTouchedFiles([]);
+        setLastChange('');
+        setTimeline([{kind: 'step', weight: 1, label: 'Session ready'}]);
+        setPendingQuestion(null);
+        pendingApprovalRef.current = null;
+        setPendingApproval(null);
+        activePlanRef.current = false;
+        setPlanItems([]);
+        setPlanStatus('planning');
+        setPlanExpanded(false);
+        setSelectedActivityId(null);
+        setFocusedChatActivityId(null);
+        setExpandedChatActivityId(null);
+        setSelectedAgentId(null);
+        setPanelMode('workspace');
+        setProviderUsage(null);
+        setChatScroll(0);
+    };
+
     const ensureApiAvailable = async () => {
-        if (await apiHasTuiCapabilities()) return true;
-
-        // Never kill an unknown process merely because it owns the default port.
-        // The launcher owns its server; direct TUI use may only start a new one.
-        startDetached('python', ['-m', 'server'], PROJECT_ROOT);
-
-        for (let attempt = 0; attempt < 20; attempt += 1) {
-            await new Promise(resolve => setTimeout(resolve, 400));
+        if (apiBootstrapRef.current) return apiBootstrapRef.current;
+        const bootstrap = (async () => {
             if (await apiHasTuiCapabilities()) return true;
-        }
 
-        return false;
+            // Never kill an unknown process merely because it owns the default
+            // port. Direct TUI use may only start a new one. When the TUI owns
+            // the launch, enable the embedded durable worker so cron/queued
+            // work is not left in SQLite with no consumer. An explicit caller
+            // setting still wins.
+            startDetached(PYTHON_EXECUTABLE, ['-m', 'server'], PROJECT_ROOT, {
+                NEXUS_DASHBOARD_TOKEN: DASHBOARD_TOKEN,
+                NEXUS_EMBED_QUEUE_DRIVER: process.env.NEXUS_EMBED_QUEUE_DRIVER || 'true'
+            });
+
+            for (let attempt = 0; attempt < 30; attempt += 1) {
+                await new Promise(resolve => setTimeout(resolve, 400));
+                if (await apiHasTuiCapabilities()) return true;
+            }
+            return false;
+        })();
+        apiBootstrapRef.current = bootstrap;
+        try {
+            return await bootstrap;
+        } finally {
+            if (apiBootstrapRef.current === bootstrap) apiBootstrapRef.current = null;
+        }
     };
 
     const apiJson = async (endpoint: string, init?: RequestInit) => {
@@ -935,6 +1113,25 @@ const App = () => {
         body: JSON.stringify(body)
     });
 
+    const resolveApproval = async (decision: 'allow' | 'allow_always' | 'deny') => {
+        const approval = pendingApproval;
+        if (!approval) return;
+        try {
+            const result = await postJson('/approve', {
+                request_id: approval.requestId,
+                decision
+            });
+            if (result.matched === false) {
+                pushSystem('Approval was already resolved or expired.');
+            }
+            pendingApprovalRef.current = null;
+            setPendingApproval(null);
+            setPanelMode(current => current === 'approval' ? 'workspace' : current);
+        } catch (error) {
+            pushSystem(`APPROVAL_ERROR: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    };
+
     const formatRows = (rows: string[]) => rows.length > 0 ? rows.join('\n') : 'No results.';
     const providerDiagnosticsRows = (diagnostics: any) => {
         const active = diagnostics?.active || {};
@@ -953,9 +1150,11 @@ const App = () => {
         .map(msg => `${msg.role.toUpperCase()}: ${msg.content.trim()}`)
         .join('\n\n');
     const usageLines = () => [
-        `context: ${formatContextPercent(usage.contextTokens, usage.contextLimit)} (${formatTokens(usage.contextTokens)} / ${formatTokens(usage.contextLimit)})`,
-        `input: ${formatTokens(usage.inputTokens)}`,
-        `output: ${formatTokens(usage.outputTokens)}`,
+        usage.source === 'provider'
+            ? `context: ${formatContextPercent(usage.contextTokens, usage.contextLimit)} (${formatTokens(usage.contextTokens)} / ${formatTokens(usage.contextLimit)})`
+            : 'context: unavailable (provider did not report token usage)',
+        usage.source === 'provider' ? `input: ${formatTokens(usage.inputTokens)}` : 'input: unavailable',
+        usage.source === 'provider' ? `output: ${formatTokens(usage.outputTokens)}` : 'output: unavailable',
         `messages: ${history.filter(msg => msg.role === 'user' || msg.role === 'assistant').length}`,
         `activities: ${activityItems.length}`
     ];
@@ -1600,7 +1799,10 @@ const App = () => {
             if (command === '/api') {
                 const action = parts[0]?.toLowerCase() || 'status';
                 if (action === 'start') {
-                    startDetached('python', ['-m', 'server'], PROJECT_ROOT);
+                    startDetached(PYTHON_EXECUTABLE, ['-m', 'server'], PROJECT_ROOT, {
+                        NEXUS_DASHBOARD_TOKEN: DASHBOARD_TOKEN,
+                        NEXUS_EMBED_QUEUE_DRIVER: process.env.NEXUS_EMBED_QUEUE_DRIVER || 'true'
+                    });
                     pushCommand('started TUI API on http://127.0.0.1:8000');
                 } else {
                     const health = await apiJson('/health');
@@ -1901,7 +2103,10 @@ const App = () => {
                     const result = await manageJson('model', 'provider', parts[1], parts.slice(2).join(' '));
                     pushCommand(formatManageResult(result));
                 } else {
-                    const result = await postJson('/model', {model: args, session_id: sessionId});
+                    const separator = args.indexOf(':');
+                    const provider = separator > 0 ? args.slice(0, separator).trim() : '';
+                    const model = separator > 0 ? args.slice(separator + 1).trim() : args;
+                    const result = await postJson('/model', {model, ...(provider ? {provider} : {}), session_id: sessionId});
                     setModel(result.model);
                     pushCommand(`model set: ${result.model}`);
                 }
@@ -1987,9 +2192,20 @@ const App = () => {
             if (command === '/sandbox') {
                 if (!args) {
                     const status = await apiJson('/sandbox');
-                    pushCommand(`sandbox: ${sandboxLabel(normalizeSandboxTier(String(status.tier || 'no_sandbox')))}`);
+                    pushCommand(`sandbox: ${sandboxLabel(normalizeSandboxTier(String(status.tier || 'normal')))}`);
                 } else {
-                    const requested = normalizeSandboxTier(args);
+                    const normalized = String(args).trim().toLowerCase().replace(/\s+/g, '_');
+                    const aliases: Record<string, SandboxTier> = {
+                        no_sandbox: 'no_sandbox', none: 'no_sandbox', off: 'no_sandbox', no: 'no_sandbox',
+                        'no-sandbox': 'no_sandbox', nosandbox: 'no_sandbox',
+                        normal: 'normal', simple: 'normal', on: 'normal', safe: 'normal',
+                        docker: 'docker', advanced: 'docker'
+                    };
+                    const requested = aliases[normalized];
+                    if (!requested) {
+                        pushCommand('invalid sandbox tier: use no_sandbox, normal, or docker');
+                        return true;
+                    }
                     const result = await postJson('/sandbox', {tier: requested});
                     const nextTier = normalizeSandboxTier(String(result.tier || requested));
                     setSandboxTier(nextTier);
@@ -1999,9 +2215,13 @@ const App = () => {
             }
 
             if (command === '/effort') {
-                const level = args || 'auto';
-                const result = await manageJson('set', 'config', 'runtime.effort', level);
-                pushCommand(formatManageResult(result));
+                if (!args || args.toLowerCase() === 'status') {
+                    const result = await apiJson('/effort');
+                    pushCommand(`effort: ${result.effort}`);
+                } else {
+                    const result = await postJson('/effort', {effort: args});
+                    pushCommand(`effort set: ${result.effort}`);
+                }
                 return true;
             }
 
@@ -2020,6 +2240,7 @@ const App = () => {
                 const created = await apiJson('/sessions/new', {method: 'POST'});
                 setSessionId(created.id);
                 setHistory(INITIAL_HISTORY);
+                resetSessionView();
                 setSelectedActivityId(null);
                 setSelectedAgentId(null);
                 setPanelMode('workspace');
@@ -2050,6 +2271,7 @@ const App = () => {
                         }))
                         : [];
                     setHistory(loadedHistory);
+                    resetSessionView();
                     pushCommand(`resumed: ${loaded.id}`);
                 }
                 return true;
@@ -2138,6 +2360,17 @@ const App = () => {
                     pushCommand(formatRows((data.plugins || [])
                         .filter((plugin: any) => !query || String(plugin.id).toLowerCase().includes(query) || String(plugin.name || '').toLowerCase().includes(query))
                         .map((plugin: any) => `${plugin.id} - ${plugin.enabled ? 'enabled' : 'disabled'}`)));
+                }
+                return true;
+            }
+
+            if (command === '/queue') {
+                const apiReady = await ensureApiAvailable();
+                if (!apiReady) {
+                    pushSystem('QUEUE_ERROR: API is offline');
+                } else {
+                    const snapshot = await apiJson(`/queue?session_id=${encodeURIComponent(sessionId)}&include_global=false&limit=50`);
+                    pushCommand(queueSnapshotLines(snapshot).join('\n'));
                 }
                 return true;
             }
@@ -2403,6 +2636,7 @@ const App = () => {
 
     const handleSubmit = async (value: string) => {
         if (!value) return;
+        let streamTerminalStatus: 'done' | 'error' | 'cancelled' | null = null;
         const normalizedValue = value.trim().toLowerCase();
         const wasTurnInFlight = turnInFlightRef.current;
         // A session accepts one live turn. Preserve the draft instead of adding
@@ -2418,6 +2652,9 @@ const App = () => {
         }
 
         turnInFlightRef.current = true;
+        // Do not carry the previous turn's measured usage into a new active
+        // request. Until the provider reports this turn, show unavailable.
+        setProviderUsage(null);
         if (await handleSlashCommand(value)) {
             // A live /stop is still waiting for the server stream to finish.
             if (!wasTurnInFlight) turnInFlightRef.current = false;
@@ -2448,15 +2685,11 @@ const App = () => {
         setThinkingPrompt(value);
         setThinkingStartedAt(Date.now());
         activePlanRef.current = false;
-        setPlanItems([]);
-        setPlanStatus('planning');
         setPlanExpanded(false);
         setWorkingPhase('querying');
         const controller = new AbortController();
         chatAbortControllerRef.current = controller;
         activeRunIdRef.current = null;
-        setActiveRunId(null);
-
         try {
             const response = await fetch(`${API_BASE}/chat`, {
                 method: 'POST',
@@ -2601,7 +2834,44 @@ const App = () => {
                     return;
                 }
                 if (eventType === 'done') {
-                    completeRunningActivities('error', 'Stream ended before this operation reported a terminal result.');
+                    let donePayload: any = {};
+                    try { donePayload = JSON.parse(raw); } catch { /* legacy empty done frame */ }
+                    const doneStatus = String(donePayload?.status || '').toLowerCase();
+                    if (doneStatus === 'error' || doneStatus === 'failed') {
+                        streamTerminalStatus = 'error';
+                        completeRunningActivities('error', String(donePayload?.message || donePayload?.error || 'Operation failed'));
+                    } else if (doneStatus === 'cancelled' || doneStatus === 'canceled') {
+                        streamTerminalStatus = 'cancelled';
+                        completeRunningActivities('cancelled');
+                    } else {
+                        streamTerminalStatus = 'done';
+                        completeRunningActivities('done');
+                    }
+                    setIsThinking(false);
+                    return;
+                }
+                if (eventType === 'usage') {
+                    let usagePayload: any;
+                    try {
+                        usagePayload = JSON.parse(raw);
+                    } catch {
+                        throw new Error('Malformed usage event from NEXUS API');
+                    }
+                    if (usagePayload?.source === 'provider' && usagePayload?.available === true) {
+                        const inputTokens = Number(usagePayload.input_tokens || 0);
+                        const outputTokens = Number(usagePayload.output_tokens || 0);
+                        const contextTokens = Number(usagePayload.context_tokens || 0);
+                        const contextLimit = Number(usagePayload.context_window || 0);
+                        if (inputTokens >= 0 && outputTokens >= 0 && contextTokens >= 0 && contextLimit > 0) {
+                            setProviderUsage({
+                                source: 'provider',
+                                inputTokens,
+                                outputTokens,
+                                contextTokens,
+                                contextLimit
+                            });
+                        }
+                    }
                     return;
                 }
                 if (eventType === 'error') {
@@ -2612,6 +2882,7 @@ const App = () => {
                     } catch {
                         // The NEXUS API sends plain-text error frames.
                     }
+                    streamTerminalStatus = 'error';
                     throw new Error(message);
                 }
                 let payload: any;
@@ -2625,21 +2896,70 @@ const App = () => {
                     const observedRunId = event.run_id || event.turn_id;
                     if (observedRunId) {
                         activeRunIdRef.current = String(observedRunId);
-                        setActiveRunId(String(observedRunId));
                     }
                     if (!acceptWorkEvent(event)) return;
+                    const toolQuestion = questionFromToolEvent(event);
+                    if (toolQuestion) {
+                        setSelectedQuestionIndex(0);
+                        setPendingQuestion(toolQuestion);
+                        setPanelMode('question');
+                        appendTimeline({kind: 'step', weight: 20, label: 'Question pending'});
+                    }
+                    const approval = approvalFromWorkEvent(event);
+                    const approvalRequestId = String(event.request_id || event.requestId || event.approval_id || event.id || '');
+                    const approvalStatus = String(event.status || '').toLowerCase();
+                    if (approval) {
+                        setPendingApproval(approval);
+                        setPanelMode('approval');
+                        appendTimeline({kind: 'step', weight: 30, label: 'Approval required'});
+                    } else if (
+                        pendingApprovalRef.current?.requestId === approvalRequestId
+                        && ['done', 'success', 'succeeded', 'completed', 'failed', 'denied', 'rejected', 'cancelled', 'canceled'].includes(approvalStatus)
+                    ) {
+                        pendingApprovalRef.current = null;
+                        setPendingApproval(null);
+                        setPanelMode(current => current === 'approval' ? 'workspace' : current);
+                    }
                     const eventKind = String(event.kind || event.type || '').toLowerCase();
                     const eventTypeName = String(event.event_type || event.type || '').toLowerCase();
                     if (eventTypeName === 'run.completed') {
                         setPlanStatus('done');
+                        setPlanItems(previous => finalizePlanChecklist(previous, 'done'));
                         setPlanExpanded(false);
                     } else if (eventTypeName === 'run.failed' || eventTypeName === 'run.cancelled' || eventTypeName === 'run.timed_out') {
                         setPlanStatus('failed');
+                        setPlanItems(previous => finalizePlanChecklist(
+                            previous,
+                            eventTypeName === 'run.cancelled' ? 'cancelled' : 'failed'
+                        ));
                         setPlanExpanded(false);
                     }
-                    // Progress narration duplicates real tool lifecycle rows
-                    // and carries no query/path target. Keep only canonical
-                    // tool events in the interactive trace.
+                    const progress = progressSummaryFromWorkEvent(event);
+                    if (progress) {
+                        const progressMessage = {
+                            role: 'progress',
+                            content: progressSummaryText(progress),
+                            progress
+                        };
+                        setHistory(previous => {
+                            if (previous.some(message => message.role === 'progress' && message.progress?.id === progress.id)) {
+                                return previous;
+                            }
+                            const next = [...previous];
+                            const assistantIndex = next.findLastIndex(message => message.role === 'assistant');
+                            if (assistantIndex >= 0) next.splice(assistantIndex, 0, progressMessage);
+                            else next.push(progressMessage);
+                            return next;
+                        });
+                        setPlanItems(previous => {
+                            const merged = mergeProgressIntoPlanChecklist(previous, progress);
+                            if (merged !== previous) setPlanStatus(planChecklistStatus(merged));
+                            return merged;
+                        });
+                        setWorkingPhase(inferWorkingPhaseFromTool(progress.tool || 'tool', event) || 'working');
+                        setIsThinking(true);
+                        return;
+                    }
                     if (eventTypeName === 'assistant.progress') return;
                     if (isSyntheticAgentLifecycle(event)) return;
                     const partType = String(event.part_type || event.payload?.part_type || '').toLowerCase();
@@ -2664,42 +2984,35 @@ const App = () => {
                     );
                     appendTimeline({kind: status === 'error' ? 'error' : 'tool', weight: 30, label});
                     setActivities(prev => [`${status === 'error' ? '!' : '⚙'} ${label}`, ...prev.slice(0, 2)]);
-                    if (eventKind === 'file') {
+                    const fileStatus = fileStatusFromWorkEvent(event);
+                    if (fileStatus) {
                         const fileTarget = String(event.target || event.path || event.related_files?.[0] || '').trim();
                         if (fileTarget) {
-                            const changes = event.changed_lines || event.line_changes || {};
-                            const additions = typeof changes === 'object'
-                                ? Number(changes.added ?? changes.additions ?? event.additions ?? 0)
-                                : Number(event.additions ?? 0);
-                            const deletions = typeof changes === 'object'
-                                ? Number(changes.removed ?? changes.deleted ?? changes.deletions ?? event.deletions ?? 0)
-                                : Number(event.deletions ?? 0);
                             setTouchedFiles(previous => [{
-                                name: fileTarget,
-                                status: String(event.operation || event.action || status || 'modified').toUpperCase(),
-                                additions: Number.isFinite(additions) ? additions : 0,
-                                deletions: Number.isFinite(deletions) ? deletions : 0
-                            }, ...previous.filter(file => file.name !== fileTarget)].slice(0, 8));
+                                name: fileStatus.name,
+                                status: fileStatus.status,
+                                additions: fileStatus.additions,
+                                deletions: fileStatus.deletions
+                            }, ...previous.filter(file => file.name !== fileStatus.name)].slice(0, 8));
                         }
                     }
                     if (eventKind === 'plan') {
-                        const items = event.items
-                            || event.steps
-                            || event.payload?.items
-                            || event.payload?.steps
-                            || event.payload?.payload?.items
-                            || event.payload?.payload?.steps
-                            || [];
-                        if (Array.isArray(items) && items.length > 0) {
-                            const descriptions = items.map((item: unknown) => typeof item === 'string'
-                                ? item
-                                : item && typeof item === 'object'
-                                    ? String((item as Record<string, unknown>).description || (item as Record<string, unknown>).step || (item as Record<string, unknown>).label || '')
-                                    : String(item || '')).filter(Boolean);
-                            setPlanItems(previous => [...new Set([...previous, ...descriptions])]);
-                        }
-                        setPlanStatus(['error', 'failed'].includes(status.toLowerCase()) ? 'failed' : 'planning');
+                        activePlanRef.current = true;
+                        setPlanItems(previous => {
+                            const merged = mergePlanChecklistEvent(previous, event);
+                            setPlanStatus(planChecklistStatus(
+                                merged,
+                                ['error', 'failed'].includes(status.toLowerCase()) ? 'failed' : 'planning'
+                            ));
+                            return merged;
+                        });
                         setPlanExpanded(true);
+                        // A plan is an inspector view, not only a transcript row.
+                        // Focus it when the server creates/updates the plan so the
+                        // right pane shows the steps immediately.
+                        setPanelMode(current => panelModeAfterActivitySelection(current, 'plan'));
+                        setSelectedActivityId(null);
+                        setSelectedAgentId(null);
                         upsertWorkEventActivity(event, false);
                         setIsThinking(true);
                         return;
@@ -2728,32 +3041,19 @@ const App = () => {
             if (streamBuffer.trim()) {
                 processSseFrame(streamBuffer);
             }
-            const choiceQuestion = detectChoiceQuestion(assistantContent);
-            if (choiceQuestion) {
-                assistantContent = formatChoiceQuestionForChat(choiceQuestion);
-                setHistory(prev => {
-                    const next = [...prev];
-                    const assistantIndex = next.findLastIndex(message => message.role === 'assistant');
-                    if (assistantIndex >= 0) {
-                        next[assistantIndex] = {...next[assistantIndex], content: assistantContent};
-                    }
-                    return next;
-                });
-                setSelectedQuestionIndex(0);
-                setPendingQuestion(choiceQuestion);
-                setPanelMode('question');
-                appendTimeline({kind: 'step', weight: 20, label: 'Question pending'});
-            }
-            completeRunningActivities('error', 'Stream ended before this operation reported a terminal result.');
+            if (streamTerminalStatus === null) streamTerminalStatus = 'done';
+            completeRunningActivities(streamTerminalStatus);
             appendTimeline({kind: 'success', weight: 24, label: 'Turn complete'});
         } catch (err) {
             if (err instanceof Error && err.name === 'AbortError') {
+                streamTerminalStatus = 'cancelled';
                 completeRunningActivities('cancelled');
                 appendTimeline({kind: 'error', weight: 24, label: 'Turn cancelled'});
                 pushCommand('current turn cancelled');
                 return;
             }
             const message = err instanceof Error ? err.message : String(err);
+            streamTerminalStatus = 'error';
             setHistory(prev => [...prev, { role: 'system', content: `SYSTEM_ERROR: ${message}` }]);
             completeRunningActivities('error');
             appendTimeline({kind: 'error', weight: 90, label: message});
@@ -2761,8 +3061,11 @@ const App = () => {
             if (chatAbortControllerRef.current === controller) {
                 chatAbortControllerRef.current = null;
                 activeRunIdRef.current = null;
-                setActiveRunId(null);
                 turnInFlightRef.current = false;
+                const queuedAnswer = queuedQuestionAnswerRef.current.take();
+                if (queuedAnswer) {
+                    setTimeout(() => { void handleSubmit(queuedAnswer); }, 0);
+                }
             }
             void loadPanelData();
             setIsThinking(false);
@@ -2772,14 +3075,18 @@ const App = () => {
     };
 
     questionSubmitRef.current = (answer: string) => {
-        const normalized = answer.trim();
-        if (!normalized) return;
+        const submission = resolveQuestionAnswerSubmission(answer, turnInFlightRef.current);
+        if (submission.kind === 'ignore') return;
         setQuestionCustomMode(false);
         setPendingQuestion(null);
         setPanelMode('workspace');
         setSelectedQuestionIndex(0);
         setInput('');
-        void handleSubmit(normalized);
+        if (submission.kind === 'queue') {
+            queuedQuestionAnswerRef.current.enqueue(submission.answer);
+            return;
+        }
+        void handleSubmit(submission.answer);
     };
 
     return (
@@ -2794,6 +3101,7 @@ const App = () => {
                     touchedFiles={touchedFiles}
                     activityItems={activityItems}
                     pendingQuestion={pendingQuestion}
+                    pendingApproval={pendingApproval}
                     selectedQuestionIndex={selectedQuestionIndex}
                     questionCustomMode={questionCustomMode}
                     planItems={planItems}
@@ -2823,14 +3131,6 @@ const App = () => {
                 height={height}
                 backgroundColor={THEME.panelAltBg}
             >
-                <NexusBanner
-                    width={chatContentWidth}
-                    isWorking={isThinking}
-                    phase={workingPhase}
-                    runId={activeRunId}
-                    elapsedMs={elapsedMs}
-                    connectionState={connectionState}
-                />
                 <Box flexDirection="column" height={chatViewportHeight} width={chatContentWidth + 2} paddingX={1} backgroundColor={THEME.panelAltBg}>
                     {showWelcomeLogo && (
                         <NexusWelcomeLogo
@@ -2884,10 +3184,18 @@ const App = () => {
                 {/* PROMPT BOX */}
                 <Box flexDirection="column" marginBottom={0} backgroundColor={THEME.inputBg}>
                     <InputComposer
-                        value={input}
-                        onChange={value => setInput(sanitizeComposerInput(value))}
-                        onSubmit={questionCustomMode && pendingQuestion ? (value) => questionSubmitRef.current(value) : handleSubmit}
-                        placeholder={questionCustomMode ? 'Type your answer · Enter to submit · Esc to cancel' : 'Message NEXUS...'}
+                        value={pendingApproval ? '' : input}
+                        onChange={value => { if (!pendingApproval) setInput(sanitizeComposerInput(value)); }}
+                        onSubmit={pendingApproval
+                            ? () => {}
+                            : questionCustomMode && pendingQuestion
+                                ? (value) => questionSubmitRef.current(value)
+                                : handleSubmit}
+                        placeholder={pendingApproval
+                            ? 'Approval required · y allow · a always · n deny'
+                            : questionCustomMode
+                                ? 'Type your answer · Enter to submit · Esc to cancel'
+                                : 'Message NEXUS...'}
                         isBusy={isThinking}
                         showHints={layout.showComposerHints && !showCommandPalette}
                         width={leftPanelWidth}
@@ -2905,6 +3213,8 @@ const App = () => {
                     mcpCount={mcpConnectedCount}
                     agentCount={agents.length}
                     taskCount={tasks.length}
+                    queuePending={queuePending}
+                    queueWorker={queueWorker}
                     activeTool={activityItems.find(activity =>
                         ['running', 'queued', 'pending', 'in_progress', 'working'].includes(activity.status.toLowerCase())
                     )?.toolName || ''}
@@ -2924,6 +3234,7 @@ const App = () => {
                         touchedFiles={touchedFiles}
                         activityItems={activityItems}
                         pendingQuestion={pendingQuestion}
+                        pendingApproval={pendingApproval}
                         selectedQuestionIndex={selectedQuestionIndex}
                         questionCustomMode={questionCustomMode}
                         planItems={planItems}

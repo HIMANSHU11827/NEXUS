@@ -51,6 +51,51 @@ async def test_v5_plan_event_emission():
         ]
 
 
+async def test_tool_progress_exposes_safe_result_and_retry_fields():
+    with TemporaryDirectory() as tmp:
+        loop = NexusLoopV5(root_dir=tmp, session_id="progress_visibility")
+        captured = []
+        loop.set_work_event_sink(lambda payload: captured.append(payload))
+        loop._current_turn_id = "turn_progress"
+        call = SimpleNamespace(
+            name="creating", params={"path": "game.py"}, call_id="call_1"
+        )
+
+        await loop._emit_tool_progress(
+            call, "finished", "failed",
+            retry_reason="bad token sk-abcdefghijklmnopqrstuvwxyz123456",
+            plan_link={"plan_id": "plan_1", "step_id": "step_1"},
+        )
+
+        payload = captured[-1]["payload"]
+        assert payload["projection"] == "deterministic-v1"
+        assert payload["phase"] == "tool_result"
+        assert payload["outcome"] == "failed"
+        assert payload["next_action"] == "retry_or_stop"
+        assert payload["plan_id"] == "plan_1"
+        assert payload["step_id"] == "step_1"
+        assert "abcdefghijklmnopqrstuvwxyz123456" not in payload["retry_reason"]
+
+
+async def test_tool_batch_progress_uses_deterministic_public_projection():
+    with TemporaryDirectory() as tmp:
+        loop = NexusLoopV5(root_dir=tmp, session_id="batch_progress_visibility")
+        captured = []
+        loop.set_work_event_sink(lambda payload: captured.append(payload))
+        loop._current_turn_id = "turn_batch_progress"
+
+        await loop._emit_tool_batch_progress([
+            {"name": "reading", "params": {"path": "README.md"}, "call_id": "read_1", "success": True},
+            {"name": "code_search", "params": {"pattern": "Nexus"}, "call_id": "search_1", "success": True},
+        ])
+
+        event = captured[-1]
+        assert event["event_type"] == "assistant.progress"
+        assert event["payload"]["projection"] == "deterministic-v1"
+        assert event["payload"]["current_action"]
+        assert event["payload"]["outcome"] == "success"
+
+
 async def test_v5_plan_approval_skipped_outside_approve_mode():
     """The plan approval gate passes immediately outside APPROVE mode."""
     with TemporaryDirectory() as tmp:

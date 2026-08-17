@@ -13,6 +13,7 @@ Extracted from ``core.py`` and upgraded to unified-loop parity:
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from types import SimpleNamespace
@@ -120,6 +121,8 @@ class V5Planner:
         # The enforcement ladder retries model planning with the same complete
         # discovered schemas when a tool-requiring task gets no concrete plan.
         # It never selects a tool from user keywords.
+        # Never let a previous turn's plan leak into a new execution.
+        self._active_execution_plan = {}
         steps = await self._llm_plan_with_enforcement(perceived)
         if steps:
             goal = str(getattr(perceived, "original_input", "") or "").strip()
@@ -134,7 +137,17 @@ class V5Planner:
                         "Plan rejected by active Hive review; skipping persistence"
                     )
                     return []
-            await self._persist_plan_via_tool(goal, steps)
+            persisted = await self._persist_plan_via_tool(goal, steps)
+            if not persisted:
+                # A plan that exists only in memory is not an execution plan:
+                # it cannot be resumed, audited, or reconciled with actions.
+                self.logger.warning(
+                    "Planning was required but the plan could not be persisted"
+                )
+                return []
+            self._active_execution_plan = self._resolve_active_execution_plan(
+                goal, steps
+            )
             try:
                 await self._emit_plan_event(
                     "pending",
@@ -149,6 +162,39 @@ class V5Planner:
             except Exception as exc:
                 self.logger.warning("Plan visibility event failed: %s", exc)
         return steps
+
+    def _resolve_active_execution_plan(
+        self, goal: str, steps: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Return the durable plan identity plus the model execution contract."""
+        result: Dict[str, Any] = {
+            "plan_id": "",
+            "goal": str(goal or "")[:4000],
+            "steps": [dict(step) for step in steps if isinstance(step, dict)],
+            "durable": False,
+        }
+        try:
+            from nexus.control_plane import list_plans
+
+            session_id = str(getattr(self, "session_id", "default") or "default")
+            candidates = list_plans(
+                str(getattr(self, "root_dir", "") or "."), session_id=session_id
+            )
+            normalized_goal = str(goal or "").strip().lower()
+            for plan in candidates:
+                if plan.status != "active":
+                    continue
+                if str(plan.goal or "").strip().lower() != normalized_goal:
+                    continue
+                result.update({
+                    "plan_id": plan.plan_id,
+                    "step_ids": [step.step_id for step in plan.steps],
+                    "durable": True,
+                })
+                break
+        except Exception as exc:
+            self.logger.debug("Could not resolve durable plan identity: %s", exc)
+        return result
 
     def _plan_spec_from_steps(self, steps: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Build a simple ``plan_spec`` for the planning tool from LLM steps.
@@ -174,15 +220,20 @@ class V5Planner:
         write is audited, lifecycle-marked and streamed as a normal tool
         event. Returns ``True`` on persistence, ``False`` on any failure.
         """
+        self._last_planning_error = ""
         spec = self._plan_spec_from_steps(steps)
         if not spec:
             count = len(steps) if isinstance(steps, list) else 0
+            self._last_planning_error = (
+                f"planner returned {count} steps; 3-8 non-empty steps are required"
+            )
             self.logger.debug(
                 "Skipping planning tool: plan has %d step(s) (3-8 required)", count
             )
             return False
         run_tool = getattr(self, "_run_tool", None)
         if not callable(run_tool):
+            self._last_planning_error = "planning tool executor is unavailable"
             return False
         call = SimpleNamespace(
             name="planning",
@@ -195,10 +246,20 @@ class V5Planner:
             },
         )
         try:
-            await run_tool(call)
+            result = await run_tool(call)
+            # The normal V5 executor raises on failure and returns text on
+            # success.  Test adapters and future executors may return a typed
+            # ToolResult, so honor an explicit unsuccessful result as well.
+            if hasattr(result, "success") and not bool(result.success):
+                self._last_planning_error = str(
+                    getattr(result, "error", "planning tool returned failure")
+                    or "planning tool returned failure"
+                )[:4000]
+                return False
             self.logger.info("Plan persisted to todo.md via planning tool")
             return True
         except Exception as exc:
+            self._last_planning_error = str(exc)[:4000] or "planning tool execution failed"
             self.logger.warning(
                 "Planning tool failed; plan will not be persisted: %s", exc
             )
@@ -287,6 +348,12 @@ class V5Planner:
         when the JSON plan cannot be parsed - mirroring the unified loop's
         ``_extract_tool_calls`` retry ladder.
         """
+        abort = getattr(self, "_check_abort", None)
+        if callable(abort):
+            try:
+                await abort()
+            except Exception:
+                return []
         intent = getattr(getattr(perceived, "intent", None), "value", "chat")
         context = str(getattr(perceived, "context_summary", "") or "")
         context_line = f"\nRelevant context: {context[:2000]}" if context else ""
@@ -311,10 +378,30 @@ class V5Planner:
             tools=self._get_tool_schemas(top_k=100),
             tool_choice="auto",
         )
+        if callable(abort):
+            try:
+                await abort()
+            except Exception:
+                return []
         steps = self._parse_plan_json(raw)
         if steps:
             return steps
         text_steps = self._plan_from_text(raw, str(perceived.original_input))
+        if not text_steps:
+            # A tool-requiring task that yields no plan must be visible, not
+            # silently empty — the turn path uses it for retry decisions.
+            try:
+                emitter = getattr(self, "_emit_plan_event", None)
+                if callable(emitter):
+                    emit = emitter(
+                        "failed",
+                        goal=str(getattr(perceived, "original_input", "") or "").strip(),
+                        steps=[],
+                    )
+                    if inspect.isawaitable(emit):
+                        await emit
+            except Exception:
+                pass
         return text_steps
 
     def _plan_from_text(self, raw: str, task: str) -> List[Dict[str, Any]]:

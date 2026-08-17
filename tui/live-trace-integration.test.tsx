@@ -84,9 +84,33 @@ for (const label of ['plan', 'read file', 'terminal · npm test', 'browser · do
     assert.match(plain, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
 }
 assert.doesNotMatch(plain, /\[(?:DONE|FAIL|LIVE)\]|Failed ·/);
-assert.match(plain, /› Trace this work/);
+assert.match(plain, /you >/);
+assert.match(plain, /Trace this work/);
 assert.match(plain, /Nexus > I am tracing the confirmed work\./);
-assert.equal((plain.match(/›/g) || []).length, activities.length + 1, 'every activity and the user message should expose a disclosure/prompt chevron');
+assert.equal((plain.match(/›/g) || []).length, activities.length, 'every activity should expose a disclosure chevron');
+
+const consecutiveToolActivities: ActivityItem[] = [
+    {id: 'tool-gap-1', number: 1, kind: 'tool', title: 'Reading', status: 'done', toolName: 'read_file', summary: 'src/app.ts'},
+    {id: 'tool-gap-2', number: 2, kind: 'tool', title: 'Reading', status: 'done', toolName: 'read_file', summary: 'src/helpers.ts'},
+    {id: 'tool-gap-3', number: 3, kind: 'tool', title: 'Reading', status: 'done', toolName: 'read_file', summary: 'src/types.ts'}
+];
+const consecutiveToolHistory: Message[] = consecutiveToolActivities.map(activity => ({
+    role: 'activity', content: activity.title, activityId: activity.id
+}));
+const consecutiveToolLines = buildChatLines(consecutiveToolHistory, consecutiveToolActivities, 90, null, null, false);
+const consecutiveToolFrame = stripAnsi(await renderInkFrame(
+    <Box width={90} flexDirection="column">
+        {consecutiveToolLines.map(line => <ChatLineView key={line.key} line={line} width={90} frame={1} />)}
+    </Box>,
+    90,
+    10
+));
+const consecutiveToolRows = consecutiveToolFrame.replace(/\r/g, '').split('\n');
+const firstToolRow = consecutiveToolRows.findIndex(row => row.includes('app.ts'));
+const secondToolRow = consecutiveToolRows.findIndex(row => row.includes('helpers.ts'));
+const thirdToolRow = consecutiveToolRows.findIndex(row => row.includes('types.ts'));
+assert.equal(secondToolRow - firstToolRow, 2, 'two consecutive tools should have one blank row between them');
+assert.equal(thirdToolRow - secondToolRow, 2, 'three consecutive tools should keep one blank row between each');
 
 const retryActivities: ActivityItem[] = [
     {id: 'search-fail-1', number: 1, kind: 'search', title: 'Searching', summary: 'web_search', status: 'failed', toolName: 'web_search', error: 'provider unavailable'},
@@ -165,5 +189,31 @@ const boundaryLines = buildChatLines([
     {role: 'activity', content: 'Provider failed again', activityId: 'turn-2'}
 ], boundaryActivities, 100, null, null, false);
 assert.equal(activityIdsFromChatLines(boundaryLines).length, 3, 'distinct errors and later user turns must remain visible');
+
+const searchThenAssistant: ActivityItem = {
+    id: 'search-before-answer', number: 4, kind: 'search', title: 'Searching',
+    summary: "today's top news", status: 'done', toolName: 'web_search'
+};
+const searchAnswerLines = buildChatLines([
+    {role: 'activity', content: searchThenAssistant.title, activityId: searchThenAssistant.id},
+    {role: 'assistant', content: 'Here is the news roundup.'}
+], [searchThenAssistant], 100, null, null, false);
+const searchRow = searchAnswerLines.findIndex(line => line.activity?.id === searchThenAssistant.id);
+const answerRow = searchAnswerLines.findIndex(line => line.surface === 'assistant');
+const rowsBetweenSearchAndAnswer = searchAnswerLines.slice(searchRow + 1, answerRow);
+assert.equal(rowsBetweenSearchAndAnswer.length, 1, 'search activity and NEXUS output need one blank row between them');
+assert.equal(rowsBetweenSearchAndAnswer[0]?.text, '');
+assert.equal(rowsBetweenSearchAndAnswer[0]?.activity, undefined);
+
+const expandedSearchLines = buildChatLines([
+    {role: 'activity', content: searchThenAssistant.title, activityId: searchThenAssistant.id},
+    {role: 'assistant', content: 'Here is the expanded news roundup.'}
+], [{...searchThenAssistant, detail: 'query: today\'s top news'}], 100, searchThenAssistant.id, searchThenAssistant.id, false);
+const expandedSearchRow = expandedSearchLines.findIndex(line => line.activity?.id === searchThenAssistant.id);
+const expandedAnswerRow = expandedSearchLines.findIndex(line => line.surface === 'assistant');
+const rowsBetweenExpandedSearchAndAnswer = expandedSearchLines.slice(expandedSearchRow + 1, expandedAnswerRow);
+assert.ok(rowsBetweenExpandedSearchAndAnswer.length >= 2, 'expanded search details should retain a final separator before NEXUS output');
+assert.equal(rowsBetweenExpandedSearchAndAnswer.at(-1)?.text, '');
+assert.equal(rowsBetweenExpandedSearchAndAnswer.at(-1)?.activityId, searchThenAssistant.id);
 
 console.log('Live trace SSE-to-render integration tests passed');

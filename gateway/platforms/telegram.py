@@ -70,8 +70,21 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
 
         try:
+            # The supervisor reconnects by calling connect() again. Cancel the
+            # previous poll task first, or two infinity_polling loops run on
+            # the same token: the old task also reads self.bot, so it would
+            # silently double-poll the freshly reassigned bot.
+            old_poll = self._poll_task
             self._disconnecting = False
             self._poll_task = None
+            if old_poll is not None and not old_poll.done():
+                old_poll.cancel()
+                try:
+                    await asyncio.wait_for(old_poll, timeout=5.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+                except Exception:  # stale poll exit failure is not fatal
+                    logger.debug("telegram: stale poll task exit failed", exc_info=True)
             self.bot = AsyncTeleBot(self.token)
             self._register_handlers()
             # Run the long-lived poll loop as a background task so connect() can

@@ -348,24 +348,41 @@ async function cmdTerminal(args: string[]) {
     if (buffer.trim()) consume(buffer);
 }
 
-function printHelp() {
-    console.log(`Usage: tsx nexus-cli-headless.ts <command> [args]
-Commands:
-  status               Server status
-  mode                 Current provider & mode
-  providers            List providers
-  provider <action>    Provider management (open, add, enable, disable, model)
-  voice [on|off]       Voice mode control
-  events [n] [sess]    Work events
-  chat <prompt>        Send chat prompt
-  sandbox [tier]       Sandbox control
-  research <query>     Deep research
-  plan <query>         Ultraplan
-  exec <cmd>           Run any shell command
-  health               Health check
-  sessions             Active sessions
-  --api <url>          Set API base (default: http://localhost:8000/api)
-  --help               This help`);
+async function printHelp() {
+    try {
+        const response = await fetch(`${API_BASE}/commands`, {headers: API_HEADERS});
+        if (response.ok) {
+            const data = await response.json() as {commands?: Array<{name: string; description: string; aliases?: string[]}>};
+            console.log('Usage: tsx nexus-tui-headless.ts <command> [args]');
+            console.log('Commands (from the NEXUS central registry):');
+            for (const entry of data.commands || []) {
+                const aliases = entry.aliases?.length ? ` [${entry.aliases.join(', ')}]` : '';
+                console.log(`  ${entry.name.padEnd(22)} ${entry.description}${aliases}`);
+            }
+            return;
+        }
+    } catch {
+        // The API may be offline; report that instead of maintaining a second
+        // stale command catalog in this client.
+    }
+    console.error(`NEXUS command catalog unavailable at ${API_BASE}. Start the server or pass --api <url>.`);
+}
+
+async function cmdRegistry(command: string, args: string[]) {
+    const data = await apiJson('/commands') as {commands?: Array<{name: string; aliases?: string[]}>};
+    const normalized = command.startsWith('/') ? command.toLowerCase() : `/${command.toLowerCase()}`;
+    const entry = (data.commands || []).find(item => [item.name, ...(item.aliases || [])]
+        .some(name => name.toLowerCase() === normalized));
+    if (!entry) {
+        console.error(`Unknown command: ${command}`);
+        process.exitCode = 1;
+        return;
+    }
+    const result = await postJson('/command', {
+        command: entry.name,
+        args: [entry.name, ...args],
+    });
+    console.log(String(result.output || result.formatted || result.error || `${entry.name}: completed`));
 }
 
 async function main() {
@@ -385,7 +402,7 @@ async function main() {
     switch (command) {
         case undefined:
         case '--help':
-        case '-h':        printHelp(); break;
+        case '-h':        await printHelp(); break;
         case 'status':    await cmdStatus(); break;
         case 'mode':      await cmdMode(); break;
         case 'providers': await cmdProviders(); break;
@@ -404,8 +421,7 @@ async function main() {
         case 'terminal':
         case 'run':       await cmdTerminal(args); break;
         default:
-            printHelp();
-            process.exit(1);
+            await cmdRegistry(command, args);
     }
 }
 

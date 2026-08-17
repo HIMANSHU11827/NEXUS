@@ -257,14 +257,28 @@ def _parse_userinfo(provider: str, data: Dict[str, Any]) -> AuthUser:
 
 # ── Gateway authorization ──────────────────────────────────────────
 
+def _gateway_platforms() -> List[str]:
+    """Enumerate gateway adapter platform names dynamically so every platform's
+    ``ALLOWED_<PLATFORM>_IDS`` env var is honored (not just a hardcoded subset)."""
+    try:
+        from gateway.platforms import all_adapters  # lazy: gateway imports authentication
+        return list(all_adapters())
+    except Exception:
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gateway", "platforms")
+        names = []
+        try:
+            for f in os.listdir(base):
+                if f.endswith(".py") and f not in ("__init__.py", "base.py"):
+                    names.append(f[:-3])
+        except OSError:
+            pass
+        return names
+
+
 def get_allowed_users() -> Dict[str, List[str]]:
     """Load allowed user IDs from environment for chat gateway adapters."""
     perms: Dict[str, List[str]] = {}
-    platforms = [
-        "telegram", "discord", "whatsapp", "facebook", "instagram",
-        "slack", "signal", "matrix", "mattermost", "email", "sms",
-    ]
-    for platform in platforms:
+    for platform in _gateway_platforms():
         env_val = os.getenv(f"ALLOWED_{platform.upper()}_IDS", "").strip()
         if env_val:
             perms[platform] = [i.strip() for i in env_val.split(",") if i.strip()]

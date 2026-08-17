@@ -1,12 +1,14 @@
-"""Regression tests for the V5 transcript-driven model/tool loop."""
+﻿"""Regression tests for the V5 transcript-driven model/tool loop."""
 
 import asyncio
 import json
 import time
 
+import orchestrators.v5.direct_loop as direct_loop_module
 from orchestrators.v5.core import NexusLoopV5, _DuckPerceived
 from orchestrators.v5.events import V5EventEmitter
 from nexus.run_context import load_run_context
+from nexus.control_plane import create_plan_version, load_plan
 
 
 def _native(name, args, call_id):
@@ -17,6 +19,47 @@ def _native(name, args, call_id):
                              "function": {"name": name, "arguments": args}}],
         }}]
     }
+
+
+def test_question_intent_is_narrow_and_explicit(tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="question-intent-test")
+
+    assert loop._explicit_question_request("ok ask me a question") is True
+    assert loop._explicit_question_request("use the ask_question tool") is True
+    assert loop._explicit_question_request("what is the question tool?") is False
+    assert loop._explicit_question_request("what is Python?") is False
+
+
+def test_explicit_question_request_forces_question_tool_once(tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="question-choice-test")
+    choices = []
+    replies = iter([
+        _native("ask_question", '{"question":"Pick one","options":["A","B"]}', "question-1"),
+        {"choices": [{"message": {"content": "Question sent."}}]},
+    ])
+
+    async def model(_messages, **kwargs):
+        choices.append(kwargs.get("tool_choice"))
+        return next(replies)
+
+    async def tool(call):
+        return "[QUESTION:{\"question\":\"Pick one\",\"options\":[\"A\",\"B\"]}]"
+
+    loop._safe_model_call_raw = model
+    loop._get_direct_tool_schemas = lambda **_kwargs: [{
+        "type": "function",
+        "function": {"name": "ask_question", "parameters": {}},
+    }]
+    loop._run_tool = tool
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("please ask me a question"))
+
+    assert result["success"] is True
+    assert choices[0] == {
+        "type": "function",
+        "function": {"name": "ask_question"},
+    }
+    assert choices[1] == "auto"
 
 
 def test_internal_route_and_verification_events_are_not_public():
@@ -76,6 +119,87 @@ def test_direct_loop_replays_tool_result_to_model_without_planner(tmp_path):
     assert seen[1][-1] == {
         "role": "tool", "name": "fixture_tool", "tool_call_id": "call-1", "content": "6"
     }
+
+
+def test_direct_loop_marks_actionable_requests_as_tool_work(tmp_path, monkeypatch):
+    loop = NexusLoopV5(str(tmp_path), session_id="actionable-prompt-test")
+    prompt_flags = {}
+
+    def prompt(*_args, **kwargs):
+        prompt_flags.update(kwargs)
+        return "You are Nexus."
+
+    replies = iter([
+        {"choices": [{"message": {"content": "I cannot do that."}}]},
+        {"choices": [{"message": {"content": "I still cannot do that."}}]},
+        {"choices": [{"message": {"content": "I cannot do that."}}]},
+    ])
+
+    async def model(_messages, **_kwargs):
+        return next(replies)
+
+    monkeypatch.setattr(direct_loop_module, "_live_system_prompt", prompt)
+    loop._safe_model_call_raw = model
+    loop._get_tool_schemas = lambda **_kwargs: []
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("fix the failing test"))
+
+    assert result["success"] is False
+    assert prompt_flags["needs_tools"] is True
+    assert prompt_flags["intent"] == "task"
+    assert prompt_flags["complexity"] == "complex"
+
+
+def test_direct_loop_reprompts_when_tool_required_but_model_answers_with_prose(tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="tool-enforcement-test")
+    seen = []
+    replies = iter([
+        {"choices": [{"message": {"content": "I will handle it."}}]},
+        _native("fixture_tool", "{}", "enforced-call"),
+        {"choices": [{"message": {"content": "The fix is verified."}}]},
+    ])
+
+    async def model(messages, **_kwargs):
+        seen.append(messages)
+        return next(replies)
+
+    async def tool(_call):
+        return "verified result"
+
+    loop._safe_model_call_raw = model
+    loop._get_tool_schemas = lambda **_kwargs: [{
+        "type": "function", "function": {"name": "fixture_tool"}
+    }]
+    loop._run_tool = tool
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("fix the failing test"))
+
+    assert result["success"] is True
+    assert result["calls_executed"] == 1
+    assert any("TOOL ACTION REQUIRED" in str(item.get("content")) for item in seen[1])
+
+
+def test_direct_loop_does_not_claim_actionable_success_without_tool_action(tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="tool-required-failure-test")
+    replies = iter([
+        {"choices": [{"message": {"content": "I cannot access the project."}}]},
+        {"choices": [{"message": {"content": "I still cannot access it."}}]},
+        {"choices": [{"message": {"content": "I cannot do it."}}]},
+    ])
+
+    async def model(_messages, **_kwargs):
+        return next(replies)
+
+    loop._safe_model_call_raw = model
+    loop._get_tool_schemas = lambda **_kwargs: [{
+        "type": "function", "function": {"name": "fixture_tool"}
+    }]
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("fix the failing test"))
+
+    assert result["success"] is False
+    assert result["calls_executed"] == 0
+    assert result["error"] == "no tool action for actionable request"
 
 
 def test_direct_loop_executes_tools_when_a_run_deadline_is_active(tmp_path):
@@ -202,6 +326,40 @@ def test_direct_loop_accepts_model_driven_repair_after_failed_tool(tmp_path):
     assert result["verification"]["failed_actions"] == 0
     assert result["actions"][0]["repaired"] is True
     assert any("REPAIR REQUIRED" in str(item.get("content")) for item in seen_messages[1])
+
+
+def test_direct_loop_recovers_from_tool_owned_cancelled_error(tmp_path):
+    """A tool-local CancelledError must become an observation, not end the loop."""
+    loop = NexusLoopV5(str(tmp_path), session_id="tool-owned-cancel-test")
+    rounds = 0
+    calls = 0
+
+    async def model(_messages, **_kwargs):
+        nonlocal rounds
+        rounds += 1
+        if rounds == 1:
+            return _native("fixture_tool", '{"attempt": 1}', "cancelled-call")
+        if rounds == 2:
+            return _native("fixture_tool", '{"attempt": 2}', "retry-call")
+        return {"choices": [{"message": {"content": "The retry completed successfully."}}]}
+
+    async def tool(call):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise asyncio.CancelledError("tool-local cancellation")
+        return "verified retry output"
+
+    loop._safe_model_call_raw = model
+    loop._get_direct_tool_schemas = lambda **_kwargs: []
+    loop._run_tool = tool
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("recover from the tool error"))
+
+    assert result["success"] is True
+    assert result["calls_executed"] == 2
+    assert calls == 2
+    assert result["response"] == "The retry completed successfully."
 
 
 def test_direct_loop_allows_repair_after_last_tool_round(tmp_path):
@@ -598,6 +756,43 @@ def test_direct_schemas_preserve_top_level_required_fields(tmp_path):
     assert schemas[0]["function"]["parameters"]["required"] == ["query"]
 
 
+def test_direct_schemas_preserve_json_schema_constraints(tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="schema-constraints")
+
+    class Entry:
+        schema = {
+            "description": "Constrained tool",
+            "params": {
+                "mode": {
+                    "type": "string", "enum": ["quick", "deep"],
+                    "default": "quick",
+                },
+                "options": {
+                    "type": "array", "items": {"type": "string"},
+                    "minItems": 1,
+                },
+                "additionalProperties": False,
+            },
+        }
+
+    class Registry:
+        def list_tools(self, include_unavailable=False):
+            return {"constrained": {}}
+
+        def get(self, name):
+            return Entry()
+
+    loop.tool_registry = Registry()
+    parameters = loop._get_direct_tool_schemas()[0]["function"]["parameters"]
+
+    assert parameters["additionalProperties"] is False
+    assert "additionalProperties" not in parameters["properties"]
+    assert parameters["properties"]["mode"]["enum"] == ["quick", "deep"]
+    assert parameters["properties"]["mode"]["default"] == "quick"
+    assert parameters["properties"]["options"]["items"] == {"type": "string"}
+    assert parameters["properties"]["options"]["minItems"] == 1
+
+
 def test_direct_schemas_include_complete_registry_by_default(tmp_path, monkeypatch):
     loop = NexusLoopV5(str(tmp_path), session_id="schema-complete-test")
 
@@ -850,10 +1045,51 @@ def test_live_turn_uses_model_route_before_direct_tool_loop(tmp_path):
     loop._inject_hive_context = hive
     loop._run_direct_model_tool_loop = direct
 
+    async def plan(_perceived):
+        return [
+            {"description": "Build the small website", "tool": "creating", "params": {}},
+            {"description": "Verify the website", "tool": "test_runner", "params": {}},
+            {"description": "Report the result", "tool": "", "params": {}},
+        ]
+
+    loop._plan_with_tool = plan
+
     result = asyncio.run(loop.run("build a small website"))
 
     assert result["success"] is True
     assert observed == {"hive_called": True, "planning": True, "hive": True}
+
+
+def test_live_actionable_turn_stops_when_required_plan_is_missing(tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="missing-plan-gate-test")
+    direct_called = []
+
+    async def route_model(_messages, **_kwargs):
+        return '{"mode":"PLAN","tool":"mixed","model":"strong"}'
+
+    async def perception(turn):
+        return _DuckPerceived(turn.user_input, turn.input_type)
+
+    async def no_plan(_perceived):
+        return []
+
+    async def direct(*_args, **_kwargs):
+        direct_called.append(True)
+        return {"success": True, "response": "unsafe", "actions": [], "calls_executed": 0}
+
+    loop._safe_model_call = route_model
+    loop._perceive_input = perception
+    loop._plan_with_tool = no_plan
+    loop._run_direct_model_tool_loop = direct
+
+    result = asyncio.run(loop.run("build and test the application"))
+
+    assert result["success"] is False
+    assert result["error"] == "planning required but no executable plan was produced"
+    assert result["calls_executed"] == 0
+    assert direct_called == [True]
+    assert result["planning_fallback"] is True
+    assert "did not produce a verified tool result" in result["response"]
 
 
 def test_stream_turn_persists_transcript_for_refresh_and_resume(tmp_path):
@@ -881,6 +1117,26 @@ def test_stream_turn_persists_transcript_for_refresh_and_resume(tmp_path):
     assert transcript[1]["content"] == "Hello from the persisted turn."
     assert transcript[1]["turn_id"] == "turn-resume-1"
     assert events[-1]["type"] == "done"
+
+
+def test_turn_events_converts_preflight_exception_to_one_done_failure(tmp_path):
+    """Unexpected setup errors must produce one terminal failure observation."""
+    loop = NexusLoopV5(str(tmp_path), session_id="preflight-failure-test")
+
+    def fail_preflight():
+        raise RuntimeError("preflight setup exploded")
+
+    loop.sync_memory = fail_preflight
+
+    async def collect():
+        return [event async for event in loop._turn_events("start the turn", turn_id="preflight-1")]
+
+    events = asyncio.run(collect())
+    done_events = [event for event in events if event.get("type") == "done"]
+
+    assert len(done_events) == 1
+    assert done_events[0]["data"]["success"] is False
+    assert "preflight setup exploded" in done_events[0]["data"]["error"]
 
 
 def test_stream_turn_transcript_write_is_idempotent(tmp_path):
@@ -1175,3 +1431,173 @@ def test_chaos_repeated_identical_success_triggers_stagnation(tmp_path):
     # The repair/loop budget (not max_rounds) bounds it.
     assert result["tool_rounds"] < 20, "loop was not bounded by stagnation detector"
     assert "made no progress" in (result.get("error") or "")
+
+
+def test_direct_actions_are_linked_to_durable_plan_steps(tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="plan-link-test")
+    plan = create_plan_version(
+        root=str(tmp_path),
+        session_id="plan-link-test",
+        task_id="task-link-test",
+        title="Plan link test",
+        goal="read the project",
+        plan_id="plan_link_test",
+        steps=[{
+            "step_id": "step_read",
+            "title": "Read the project",
+            "description": "Read the project",
+            "metadata": {"tool": "reading"},
+        }],
+    )
+    loop._active_execution_plan = {
+        "plan_id": plan.plan_id,
+        "goal": plan.goal,
+        "steps": [{"description": "Read the project", "tool": "reading", "params": {}}],
+        "step_ids": ["step_read"],
+        "durable": True,
+    }
+    loop._current_turn_id = "turn-plan-link"
+    replies = iter([
+        _native("reading", '{"path":"README.md"}', "read-1"),
+        {"choices": [{"message": {"content": "The project was read and verified."}}]},
+    ])
+
+    async def model(_messages, **_kwargs):
+        return next(replies)
+
+    async def tool(_call):
+        return "project contents"
+
+    loop._safe_model_call_raw = model
+    loop._get_direct_tool_schemas = lambda **_kwargs: []
+    loop._run_tool = tool
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("read the project"))
+
+    assert result["success"] is True
+    assert result["actions"][0]["plan_id"] == "plan_link_test"
+    assert result["actions"][0]["step_id"] == "step_read"
+    assert result["verification"]["plan_complete"] is True
+    assert load_plan(str(tmp_path), "plan-link-test", "plan_link_test").step("step_read").status == "succeeded"
+
+
+def test_repaired_action_reopens_and_completes_failed_plan_step(tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="plan-repair-link-test")
+    plan = create_plan_version(
+        root=str(tmp_path),
+        session_id="plan-repair-link-test",
+        task_id="task-repair-link-test",
+        title="Plan repair link test",
+        goal="repair the command",
+        plan_id="plan_repair_link_test",
+        steps=[{
+            "step_id": "step_command",
+            "title": "Run the command",
+            "description": "Run the command",
+            "metadata": {"tool": "terminal"},
+        }],
+    )
+    loop._active_execution_plan = {
+        "plan_id": plan.plan_id,
+        "goal": plan.goal,
+        "steps": [{"description": "Run the command", "tool": "terminal", "params": {}}],
+        "step_ids": ["step_command"],
+        "durable": True,
+    }
+    loop._current_turn_id = "turn-plan-repair-link"
+    replies = iter([
+        _native("terminal", '{"command":"bad"}', "bad-1"),
+        _native("terminal", '{"command":"good"}', "good-1"),
+        {"choices": [{"message": {"content": "The repaired command is verified."}}]},
+    ])
+
+    async def model(_messages, **_kwargs):
+        return next(replies)
+
+    async def tool(call):
+        if call.params.get("command") == "bad":
+            raise RuntimeError("bad command")
+        return "good output"
+
+    loop._safe_model_call_raw = model
+    loop._get_direct_tool_schemas = lambda **_kwargs: []
+    loop._run_tool = tool
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("repair the command"))
+
+    assert result["success"] is True
+    assert result["verification"]["plan_complete"] is True
+    assert load_plan(str(tmp_path), "plan-repair-link-test", "plan_repair_link_test").step("step_command").status == "succeeded"
+def test_parallel_read_gather_runs_multiple_read_tools_concurrently(tmp_path):
+    """Claude Code/Codex read-gather: a batch of independent read-only tools
+    executes concurrently, not serially, cutting multi-read latency."""
+
+    class _ParLoop(NexusLoopV5):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            reg = type("_Reg", (), {
+                "get": (lambda self, name: type("_Entry", (), {
+                    "is_read_only": (lambda self, p: True)
+                })()),
+                "list_tools": (lambda: []),
+            })()
+            self.tool_registry = reg
+
+        async def _run_tool(self, call):
+            await asyncio.sleep(0.2)
+            return f"read/{call.name}"
+
+    loop = _ParLoop(str(tmp_path), session_id="parallel-read-gather")
+
+    class _Call:
+        def __init__(self, name, cid):
+            self.name = name
+            self.params = {}
+            self.call_id = cid
+
+    calls = [_Call("a", "c1"), _Call("b", "c2"), _Call("c", "c3")]
+    assert loop._batch_is_parallelizable(calls) is True
+
+    started = time.perf_counter()
+    out = asyncio.run(loop._gather_read_parallel(calls, None))
+    elapsed = time.perf_counter() - started
+
+    # Concurrent: 3 sleeps of 0.2s = ~0.4s if serial, ~0.2s if parallel.
+    assert elapsed < 0.45
+    assert sorted(out[k][1] for k in out) == ["read/a", "read/b", "read/c"]
+    assert all(ok for ok, _ in out.values())
+
+
+def test_parallel_read_gather_reports_errors_without_cancelling_other_reads(tmp_path):
+    """One failing read must not cancel the other concurrent reads; its error
+    is returned for normal per-call handling."""
+
+    class _ParLoopErr(NexusLoopV5):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            reg = type("_Reg", (), {
+                "get": (lambda self, name: type("_Entry", (), {
+                    "is_read_only": (lambda self, p: True)
+                })()),
+                "list_tools": (lambda: []),
+            })()
+            self.tool_registry = reg
+
+        async def _run_tool(self, call):
+            await asyncio.sleep(0.05)
+            if call.name == "bad":
+                raise RuntimeError("boom")
+            return f"read/{call.name}"
+
+    loop = _ParLoopErr(str(tmp_path), session_id="parallel-read-gather-err")
+
+    class _Call:
+        def __init__(self, name, cid):
+            self.name = name
+            self.params = {}
+            self.call_id = cid
+
+    calls = [_Call("bad", "c1"), _Call("good", "c2")]
+    out = asyncio.run(loop._gather_read_parallel(calls, None))
+    assert out["c1"][0] is False and "boom" in out["c1"][1]
+    assert out["c2"][0] is True and out["c2"][1] == "read/good"

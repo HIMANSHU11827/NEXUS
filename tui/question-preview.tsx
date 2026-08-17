@@ -3,6 +3,7 @@ import {mkdir, writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import chalk from 'chalk';
 import {Box, Text} from 'ink';
+import {NEXUS_BLUE_BRIGHT} from './theme.js';
 import {QuestionPanelBody} from './details-panel.js';
 import {renderInkFrame} from './render-test-utils.js';
 import {THEME} from './helpers.js';
@@ -28,7 +29,7 @@ const frame = await renderInkFrame(
         backgroundColor={THEME.panelBg}
     >
         <Box justifyContent="space-between" marginBottom={1}>
-            <Text bold color="cyanBright">NEXUS</Text>
+            <Text bold color={NEXUS_BLUE_BRIGHT}>NEXUS</Text>
             <Text color="blueBright" bold>QUESTION</Text>
         </Box>
         <QuestionPanelBody question={question} selectedIndex={1} customActive={false} width={WIDTH - 2} />

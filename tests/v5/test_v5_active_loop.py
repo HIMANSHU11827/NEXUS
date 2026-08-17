@@ -16,6 +16,21 @@ sys.path.insert(0, str(project_root))
 from orchestrators.v5.active_loop import V5ActiveLoop
 
 
+@pytest.fixture(autouse=True)
+def _restore_active_mode_env(monkeypatch):
+    """Neutralize _ActiveLoopHost's direct os.environ writes.
+
+    The host sets NEXUS_HIVE / NEXUS_V5_ACTIVE_MODE at construction without
+    cleanup, so the last instantiation's values otherwise leak into every
+    later test in the process (this hung unrelated run() tests behind a real
+    120s hive spawn wait). monkeypatch.undo() restores the pre-test values no
+    matter what the host wrote during the test.
+    """
+    monkeypatch.setenv("NEXUS_HIVE", "0")
+    monkeypatch.setenv("NEXUS_V5_ACTIVE_MODE", "false")
+    yield
+
+
 class _MockSubAgent:
     def __init__(self, persona, result, status="success"):
         self.persona = persona

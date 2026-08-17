@@ -101,10 +101,14 @@ def test_gateway_runner_persists_response_before_send(monkeypatch, tmp_path):
     class Loop:
         root = str(tmp_path)
 
+        def __init__(self, root_dir=None):
+            if root_dir:
+                self.root = root_dir
+
         def load_memory(self, _session):
             return None
 
-        async def stream_run(self, _text):
+        async def stream_run(self, _text, deadline_seconds=None):
             yield {"type": "content", "data": "answer"}
 
     monkeypatch.setattr(gateway_run, "NexusLoop", Loop)
@@ -159,5 +163,51 @@ def test_gateway_runner_renews_lease_during_slow_send(tmp_path):
         await drain
         assert competing == []
         assert runner._delivery_ledger.get(item["delivery_id"])["status"] == "sent"
+
+    asyncio.run(scenario())
+
+
+def test_permanent_delivery_failure_notifies_user(tmp_path):
+    """Regression: a delivery that exhausts its attempts must be surfaced (P11)."""
+    import asyncio
+    from gateway.base import BasePlatformAdapter, SendResult
+    from gateway.run import GatewayRunner
+
+    class FailingAdapter(BasePlatformAdapter):
+        def __init__(self):
+            super().__init__("telegram")
+            self.sent = []
+
+        async def connect(self):
+            return True
+
+        async def disconnect(self):
+            return None
+
+        async def send_text(self, chat_id, text, reply_to=None):
+            self.sent.append(text)
+            return SendResult(success=False, error="rate limited")
+
+    async def scenario():
+        runner = GatewayRunner(root=str(tmp_path))
+        adapter = FailingAdapter()
+        runner.add_adapter(adapter)
+        item = runner._delivery_ledger.enqueue(
+            idempotency_key="event:doomed",
+            platform="telegram",
+            chat_id="c",
+            text="lost message",
+        )
+        for _ in range(8):
+            claimed = runner._delivery_ledger.claim(
+                "worker", platforms=["telegram"], lease_seconds=5
+            )
+            assert claimed
+            runner._delivery_ledger.fail(claimed[0]["delivery_id"], "worker", "rate limited")
+        assert runner._delivery_ledger.get(item["delivery_id"])["status"] == "failed"
+
+        await runner._notify_permanent_delivery_failure(item, adapter, "rate limited")
+
+        assert any("could not be delivered" in text for text in adapter.sent)
 
     asyncio.run(scenario())

@@ -6,7 +6,8 @@ import React from 'react';
 import {Box, Text} from 'ink';
 import {renderTerminalMarkdown} from './terminal-markdown.js';
 import {InlineActivity} from './inline-activity.js';
-import {TRANSCRIPT_SURFACE_BG} from './theme.js';
+import {getTheme, TRANSCRIPT_SURFACE_BG} from './theme.js';
+import {NEXUS_BLUE, NEXUS_ORANGE, NEXUS_ORANGE_BRIGHT} from './theme.js';
 import {
     CHAT_ACTIVITY_KINDS,
     activityGlyph,
@@ -15,6 +16,7 @@ import {
     compactActivityOutputPreview,
     activityPreviewLabel,
     cleanVisibleAssistantText,
+    progressSummaryText,
     voicePhaseLabel,
     voicePhaseColor,
     CLAUDE_SPINNER_FRAMES,
@@ -38,6 +40,19 @@ const wrapPlainLine = (line: string, width: number) => {
     }
     rows.push(rest);
     return rows;
+};
+
+/**
+ * Boxed message surfaces reserve one border column per side. Content is
+ * wrapped against the reduced budget so the box never overflows.
+ */
+export const MESSAGE_BORDER_COLUMNS = 2;
+
+/** Speaker-colored side rails for boxed messages; null outside them. */
+export const messageBorderColor = (role?: string): string | null => {
+    if (role === 'user') return getTheme().userColor;
+    if (role === 'assistant') return getTheme().warning;
+    return null;
 };
 
 const phaseThoughtText = (phase: WorkingPhase) => {
@@ -101,9 +116,9 @@ export const buildThinkingRows = (
     rows.push({
         key: 'thinking-detail-header',
         text: `${spinner ? `${spinner} ` : ''}Run status:${duration ? ` ${duration}` : ''}`,
-        color: 'yellowBright',
+        color: NEXUS_ORANGE_BRIGHT,
         prefix: '+ ',
-        prefixColor: 'yellowBright',
+        prefixColor: NEXUS_ORANGE_BRIGHT,
         reservePrefix: true,
         bold: true
     });
@@ -140,23 +155,34 @@ export const HistoryItem = ({
     }
 
     const prefix = msg.role === 'user' ? '> ' : msg.role === 'command' ? '◆ ' : msg.role === 'system' ? '! ' : '';
-    const prefixColor = msg.role === 'user' ? 'blue' : msg.role === 'command' ? 'cyan' : msg.role === 'system' ? 'red' : 'magenta';
-    const contentWidth = Math.max(1, width - (prefix ? 2 : 0));
+    const prefixColor = msg.role === 'user' ? NEXUS_BLUE : msg.role === 'command' ? NEXUS_BLUE : msg.role === 'system' ? 'red' : NEXUS_ORANGE;
+    const borderColor = messageBorderColor(msg.role);
+    const innerWidth = Math.max(1, width - (borderColor ? MESSAGE_BORDER_COLUMNS : 0) - (prefix ? 2 : 0));
     const topGap = msg.role === 'user' && index > 0 ? 1 : 0;
     const bottomGap = msg.role === 'assistant' || msg.role === 'command' || msg.role === 'system' ? 1 : 0;
 
     return (
         <Box marginTop={topGap} marginBottom={bottomGap} width={width}>
+            {borderColor && (
+                <Box width={1} flexShrink={0}>
+                    <Text color={borderColor}>│</Text>
+                </Box>
+            )}
             {prefix && (
                 <Box width={2} flexShrink={0}>
                     <Text bold color={prefixColor}>{prefix}</Text>
                 </Box>
             )}
-            <Box width={contentWidth}>
-                <Text wrap="wrap" color={msg.role === 'system' ? "red" : msg.role === 'command' ? "grey" : "white"}>
+            <Box width={innerWidth}>
+                <Text wrap="truncate" color={msg.role === 'system' ? "red" : msg.role === 'command' ? "grey" : "white"}>
                     {msg.content}
                 </Text>
             </Box>
+            {borderColor && (
+                <Box width={1} flexShrink={0}>
+                    <Text color={borderColor}>│</Text>
+                </Box>
+            )}
         </Box>
     );
 };
@@ -229,7 +255,11 @@ export const buildChatLines = (
     const rows: ChatLine[] = [];
     const activityById = new Map(activityItems.map(activity => [activity.id, activity]));
     const appendGap = (key: string) => {
-        if (rows.length > 0 && rows[rows.length - 1].text !== '') {
+        const last = rows[rows.length - 1];
+        // Collapsed activity rows intentionally have empty text. They still
+        // occupy a visible transcript row, so assistant/user surfaces need an
+        // explicit separator after them just like they do after text rows.
+        if (last && (last.text !== '' || Boolean(last.activity))) {
             rows.push({key, text: '', color: 'grey'});
         }
     };
@@ -240,10 +270,11 @@ export const buildChatLines = (
         color: string,
         prefix = '',
         prefixColor = 'grey',
-        repeatPrefix = false
+        repeatPrefix = false,
+        rowWidth = width
     ) => {
         const reservePrefix = prefix.length > 0;
-        const contentWidth = Math.max(1, width - (reservePrefix ? prefix.length : 0));
+        const contentWidth = Math.max(1, rowWidth - (reservePrefix ? prefix.length : 0));
         const sourceLines = content.replace(/\r/g, '').split('\n');
         let first = true;
 
@@ -265,20 +296,55 @@ export const buildChatLines = (
     history.forEach((msg, index) => {
         if (msg.role === 'assistant' && msg.content.trim().length === 0) return;
 
+        if (msg.role === 'progress' && msg.progress) {
+            appendGap(`before-progress-${index}`);
+            appendWrapped(
+                `progress-${index}`,
+                progressSummaryText(msg.progress),
+                'grey',
+                'Update > ',
+                NEXUS_ORANGE_BRIGHT
+            );
+            return;
+        }
+
         if (msg.role === 'user') {
             appendGap(`before-user-${index}`);
             const start = rows.length;
-            appendWrapped(`user-${index}`, msg.content, 'white', '› ', 'grey');
+            const surfaceWidth = Math.max(1, width - MESSAGE_BORDER_COLUMNS);
+            appendWrapped(`user-${index}`, msg.content, 'white', 'you > ', NEXUS_BLUE, false, surfaceWidth);
+            if (rows.length === start + 1) {
+                rows.push({
+                    key: `user-padding-${index}-${rows.length}`,
+                    text: '',
+                    color: 'white',
+                    backgroundColor: TRANSCRIPT_SURFACE_BG,
+                    surface: 'user'
+                });
+            }
             for (let rowIndex = start; rowIndex < rows.length; rowIndex += 1) {
                 rows[rowIndex].backgroundColor = TRANSCRIPT_SURFACE_BG;
+                rows[rowIndex].surface = 'user';
+                rows[rowIndex].bold = Boolean(rows[rowIndex].text.trim() || rows[rowIndex].prefix?.trim());
             }
-            appendGap(`after-user-${index}`);
+            rows.push({
+                key: `after-user-${index}`,
+                text: '',
+                color: 'grey'
+            });
             return;
         }
 
         if (msg.role === 'activity') {
             const activity = msg.activityId ? activityById.get(msg.activityId) : undefined;
             if (!activity || !CHAT_ACTIVITY_KINDS.has(activity.kind)) return;
+            if (rows.length > 0 && rows[rows.length - 1].activity) {
+                rows.push({
+                    key: `activity-gap-${index}-${rows.length}`,
+                    text: '',
+                    color: 'grey'
+                });
+            }
             // v3: push ActivityCard via ChatLine.activity
             rows.push({
                 key: `activity-${index}`,
@@ -322,7 +388,7 @@ export const buildChatLines = (
         }
 
         if (msg.role === 'command') {
-            appendWrapped(`command-${index}`, msg.content, 'grey', '◆ ', 'cyan');
+            appendWrapped(`command-${index}`, msg.content, 'grey', '◆ ', NEXUS_BLUE);
             appendGap(`after-command-${index}`);
             return;
         }
@@ -335,6 +401,7 @@ export const buildChatLines = (
 
         appendGap(`before-assistant-${index}`);
         const assistantStart = rows.length;
+        const assistantSurfaceWidth = Math.max(1, width - MESSAGE_BORDER_COLUMNS);
         appendWrapped(
             `assistant-${index}`,
             renderTerminalMarkdown(
@@ -343,13 +410,16 @@ export const buildChatLines = (
             ),
             'white',
             'Nexus > ',
-            'magentaBright'
+            NEXUS_ORANGE_BRIGHT,
+            false,
+            assistantSurfaceWidth
         );
         // Use the same full-width message surface for both sides of the
         // conversation. The role prefix remains inside the panel; live tool
         // rows deliberately keep their compact activity treatment.
         for (let rowIndex = assistantStart; rowIndex < rows.length; rowIndex += 1) {
             rows[rowIndex].backgroundColor = TRANSCRIPT_SURFACE_BG;
+            rows[rowIndex].surface = 'assistant';
         }
         appendGap(`after-assistant-${index}`);
     });
@@ -411,7 +481,7 @@ export const appendVoicePreviewLines = (
     }
 
     if (reply && reply !== normalizedLatestAssistant) {
-        appendWrapped(`voice-reply-${rows.length}`, reply, 'yellow');
+        appendWrapped(`voice-reply-${rows.length}`, reply, NEXUS_ORANGE);
     }
 
     const statusText = `🎙 ${voiceMode} · ${voicePhaseLabel(voicePhase)}`;
@@ -421,9 +491,6 @@ export const appendVoicePreviewLines = (
 };
 
 export const ChatLineView = React.memo(({line, width, frame}: {line: ChatLine; width: number; frame: number}) => {
-    const prefixWidth = line.reservePrefix ? Math.max(1, line.prefix?.length || 2) : 0;
-    const contentWidth = Math.max(1, width - prefixWidth);
-
     // v3: opencode-style inline tool/activity row for activity chat lines
     if (line.activity) {
         const act = line.activity as any;
@@ -434,16 +501,33 @@ export const ChatLineView = React.memo(({line, width, frame}: {line: ChatLine; w
         );
     }
 
+    // Boxed message surfaces draw role-colored border rails on both sides.
+    const borderColor = messageBorderColor(line.surface);
+    const borderWidth = borderColor ? MESSAGE_BORDER_COLUMNS : 0;
+    const innerWidth = Math.max(1, width - borderWidth);
+    const prefixWidth = line.reservePrefix ? Math.max(1, line.prefix?.length || 2) : 0;
+    const contentWidth = Math.max(1, innerWidth - prefixWidth);
+
     return (
         <Box width={width} backgroundColor={line.backgroundColor}>
+            {borderColor && (
+                <Box width={1} flexShrink={0}>
+                    <Text color={borderColor}>│</Text>
+                </Box>
+            )}
             {line.reservePrefix && (
                 <Box width={prefixWidth} flexShrink={0}>
                     <Text bold color={line.prefixColor}>{line.prefix || '  '}</Text>
                 </Box>
             )}
             <Box width={contentWidth}>
-                <Text color={line.color} bold={line.bold}>{line.text || ' '}</Text>
+                <Text color={line.color} bold={line.bold} wrap="truncate">{line.text || ' '}</Text>
             </Box>
+            {borderColor && (
+                <Box width={1} flexShrink={0}>
+                    <Text color={borderColor}>│</Text>
+                </Box>
+            )}
         </Box>
     );
 });

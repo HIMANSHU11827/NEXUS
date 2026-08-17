@@ -56,7 +56,7 @@ Rejected: Minimal Chat-First (hides differentiation), Split-View (narrow termina
 ## Test Results
 
 ### Unit Tests — ALL PASSING
-- choice-question ✅ terminal-markdown ✅ startup-session ✅
+- question-tool-event ✅ question-marker ✅ terminal-markdown ✅ startup-session ✅
 - sse-parser ✅ v3-smoke ✅ (19 component tests)
 
 ### Runtime — 19/21 pass (2 pre-existing env issues)

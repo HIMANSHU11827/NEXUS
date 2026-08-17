@@ -37,14 +37,9 @@ class DeepSeekProvider(NexusBaseProvider):
             name = str(function.get("name") or "").strip()
             if not name:
                 continue
-            arguments = function.get("arguments", {})
-            if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments) if arguments.strip() else {}
-                except json.JSONDecodeError:
-                    arguments = {}
-            if not isinstance(arguments, dict):
-                arguments = {}
+            arguments = NexusBaseProvider.normalize_tool_arguments(
+                function.get("arguments", {}), tool_name=name
+            )
             envelopes.append(f"<function={name}>{json.dumps(arguments, ensure_ascii=False)}")
         return "\n".join(envelopes)
 
@@ -59,6 +54,7 @@ class DeepSeekProvider(NexusBaseProvider):
     def generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> str:
         if not self.validate_api_key():
             raise RuntimeError("deepseek: missing or invalid API key")
+        self._last_usage = None
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": kwargs.get("model") or self.model, "messages": msgs}
         if kwargs.get("max_tokens") is not None:
@@ -69,6 +65,9 @@ class DeepSeekProvider(NexusBaseProvider):
             response = self.session.post(self.endpoint, json=payload, headers=self.headers, timeout=self.request_timeout(kwargs, 60))
             if response.status_code == 200:
                 data = response.json()
+                usage = data.get("usage") if isinstance(data, dict) else None
+                if isinstance(usage, dict):
+                    self._last_usage = dict(usage)
                 message = data["choices"][0].get("message", {})
                 native_tools = message.get("tool_calls") or []
                 if native_tools:
@@ -90,8 +89,10 @@ class DeepSeekProvider(NexusBaseProvider):
     def stream_generate(self, prompt: str = '', system_prompt: str = "", messages: Optional[List[Dict[str, str]]] = None, **kwargs) -> Iterator[str]:
         if not self.validate_api_key():
             raise RuntimeError("deepseek: missing or invalid API key")
+        self._last_usage = None
         msgs = self._prepare_messages(prompt, system_prompt, messages)
         payload = {"model": kwargs.get("model") or self.model, "messages": msgs, "stream": True}
+        payload["stream_options"] = {"include_usage": True}
         if kwargs.get("max_tokens") is not None:
             payload["max_tokens"] = kwargs["max_tokens"]
         self._add_tool_payload(payload, kwargs)
@@ -110,7 +111,13 @@ class DeepSeekProvider(NexusBaseProvider):
                             if data_str == "[DONE]": break
                             try:
                                 chunk = json.loads(data_str)
-                                delta = chunk["choices"][0].get("delta", {})
+                                usage = chunk.get("usage")
+                                if isinstance(usage, dict):
+                                    self._last_usage = dict(usage)
+                                choices = chunk.get("choices") or []
+                                if not choices:
+                                    continue
+                                delta = choices[0].get("delta", {})
                                 for tool_call in delta.get("tool_calls", []) or []:
                                     index = tool_call.get("index", 0)
                                     current = streamed_tool_calls.setdefault(index, {

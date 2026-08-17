@@ -214,7 +214,11 @@ async def authed_client(server_running):
     if not token:
         pytest.skip("NEXUS_DASHBOARD_TOKEN not set — cannot test auth-protected endpoints")
 
-    async with httpx.AsyncClient(base_url=NEXUS_API_URL, timeout=15) as client:
+    async with httpx.AsyncClient(
+        base_url=NEXUS_API_URL,
+        timeout=15,
+        headers={"Authorization": f"Bearer {token}"},
+    ) as client:
         resp = await client.post("/api/auth/token", json={"token": token})
         if resp.status_code != 200:
             pytest.skip(f"Auth failed ({resp.status_code}): {resp.text}")
@@ -253,9 +257,8 @@ async def test_state_endpoint(authed_client):
 
 
 @pytest.mark.asyncio
-async def test_files_list(server_running):
-    async with httpx.AsyncClient(base_url=server_running, timeout=10) as client:
-        resp = await client.post("/api/files/list", json={"path": "."})
+async def test_files_list(authed_client):
+    resp = await authed_client.post("/api/files/list", json={"path": "."})
     assert resp.status_code == 200
     data = resp.json()
     assert "files" in data

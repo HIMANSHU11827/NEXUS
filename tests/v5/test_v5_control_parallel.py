@@ -2,6 +2,7 @@
 parallel executor (superstep fan-out, stall detection) mixins."""
 
 import json
+import asyncio
 import os
 import subprocess
 import sys
@@ -169,7 +170,9 @@ async def test_budget_cost_ceiling_and_defaults(tmp_path, monkeypatch):
 
     fresh = NexusLoopV5(root_dir=str(tmp_path))
     assert fresh._budget_tick()["turns"] == 1
-    assert fresh._budget["max_turns"] == 50
+    # Default is unlimited turns (0): a run ends when the model stops
+    # requesting tools, not at an arbitrary counter (Claude Code semantics).
+    assert fresh._budget["max_turns"] == 0
     assert fresh._budget["max_budget_usd"] == 0.0
     assert fresh._budget_exceeded() is False
 
@@ -179,6 +182,19 @@ async def test_budget_cost_ceiling_and_defaults(tmp_path, monkeypatch):
     env_loop._init_budget()
     assert env_loop._budget["max_turns"] == 7
     assert env_loop._budget["max_budget_usd"] == 3.5
+
+
+def test_budget_can_be_reset_at_a_new_run_boundary(tmp_path):
+    loop = NexusLoopV5(str(tmp_path))
+    loop._init_budget()
+    loop._budget_tick(tokens=100)
+    loop._budget_tick(tokens=200)
+    assert loop._budget["turns"] == 2
+
+    loop._init_budget(reset=True)
+
+    assert loop._budget["turns"] == 0
+    assert loop._budget["tokens"] == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -316,6 +332,27 @@ async def test_run_superstep_preserves_structured_executor_failure(tmp_path):
     assert result["results"][0]["error"] == "compiler failed"
 
 
+async def test_run_superstep_reports_self_cancelled_branch_as_failure(tmp_path):
+    loop = NexusLoopV5(root_dir=str(tmp_path))
+
+    async def executor(call):
+        if call.name == "reading":
+            raise asyncio.CancelledError("child probe stopped")
+        return "healthy branch"
+
+    result = await loop._run_superstep(
+        [
+            {"description": "probe", "tool": "reading", "read_only": True},
+            {"description": "other probe", "tool": "code_search", "read_only": True},
+        ],
+        executor=executor,
+    )
+
+    assert result["results"][0]["success"] is False
+    assert result["results"][0]["error"] == "tool cancelled"
+    assert result["results"][1]["success"] is True
+
+
 async def test_run_superstep_guards(tmp_path):
     loop = NexusLoopV5(root_dir=str(tmp_path))
     executor = _FakeExecutor()
@@ -323,6 +360,22 @@ async def test_run_superstep_guards(tmp_path):
     assert result["applied"] is True
     assert result["results"] == []
     assert result["blocked"] == []
+
+
+async def test_parallel_writer_self_cancellation_is_a_failed_action(tmp_path):
+    loop = NexusLoopV5(root_dir=str(tmp_path))
+
+    async def tool(_call):
+        raise asyncio.CancelledError("writer stopped")
+
+    loop._run_tool = tool
+    actions = await loop._run_steps_parallel([
+        {"description": "run command", "tool": "terminal", "params": {"cmd": "stop"}},
+    ])
+
+    assert len(actions) == 1
+    assert actions[0]["success"] is False
+    assert actions[0]["error"] == "tool cancelled"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -49,6 +49,29 @@ async def test_hive_default_concurrency_remains_parallel(tmp_path):
     assert peak == 2
 
 
+def test_hive_default_concurrency_is_bounded_cap_not_unlimited(tmp_path, monkeypatch):
+    """Regression (P27): the default constructor must not permit an unbounded
+    parallel spawn; an explicit 0 preserves the documented legacy opt-out."""
+    monkeypatch.delenv("NEXUS_HIVE_MAX_CONCURRENCY", raising=False)
+    defaulted = NexusHiveEngine(str(tmp_path))
+    assert defaulted.max_concurrency == 8
+    assert defaulted._agent_semaphore is not None
+
+    unlimited = NexusHiveEngine(str(tmp_path), max_concurrency=0)
+    assert unlimited.max_concurrency == 0
+    assert unlimited._agent_semaphore is None
+
+
+def test_hive_default_concurrency_honors_env_cap(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEXUS_HIVE_MAX_CONCURRENCY", "3")
+    capped = NexusHiveEngine(str(tmp_path))
+    assert capped.max_concurrency == 3
+
+    monkeypatch.setenv("NEXUS_HIVE_MAX_CONCURRENCY", "not-an-int")
+    safe = NexusHiveEngine(str(tmp_path))
+    assert safe.max_concurrency == 8
+
+
 @pytest.mark.asyncio
 async def test_hive_aggregate_step_budget_fails_closed(tmp_path):
     calls = 0

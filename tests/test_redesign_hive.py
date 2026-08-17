@@ -99,6 +99,7 @@ async def test_spawn_timeout_cancels_and_marks_failed(monkeypatch, tmp_path):
     engine = FakeEngine()
     engine._consolidate_delay = 10.0  # never finishes on time
     host = _make_host(tmp_path, engine)
+    host._degradations = []
 
     result = await host._maybe_spawn_hive("task", timeout_seconds=0.1)
 
@@ -108,6 +109,8 @@ async def test_spawn_timeout_cancels_and_marks_failed(monkeypatch, tmp_path):
     # The turn was marked failed with reason "timeout".
     assert host._v5_hive_turn_failure["status"] == "failed"
     assert host._v5_hive_turn_failure["reason"] == "timeout"
+    # The failure is surfaced on the final result via the degradation list.
+    assert any("hive failed" in d for d in host._degradations)
     # Persisted states moved to "timeout".
     states = host._hive_load_subagent_states()
     assert states and all(s["status"] == "timeout" for s in states.values())

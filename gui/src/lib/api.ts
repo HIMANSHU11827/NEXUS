@@ -110,6 +110,24 @@ export interface InventoryItem {
   [key: string]: unknown
 }
 
+export interface CommandDTO {
+  name: string
+  description: string
+  category: string
+  args: Record<string, string>
+  aliases: string[]
+  execution?: 'shared' | 'client' | string
+}
+
+export interface CommandResultDTO {
+  status: string
+  output?: string
+  formatted?: string
+  content_type?: string
+  data?: Record<string, unknown>
+  error?: string
+}
+
 export interface RuntimeProviderStatus {
   model?: string
   provider?: string
@@ -494,6 +512,11 @@ export const api = {
   tools: () => request<{ tools: InventoryItem[] }>('/tools'),
   plugins: () => request<{ plugins: InventoryItem[] }>('/plugins'),
   mcp: () => request<{ mcp: InventoryItem[] }>('/mcp'),
+  commands: () => request<{ commands: CommandDTO[] }>('/commands'),
+  command: (command: string, args?: string, sessionId?: string) => request<CommandResultDTO>('/command', {
+    method: 'POST',
+    body: JSON.stringify({ command, args: args || command, ...(sessionId ? { session_id: sessionId } : {}) }),
+  }),
   createMcp: (value: { name: string; command: string; args: string[]; description?: string; active?: boolean; env?: Record<string, string>; working_dir?: string }) =>
     request<{ status: string; id: string }>('/mcp', { method: 'POST', body: JSON.stringify(value) }),
   deleteMcp: (name: string) => request<{ status: string }>(`/mcp/${encodeURIComponent(name)}`, { method: 'DELETE' }),

@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -80,11 +81,40 @@ def test_require_confirmation_skips_approved_call(loop):
     assert loop._require_confirmation(_call("deleting", {"path": "x"}, "c3")) is False
 
 
+def test_require_confirmation_fails_closed_when_risk_classification_raises(loop):
+    loop.runtime.permission_mode_value = "bypass"
+    loop._risk_class_for_call = lambda call: (_ for _ in ()).throw(RuntimeError("risk unavailable"))
+    assert loop._require_confirmation(_call("deleting", {"path": "x"}, "risk-error")) is True
+
+
 def test_confirmation_gate_fails_closed_without_broker(loop):
     loop.runtime.permission_mode_value = "approve"
     loop._open_approval = lambda *args, **kwargs: None
     approved = asyncio.run(loop._confirmation_gate(_call("deleting", {"path": "x"}, "c4")))
     assert approved is False
+
+
+def test_audit_approval_satisfies_followup_confirmation_gate(loop):
+    """One registry approval must not open a second hidden broker request."""
+    loop.runtime.permission_mode_value = "approve"
+
+    class ManualApproval:
+        granted = False
+        reason = "manual approval required"
+        decision = {"source": "mode:manual_approval"}
+
+    loop.runtime.permissions = SimpleNamespace(
+        check=lambda *args, **kwargs: ManualApproval()
+    )
+    loop._await_human_approval = lambda *args, **kwargs: asyncio.sleep(0, result=True)
+    call = _call("deleting", {"path": "x"}, "one-approval")
+
+    async def scenario():
+        assert await loop._audit_tool_call(call) is True
+        assert loop._approved_calls.get("one-approval") is True
+        assert await loop._confirmation_gate(call) is True
+
+    asyncio.run(scenario())
 
 
 def test_lint_source_valid_py(loop, tmp_path):

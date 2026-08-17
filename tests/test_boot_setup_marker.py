@@ -187,6 +187,66 @@ def test_ink_tui_starts_without_waiting_for_api(monkeypatch, tmp_path):
     assert calls == [("kill", 8000), "backend", ("tui", ["runner", "nexus-tui.tsx"]), "terminated"]
 
 
+def test_ink_tui_propagates_dashboard_token_to_children(monkeypatch, tmp_path):
+    import os
+    import subprocess
+    import nexus
+
+    tui_dir = tmp_path / "tui"
+    tui_dir.mkdir()
+    (tui_dir / "nexus-tui.tsx").write_text("// test", encoding="utf-8")
+    token = "token-for-test-only"
+    captured = {}
+
+    monkeypatch.setattr(nexus.secrets, "token_urlsafe", lambda size: token)
+    monkeypatch.setattr(nexus, "_api_is_ready", lambda *_args: False)
+    monkeypatch.setattr(nexus, "_kill_windows_port", lambda port: captured.setdefault("killed", port))
+    monkeypatch.setattr(nexus, "_find_tui_runner", lambda path: ["runner", "nexus-tui.tsx"])
+
+    class FakePopen:
+        pid = None
+
+        def __init__(self, args, **kwargs):
+            captured["backend_args"] = args
+            captured["backend_kwargs"] = kwargs
+            self.running = True
+
+        def poll(self):
+            return None if self.running else 0
+
+        def terminate(self):
+            self.running = False
+
+        def wait(self, timeout=None):
+            self.running = False
+            return 0
+
+    class FakeCompleted:
+        returncode = 0
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+
+    def fake_run(args, **kwargs):
+        captured["tui_args"] = args
+        captured["tui_kwargs"] = kwargs
+        return FakeCompleted()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    cleaned = []
+    monkeypatch.setattr(nexus, "_terminate_server_process", lambda proc: cleaned.append(proc))
+    before = os.environ.copy()
+
+    assert nexus._run_ink_tui(str(tmp_path), console=None) == 0
+
+    assert captured["killed"] == 8000
+    assert captured["backend_args"][:3] == [nexus.sys.executable, "-m", "uvicorn"]
+    assert captured["tui_args"] == ["runner", "nexus-tui.tsx"]
+    assert captured["backend_kwargs"]["env"]["NEXUS_DASHBOARD_TOKEN"] == token
+    assert captured["tui_kwargs"]["env"]["NEXUS_DASHBOARD_TOKEN"] == token
+    assert os.environ == before
+    assert len(cleaned) == 1
+
+
 def test_server_launcher_owns_process_group_and_reaps_child(monkeypatch):
     import nexus
 

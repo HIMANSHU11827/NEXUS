@@ -105,7 +105,9 @@ def _stringify(value: Any) -> str:
 
 # Strong markers that indicate provider/API failure output that should never be
 # crystallized as a Learning. Mirrors orchestrators' own failure markers but
-# tightened so normal prose ("the router prefers X") is not rejected.
+# tightened so normal prose ("the router prefers X") is not rejected. Each
+# marker is anchored with word boundaries so plain words ("error handling",
+# "failure modes") in genuine learnings are not misread as failure evidence.
 _PROVIDER_ERROR_MARKERS = (
     "traceback",
     "exception",
@@ -136,6 +138,10 @@ _PROVIDER_ERROR_MARKERS = (
     "http 5",
     "retrying",
 )
+_PROVIDER_ERROR_RE = tuple(
+    re.compile(r"\b" + re.escape(marker) + r"\b", re.IGNORECASE)
+    for marker in _PROVIDER_ERROR_MARKERS
+)
 
 
 def looks_like_provider_error(text: Optional[str]) -> bool:
@@ -147,8 +153,7 @@ def looks_like_provider_error(text: Optional[str]) -> bool:
     content = str(text or "").strip()
     if not content:
         return True
-    lowered = content.lower()
-    return any(marker in lowered for marker in _PROVIDER_ERROR_MARKERS)
+    return any(pattern.search(content) for pattern in _PROVIDER_ERROR_RE)
 
 
 # ── Path safety ────────────────────────────────────────────────────────────

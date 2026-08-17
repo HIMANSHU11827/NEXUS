@@ -25,14 +25,33 @@ class ThreadSafeSingleton:
     _lock: threading.RLock = threading.RLock()
 
     def __new__(cls, *args, **kwargs):
-        if cls not in cls._instances:
-            with cls._lock:
-                # Double-check locking pattern
-                if cls not in cls._instances:
-                    instance = super().__new__(cls)
-                    instance._singleton_initialized = False
-                    cls._instances[cls] = instance
-        return cls._instances[cls]
+        with cls._lock:
+            if cls not in cls._instances:
+                instance = super().__new__(cls)
+                instance._singleton_initialized = False
+                cls._instances[cls] = instance
+                # Publish the instance only after initialization completes.
+                # Python calls ``__init__`` *after* ``__new__`` returns, so
+                # without this a concurrent caller can grab the instance
+                # mid-initialization and crash with AttributeError on
+                # attributes the first thread has not assigned yet (found
+                # via a real multi-agent hive run:
+                # ``'NexusProviderFactory' object has no attribute 'loader'``).
+                # The lock covers the fast path too, so a waiting caller can
+                # never observe the instance until init finished. Every
+                # singleton ``__init__`` guards on an initialized flag, so the
+                # automatic second ``__init__`` call after ``__new__`` returns
+                # is a no-op. On init failure the instance is removed so the
+                # next call retries instead of reusing a broken singleton.
+                try:
+                    if type(instance).__init__ is not object.__init__:
+                        instance.__init__(*args, **kwargs)
+                except Exception:
+                    cls._instances.pop(cls, None)
+                    raise
+                finally:
+                    instance._singleton_initialized = True
+            return cls._instances[cls]
 
     def _singleton_init(self, *args, **kwargs):
         """

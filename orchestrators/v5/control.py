@@ -208,7 +208,7 @@ class V5Control:
                 return ""
             for hook in list(hooks):
                 try:
-                    if asyncio.iscoroutinefunction(hook):
+                    if inspect.iscoroutinefunction(hook):
                         result = await self._invoke_phase_hook(hook, position, phase)
                     else:
                         result = await asyncio.to_thread(
@@ -284,17 +284,21 @@ class V5Control:
     # PER-RUN BUDGET + COST TELEMETRY (Codex lesson)
     # ─────────────────────────────────────────────────────────────────────
 
-    def _init_budget(self) -> None:
+    def _init_budget(self, *, reset: bool = False) -> None:
         """Lazily initialize the per-run budget tracking dict.
 
         Reads ``runtime.budget`` (a dict) and the ``NEXUS_MAX_TURNS`` /
-        ``NEXUS_MAX_BUDGET_USD`` env vars; defaults are 50 turns and
-        unlimited cost (``max_budget_usd = 0``).
+        ``NEXUS_MAX_BUDGET_USD`` env vars; defaults are unlimited turns
+        (``max_turns = 0``) and unlimited cost (``max_budget_usd = 0``),
+        matching Claude Code/Cursor behavior: a run ends when the model
+        stops requesting tools, not when an arbitrary counter expires.
+        Set ``NEXUS_MAX_TURNS``/``NEXUS_MAX_BUDGET_USD`` only when you
+        explicitly want a cost/length ceiling.
         """
         try:
-            if getattr(self, "_budget", None) is not None:
+            if not reset and getattr(self, "_budget", None) is not None:
                 return
-            max_turns = 50
+            max_turns = 0
             max_budget_usd = 0.0
             budget = getattr(getattr(self, "runtime", None), "budget", None)
             if isinstance(budget, dict):
@@ -330,7 +334,7 @@ class V5Control:
             }
         except Exception:
             self._budget = {
-                "max_turns": 50,
+                "max_turns": 0,
                 "max_budget_usd": 0.0,
                 "turns": 0,
                 "cost": 0.0,

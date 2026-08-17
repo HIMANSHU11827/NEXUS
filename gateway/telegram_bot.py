@@ -79,6 +79,10 @@ async def handle_task(message):
     try:
         loop = get_loop()
         async for chunk in loop.stream_run(task_desc):
+            if isinstance(chunk, dict):
+                if chunk.get("type") != "content":
+                    continue
+                chunk = chunk.get("data") or ""
             full_response += chunk
             chunk_counter += 1
 

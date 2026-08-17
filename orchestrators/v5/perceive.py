@@ -95,7 +95,11 @@ class PerceptionLayer:
         Returns:
             PerceivedInput with processed information
         """
-        input_type = InputType(turn.input_type)
+        try:
+            input_type = InputType(turn.input_type)
+        except (ValueError, TypeError):
+            # Unknown input types degrade to chat instead of crashing the turn.
+            input_type = InputType.CHAT
         original_input = turn.user_input
         
         # Recognize intent

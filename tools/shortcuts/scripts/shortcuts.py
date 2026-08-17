@@ -41,6 +41,14 @@ class ShortcutsTool(BaseTool):
 
             if action == "list":
                 if not os.path.isdir(target):
+                    if os.path.isfile(target):
+                        return ToolResult(
+                            success=False,
+                            error=(
+                                f"Path is a file, not a directory: {path}. "
+                                "Use action=info for metadata or the reading tool for contents."
+                            ),
+                        )
                     return ToolResult(success=False, error=f"Directory not found: {path or '.'}")
                 entries = sorted(os.listdir(target))
                 lines = [f"Contents of: {path or '.'}"]
@@ -52,6 +60,14 @@ class ShortcutsTool(BaseTool):
 
             if action == "tree":
                 if not os.path.isdir(target):
+                    if os.path.isfile(target):
+                        return ToolResult(
+                            success=False,
+                            error=(
+                                f"Path is a file, not a directory: {path}. "
+                                "Use action=info for metadata or the reading tool for contents."
+                            ),
+                        )
                     return ToolResult(success=False, error=f"Directory not found: {path or '.'}")
                 lines = [f"Tree of: {path or '.'}"]
                 self._build_tree(target, lines, "")

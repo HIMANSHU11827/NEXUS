@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "updated_at": 1786719407.1052258,
+  "platforms": {
+    "telegram": {
+      "state": "stopped",
+      "health": "unavailable",
+      "last_error": null,
+      "restarts": 0,
+      "paused_reason": null,
+      "disabled_until": 0.0,
+      "updated_at": 1786719407.104773
+    }
+  }
+}

@@ -89,19 +89,23 @@ class CallbackServer:
                 return
 
             if not code or not state:
+                self._error = "Missing code or state in callback"
                 body = "Missing code or state"
                 resp = f"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {len(body)}\r\n\r\n{body}"
                 writer.write(resp.encode())
                 await writer.drain()
                 writer.close()
+                self._event.set()
                 return
 
             if state != expected_state:
+                self._error = "State mismatch in OAuth callback"
                 body = OAUTH_ERROR_HTML.format(heading="Authentication failed", message="State mismatch")
                 resp = f"HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {len(body)}\r\n\r\n{body}"
                 writer.write(resp.encode())
                 await writer.drain()
                 writer.close()
+                self._event.set()
                 return
 
             self._result = OAuthCallbackResult(code=code, state=state)
@@ -113,7 +117,6 @@ class CallbackServer:
             self._event.set()
 
         self._server = await asyncio.start_server(handler, host=self.host, port=self.port)
-        self._server.sockets
 
     async def wait_for_callback(self, timeout: float = 300.0) -> Optional[OAuthCallbackResult]:
         try:

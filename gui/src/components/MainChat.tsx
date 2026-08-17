@@ -1,7 +1,7 @@
 import { Send, Copy, Check, CheckCircle, CheckCircle2, StopCircle, Globe, Terminal, FileEdit, Search, Code, Users, XCircle, ChevronDown, ChevronRight, ExternalLink, Mic, MicOff, Volume2, VolumeX, Cpu, ShieldCheck, MonitorUp, MonitorOff, Headphones, FolderOpen, Plus, GitBranch } from 'lucide-react'
 import { createElement, useState, useRef, useEffect, useCallback, type ReactNode } from 'react'
 import { useStore, type Message } from '../lib/store'
-import { api } from '../lib/api'
+import { api, type CommandDTO } from '../lib/api'
 import ApprovalPanel from './ApprovalPanel'
 import BackgroundTasksPanel from './BackgroundTasksPanel'
 import HivePanel from './HivePanel'
@@ -72,27 +72,6 @@ const sandboxOptions = [
   { value: 'normal', label: 'Sandbox' },
   { value: 'docker', label: 'Advanced Sandbox' },
 ]
-const nexusCommands = [
-  { name: 'help', description: 'Show all Nexus commands' },
-  { name: 'new', description: 'Create a new session' },
-  { name: 'sessions', description: 'List saved sessions' },
-  { name: 'status', description: 'Show Nexus system status' },
-  { name: 'tasks', description: 'Show active tasks' },
-  { name: 'skills', description: 'List installed skills' },
-  { name: 'tools', description: 'List available tools' },
-  { name: 'agents', description: 'Show active agents' },
-  { name: 'model', description: 'View or set a model' },
-  { name: 'thinking', description: 'Toggle thinking mode' },
-  { name: 'mode', description: 'View or set permission mode' },
-  { name: 'config', description: 'Show current configuration' },
-  { name: 'run', description: 'Run a shell command' },
-  { name: 'review', description: 'Run a code review' },
-  { name: 'verify', description: 'Verify project changes' },
-  { name: 'hive', description: 'Show sub-agent status' },
-  { name: 'memory', description: 'Show memory and session information' },
-  { name: 'providers', description: 'Show provider health' },
-]
-
 function extractCodeBlocks(text: string) {
   const parts: { type: 'text' | 'code'; content: string; language?: string }[] = []
   const regex = /```(\w*)\n([\s\S]*?)```/g
@@ -1083,7 +1062,7 @@ function EventActivity({ events }: { events: TimelineEvent[] }) {
 }
 
 export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => void }) {
-  const { addMessage, getActiveSession, activeSessionId, createSession, backendAvailable } = useStore()
+  const { addMessage, getActiveSession, activeSessionId, createSession, setActiveSession, loadSessionsFromServer, backendAvailable } = useStore()
   const { content, events, thinkingText, isThinking, thinkingDone, isProcessing, recoveredActivity, replayGap, error, send, cancel, reset, pendingApproval, respondApproval } = useStreamChat(activeSessionId)
   const [input, setInput] = useState('')
   const [isMicListening, setIsMicListening] = useState(false)
@@ -1098,8 +1077,8 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('nexus-selected-model') || '')
   const [modelError, setModelError] = useState('')
   const [permissionMode, setPermissionMode] = useState(() => localStorage.getItem('nexus-permission-mode') || 'auto')
-  // Preserve an existing explicit choice; default new sessions to no sandbox.
-  const [sandboxTier, setSandboxTier] = useState(() => localStorage.getItem('nexus-sandbox-tier') || 'no_sandbox')
+  // Preserve an existing explicit choice; default new sessions to the safe sandbox.
+  const [sandboxTier, setSandboxTier] = useState(() => localStorage.getItem('nexus-sandbox-tier') || 'normal')
   const [sandboxRoot, setSandboxRoot] = useState(() => localStorage.getItem('nexus-sandbox-root') || '')
   const [sandboxError, setSandboxError] = useState('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
@@ -1108,6 +1087,7 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
   const [queuedTasks, setQueuedTasks] = useState<QueuedTask[]>([])
   const [showModelPicker, setShowModelPicker] = useState(false)
   const [modelSearch, setModelSearch] = useState('')
+  const [commandRegistry, setCommandRegistry] = useState<CommandDTO[]>([])
   const [modelPreferences, setModelPreferences] = useState<Record<string, ModelPreferences>>(() => {
     try { return JSON.parse(localStorage.getItem('nexus-model-preferences') || '{}') as Record<string, ModelPreferences> } catch { return {} }
   })
@@ -1124,7 +1104,12 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
   const taskQueueRef = useRef<QueuedTask[]>([])
   const slashQuery = input.trimStart().startsWith('/') ? input.trimStart().slice(1).split(/\s/, 1)[0].toLowerCase() : ''
   const showSlashMenu = input.trimStart().startsWith('/') && !input.trimStart().slice(1).includes(' ')
-  const matchingCommands = nexusCommands.filter(command => command.name.includes(slashQuery) || command.description.toLowerCase().includes(slashQuery)).slice(0, 8)
+  const matchingCommands = commandRegistry
+    .filter(command => {
+      const names = [command.name, ...(command.aliases || [])].map(name => name.replace(/^\//, '').toLowerCase())
+      return names.some(name => name.includes(slashQuery)) || command.description.toLowerCase().includes(slashQuery)
+    })
+    .slice(0, 8)
 
   const settingsForModel = (model: string): ModelPreferences => modelPreferences[model] || defaultModelPreferences
   const updateModelPreferences = (model: string, next: Partial<ModelPreferences>) => {
@@ -1248,6 +1233,20 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
   useEffect(() => () => {
     screenStream?.getTracks().forEach(track => track.stop())
   }, [screenStream])
+
+  useEffect(() => {
+    let active = true
+    const loadCommands = async () => {
+      try {
+        const result = await api.commands()
+        if (active) setCommandRegistry(Array.isArray(result.commands) ? result.commands : [])
+      } catch {
+        if (active) setCommandRegistry([])
+      }
+    }
+    void loadCommands()
+    return () => { active = false }
+  }, [])
 
   useEffect(() => {
     Promise.all([
@@ -1443,6 +1442,41 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
     }
   }
 
+  const executeSlashCommand = async (value: string) => {
+    const [rawCommand, ...args] = value.trim().split(/\s+/)
+    const normalized = rawCommand.toLowerCase()
+    const command = commandRegistry.find(item => [item.name, ...(item.aliases || [])]
+      .some(name => name.toLowerCase() === normalized || name.toLowerCase() === normalized.slice(1)))
+    if (!command) return false
+
+    let sid = activeSessionId
+    if (!sid) sid = await createSession()
+    const commandArgs = args.length ? `${command.name} ${args.join(' ')}` : command.name
+    addMessage(sid!, 'user', value.trim())
+    try {
+      const result = await api.command(command.name, commandArgs, sid!)
+      const clientAction = String(result.data?.client_action || '')
+      if (clientAction === 'stop') cancel()
+      const commandSessionId = String(result.data?.session_id || '')
+      if (commandSessionId) {
+        if (command.name.replace(/^\//, '') === 'new') {
+          // The shared command already created the server session. Refresh the
+          // store so the GUI selects that exact session instead of creating a
+          // second one locally.
+          localStorage.setItem('nexus-active-session-id', commandSessionId)
+          await loadSessionsFromServer()
+        } else {
+          setActiveSession(commandSessionId)
+        }
+      }
+      const output = String(result.output || result.error || `${command.name}: completed`).trim()
+      if (output) addMessage(sid!, 'assistant', output)
+    } catch (error) {
+      addMessage(sid!, 'assistant', `Command error: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return true
+  }
+
   const selectSavedModel = async (item: SavedModel) => {
     setSelectedModel(item.model)
     localStorage.setItem('nexus-selected-model', item.model)
@@ -1459,6 +1493,14 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
   const handleSend = () => {
     const trimmed = input.trim()
     if (!trimmed) return
+    if (trimmed.startsWith('/') && commandRegistry.some(command => [command.name, ...(command.aliases || [])]
+      .some(name => name.toLowerCase() === trimmed.split(/\s+/, 1)[0].toLowerCase()
+        || `/${name.replace(/^\//, '')}`.toLowerCase() === trimmed.split(/\s+/, 1)[0].toLowerCase()))) {
+      setInput('')
+      setAttachments([])
+      void executeSlashCommand(trimmed)
+      return
+    }
     const task = { id: crypto.randomUUID(), prompt: trimmed, attachments }
     setInput('')
     setAttachments([])
@@ -1618,7 +1660,7 @@ export default function MainChat({ onOpenTerminal }: { onOpenTerminal?: () => vo
         {voiceMode && <VoiceModeIndicator />}
         {screenStream && <div className="mb-2 flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/5 px-2 py-1.5"><video ref={screenPreviewRef} autoPlay muted playsInline className="h-10 w-16 rounded object-cover" /><span className="min-w-0 flex-1 truncate text-[11px] font-medium text-blue-700 dark:text-blue-300">Screen sharing is active</span><button type="button" onClick={stopScreenShare} className="rounded px-2 py-1 text-[10px] font-medium text-blue-700 hover:bg-blue-500/10 dark:text-blue-300">Stop</button></div>}
         <div className="relative rounded-md border border-border bg-secondary/90 p-1 shadow-[0_8px_28px_rgba(15,23,42,0.06)] transition focus-within:border-ring/50 focus-within:ring-2 focus-within:ring-ring/10">
-          {showSlashMenu && <div className="absolute bottom-full left-0 right-0 z-30 mb-1 overflow-hidden border border-border bg-background shadow-xl" role="listbox" aria-label="Nexus commands">{matchingCommands.length > 0 ? <>{matchingCommands.map(command => <button key={command.name} type="button" role="option" onMouseDown={event => event.preventDefault()} onClick={() => { setInput(`/${command.name} `); window.setTimeout(() => textareaRef.current?.focus(), 0) }} className="flex w-full items-center gap-3 border-b border-border/60 px-3 py-2 text-left hover:bg-secondary last:border-b-0"><code className="w-24 shrink-0 text-xs font-medium text-foreground">/{command.name}</code><span className="truncate text-[11px] text-muted-foreground">{command.description}</span></button>)}<div className="px-3 py-1.5 text-[10px] text-muted-foreground">Choose a command, then add any details.</div></> : <div className="px-3 py-2 text-xs text-muted-foreground">No Nexus command found.</div>}</div>}
+          {showSlashMenu && <div className="absolute bottom-full left-0 right-0 z-30 mb-1 overflow-hidden border border-border bg-background shadow-xl" role="listbox" aria-label="Nexus commands">{matchingCommands.length > 0 ? <>{matchingCommands.map(command => { const name = command.name.replace(/^\//, ''); return <button key={command.name} type="button" role="option" onMouseDown={event => event.preventDefault()} onClick={() => { setInput(`/${name} `); window.setTimeout(() => textareaRef.current?.focus(), 0) }} className="flex w-full items-center gap-3 border-b border-border/60 px-3 py-2 text-left hover:bg-secondary last:border-b-0"><code className="w-24 shrink-0 text-xs font-medium text-foreground">/{name}</code><span className="truncate text-[11px] text-muted-foreground">{command.description}</span></button>})}<div className="px-3 py-1.5 text-[10px] text-muted-foreground">Choose a command, then add any details.</div></> : <div className="px-3 py-2 text-xs text-muted-foreground">No Nexus command found.</div>}</div>}
           <textarea
             ref={textareaRef}
             value={input}

@@ -235,7 +235,8 @@ async def _wait_for_health(url: str, timeout: float = 15.0, label: str = "servic
                     if r.status_code < 500:
                         return True
                 except Exception:
-                    await asyncio.sleep(0.5)
+                    pass
+                await asyncio.sleep(0.5)
             return False
 
 
@@ -587,10 +588,18 @@ def _find_tui_runner(tui_dir: str) -> list[str] | None:
     return None
 
 
-def _run_ink_tui(project_root: str, console) -> int:
+def _run_ink_tui(project_root: str, console, wait_for_api: bool = True) -> int:
     import subprocess
 
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
+    # A console is only passed by boot(); console=None means a programmatic or
+    # test-driven launch, which must skip the interactive-only checks and the
+    # API-readiness wait instead of blocking.
+    interactive = console is not None
+    if console is None:
+        from rich.console import Console
+        console = Console()
+
+    if interactive and (not sys.stdin.isatty() or not sys.stdout.isatty()):
         console.print(
             "[yellow]NEXUS TUI needs an interactive terminal. Start `nexus` from "
             "PowerShell, Command Prompt, Windows Terminal, or a WSL shell.[/yellow]"
@@ -634,17 +643,20 @@ def _run_ink_tui(project_root: str, console) -> int:
 
             # Ink immediately requests a new session and panel state. Do not show a
             # blank, apparently broken TUI while its owned backend is still booting.
-            deadline = time.monotonic() + 30.0
-            while time.monotonic() < deadline:
-                if _api_is_ready(api_token):
-                    break
-                if backend_proc.poll() is not None:
-                    console.print("[red]NEXUS API exited before the TUI could start.[/red]")
-                    return int(backend_proc.returncode or 1)
-                time.sleep(0.2)
-            else:
-                console.print("[red]NEXUS API did not become ready within 30 seconds.[/red]")
-                return 1
+            # Only wait when launched interactively; headless/programmatic callers
+            # (console=None or wait_for_api=False) must not block on readiness.
+            if wait_for_api and interactive:
+                deadline = time.monotonic() + 30.0
+                while time.monotonic() < deadline:
+                    if _api_is_ready(api_token):
+                        break
+                    if backend_proc.poll() is not None:
+                        console.print("[red]NEXUS API exited before the TUI could start.[/red]")
+                        return int(backend_proc.returncode or 1)
+                    time.sleep(0.2)
+                else:
+                    console.print("[red]NEXUS API did not become ready within 30 seconds.[/red]")
+                    return 1
 
         result = subprocess.run(runner, cwd=tui_dir, env=launch_env)
         return result.returncode

@@ -174,8 +174,11 @@ class TaskQueue:
         d = dict(row)
         try:
             d["payload"] = json.loads(d["payload"]) if d["payload"] else {}
-        except (ValueError, TypeError):
-            d["payload"] = {}
+        except (ValueError, TypeError) as exc:
+            d["payload"] = {
+                "_payload_error": f"invalid json payload: {exc}",
+                "_raw_payload": str(d["payload"])[:2000],
+            }
         return d
 
     # ------------------------------------------------------------------ #
@@ -646,6 +649,25 @@ class TaskQueue:
             finally:
                 conn.close()
 
+    def owns_lease(self, task_id: int, lease_token: str) -> bool:
+        """Return whether a worker still owns a live lease right now."""
+        if not lease_token:
+            return False
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT 1 FROM tasks
+                    WHERE id = ? AND state = ? AND lease_token = ?
+                      AND leased_until IS NOT NULL AND leased_until > ?
+                    """,
+                    (task_id, STATE_LEASED, lease_token, _now()),
+                ).fetchone()
+                return row is not None
+            finally:
+                conn.close()
+
     def cancel(
         self,
         task_id: int,
@@ -673,35 +695,108 @@ class TaskQueue:
             finally:
                 conn.close()
 
-    def list_states(self) -> Dict[str, int]:
-        """Return a count of tasks per state."""
-        with self._lock:
-            conn = self._connect()
-            try:
-                cur = conn.execute(
-                    "SELECT state, COUNT(*) AS n FROM tasks GROUP BY state"
-                )
-                counts = {s: 0 for s in VALID_STATES}
-                for row in cur.fetchall():
-                    counts[row["state"]] = int(row["n"])
-                return counts
-            finally:
-                conn.close()
+    def quarantine_uncertain(self, task_id: int, reason: str) -> bool:
+        """Stop every replay path after an execution outcome becomes unknown.
 
-    def pending_count(self) -> int:
-        """Count tasks that are queued or retrying (i.e. eligible to lease)."""
+        Unlike ordinary worker completion this is intentionally not guarded by
+        the old lease token. A replacement lease may already exist when a
+        cancellation-resistant prior attempt reports uncertainty; invalidating
+        that replacement is the only safe generic action until an operator or
+        idempotent adapter reconciles the external effect. Completed/failed
+        terminal records remain authoritative and are never overwritten.
+        """
+        ts = _now()
         with self._lock:
             conn = self._connect()
             try:
                 cur = conn.execute(
                     """
-                    SELECT COUNT(*) AS n FROM tasks
-                    WHERE state = ?
-                       OR (state = ? AND (leased_until IS NULL OR leased_until <= ?))
+                    UPDATE tasks SET state = ?, error = ?, lease_token = NULL,
+                        leased_until = NULL, updated_at = ?
+                    WHERE id = ? AND state IN (?, ?, ?)
                     """,
-                    (STATE_QUEUED, STATE_RETRYING, _now()),
+                    (
+                        STATE_CANCELLED,
+                        _safe_error("uncertain external outcome: " + str(reason or "")),
+                        ts,
+                        task_id,
+                        STATE_QUEUED,
+                        STATE_LEASED,
+                        STATE_RETRYING,
+                    ),
                 )
-                return int(cur.fetchone()["n"])
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    @staticmethod
+    def _payload_matches_scope(payload: Any, session_id: str = "", include_global: bool = False) -> bool:
+        """Return whether a payload belongs to an optional session scope."""
+        if not session_id:
+            return True
+        data = payload if isinstance(payload, dict) else {}
+        meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+        task_session = str(meta.get("session_id") or "")
+        return task_session == str(session_id) or (include_global and not task_session)
+
+    def list_states(self, session_id: str = "", include_global: bool = False) -> Dict[str, int]:
+        """Return task counts per state, optionally limited to a session."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                counts = {s: 0 for s in VALID_STATES}
+                if not session_id:
+                    cur = conn.execute("SELECT state, COUNT(*) AS n FROM tasks GROUP BY state")
+                    for row in cur.fetchall():
+                        counts[row["state"]] = int(row["n"])
+                    return counts
+                rows = conn.execute("SELECT state, payload FROM tasks").fetchall()
+                for row in rows:
+                    try:
+                        payload = json.loads(row["payload"] or "{}")
+                    except (TypeError, ValueError):
+                        payload = {}
+                    if self._payload_matches_scope(payload, session_id, include_global):
+                        counts[str(row["state"])] = counts.get(str(row["state"]), 0) + 1
+                return counts
+            finally:
+                conn.close()
+
+    def pending_count(self, session_id: str = "", include_global: bool = False) -> int:
+        """Count eligible queued/retrying tasks, optionally limited to a session."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                now = _now()
+                if not session_id:
+                    cur = conn.execute(
+                        """
+                        SELECT COUNT(*) AS n FROM tasks
+                        WHERE state = ?
+                           OR (state = ? AND (leased_until IS NULL OR leased_until <= ?))
+                        """,
+                        (STATE_QUEUED, STATE_RETRYING, now),
+                    )
+                    return int(cur.fetchone()["n"])
+                rows = conn.execute("SELECT state, leased_until, payload FROM tasks").fetchall()
+                count = 0
+                for row in rows:
+                    if str(row["state"]) == STATE_QUEUED:
+                        eligible = True
+                    elif str(row["state"]) == STATE_RETRYING:
+                        eligible = row["leased_until"] is None or float(row["leased_until"]) <= now
+                    else:
+                        eligible = False
+                    if not eligible:
+                        continue
+                    try:
+                        payload = json.loads(row["payload"] or "{}")
+                    except (TypeError, ValueError):
+                        payload = {}
+                    if self._payload_matches_scope(payload, session_id, include_global):
+                        count += 1
+                return count
             finally:
                 conn.close()
 

@@ -20,7 +20,8 @@ class SystemTool(BaseTool):
     #: diagnostics so secrets never reach tool output, logs, or the model.
     _SECRET_ENV_RE = re.compile(r"(?i)(api[_-]?key|secret|token|password|passwd|"
                                 r"credential|auth|signing|client[_-]?secret|"
-                                r"access[_-]?(key|token)|private[_-]?key|session[_-]?secret)")
+                                r"access[_-]?(key|token)|private[_-]?key|session[_-]?secret|"
+                                r"(?:[a-z0-9][_-]|^)key$)")
 
     @classmethod
     def _redact_env(cls, key: str, value: str) -> str:

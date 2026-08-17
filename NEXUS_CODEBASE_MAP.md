@@ -52,7 +52,7 @@
 |------|-------------|
 | `nexus/__init__.py` | Boot loader (687 lines) — loads `.env`, applies command aliases, launches TUI/GUI/server/gateway/setup, export/import, first-run wizard |
 | `nexus/__main__.py` | Delegates to `boot()` |
-| `nexus/commands.py` | CommandRegistry singleton — 42 built-in slash commands across general/settings/info categories |
+| `nexus/commands.py` | CommandRegistry singleton — canonical 152-command catalog across shared/client general, settings, info, workspace, developer, integrations, and orchestration entries |
 | `nexus/events.py` | **CanonicalEvent** dataclass — ~50 event types with validation, `infer_event_type()` heuristic |
 | `nexus/runtime.py` | `ChatRunRequest`, session/turn ID sanitization, provider normalization |
 | `nexus/run_context.py` | `RunContext` durable identity, `start_run_context()`, `list_run_contexts()`
@@ -179,12 +179,9 @@
 | `test_runner` | TestRunnerTool | 89 | Stable |
 | `web_search` | WebSearchTool | 277 | Stable |
 
-> **Note**: `bash` is retired (disabled in `ToolRegistry`). 13 additional tool directories
-> (`bash_timeout_control`, `browser_open`, `fault_tolerant_command_runner`, `file_path_resolver`,
-> `live_news_tool`, `long_running_command_handler`, `news_aggregator_live`, `nexus_codebase_research`,
-> `safe_file_path_tracking`, `sandbox_path_validation`, `sandbox_path_validator`, `workspace_path_guard`,
-> `workspace_path_validation`) are **unimplemented stubs** — registered via `.json` metadata but marked
-> `unavailable` by `ToolRegistry`.
+> **Note**: `bash` is retired (disabled in `ToolRegistry`). The 13 stale
+> unimplemented stub tool directories were removed entirely and their names
+> added to `DISABLED_TOOL_NAMES`, so the registry never advertises them.
 
 ---
 

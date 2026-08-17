@@ -65,11 +65,13 @@ class TaskTool(BaseTool):
         return ""
 
     def _write_plan(self, plan: str) -> None:
+        self.assert_execution_active()
         self._planning()._write_plan(plan)
 
     def _sync_rows(self, rows: List[Dict[str, Any]], *, session_id: str = "default") -> None:
         if not rows:
             return
+        self.assert_execution_active()
         durable_plan = create_checklist_plan(
             root=self.root_dir or ".", session_id=session_id, title="Task checklist",
             goal="Task checklist", rows=rows,

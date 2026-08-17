@@ -25,6 +25,7 @@ adapters feed the exact same session/loop pipeline as before.
 
 import asyncio
 import logging
+import os
 import time
 from typing import Dict, Optional
 
@@ -51,6 +52,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONFIG = {
     "backoff_base": 1.0,        # first reconnect delay (doubles up to cap)
     "backoff_cap": 60.0,        # max reconnect delay
+    "connect_timeout": 30.0,    # hard deadline for one adapter connect attempt
     "max_restarts": 5,          # crash budget within the window
     "crash_window": 60.0,       # seconds over which restarts are counted
     "disabled_cooldown": 60.0,  # how long a crash-looping platform stays off
@@ -85,6 +87,7 @@ class PlatformRuntime:
         self.disabled_until = 0.0
         self.paused_reason: Optional[str] = None
         self.last_error: Optional[str] = None
+        self._connect_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------ #
     # State mirroring
@@ -164,6 +167,25 @@ class PlatformRuntime:
     # ------------------------------------------------------------------ #
     # Connect / recover
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _consume_connect_result(task: asyncio.Task) -> None:
+        """Retrieve a detached connect result so asyncio never logs it later."""
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("detached gateway connect task failed", exc_info=True)
+
+    def cancel_connect(self) -> None:
+        """Fence an in-flight connect without waiting on uncooperative code."""
+        task = self._connect_task
+        self._connect_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        task.add_done_callback(self._consume_connect_result)
+
     async def connect_once(self, now: Optional[float] = None) -> None:
         """Perform a single connect attempt and record its outcome.
 
@@ -175,12 +197,59 @@ class PlatformRuntime:
         """
         if now is None:
             now = time.time()
+
+        # A timed-out adapter may ignore cancellation. Never start a second
+        # connect while that detached attempt is still alive; doing so can
+        # create duplicate pollers or sockets for the same platform.
+        previous = self._connect_task
+        if previous is not None:
+            if not previous.done():
+                self._set_state(STATE_RECOVERING)
+                self._set_health(HEALTH_UNAVAILABLE)
+                self.last_error = self.last_error or f"{self.platform} previous connect attempt is still stopping"
+                self.adapter.last_error = self.last_error
+                return
+            self._connect_task = None
+            try:
+                delayed_ok = bool(previous.result())
+            except asyncio.CancelledError:
+                delayed_ok = False
+            except Exception as exc:
+                self.last_error = redact_secrets(exc)
+                delayed_ok = False
+            if delayed_ok:
+                self._record_success()
+                return
+
         self._set_state(STATE_CONNECTING)
         self._set_health(HEALTH_UNAVAILABLE)
         self.last_error = None
         ok = False
+        connect_task = asyncio.create_task(self.adapter.connect())
+        self._connect_task = connect_task
+        timeout = max(0.01, float(self.config.get("connect_timeout", 30.0)))
         try:
-            ok = await self.adapter.connect()
+            done, _pending = await asyncio.wait((connect_task,), timeout=timeout)
+            if not done:
+                self.last_error = f"{self.platform} connect timed out after {timeout:.2f}s"
+                connect_task.cancel()
+                connect_task.add_done_callback(self._consume_connect_result)
+            else:
+                self._connect_task = None
+                try:
+                    ok = bool(connect_task.result())
+                except asyncio.CancelledError:
+                    self.last_error = f"{self.platform} connect was cancelled"
+                    ok = False
+                except Exception as exc:
+                    self.last_error = redact_secrets(exc)
+                    ok = False
+        except asyncio.CancelledError:
+            # Cancellation of the supervision pass must release the global
+            # tick lock immediately, even if adapter code ignores cancellation.
+            connect_task.cancel()
+            connect_task.add_done_callback(self._consume_connect_result)
+            raise
         except Exception as exc:  # a raising connect == a failed attempt
             self.last_error = redact_secrets(exc)
             ok = False
@@ -277,6 +346,15 @@ class GatewaySupervisor:
         runner: Optional[GatewayRunner] = None,
     ):
         self.config = dict(DEFAULT_CONFIG)
+        env_connect_timeout = os.environ.get("NEXUS_GATEWAY_CONNECT_TIMEOUT", "").strip()
+        if env_connect_timeout:
+            try:
+                self.config["connect_timeout"] = max(0.01, float(env_connect_timeout))
+            except ValueError:
+                logger.warning(
+                    "ignoring invalid NEXUS_GATEWAY_CONNECT_TIMEOUT=%r",
+                    env_connect_timeout,
+                )
         if config:
             self.config.update(config)
         self.adapters: Dict[str, BasePlatformAdapter] = {}
@@ -284,6 +362,7 @@ class GatewaySupervisor:
         self._store = GatewayStateStore(state_file)
         self._runner = runner or GatewayRunner()
         self._running = False
+        self._stopping = False
         self._tick_task: Optional[asyncio.Task] = None
         # ``tick(once=True)`` is also a public diagnostic/recovery entry point.
         # Serialize it with the periodic loop so two callers cannot both see
@@ -334,6 +413,7 @@ class GatewaySupervisor:
         now = time.time()
         for name, rt in self.runtimes.items():
             rt.restore(saved.get(name, {}))
+        self._stopping = False
         self._running = True
         start_delivery = getattr(self._runner, "start_delivery_loop", None)
         if callable(start_delivery):
@@ -392,6 +472,8 @@ class GatewaySupervisor:
 
     async def _supervise(self, rt: PlatformRuntime, now: float) -> None:
         """Reconnect any runtime that is down, respecting backoff + crash budget."""
+        if self._stopping:
+            return
         # Disabled: wait out the cooldown, then re-arm.
         if rt.state == STATE_DISABLED:
             if rt.disabled_until and now >= rt.disabled_until:
@@ -411,13 +493,81 @@ class GatewaySupervisor:
         if now < rt.next_attempt_at:
             return
         await rt.connect_once(now)
+        # A manual one-shot tick is not stored in ``_tick_task`` and may race
+        # shutdown. Project the final state back to stopped after its bounded
+        # connect returns so it cannot resurrect a stopped runtime.
+        if self._stopping and rt.state != STATE_DISABLED:
+            rt._set_state(STATE_STOPPED)
+            rt._set_health(HEALTH_UNAVAILABLE)
 
     async def stop_all(self) -> None:
-        """Stop platforms after any in-flight supervision pass has settled."""
-        async with self._tick_lock:
-            await self._stop_all()
+        """Stop every gateway component within the configured shutdown bound."""
+        timeout = max(0.01, float(self.config["shutdown_timeout"]))
+        self._stopping = True
+        self._running = False
 
-    async def _stop_all(self) -> None:
+        # Cancel periodic supervision before taking the lock. Otherwise a
+        # cancellation-resistant adapter connect can hold the lock forever and
+        # prevent shutdown from even beginning.
+        await self._cancel_tick_task(timeout)
+
+        acquired = False
+        try:
+            await asyncio.wait_for(self._tick_lock.acquire(), timeout=timeout)
+            acquired = True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "gateway supervisor lock did not settle within %.2fs; continuing bounded shutdown",
+                timeout,
+            )
+        try:
+            await self._stop_all(timeout=timeout)
+        finally:
+            if acquired:
+                self._tick_lock.release()
+
+    @staticmethod
+    def _consume_detached_task(task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("detached gateway shutdown task failed", exc_info=True)
+
+    async def _await_bounded(self, awaitable, timeout: float, label: str) -> bool:
+        """Await lifecycle work without trusting its cancellation behavior."""
+        task = asyncio.ensure_future(awaitable)
+        done, _pending = await asyncio.wait((task,), timeout=max(0.01, timeout))
+        if not done:
+            task.cancel()
+            task.add_done_callback(self._consume_detached_task)
+            logger.warning("gateway %s exceeded %.2fs; detached during shutdown", label, timeout)
+            return False
+        try:
+            await task
+            return True
+        except asyncio.CancelledError:
+            return False
+        except Exception:
+            logger.warning("gateway %s failed during shutdown", label, exc_info=True)
+            return False
+
+    async def _cancel_tick_task(self, timeout: float) -> None:
+        task = self._tick_task
+        self._tick_task = None
+        if task is None or task is asyncio.current_task():
+            return
+        if not task.done():
+            task.cancel()
+        done, _pending = await asyncio.wait((task,), timeout=max(0.01, timeout))
+        if done:
+            await asyncio.gather(*done, return_exceptions=True)
+        else:
+            task.add_done_callback(self._consume_detached_task)
+            logger.warning("gateway supervision task did not cancel within %.2fs", timeout)
+
+    async def _stop_all(self, *, timeout: Optional[float] = None) -> None:
         """Gracefully shut down all platforms: cancel tick, disconnect, persist.
 
         Bound the disconnect phase by ``shutdown_timeout`` so a hung adapter
@@ -425,28 +575,22 @@ class GatewaySupervisor:
         is honoured on the next start.
         """
         self._running = False
+        bound = max(0.01, float(timeout if timeout is not None else self.config["shutdown_timeout"]))
         stop_delivery = getattr(self._runner, "stop_delivery_loop", None)
         if callable(stop_delivery):
-            await stop_delivery()
-        if self._tick_task is not None:
-            self._tick_task.cancel()
-            try:
-                await self._tick_task
-            except (asyncio.CancelledError, Exception):  # expected on shutdown
-                pass
-            self._tick_task = None
-        # Graceful per-adapter disconnect, bounded by the overall timeout.
+            await self._await_bounded(stop_delivery(), bound, "delivery worker stop")
+        await self._cancel_tick_task(bound)
+
+        # Fence connect attempts before disconnecting, then disconnect all
+        # adapters concurrently. Each disconnect receives the same hard bound,
+        # so total shutdown time does not grow linearly with platform count.
         for rt in self.runtimes.values():
-            try:
-                await asyncio.wait_for(
-                    rt.adapter.disconnect(),
-                    timeout=max(1.0, float(self.config["shutdown_timeout"])),
-                )
-            except (asyncio.TimeoutError, Exception):  # pragma: no cover - network
-                logger.warning(
-                    "gateway/supervisor.py disconnect %s suppressed", rt.platform,
-                    exc_info=True,
-                )
+            rt.cancel_connect()
+        if self.runtimes:
+            await asyncio.gather(*(
+                self._await_bounded(rt.adapter.disconnect(), bound, f"disconnect {rt.platform}")
+                for rt in self.runtimes.values()
+            ))
         for rt in self.runtimes.values():
             if rt.state != STATE_DISABLED:
                 rt._set_state(STATE_STOPPED)

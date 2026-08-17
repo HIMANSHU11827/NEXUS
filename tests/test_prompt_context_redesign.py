@@ -29,6 +29,8 @@ class TestLivePromptEngine:
         assert "# NEXUS_ENGINEERING_CORE" in prompt
         # Role segment is present.
         assert "# ROLE: ARCHITECT" in prompt
+        assert "ask_question" in prompt
+        assert "Do not ask through ordinary prose" in prompt
 
     def test_build_live_system_prompt_respects_max_chars(self, tmp_path):
         focus_dir = tmp_path / "docs"
@@ -71,6 +73,7 @@ class TestDirectLoopSystemPrompt:
         monkeypatch.setattr(builtins, "__import__", fake_import)
         prompt = _live_system_prompt(str(tmp_path))
         assert prompt == _LEGACY_SYSTEM_PROMPT
+        assert "ask_question" in prompt
 
     def test_project_context_appended_when_files_loaded(self, tmp_path):
         (tmp_path / "CLAUDE.md").write_text(

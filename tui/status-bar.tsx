@@ -14,6 +14,8 @@ interface StatusBarProps {
     mcpCount: number;
     agentCount: number;
     taskCount: number;
+    queuePending?: number | null;
+    queueWorker?: string;
     activeTool?: string;
     connectionState?: 'connecting' | 'online' | 'offline';
 }
@@ -35,6 +37,8 @@ export const StatusBar: React.FC<StatusBarProps> = ({
     mcpCount,
     agentCount,
     taskCount,
+    queuePending = null,
+    queueWorker = 'unknown',
     activeTool,
     connectionState = 'online'
 }) => {
@@ -75,6 +79,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
             <Text color={theme.textDim}><Text color={theme.secondary}>Model: </Text>{modelLabel}</Text>
             <Text color={sandboxColor}><Text color={theme.secondary}>Sandbox: </Text>{sandboxLabel}</Text>
             <Text color={permissionColor}><Text color={theme.secondary}>Permissions: </Text>{permissionMode}</Text>
+            <Text color={theme.textDim}><Text color={theme.secondary}>Queue(session): </Text>{queuePending == null ? '—' : `${queuePending} ${queueWorker === 'running' ? 'ready' : queueWorker}`}</Text>
             <Text color={connectionColor}><Text color={theme.secondary}>Connection: </Text>● {connectionState}</Text>
             {width >= 124 && <Text color={theme.textMuted}>{clock}</Text>}
         </Box>

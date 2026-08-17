@@ -7,6 +7,7 @@ registered here with a category, description, and async handler.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -116,6 +117,7 @@ class Command:
         category: str = "general",
         args: Optional[Dict[str, str]] = None,
         aliases: Optional[List[str]] = None,
+        execution: str = "shared",
     ):
         self.name = name
         self.description = description
@@ -123,6 +125,11 @@ class Command:
         self.category = category
         self.args = args or {}
         self.aliases = aliases or []
+        # ``shared`` commands execute through the Python handler on every
+        # client. ``client`` commands are still part of the canonical catalog,
+        # but their interactive behavior belongs to the surface (Ink/browser)
+        # because it needs local UI state such as the clipboard or terminal.
+        self.execution = execution
 
     async def execute(self, ctx: CommandContext) -> CommandResult:
         try:
@@ -231,7 +238,15 @@ async def _cmd_retry(ctx: CommandContext) -> CommandResult:
 async def _cmd_new(ctx: CommandContext) -> CommandResult:
     import time
     if not ctx.shell:
-        return CommandResult(output="New session requires a shell context", success=False)
+        callback = ctx.extra.get("new_session")
+        if callable(callback):
+            result = callback()
+            if inspect.isawaitable(result):
+                result = await result
+            session_id = str((result or {}).get("id") or "") if isinstance(result, dict) else str(result or "")
+            if session_id:
+                return CommandResult(output=f"New session: {session_id}", data={"session_id": session_id})
+        return CommandResult(output="New session requires a session-capable client", success=False)
     ctx.shell._apply_session(f"session_{int(time.time())}")
     if ctx.loop:
         ctx.loop.save_memory()
@@ -244,7 +259,16 @@ async def _cmd_new(ctx: CommandContext) -> CommandResult:
 async def _cmd_sessions(ctx: CommandContext) -> CommandResult:
     if ctx.shell:
         ctx.shell._list_sessions()
-    return CommandResult()
+        return CommandResult(output="Sessions listed in the active shell.")
+    callback = ctx.extra.get("list_sessions")
+    if callable(callback):
+        result = callback()
+        if inspect.isawaitable(result):
+            result = await result
+        rows = result if isinstance(result, list) else (result or {}).get("sessions", [])
+        lines = [f"{item.get('id')}: {item.get('title') or 'New Chat'}" for item in rows if isinstance(item, dict)]
+        return CommandResult(output="\n".join(lines) if lines else "No sessions found.", data={"sessions": rows})
+    return CommandResult(output="No session listing provider is attached.", success=False)
 
 
 async def _cmd_session(ctx: CommandContext) -> CommandResult:
@@ -257,7 +281,30 @@ async def _cmd_session(ctx: CommandContext) -> CommandResult:
             output=f"Switched to session: {ctx.shell.session_id}",
             formatted=f"[green]Switched to session: {ctx.shell.session_id}[/green]",
         )
+    if len(parts) > 1:
+        callback = ctx.extra.get("load_session")
+        if callable(callback):
+            result = callback(parts[1])
+            if inspect.isawaitable(result):
+                result = await result
+            session_id = str((result or {}).get("id") or parts[1]) if isinstance(result, dict) else str(result or parts[1])
+            return CommandResult(output=f"Switched to session: {session_id}", data={"session_id": session_id})
     return CommandResult(output="Usage: /session <id>", success=False)
+
+
+async def _cmd_history(ctx: CommandContext) -> CommandResult:
+    callback = ctx.extra.get("load_history")
+    if callable(callback):
+        result = callback(ctx.session_id)
+        if inspect.isawaitable(result):
+            result = await result
+        messages = result if isinstance(result, list) else (result or {}).get("history", [])
+    else:
+        messages = _load_session_messages(ctx)
+    if not messages:
+        return CommandResult(output=f"No history for session: {ctx.session_id}", data={"session_id": ctx.session_id, "messages": []})
+    lines = [f"{item.get('role', 'unknown')}: {str(item.get('content', '')).strip()}" for item in messages if isinstance(item, dict)]
+    return CommandResult(output="\n".join(lines), data={"session_id": ctx.session_id, "messages": messages})
 
 
 async def _cmd_run(ctx: CommandContext) -> CommandResult:
@@ -309,6 +356,11 @@ async def _cmd_verify(ctx: CommandContext) -> CommandResult:
         "Verify the current project changes with relevant tests and report exact evidence, failures, and next actions.")
 
 
+async def _cmd_test(ctx: CommandContext) -> CommandResult:
+    return await _cmd_agent_task(ctx, "test",
+        "Run the relevant project tests and report actionable failures with exact evidence.")
+
+
 async def _cmd_agent_task(ctx: CommandContext, name: str, prompt: str) -> CommandResult:
     from nexus.commands import TaskTracker
     tid = TaskTracker.create(f"/{name}", agent="multi-agent")
@@ -324,20 +376,67 @@ async def _cmd_agent_task(ctx: CommandContext, name: str, prompt: str) -> Comman
 
 # ── Settings Commands ──────────────────────────────────────────────────────────
 
+async def _persist_runtime(ctx: CommandContext) -> None:
+    callback = ctx.extra.get("persist_runtime")
+    if not callable(callback):
+        return
+    result = callback()
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _apply_runtime(ctx: CommandContext) -> None:
+    callback = ctx.extra.get("apply_runtime")
+    if not callable(callback):
+        return
+    result = callback()
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _sync_runtime(ctx: CommandContext, setting: str, value: str) -> None:
+    callback = ctx.extra.get(f"sync_{setting}")
+    if not callable(callback):
+        return
+    result = callback(value)
+    if inspect.isawaitable(result):
+        await result
+
+
+def _runtime(ctx: CommandContext) -> Optional[Dict[str, Any]]:
+    value = ctx.extra.get("runtime_settings")
+    return value if isinstance(value, dict) else None
+
+
+def _normalize_mode(value: str) -> str:
+    aliases = {"": "auto", "default": "ask", "approve": "ask", "approval": "ask", "askall": "ask", "ask_all": "ask", "once": "ask", "bypass": "all", "dontask": "all", "dont_ask": "all", "noask": "all", "allow": "allowlist", "allowed": "allowlist", "allow-list": "allowlist", "whitelist": "allowlist", "preauth": "allowlist", "pre_authorized": "allowlist", "checklist": "allowlist", "acceptedits": "auto", "accept": "auto", "auto_pilot": "auto", "autopilot": "auto"}
+    normalized = str(value or "").strip().lower().replace(" ", "_")
+    return aliases.get(normalized, normalized)
+
+
+def _normalize_sandbox(value: str) -> str:
+    aliases = {"": "no_sandbox", "none": "no_sandbox", "off": "no_sandbox", "no": "no_sandbox", "no-sandbox": "no_sandbox", "nosandbox": "no_sandbox", "simple": "normal", "safe": "normal", "on": "normal", "advanced": "docker"}
+    normalized = str(value or "").strip().lower().replace(" ", "_")
+    return aliases.get(normalized, normalized)
+
+
 async def _cmd_mode(ctx: CommandContext) -> CommandResult:
     parts = ctx.extra.get("args", "")
     if isinstance(parts, str):
         parts = parts.split()
     if len(parts) > 1:
         new_mode = parts[1].strip().lower()
-        aliases = {
-            "accept": "acceptEdits", "acceptedits": "acceptEdits", "accept_edits": "acceptEdits",
-            "dontask": "dontAsk", "dont_ask": "dontAsk",
-            "plan": "plan", "auto": "auto", "default": "auto",
-        }
-        resolved = aliases.get(new_mode, new_mode)
+        resolved = _normalize_mode(new_mode)
+        if resolved not in {"auto", "all", "allowlist", "ask", "plan"}:
+            return CommandResult(output=f"Invalid mode: {new_mode}. Use auto, ask, allowlist, all, or plan.", success=False)
         if ctx.shell:
             ctx.shell.mode = resolved
+        runtime = _runtime(ctx)
+        if runtime is not None:
+            runtime["mode"] = resolved
+            await _apply_runtime(ctx)
+            await _persist_runtime(ctx)
+            await _sync_runtime(ctx, "permission_mode", resolved)
         return CommandResult(output=f"Mode: {resolved}", formatted=f"[green]Mode: {resolved}[/green]")
     return CommandResult(
         output=f"Current mode: {ctx.mode}",
@@ -353,7 +452,12 @@ async def _cmd_model(ctx: CommandContext) -> CommandResult:
         raw = " ".join(parts[1:]).strip()
         provider = ctx.provider
         model = ctx.model
-        if ":" in raw:
+        model_parts = raw.split()
+        is_set_syntax = len(model_parts) >= 3 and model_parts[0].lower() in {"set", "use"}
+        if is_set_syntax:
+            provider = model_parts[1].strip().lower()
+            model = " ".join(model_parts[2:]).strip()
+        elif ":" in raw:
             p, m = raw.split(":", 1)
             provider = (p or "").strip().lower()
             model = (m or "").strip()
@@ -362,6 +466,12 @@ async def _cmd_model(ctx: CommandContext) -> CommandResult:
         if ctx.shell:
             ctx.shell.provider = provider
             ctx.shell.model = model
+        runtime = _runtime(ctx)
+        if runtime is not None:
+            runtime["provider"] = provider
+            runtime["model"] = model
+            await _apply_runtime(ctx)
+            await _persist_runtime(ctx)
         return CommandResult(
             output=f"Provider: {provider}, Model: {model}",
             formatted=f"[green]Provider:[/green] {provider}\n[green]Model:[/green] {model}",
@@ -376,6 +486,10 @@ async def _cmd_thinking(ctx: CommandContext) -> CommandResult:
     new_state = not ctx.thinking
     if ctx.loop and hasattr(ctx.loop, 'configure_thinking'):
         ctx.loop.configure_thinking(new_state)
+    runtime = _runtime(ctx)
+    if runtime is not None:
+        runtime["thinking"] = new_state
+        await _persist_runtime(ctx)
     state = "ON" if new_state else "OFF"
     return CommandResult(
         output=f"Thinking: {state}",
@@ -401,8 +515,15 @@ async def _cmd_dontask(ctx: CommandContext) -> CommandResult:
 
 
 async def _cmd_mode_shortcut(ctx: CommandContext, mode: str) -> CommandResult:
+    mode = _normalize_mode(mode)
     if ctx.shell:
         ctx.shell.mode = mode
+    runtime = _runtime(ctx)
+    if runtime is not None:
+        runtime["mode"] = mode
+        await _apply_runtime(ctx)
+        await _persist_runtime(ctx)
+        await _sync_runtime(ctx, "permission_mode", mode)
     return CommandResult(
         output=f"Mode: {mode}",
         formatted=f"[green]Mode: {mode}[/green]",
@@ -412,7 +533,99 @@ async def _cmd_mode_shortcut(ctx: CommandContext, mode: str) -> CommandResult:
 async def _cmd_config(ctx: CommandContext) -> CommandResult:
     if ctx.shell:
         ctx.shell._show_config()
-    return CommandResult()
+    runtime = _runtime(ctx)
+    if runtime is not None:
+        keys = ("mode", "sandbox_tier", "provider", "model", "profile", "thinking", "effort")
+        return CommandResult(output=json.dumps({key: runtime.get(key) for key in keys}, indent=2, sort_keys=True))
+    return CommandResult(output="No runtime configuration context is attached.", success=False)
+
+
+async def _cmd_provider(ctx: CommandContext) -> CommandResult:
+    parts = ctx.extra.get("args", "")
+    parts = parts.split() if isinstance(parts, str) else list(parts or [])
+    raw = " ".join(parts[1:]).strip() if len(parts) > 1 else ""
+    if not raw or raw.lower() in {"status", "show", "current"}:
+        return CommandResult(output=f"Provider: {ctx.provider}", data={"provider": ctx.provider})
+    if raw.lower() in {"clear", "reset", "off", "auto"}:
+        provider = ""
+    else:
+        provider = raw.lower().replace(" ", "_")
+    runtime = _runtime(ctx)
+    if runtime is not None:
+        runtime["provider"] = provider
+        await _apply_runtime(ctx)
+        await _persist_runtime(ctx)
+    if ctx.shell:
+        ctx.shell.provider = provider
+    return CommandResult(output=f"Provider: {provider or 'auto'}", data={"provider": provider})
+
+
+async def _cmd_sandbox(ctx: CommandContext) -> CommandResult:
+    parts = ctx.extra.get("args", "")
+    parts = parts.split() if isinstance(parts, str) else list(parts or [])
+    requested = " ".join(parts[1:]).strip() if len(parts) > 1 else ""
+    runtime = _runtime(ctx)
+    current = _normalize_sandbox(str((runtime or {}).get("sandbox_tier") or "no_sandbox"))
+    if not requested:
+        return CommandResult(output=f"Sandbox: {current}", data={"tier": current})
+    tier = _normalize_sandbox(requested)
+    if tier not in {"no_sandbox", "normal", "docker"}:
+        return CommandResult(output=f"Invalid sandbox tier: {requested}. Use no_sandbox, normal, or docker.", success=False)
+    if runtime is not None:
+        runtime["sandbox_tier"] = tier
+        await _apply_runtime(ctx)
+        await _persist_runtime(ctx)
+        await _sync_runtime(ctx, "sandbox_tier", tier)
+    return CommandResult(output=f"Sandbox: {tier}", data={"tier": tier})
+
+
+async def _cmd_effort(ctx: CommandContext) -> CommandResult:
+    parts = ctx.extra.get("args", "")
+    parts = parts.split() if isinstance(parts, str) else list(parts or [])
+    requested = " ".join(parts[1:]).strip().lower() if len(parts) > 1 else ""
+    runtime = _runtime(ctx)
+    current = str((runtime or {}).get("effort") or "auto")
+    if not requested:
+        return CommandResult(output=f"Effort: {current}", data={"effort": current})
+    if requested == "extra_high":
+        requested = "xhigh"
+    if requested not in {"auto", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
+        return CommandResult(output=f"Invalid effort: {requested}.", success=False)
+    if runtime is not None:
+        runtime["effort"] = requested
+        await _persist_runtime(ctx)
+    return CommandResult(output=f"Effort: {requested}", data={"effort": requested})
+
+
+async def _cmd_permissions(ctx: CommandContext) -> CommandResult:
+    parts = ctx.extra.get("args", "")
+    parts = parts.split() if isinstance(parts, str) else list(parts or [])
+    runtime = _runtime(ctx)
+    if runtime is None:
+        return CommandResult(output=f"Permission mode: {ctx.mode}", data={"mode": ctx.mode})
+    allowlist = [str(item) for item in runtime.get("permission_allowlist") or [] if str(item).strip()]
+    sub = parts[1].lower() if len(parts) > 1 else ""
+    if sub in {"add", "remove", "rm", "delete"}:
+        entry = " ".join(parts[2:]).strip()
+        if not entry:
+            return CommandResult(output=f"Usage: /permissions {sub} <tool-or-command>", success=False)
+        if sub == "add" and entry not in allowlist:
+            allowlist.append(entry)
+        elif sub in {"remove", "rm", "delete"}:
+            allowlist = [item for item in allowlist if item != entry]
+        runtime["permission_allowlist"] = allowlist
+        await _persist_runtime(ctx)
+    elif sub in {"list", "allowlist", "allowed"}:
+        return CommandResult(output=f"Permission mode: {runtime.get('mode', ctx.mode)}\nAllowlist:\n" + "\n".join(f"- {item}" for item in allowlist), data={"mode": runtime.get("mode", ctx.mode), "allowlist": allowlist})
+    elif sub:
+        mode = _normalize_mode(sub)
+        if mode not in {"auto", "all", "allowlist", "ask", "plan"}:
+            return CommandResult(output=f"Invalid permission mode: {sub}", success=False)
+        runtime["mode"] = mode
+        await _apply_runtime(ctx)
+        await _persist_runtime(ctx)
+        await _sync_runtime(ctx, "permission_mode", mode)
+    return CommandResult(output=f"Permission mode: {runtime.get('mode', ctx.mode)}\nAllowlist entries: {len(allowlist)}", data={"mode": runtime.get("mode", ctx.mode), "allowlist": allowlist})
 
 
 # ── Info Commands ─────────────────────────────────────────────────────────────
@@ -427,12 +640,18 @@ async def _cmd_status(ctx: CommandContext) -> CommandResult:
     ]
     if ctx.loop:
         info.append(f"Agent: {getattr(ctx.loop, 'agent_id', 'default')}")
+    runtime = _runtime(ctx)
+    if runtime is not None:
+        info.extend([
+            f"Sandbox: {runtime.get('sandbox_tier', 'normal')}",
+            f"Effort: {runtime.get('effort', 'medium')}",
+        ])
     output = "\n".join(info)
     formatted = "\n".join(
         f"  [dim]{k}:[/dim] [white]{v}[/white]"
         for k, v in (s.split(": ", 1) for s in info)
     )
-    return CommandResult(output=output, formatted=f"[bold]System Status[/bold]\n{formatted}", data={"mode": ctx.mode})
+    return CommandResult(output=output, formatted=f"[bold]System Status[/bold]\n{formatted}", data={"mode": ctx.mode, "sandbox_tier": (runtime or {}).get("sandbox_tier"), "effort": (runtime or {}).get("effort")})
 
 
 async def _cmd_version(ctx: CommandContext) -> CommandResult:
@@ -475,6 +694,29 @@ async def _cmd_hive(ctx: CommandContext) -> CommandResult:
             data={"agents": agents},
         )
     return CommandResult(output="No active sub-agents", formatted="[dim]No active sub-agents[/dim]")
+
+
+async def _cmd_hiveteam(ctx: CommandContext) -> CommandResult:
+    """List reusable Hive Agent Team templates (plug-and-play)."""
+    try:
+        from hive import list_team_templates
+        teams = list_team_templates()
+    except Exception as e:
+        return CommandResult(output=f"Hive teams unavailable: {e}",
+                             formatted=f"[dim]Hive teams unavailable: {e}[/dim]")
+    if not teams:
+        return CommandResult(output="No Agent Team templates registered",
+                             formatted="[dim]No Agent Team templates registered[/dim]")
+    lines = [f"  {t.name}  ({len(t.agents)} agents, workflow={t.workflow})" for t in teams]
+    formatted = "\n".join(
+        f"  [cyan]{t.name}[/cyan] [grey70]({len(t.agents)} agents, workflow={t.workflow})[/grey70]"
+        for t in teams
+    )
+    return CommandResult(
+        output=f"Hive Agent Teams ({len(teams)}):\n" + "\n".join(lines),
+        formatted=f"[bold]Hive Agent Teams ({len(teams)})[/bold]\n{formatted}",
+        data={"teams": [t.name for t in teams]},
+    )
 
 
 async def _cmd_tasks(ctx: CommandContext) -> CommandResult:
@@ -688,6 +930,23 @@ async def _cmd_context(ctx: CommandContext) -> CommandResult:
         output="\n".join(lines),
         formatted="[bold]Context Usage[/bold]\n" + "\n".join(formatted_lines),
         data={"messages": len(messages), "est_tokens": est_tokens, "window": window, "percent": round(pct, 1)},
+    )
+
+
+async def _cmd_client_catalog_entry(ctx: CommandContext) -> CommandResult:
+    """Describe a cataloged interactive command without faking execution.
+
+    A number of commands (clipboard, terminal renderer, local working
+    directory, browser launch, and client-side cancellation) cannot be
+    performed by the stateless HTTP command endpoint. They still belong in the
+    same registry so every surface discovers the same command set. The TUI
+    handles these in its client dispatcher; other clients receive an honest
+    capability response.
+    """
+    name = str(ctx.extra.get("command") or "").strip().lstrip("/")
+    return CommandResult(
+        output=f"/{name} is registered as an interactive client command. Run it from the active NEXUS client.",
+        data={"client_action": "interactive", "command": f"/{name}"},
     )
 
 
@@ -983,15 +1242,21 @@ def init_registry(registry: Optional[CommandRegistry] = None) -> CommandRegistry
         Command("new", "Create a new session", _cmd_new, category="general"),
         Command("sessions", "List all sessions", _cmd_sessions, category="general"),
         Command("session", "Switch to a session by ID", _cmd_session, category="general"),
+        Command("history", "Show the active session history", _cmd_history, category="general", aliases=["hist"]),
         Command("run", "Execute a shell command", _cmd_run, category="general"),
         Command("gui", "Launch the NEXUS GUI", _cmd_gui, category="general"),
         Command("review", "Run an automated code review", _cmd_review, category="general"),
         Command("simplify", "Simplify the current project changes", _cmd_simplify, category="general"),
         Command("verify", "Verify project changes with tests", _cmd_verify, category="general"),
+        Command("test", "Run relevant project tests", _cmd_test, category="general", aliases=["tests"]),
 
         # settings
         Command("mode", "Get or set mode (auto/plan/acceptEdits/dontAsk)", _cmd_mode, category="settings"),
         Command("model", "Get or set provider:model", _cmd_model, category="settings"),
+        Command("provider", "Get or set the active provider", _cmd_provider, category="settings", aliases=["connect"]),
+        Command("permissions", "Get or set permission mode and allowlist", _cmd_permissions, category="settings", aliases=["perm", "perms"]),
+        Command("sandbox", "Get or set the sandbox tier", _cmd_sandbox, category="settings", aliases=["sb"]),
+        Command("effort", "Get or set reasoning effort", _cmd_effort, category="settings"),
         Command("thinking", "Toggle thinking mode on/off", _cmd_thinking, category="settings"),
         Command("auto", "Switch to auto mode", _cmd_auto, category="settings"),
         Command("plan", "Switch to plan mode", _cmd_plan, category="settings"),
@@ -1003,6 +1268,7 @@ def init_registry(registry: Optional[CommandRegistry] = None) -> CommandRegistry
         Command("status", "System status overview", _cmd_status, category="info", aliases=["s"]),
         Command("version", "Show version information", _cmd_version, category="info"),
         Command("hive", "Show active sub-agent hive status", _cmd_hive, category="info"),
+        Command("hiveteam", "List reusable Hive Agent Team templates", _cmd_hiveteam, category="info"),
         Command("tasks", "Show active tasks", _cmd_tasks, category="info", aliases=["t"]),
         Command("skills", "List installed skills", _cmd_skills, category="info"),
         Command("tools", "List registered tools", _cmd_tools, category="info"),
@@ -1026,6 +1292,146 @@ def init_registry(registry: Optional[CommandRegistry] = None) -> CommandRegistry
     ]
     for cmd in builtins:
         reg.register(cmd)
+
+    # One catalog for every client. These commands historically lived only in
+    # the Ink dispatcher (and a smaller browser list), so they are marked as
+    # client commands while remaining discoverable through the same registry.
+    interactive_commands = [
+        ("usage", "Show usage and context telemetry", "info"),
+        ("conversations", "List saved conversations", "general"),
+        ("load", "Load a saved conversation", "general"),
+        ("rename", "Rename the active conversation", "general"),
+        ("delete-session", "Delete a saved conversation", "general"),
+        ("history", "Load the active conversation history", "general"),
+        ("recap", "Show a recap of the current work", "info"),
+        ("insights", "Show work insights", "info"),
+        ("team-onboarding", "Show team onboarding guidance", "general"),
+        ("btw", "Record a side question", "general"),
+        ("sources", "Toggle activity source labels", "settings"),
+        ("copy", "Copy the latest response or conversation", "general"),
+        ("export", "Export the active conversation", "general"),
+        ("paste", "Attach an image from the clipboard", "general"),
+        ("pwd", "Print the active workspace directory", "workspace"),
+        ("where", "Show workspace and runtime locations", "workspace"),
+        ("files", "List workspace files", "workspace"),
+        ("ls", "List a workspace directory", "workspace"),
+        ("tree", "Show a workspace directory tree", "workspace"),
+        ("cat", "Preview a workspace file", "workspace"),
+        ("cd", "Change the local TUI working directory", "workspace"),
+        ("add-dir", "Add a workspace directory", "workspace"),
+        ("readme", "Preview the project README", "workspace"),
+        ("init", "Initialize workspace guidance", "workspace"),
+        ("docs", "Open or list project documentation", "workspace"),
+        ("health", "Show backend and subsystem health", "info"),
+        ("queue", "Show durable queue state and unfinished work", "info"),
+        ("features", "List enabled runtime features", "info"),
+        ("env", "Show safe runtime environment information", "info"),
+        ("logs", "Show recent runtime log entries", "info"),
+        ("work", "Show recent work events", "info"),
+        ("debug", "Show safe runtime debugging details", "info"),
+        ("doctor", "Run local NEXUS health checks", "info"),
+        ("heapdump", "Write a local memory snapshot", "developer"),
+        ("check", "Run a focused type, Python, or GUI check", "developer"),
+        ("build", "Build the TUI and GUI clients", "developer"),
+        ("settings", "Open or inspect client settings", "settings"),
+        ("permissions", "View or change command permission policy", "settings"),
+        ("sandbox", "View or change the sandbox tier", "settings"),
+        ("provider", "View or change the active provider", "settings"),
+        ("effort", "View or change reasoning effort", "settings"),
+        ("fast", "Toggle fast mode", "settings"),
+        ("logout", "Clear local provider overrides", "settings"),
+        ("reset", "Reset a client feature or setting", "settings"),
+        ("enable", "Enable a NEXUS feature", "settings"),
+        ("disable", "Disable a NEXUS feature", "settings"),
+        ("reload", "Reload a NEXUS subsystem", "settings"),
+        ("terminal-setup", "Show terminal setup guidance", "settings"),
+        ("theme", "Show or change TUI theme", "settings"),
+        ("color", "Show or change output colors", "settings"),
+        ("statusline", "Configure the TUI status line", "settings"),
+        ("output-style", "Configure output style", "settings"),
+        ("tui", "Show TUI renderer information", "settings"),
+        ("keybindings", "Show keyboard bindings", "settings"),
+        ("voice", "Start, stop, or inspect voice mode", "integrations"),
+        ("api", "Start or inspect the local API", "integrations"),
+        ("open-gui", "Open the NEXUS GUI", "integrations"),
+        ("ide", "Open the workspace in an IDE", "integrations"),
+        ("evolution", "Show or manage evolution", "integrations"),
+        ("scheduler", "Show or manage scheduled jobs", "integrations"),
+        ("schedule", "Show or manage scheduled jobs", "integrations"),
+        ("loop", "Show or manage scheduled loops", "integrations"),
+        ("reminders", "Show or manage reminders", "integrations"),
+        ("goal", "Show or set the active goal", "general"),
+        ("todo", "Add or complete a todo item", "general"),
+        ("batch", "Start a multi-agent batch task", "orchestration"),
+        ("fork", "Start a forked multi-agent task", "orchestration"),
+        ("multi-agent", "Start a multi-agent task", "orchestration"),
+        ("multi_agent", "Start a multi-agent task", "orchestration"),
+        ("security-review", "Run a security-focused review", "orchestration"),
+        ("code-review", "Run a code review", "orchestration"),
+        ("ultrareview", "Run an extended review", "orchestration"),
+        ("deep-research", "Start a deep research task", "orchestration"),
+        ("ultraplan", "Start an extended planning task", "orchestration"),
+        ("git", "Run a safe git inspection", "developer"),
+        ("diff", "Show the current git diff summary", "developer"),
+        ("branch", "Show the current git branch", "developer"),
+        ("log", "Show recent git commits", "developer"),
+        ("advisor", "Show advisor status", "general"),
+        ("focus", "Show focus status", "general"),
+        ("fewer-permission-prompts", "Show permission prompt settings", "settings"),
+        ("background", "Show background task support", "general"),
+        ("desktop", "Show desktop integration support", "integrations"),
+        ("mobile", "Show mobile integration support", "integrations"),
+        ("teleport", "Show remote session support", "integrations"),
+        ("remote-control", "Show remote control support", "integrations"),
+        ("remote-env", "Show remote environment support", "integrations"),
+        ("chrome", "Show browser integration support", "integrations"),
+        ("install-github-app", "Show GitHub integration setup", "integrations"),
+        ("install-slack-app", "Show Slack integration setup", "integrations"),
+        ("passes", "Show account pass status", "general"),
+        ("powerup", "Show account power-up status", "general"),
+        ("privacy-settings", "Show privacy settings support", "settings"),
+        ("radio", "Show radio support", "general"),
+        ("stickers", "Show sticker support", "general"),
+        ("upgrade", "Show upgrade support", "general"),
+        ("usage-credits", "Show account usage-credit support", "info"),
+        ("claude-api", "Show Claude API integration support", "integrations"),
+        ("run-skill-generator", "Show skill generator support", "integrations"),
+        ("scroll-speed", "Show terminal scroll-speed support", "settings"),
+        ("setup-bedrock", "Show Bedrock setup support", "settings"),
+        ("setup-vertex", "Show Vertex setup support", "settings"),
+        ("open", "Open the selected activity or panel", "general"),
+        ("detail", "Open activity detail", "general"),
+        ("close", "Close the active panel", "general"),
+        ("panel", "Open or close a named panel", "general"),
+        ("back", "Return to the previous panel", "general"),
+        ("engine", "Show local engine integration support", "integrations"),
+    ]
+    for name, description, category in interactive_commands:
+        if reg.get(name) is None:
+            reg.register(Command(name, description, _cmd_client_catalog_entry, category=category, execution="client"))
+
+    # Compatibility aliases are catalog data too. Keep them here so TUI, GUI,
+    # headless CLI, and gateways resolve the same spelling to the same command.
+    aliases = {
+        "provider": ("connect",), "model": ("models",), "sessions": ("chats",),
+        "tools": ("tool",), "skills": ("skill",), "plugins": ("plugin",),
+        "mcp": ("mcps", "mpc"), "enable": ("on",), "disable": ("off",),
+        "agents": ("agent",), "voice": ("voi", "mic", "talk"),
+        "engine": ("eng", "backend"), "git": ("gst", "gstatus"),
+        "tasks": ("bashes",), "cost": ("stats",),
+        "ide": ("editor",), "background": ("bg",), "desktop": ("app",),
+        "mobile": ("ios", "android"), "teleport": ("tp",),
+        "remote-control": ("rc",), "reload": ("reload-plugins", "reload-skills"),
+        "check": ("test-check",),
+    }
+    for canonical, names in aliases.items():
+        command = reg.get(canonical)
+        if command is None:
+            continue
+        for alias in names:
+            if reg.get(alias) is None:
+                command.aliases.append(alias)
+                reg._by_name[alias] = command
 
     return reg
 

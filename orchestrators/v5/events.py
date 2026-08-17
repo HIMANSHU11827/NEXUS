@@ -7,6 +7,7 @@ so the GUI/TUI frontends consume V5 events exactly like V1 events.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import hashlib
 import os
@@ -19,6 +20,20 @@ from providers.reliability import redact_secrets
 
 
 EVENT_SUMMARY_LIMIT = 128
+
+
+def _sink_timeout_seconds() -> float:
+    """Max time the loop will wait for one sink delivery (GUI/SSE consumer).
+
+    A slow or hung consumer must never stall tool execution on the critical
+    path. Override via NEXUS_EVENT_SINK_TIMEOUT (seconds, default 5).
+    """
+    try:
+        raw = os.environ.get("NEXUS_EVENT_SINK_TIMEOUT", "")
+        value = float(raw) if str(raw).strip() else 5.0
+        return max(0.1, value)
+    except (TypeError, ValueError):
+        return 5.0
 
 
 def _safe_event_text(value: Any, limit: int = 160) -> str:
@@ -164,12 +179,20 @@ class V5EventEmitter:
         if not sink:
             return
         try:
+            timeout = _sink_timeout_seconds()
             if inspect.iscoroutinefunction(sink):
-                await sink(payload)
+                await asyncio.wait_for(sink(payload), timeout=timeout)
             else:
                 result = sink(payload)
                 if inspect.isawaitable(result):
-                    await result
+                    await asyncio.wait_for(result, timeout=timeout)
+        except asyncio.TimeoutError:
+            # The event stays in the durable stream queue; only the slow
+            # consumer's copy is dropped, and the loop keeps executing.
+            self.logger.warning(
+                "work_event_sink timed out after %.1fs; continuing without stalling the run",
+                _sink_timeout_seconds(),
+            )
         except Exception as e:
             self.logger.debug(f"work_event_sink failed: {e}")
 
@@ -223,6 +246,7 @@ class V5EventEmitter:
         result: str = "",
         error: str = "",
         exit_code: Optional[int] = None,
+        background: bool = False,
     ) -> None:
         """Publish tool lifecycle events with the canonical work-event shape."""
         kind = self._work_kind_for_call(call.name, call.params)
@@ -277,6 +301,8 @@ class V5EventEmitter:
             payload["result"] = error[:20000]
         if exit_code is not None:
             payload["exit_code"] = int(exit_code)
+        if background:
+            payload["background"] = True
         payload["part_type"] = "tool-call" if status in ("running", "queued") else "tool-result"
         if status in ("running", "queued"):
             self._tool_started_at.setdefault(call.call_id, time.time())
@@ -330,6 +356,57 @@ class V5EventEmitter:
                     )
                 except Exception:
                     pass
+
+    async def _emit_learning_event(
+        self,
+        event_type: str,
+        *,
+        evidence: Dict[str, Any],
+        policy: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Publish learning evidence/policy telemetry as canonical events.
+
+        Additive emitter: ``learning.evidence`` carries the durable evidence
+        identity (evidence_id, claim_source, confidence, run_id, kind);
+        ``learning.policy`` additionally carries the policy nudge counters.
+        Fully guarded — a broken sink must never break the loop.
+        """
+        try:
+            run_id = str(
+                getattr(self, "_current_turn_id", "") or getattr(self, "session_id", "") or ""
+            )
+            payload: Dict[str, Any] = {
+                "evidence_id": _safe_event_text(evidence.get("evidence_id"), 64),
+                "claim_source": _safe_event_text(evidence.get("claim_source"), 16),
+                "kind": _safe_event_text(evidence.get("kind"), 24),
+                "run_id": run_id,
+            }
+            try:
+                payload["confidence"] = round(
+                    max(0.0, min(1.0, float(evidence.get("confidence") or 0.0))), 4
+                )
+            except (TypeError, ValueError):
+                payload["confidence"] = 0.0
+            if policy:
+                payload["policy_key"] = _safe_event_text(policy.get("tool"), 80)
+                payload["good_tool_count"] = int(policy.get("good_tool_count") or 0)
+                payload["bad_tool_count"] = int(policy.get("bad_tool_count") or 0)
+            event: Dict[str, Any] = {
+                "id": f"learn_{run_id}_{_safe_event_text(evidence.get('evidence_id'), 12)}",
+                "event_type": event_type,
+                "run_id": run_id,
+                "turn_id": self._current_turn_id,
+                "kind": "learning",
+                "part_type": "learning",
+                "title": "Learning evidence" if event_type == "learning.evidence" else "Learning policy update",
+                "action": "evidence" if event_type == "learning.evidence" else "policy",
+                "status": "success",
+                "payload": payload,
+                "visibility": "internal",
+            }
+            await self._emit_work_event(event)
+        except Exception as e:
+            self.logger.debug(f"learning event emit failed: {e}")
 
     async def _emit_tool_chunk(
         self,
@@ -535,6 +612,7 @@ class V5EventEmitter:
         known = {
             "run", "message", "tool", "plan", "phase", "test",
             "file", "search", "command", "subagent", "skill", "memory", "progress",
+            "learning",
         }
         if base in known:
             return base

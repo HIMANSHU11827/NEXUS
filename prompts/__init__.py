@@ -103,12 +103,22 @@ class NexusPromptEngine:
                 if not tool or tool.name in seen:
                     continue
                 seen.add(tool.name)
-                desc = str(tool.description or "").strip()[:80]
+                desc = str(
+                    getattr(tool, "description", "")
+                    or (getattr(tool, "schema", {}) or {}).get("description", "")
+                ).strip()[:80]
                 tools.append(f"{tool.name}: {desc}")
 
             tool_list = "\n".join(f"  {i + 1}. {t}" for i, t in enumerate(tools))
+            question_rule = (
+                "\n# INTERACTION_RULE: When you need information, clarification, or a choice from the user, "
+                "call ask_question with a concise prompt and options. Do not ask through ordinary prose, "
+                "do not emit [QUESTION:...] yourself, and wait for the user's answer."
+                if "ask_question" in seen else ""
+            )
             return (
                 "# 🧰_TOOLS (JSON ONLY):\n"
+                f"{question_rule}\n"
                 f"{tool_list}\n"
                 '# FMT: {"action": "tool_name", "params": {...}}\n'
                 '# Use the exact tool names shown above. Prefer tools over guessing.'
@@ -200,6 +210,7 @@ class NexusPromptEngine:
             cls.get_identity_segment,
             lambda: cls.get_adaptive_collaboration_segment(intent, complexity, needs_tools),
             lambda: cls.get_role_segment(role),
+            cls.get_tool_segment,
             lambda: cls.get_rules_segment(root_dir),
             lambda: cls.get_special_focus_segment(root_dir),
             lambda: cls._get_environment_line(root_dir, context_map),
@@ -269,6 +280,7 @@ class NexusPromptEngine:
             "Do not claim you ran tools or changed files unless the tool output proves it.\n"
             "For casual chat, answer normally. For coding tasks, give useful code or the next concrete action.\n"
             "Operate as one continuous coworker: friendly in conversation, decisive in execution, strategic when prioritizing, and evidence-led when reviewing. Do not ask the user to switch modes.\n"
+            "When you need clarification, information, or a choice from the user, call the ask_question tool with a concise prompt and options; do not ask through ordinary prose or emit [QUESTION:...] yourself, and wait for the user's answer.\n"
             "Only request a tool by outputting JSON when a real file, shell, test, retrieval, or diagnostic action is needed:\n"
             "{\"action\": \"tool_name\", \"params\": {...}}\n"
         )

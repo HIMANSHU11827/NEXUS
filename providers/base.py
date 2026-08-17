@@ -8,6 +8,8 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import requests
 
+from tools.nexus_tools.result import ToolArgumentError, parse_tool_arguments
+
 logger = logging.getLogger("NEXUS_PROVIDER")
 
 class NexusBaseProvider(ABC):
@@ -23,6 +25,10 @@ class NexusBaseProvider(ABC):
         self.api_key = ""
         self.headers = {}
         self.session = requests.Session()
+        # Provider-reported token usage for the most recent request.  The
+        # router copies this side-channel into the V5 result without changing
+        # the long-standing provider.generate() text interface.
+        self._last_usage: Optional[Dict[str, int]] = None
         # NEXUS providers use their configured endpoint directly. Inheriting
         # a stale machine-wide HTTP(S)_PROXY/ALL_PROXY setting can route cloud
         # calls through a dead localhost proxy and produce misleading local
@@ -30,31 +36,45 @@ class NexusBaseProvider(ABC):
         # provider implementation rather than an ambient process variable.
         self.session.trust_env = False
         self.thinking = False
-        
-        # ⚡ Load from Config
+
+        # Resolve provider metadata and secret references during construction.
+        # Argument normalization below is deliberately a pure static helper.
         try:
             from config.config_loader import NexusConfigLoader
+
             loader = NexusConfigLoader()
             config = loader.get_provider_config(provider_name)
-            
-            # provider.yml stores provider metadata and may reference secrets as ${VAR}.
-            # Raw secrets should stay in environment variables or local encrypted/profile storage.
             raw_key = config.get("api_key", "")
             if isinstance(raw_key, str) and raw_key.startswith("${") and raw_key.endswith("}"):
-                env_name = raw_key[2:-1]
-                raw_key = os.getenv(env_name, "")
+                raw_key = os.getenv(raw_key[2:-1], "")
             if not raw_key:
                 raw_key = os.getenv(f"{provider_name.upper()}_API_KEY", "")
             self.api_key = raw_key
             self.model = config.get("model") or ""
             self.endpoint = config.get("endpoint") or self.endpoint
-            
-            # Sanitize key
             if self.api_key and "YOUR_" in self.api_key:
                 self.api_key = ""
-                
         except Exception as e:
             logger.warning(f"[{provider_name.upper()}_INIT]: Failed to load config: {e}")
+
+    @staticmethod
+    def normalize_tool_arguments(raw: Any, *, tool_name: str = "") -> Dict[str, Any]:
+        """Normalize provider tool arguments without silently dropping them.
+
+        OpenAI-compatible providers often return arguments as a JSON string.
+        Turning malformed JSON into ``{}`` makes a transport/protocol defect
+        look like a normal missing-parameter call and causes the model loop to
+        repeat the same bad request.  Preserve a bounded diagnostic envelope
+        instead; the V5 loop turns it into a model-visible repair observation.
+        """
+        try:
+            parsed = parse_tool_arguments(raw, tool_name=tool_name)
+            return parsed if isinstance(parsed, dict) else {}
+        except ToolArgumentError as exc:
+            return {
+                "__nexus_argument_error": str(exc)[:1000],
+                "__nexus_raw_arguments": str(raw)[:4000],
+            }
 
     def configure_thinking(self, enabled: bool):
         self.thinking = enabled

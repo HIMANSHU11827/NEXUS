@@ -63,7 +63,20 @@ class SlackAdapter(BasePlatformAdapter):
             return False
 
         try:
+            # The supervisor reconnects by calling connect() again. Cancel any
+            # previous Socket Mode session first: an orphaned socket keeps
+            # receiving events, so both the old and new sessions would
+            # double-deliver every message.
+            old_socket_task = self._socket_task
             self._disconnecting = False
+            if old_socket_task is not None and not old_socket_task.done():
+                old_socket_task.cancel()
+                try:
+                    await asyncio.wait_for(old_socket_task, timeout=5.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+                except Exception:
+                    logger.debug("slack: stale socket task exit failed", exc_info=True)
             self._client = AsyncWebClient(token=self.bot_token)
 
             if self.app_token:

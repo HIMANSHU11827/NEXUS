@@ -32,9 +32,9 @@ class CohereProvider(NexusBaseProvider):
             name = str(call.get("name") or "").strip()
             if not name:
                 continue
-            parameters = call.get("parameters", {}) or {}
-            if not isinstance(parameters, dict):
-                parameters = {}
+            parameters = NexusBaseProvider.normalize_tool_arguments(
+                call.get("parameters", {}), tool_name=name
+            )
             envelopes.append(f"<function={name}>{json.dumps(parameters, ensure_ascii=False)}")
         return "\n".join(envelopes)
 

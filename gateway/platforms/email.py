@@ -94,7 +94,7 @@ class EmailAdapter(BasePlatformAdapter):
                         if status == "OK":
                             raw_email = data[0][1]
                             await self._process_incoming(raw_email, mid)
-                        await self._imap.store(mid, "+FLAGS", "\\Seen")
+                            await self._imap.store(mid, "+FLAGS", "\\Seen")
             except asyncio.CancelledError:
                 break
             except Exception as e:

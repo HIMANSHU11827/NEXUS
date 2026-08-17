@@ -37,12 +37,13 @@ class _TextToolCall:
     and anything else that only touches ``name`` / ``params`` / ``call_id``.
     """
 
-    __slots__ = ("name", "params", "call_id", "_denied_reason")
+    __slots__ = ("name", "params", "call_id", "argument_error", "_denied_reason")
 
-    def __init__(self, name: str, params: Dict[str, Any], call_id: str = ""):
+    def __init__(self, name: str, params: Dict[str, Any], call_id: str = "", argument_error: str = ""):
         self.name = name
         self.params = params
         self.call_id = call_id
+        self.argument_error = str(argument_error or "")[:2000]
         self._denied_reason = ""
 
 
@@ -76,14 +77,45 @@ class V5ToolExecutor:
                 logger.debug("tool feedback recording unavailable", exc_info=True)
 
     async def _run_tool(self, call) -> str:
-        """Execute a tool and record an auditable success/failure signal."""
+        """Execute a tool and record an auditable success/failure signal.
+
+        When the active run has no deadline (``remaining`` is None) the
+        direct-loop callers await the tool without any ``asyncio.wait_for``,
+        so a registry tool that hangs between stream items would stall the
+        turn forever. Bound that case with a sane default dispatch timeout
+        (``NEXUS_TOOL_TIMEOUT``, default 120s). Command aliases are exempt:
+        they are already bounded by the sandbox's own execution timeout, so
+        the sandbox default and any explicit per-call timeout are preserved.
+        When a run deadline exists the caller's remaining-budget timeout
+        (``asyncio.wait_for(remaining)``) stays authoritative and this
+        wrapper does not add another cap.
+        """
         try:
-            result = await self._run_tool_impl(call)
+            remaining = None
+            control = self._current_run_control()
+            remaining = getattr(control, "remaining", None) if control is not None else None
+            if remaining is None and str(getattr(call, "name", "") or "") not in self.COMMAND_ALIASES:
+                result = await asyncio.wait_for(
+                    self._run_tool_impl(call), timeout=self._default_tool_timeout()
+                )
+            else:
+                result = await self._run_tool_impl(call)
         except Exception:
             await self._record_tool_feedback(call, -1.0)
             raise
         await self._record_tool_feedback(call, 1.0)
         return result
+
+    def _default_tool_timeout(self) -> float:
+        """Sane fallback tool dispatch timeout when no run deadline is set.
+
+        Overridable via ``NEXUS_TOOL_TIMEOUT`` (seconds). Never raises;
+        returns 120.0 when the env value is missing or malformed.
+        """
+        try:
+            return max(1.0, float(os.environ.get("NEXUS_TOOL_TIMEOUT", "120.0")))
+        except (TypeError, ValueError):
+            return 120.0
 
     def _current_run_control(self):
         registry = getattr(self, "_run_controls", None)
@@ -92,6 +124,19 @@ class V5ToolExecutor:
 
     def _remaining_run_budget(self) -> Optional[float]:
         control = self._current_run_control()
+        fence = getattr(control, "execution_fence", None) if control is not None else None
+        if callable(fence):
+            try:
+                owns_execution = bool(fence())
+            except Exception:
+                owns_execution = False
+            if not owns_execution:
+                registry = getattr(self, "_run_controls", None)
+                current = str(getattr(self, "_current_turn_id", "") or "")
+                request_cancel = getattr(registry, "request_cancel", None)
+                if callable(request_cancel) and current:
+                    request_cancel(current, "queue_lease_lost")
+                raise asyncio.CancelledError("queue lease ownership was lost")
         remaining = getattr(control, "remaining", None) if control is not None else None
         if remaining is not None and remaining <= 0:
             check_deadline = getattr(self, "_check_deadline", None)
@@ -118,6 +163,17 @@ class V5ToolExecutor:
                         logger = getattr(self, "logger", None)
                         if logger is not None:
                             logger.debug("could not refresh durable tool cancellation", exc_info=True)
+                fence = getattr(control, "execution_fence", None)
+                if callable(fence):
+                    try:
+                        owns_execution = bool(fence())
+                    except Exception:
+                        owns_execution = False
+                    if not owns_execution:
+                        task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await task
+                        raise asyncio.CancelledError("queue lease ownership was lost")
                 if control.cancelled:
                     task.cancel()
                     with suppress(asyncio.CancelledError):
@@ -161,8 +217,16 @@ class V5ToolExecutor:
         when missing and audited against the permission policy before the
         registry's ``stream_execute`` runs. Raises RuntimeError on failure.
         """
+        argument_error = str(getattr(call, "argument_error", "") or "").strip()
+        if argument_error:
+            error_text = f"Error: invalid arguments for tool '{getattr(call, 'name', 'unknown')}': {argument_error}"
+            await self._emit_tool_event(call, status="error", error=error_text)
+            raise RuntimeError(error_text)
         call = self._canonicalize_tool_call(call)
         await self._emit_tool_event(call, status="running")
+        # Validate queue/run ownership at the last shared boundary before any
+        # direct sandbox or registry-backed tool can begin a side effect.
+        self._remaining_run_budget()
 
         # Commands are owned by the process sandbox, not the tool registry.
         if call.name in self.COMMAND_ALIASES:
@@ -226,15 +290,32 @@ class V5ToolExecutor:
 
             chunks: List[str] = []
             sequence = 0
+            background_param = call.params.get("background")
+            if isinstance(background_param, str):
+                explicit_background = background_param.strip().lower() in {
+                    "1", "true", "yes", "on"
+                }
+                background_supplied = True
+            else:
+                explicit_background = bool(background_param) if background_param is not None else False
+                background_supplied = background_param is not None
+            background = (
+                explicit_background
+                if background_supplied
+                else bool(getattr(sandbox, "should_background_command", lambda _cmd: False)(cmd))
+            )
             stream_kwargs = {
                 "workdir": call.params.get("cwd") or call.params.get("working_directory"),
             }
             requested_shell = call.params.get("shell")
             if requested_shell:
                 stream_kwargs["shell"] = requested_shell
+            if background:
+                stream_kwargs["background"] = True
             remaining = self._remaining_run_budget()
             if remaining is not None:
                 stream_kwargs["timeout"] = max(0.001, remaining)
+            self._remaining_run_budget()
             iterator = sandbox.stream_execute(cmd, **stream_kwargs)
             try:
                 while True:
@@ -274,7 +355,13 @@ class V5ToolExecutor:
                 await self._fire_post_tool_hooks(call, "error", error=error_text)
                 await self._mark_tool_lifecycle(call, error=True)
                 raise RuntimeError(error_text)
-            await self._emit_tool_event(call, status="done", result=result, exit_code=exit_code)
+            await self._emit_tool_event(
+                call,
+                status="done",
+                result=result,
+                exit_code=exit_code,
+                background=background,
+            )
             await self._fire_post_tool_hooks(call, "done", result=result)
             await self._mark_tool_lifecycle(call, error=False)
             return result
@@ -517,6 +604,10 @@ class V5ToolExecutor:
         if self._result_requires_approval(result):
             approved = await self._await_human_approval(call.name, action)
             if approved:
+                # The registry path has a second risk confirmation gate below.
+                # Remember this exact call so one human decision cannot turn
+                # into a hidden second broker request with no UI event.
+                self._remember_approval(call)
                 return True
         reason = getattr(result, "reason", "policy")
         setattr(call, "_denied_reason", reason)
@@ -576,7 +667,10 @@ class V5ToolExecutor:
                 get_approval_broker,
             )
         except Exception:
-            return False
+            # Unknown risk state must require confirmation. Returning False
+            # here means _confirmation_gate interprets the failure as "no
+            # confirmation needed" and can execute without a human decision.
+            return True
 
         try:
             broker = get_approval_broker()
@@ -744,7 +838,10 @@ class V5ToolExecutor:
                 return risk == "critical"
             return False
         except Exception:
-            return False
+            # Unknown risk state must require confirmation. Returning False
+            # here means _confirmation_gate interprets the failure as "no
+            # confirmation needed" and can execute without a human decision.
+            return True
 
     async def _confirmation_gate(self, call) -> bool:
         """Open a human approval request and wait for the decision.

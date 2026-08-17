@@ -66,6 +66,7 @@ t('workspace-panel.tsx exports NexusWorkspacePanel', workspacePanel.includes('ex
 t('nexus-tui.tsx imports from helpers.js', monolith.includes("from './helpers.js'"));
 t('nexus-tui.tsx imports from chat-view.js', monolith.includes("from './chat-view.js'"));
 t('nexus-tui.tsx imports from banner.js', monolith.includes("from './banner.js'"));
+t('nexus-tui.tsx does not render the removed top banner', !monolith.includes('<NexusBanner'));
 t('nexus-tui.tsx imports the welcome logo', monolith.includes("from './welcome-logo.js'"));
 t('nexus-tui.tsx loads commands from the server registry', monolith.includes('`${API_BASE}/commands`'));
 t('nexus-tui.tsx delegates registered fallbacks to shared execution', monolith.includes("postJson('/command'"));

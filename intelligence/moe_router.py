@@ -382,6 +382,7 @@ class NexusMoERouter:
         return self._attempt_recorder().snapshot()
 
     def stream_generate(self, messages: List[Dict[str, str]], **kwargs):
+        self._last_usage = None
         # Optional routing-preference hints (preferred/latency_tier/cost_tier)
         # tune the task-aware ranking tiers; they never reach the provider.
         routing_prefs = {}
@@ -438,6 +439,8 @@ class NexusMoERouter:
                     saw_chunk = True
                     yield text
                 if saw_chunk:
+                    provider_usage = getattr(provider, "_last_usage", None)
+                    self._last_usage = dict(provider_usage) if isinstance(provider_usage, dict) else None
                     if profile_name:
                         from providers.profiles import load_profile_store
                         load_profile_store().record_success(provider_name, profile_name)

@@ -39,7 +39,34 @@ def test_work_item_api_lists_session_scoped_public_records(tmp_path, monkeypatch
     assert [item["task_id"] for item in payload["work_items"]] == [first.task_id]
     assert payload["work_items"][0]["run_id"] == "run-a"
     assert payload["work_items"][0]["plan_id"] == "plan-a"
+    assert payload["active_plan"]["plan_id"] == "plan-a"
+    assert [step["task_id"] for step in payload["active_plan"]["steps"]] == [first.task_id]
     assert "root" not in payload["work_items"][0]
+
+
+def test_work_item_api_restores_only_the_newest_plan(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "_RUN_ROOT", str(tmp_path))
+    old = create_work_item(
+        root=str(tmp_path), session_id="session-a", task_id="old-step",
+        title="Old mission", plan_id="plan-old",
+    )
+    old.created_at = 1.0
+    old.updated_at = 1000.0
+    from nexus.work_items import persist_work_item
+    persist_work_item(old)
+    new = create_work_item(
+        root=str(tmp_path), session_id="session-a", task_id="new-step",
+        title="New mission", plan_id="plan-new",
+    )
+    new.created_at = 2.0
+    persist_work_item(new)
+
+    with _authed_client(monkeypatch) as client:
+        payload = client.get("/api/work-items", params={"session_id": "session-a"}).json()
+
+    assert {item["task_id"] for item in payload["work_items"]} == {"old-step", "new-step"}
+    assert payload["active_plan"]["plan_id"] == "plan-new"
+    assert [step["task_id"] for step in payload["active_plan"]["steps"]] == ["new-step"]
 
 
 def test_work_item_api_get_is_durable_and_returns_not_found(tmp_path, monkeypatch):

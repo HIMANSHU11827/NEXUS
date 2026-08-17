@@ -19,6 +19,24 @@ import urllib.request
 import uuid
 from typing import Any, Dict, Iterable, List, Optional
 
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    # os.kill(pid, 0) is not a usable existence probe on Windows: signal 0 maps
+    # to CTRL_C_EVENT and is delivered to the console group, which can inject a
+    # real KeyboardInterrupt into an unrelated process. Probe via the process
+    # handle instead. The explicit signatures keep 64-bit HANDLEs intact.
+    _KERNEL32 = ctypes.windll.kernel32
+    _KERNEL32.OpenProcess.restype = wintypes.HANDLE
+    _KERNEL32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _KERNEL32.GetExitCodeProcess.restype = wintypes.BOOL
+    _KERNEL32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    _KERNEL32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _STILL_ACTIVE = 259
+    _ERROR_ACCESS_DENIED = 5
+
 
 def _atomic_json(path: str, payload: Dict[str, Any]) -> None:
     directory = os.path.dirname(path) or "."
@@ -135,12 +153,33 @@ class NexusSupervisor:
             value = int(pid)
             if value <= 0:
                 return False
+            if os.name == "nt":
+                return NexusSupervisor._pid_alive_windows(value)
             os.kill(value, 0)
             return True
         except PermissionError:
             return True
         except (OSError, TypeError, ValueError):
             return False
+
+    @staticmethod
+    def _pid_alive_windows(pid: int) -> bool:
+        """Existence probe via OpenProcess — never sends signals.
+
+        A handle means the process exists (or we could not open it because it
+        is protected: ERROR_ACCESS_DENIED -> treat as alive). With a handle,
+        STILL_ACTIVE (259) exit code means the process is running.
+        """
+        handle = _KERNEL32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return _KERNEL32.GetLastError() == _ERROR_ACCESS_DENIED
+        try:
+            exit_code = wintypes.DWORD()
+            if not _KERNEL32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return True
+            return exit_code.value == _STILL_ACTIVE
+        finally:
+            _KERNEL32.CloseHandle(handle)
 
     def _acquire_lock(self) -> bool:
         """Acquire the durable singleton supervisor lock.
@@ -249,9 +288,16 @@ class NexusSupervisor:
                                 break
                         else:
                             time.sleep(self.interval)
-                    incident = self.record_failure(
-                        "supervised process exited or became unhealthy"
-                    )
+                    # Only an operator-requested stop is expected. A child
+                    # which becomes healthy and then exits unexpectedly must
+                    # count toward the crash budget even when its exit code is
+                    # zero, otherwise a clean-exit loop restarts forever.
+                    if self._stopping:
+                        incident = {}
+                    else:
+                        incident = self.record_failure(
+                            "supervised process exited unexpectedly or became unhealthy"
+                        )
                 if self._stopping:
                     break
                 if incident.get("state") == "quarantined":

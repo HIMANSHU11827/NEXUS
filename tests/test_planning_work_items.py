@@ -107,3 +107,23 @@ def test_planning_persistence_does_not_block_event_loop(tmp_path, monkeypatch):
     result, ticks = asyncio.run(run_with_heartbeat())
     assert result.success is True
     assert ticks >= 4
+
+
+def test_planner_accepts_legacy_phase_keys_and_reports_persisted_path(tmp_path):
+    tool = PlanningTool(str(tmp_path))
+    result = asyncio.run(tool.execute(
+        action="create",
+        goal="Exercise planning",
+        plan_spec={
+            "plan_type": "phased",
+            "phases": [
+                {"name": "Prepare", "tasks": ["Inspect the request"]},
+                {"name": "Verify", "tasks": ["Run the planning check"]},
+            ],
+        },
+        session_id="legacy-schema",
+    ))
+
+    assert result.success is True
+    assert "PHASE 1: Prepare" in result.output
+    assert f"Persisted file: {tmp_path / 'todo.md'}" in result.output

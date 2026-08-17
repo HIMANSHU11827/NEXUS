@@ -68,7 +68,7 @@ class RunContext:
         with _run_context_lock(self.path):
             current = _read_run_context_payload(self.path)
             if current:
-                if str(current.get("status") or "").lower() != "running":
+                if str(current.get("status") or "").lower() not in _FINISHABLE_STATUSES:
                     return False
                 current_owner = int(current.get("owner_process_id") or 0)
                 if current_owner and current_owner != os.getpid():
@@ -119,6 +119,43 @@ class RunContext:
             self.lease_expires_at = payload["lease_expires_at"]
             return True
 
+    def set_intermediate_status(self, status: str, detail: str = "") -> bool:
+        """Persist a non-terminal recovery/blocked status.
+
+        The run remains finishable (``finish`` accepts intermediate
+        statuses); heartbeat is paused while blocked, so an abandoned
+        blocked run is eventually retired by lease expiry like any other
+        orphaned run. Invalid statuses are rejected (returns False).
+        """
+        normalized = str(status or "").lower()
+        if normalized not in _INTERMEDIATE_STATUSES:
+            return False
+        now = time.time()
+        if self.owner_process_id and self.owner_process_id != os.getpid():
+            return False
+        with _run_context_lock(self.path):
+            current = _read_run_context_payload(self.path)
+            if current:
+                if str(current.get("status") or "").lower() not in _FINISHABLE_STATUSES:
+                    return False
+                current_owner = int(current.get("owner_process_id") or 0)
+                if current_owner and current_owner != os.getpid():
+                    return False
+                payload = current
+            else:
+                payload = self.to_dict()
+            payload.update({
+                "status": normalized,
+                "terminal_event": "",
+                "error": str(detail or "")[:1000],
+                "updated_at": now,
+            })
+            self._persist_payload(payload)
+            for key, value in payload.items():
+                if hasattr(self, key):
+                    setattr(self, key, value)
+            return True
+
 @contextmanager
 def _run_context_lock(path: str):
     """Serialize run-context transitions across threads and processes."""
@@ -140,6 +177,14 @@ def _run_context_lock(path: str):
             connection.close()
 
 
+_INTERMEDIATE_STATUSES = frozenset({
+    "recovering", "blocked", "degraded", "paused",
+    "waiting_for_permission", "waiting_for_credentials",
+    "waiting_for_dependency",
+})
+_FINISHABLE_STATUSES = frozenset({"running"}) | _INTERMEDIATE_STATUSES
+
+
 def _read_run_context_payload(path: str) -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -147,6 +192,52 @@ def _read_run_context_payload(path: str) -> Dict[str, Any]:
         return payload if isinstance(payload, dict) else {}
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return {}
+
+
+def _process_is_alive(pid: int) -> bool:
+    """Use the supervisor's Windows-safe process probe."""
+    if int(pid or 0) <= 0:
+        return False
+    try:
+        from nexus.supervisor import NexusSupervisor
+
+        return NexusSupervisor._pid_alive(int(pid))
+    except Exception:
+        return True
+
+
+def _finish_expired_run_context(
+    path: str, *, now: float, error: str
+) -> bool:
+    """Atomically retire an expired run whose owning process is gone."""
+    with _run_context_lock(path):
+        payload = _read_run_context_payload(path)
+        if str(payload.get("status") or "").lower() != "running":
+            return False
+        try:
+            lease_expires_at = float(payload.get("lease_expires_at") or 0)
+        except (TypeError, ValueError):
+            lease_expires_at = 0
+        if lease_expires_at > now:
+            return False
+        owner_pid = int(payload.get("owner_process_id") or 0)
+        if owner_pid and _process_is_alive(owner_pid):
+            return False
+        payload.update({
+            "status": "failed",
+            "terminal_event": "run.failed",
+            "error": str(error or "")[:1000],
+            "updated_at": now,
+            "completed_at": now,
+            "lease_expires_at": None,
+        })
+        context = RunContext(
+            run_id=str(payload.get("run_id") or "default"),
+            session_id=str(payload.get("session_id") or "default"),
+            root=os.path.abspath(str(payload.get("root") or ".")),
+        )
+        context._persist_payload(payload)
+        return True
 
 
 def run_context_path(root: str, session_id: str, run_id: str) -> str:
@@ -305,38 +396,44 @@ def recover_orphaned_runs(
         log_dir = os.path.abspath(event_log_dir or os.path.join(root, "workspace", "work_events"))
         os.makedirs(log_dir, exist_ok=True)
         path = os.path.join(log_dir, f"{sid}.jsonl")
-        already_written = False
-        sequence = 0
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as handle:
-                for line in handle:
-                    try:
-                        prior = json.loads(line)
-                    except (TypeError, json.JSONDecodeError):
-                        continue
-                    if isinstance(prior, dict):
+        # The read-modify-append of a recovery event must hold the same
+        # per-log interprocess lock the server uses for appends, or two
+        # processes can allocate the same sequence for one conversation.
+        with _run_context_lock(path):
+            already_written = False
+            sequence = 0
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                    for line in handle:
                         try:
-                            sequence = max(sequence, int(prior.get("sequence") or 0))
-                        except (TypeError, ValueError):
-                            pass
-                        if str(prior.get("event_id") or prior.get("id") or "") == event_id:
-                            already_written = True
-        except FileNotFoundError:
-            pass
-        if not already_written:
-            transitioned = context.finish(
-                "failed", "run.failed", "process restarted before terminal event"
-            )
-            if not transitioned:
-                # A live owner may have renewed or completed the run after
-                # the initial scan. Do not emit a stale recovery event.
-                continue
-        event["sequence"] = sequence + (0 if already_written else 1)
-        if not already_written:
-            with open(path, "a", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps(event, ensure_ascii=False) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+                            prior = json.loads(line)
+                        except (TypeError, json.JSONDecodeError):
+                            continue
+                        if isinstance(prior, dict):
+                            try:
+                                sequence = max(sequence, int(prior.get("sequence") or 0))
+                            except (TypeError, ValueError):
+                                pass
+                            if str(prior.get("event_id") or prior.get("id") or "") == event_id:
+                                already_written = True
+            except FileNotFoundError:
+                pass
+            if not already_written:
+                transitioned = _finish_expired_run_context(
+                    context.path,
+                    now=now,
+                    error="process restarted before terminal event",
+                )
+                if not transitioned:
+                    # A live owner may have renewed or completed the run after
+                    # the initial scan. Do not emit a stale recovery event.
+                    continue
+            event["sequence"] = sequence + (0 if already_written else 1)
+            if not already_written:
+                with open(path, "a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
         project_work_item_event(root=os.path.abspath(root), session_id=sid, event=event)
         if not already_written:
             recovered.append(event)

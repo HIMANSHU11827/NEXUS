@@ -10,7 +10,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover - exercised only in minimal installs
+    yaml = None
 
 
 @dataclass(frozen=True)
@@ -48,24 +53,69 @@ class SkillRegistry:
                     yield path, "legacy"
 
     @staticmethod
+    def _fallback_frontmatter(text: str) -> Dict[str, Any]:
+        """Parse top-level scalar YAML fields without consuming nested keys.
+
+        PyYAML is part of the normal NEXUS installation. This conservative
+        fallback preserves legacy minimal environments and, unlike the old
+        parser, cannot let an indented credential ``description`` overwrite
+        the skill's top-level description.
+        """
+        metadata: Dict[str, Any] = {}
+        lines = text.splitlines()
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            if not line or line[0].isspace() or ":" not in line:
+                index += 1
+                continue
+            key, value = line.split(":", 1)
+            key = key.strip().lower()
+            value = value.strip()
+            if value in {"|", ">"}:
+                folded = value == ">"
+                block: List[str] = []
+                index += 1
+                while index < len(lines):
+                    continuation = lines[index]
+                    if continuation and not continuation[0].isspace():
+                        break
+                    block.append(continuation.strip())
+                    index += 1
+                metadata[key] = (" " if folded else "\n").join(block).strip()
+                continue
+            metadata[key] = value.strip('"\'')
+            index += 1
+        return metadata
+
+    @staticmethod
     def _parse(path: Path, source: str) -> SkillRecord:
         content = path.read_text(encoding="utf-8")
-        metadata: Dict[str, str] = {}
+        metadata: Dict[str, Any] = {}
         body = content.strip()
         match = re.match(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n?(.*)$", content, re.DOTALL)
         if match:
-            for line in match.group(1).splitlines():
-                if ":" in line:
-                    key, value = line.split(":", 1)
-                    metadata[key.strip().lower()] = value.strip().strip('"\'')
+            frontmatter = match.group(1)
+            if yaml is not None:
+                try:
+                    loaded = yaml.safe_load(frontmatter) or {}
+                except Exception:
+                    loaded = {}
+                if isinstance(loaded, dict):
+                    metadata = {str(key).strip().lower(): value for key, value in loaded.items()}
+            if not metadata:
+                metadata = SkillRegistry._fallback_frontmatter(frontmatter)
             body = match.group(2).strip()
         fallback = path.parent.name if path.name == "SKILL.md" else path.stem
-        skill_id = metadata.get("id") or metadata.get("name") or fallback
+        skill_id = str(metadata.get("id") or metadata.get("name") or fallback).strip()
+        name = str(metadata.get("name") or skill_id).strip()
+        description = str(metadata.get("description") or "").strip()
+        version = str(metadata.get("version") or "1.0.0").strip()
         return SkillRecord(
             id=skill_id,
-            name=metadata.get("name") or skill_id,
-            description=metadata.get("description", ""),
-            version=metadata.get("version", "1.0.0"),
+            name=name,
+            description=description,
+            version=version,
             prompt=body,
             path=str(path.resolve()),
             source=source,

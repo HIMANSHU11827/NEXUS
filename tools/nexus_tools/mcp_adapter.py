@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Dict, Optional
 
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
@@ -20,6 +21,22 @@ from tools.nexus_tools.result import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Default per-call MCP timeout (seconds), overridable via NEXUS_MCP_TOOL_TIMEOUT_S.
+_DEFAULT_MCP_TIMEOUT_S = 30.0
+
+
+def _mcp_timeout_default() -> float:
+    """Return the default MCP tool timeout from env (min 1s, float)."""
+    raw = os.environ.get("NEXUS_MCP_TOOL_TIMEOUT_S")
+    if raw:
+        try:
+            value = float(raw)
+            if value >= 1:
+                return value
+        except (TypeError, ValueError):
+            logger.warning("Invalid NEXUS_MCP_TOOL_TIMEOUT_S=%r; using default", raw)
+    return _DEFAULT_MCP_TIMEOUT_S
 
 
 class MCPToolAdapter(BaseTool):
@@ -50,7 +67,7 @@ class MCPToolAdapter(BaseTool):
         self.description = (tool_definition or {}).get("description", f"MCP tool: {name}")
         self._client = mcp_client
         self._tool_def = tool_definition or {}
-        self._timeout_s = float(self._tool_def.get("timeout", 30))
+        self._timeout_s = float(self._tool_def.get("timeout", _mcp_timeout_default()))
 
     async def execute(self, **kwargs) -> ToolResult:
         """Call the MCP tool synchronously (blocking via asyncio.to_thread)."""
@@ -69,6 +86,21 @@ class MCPToolAdapter(BaseTool):
                     status=STATUS_ERROR,
                     error_info={"type": "ConnectionError", "message": "MCP server disconnected", "retryable": True},
                     error="MCP server disconnected",
+                )
+            if isinstance(result, dict) and result.get("isError") is True:
+                content = result.get("content") or result.get("error") or "MCP tool reported an error"
+                if isinstance(content, list):
+                    error_text = "\n".join(
+                        str(item.get("text", item)) if isinstance(item, dict) else str(item)
+                        for item in content
+                    )
+                else:
+                    error_text = str(content)
+                return ToolCallResult(
+                    name=self.name,
+                    status=STATUS_ERROR,
+                    error_info={"type": "MCPError", "message": error_text[:4000], "retryable": False},
+                    error=error_text[:4000],
                 )
             if isinstance(result, dict) and "error" in result:
                 error_text = str(result["error"])

@@ -265,7 +265,58 @@ class V5BackgroundRunner:
             self.recover_durable_background_tasks()
         except Exception:
             logger.debug("[BACKGROUND] durable recovery after registration failed", exc_info=True)
+        self._ensure_durable_background_watchdog()
         return True
+
+    def _ensure_durable_background_watchdog(self) -> bool:
+        """Start one periodic stale-job recovery loop when an event loop exists."""
+        current = getattr(self, "_v5_durable_watchdog_task", None)
+        if current is not None and not current.done():
+            return True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Factories may be registered during synchronous construction.
+            # The next registration/submission in the live loop starts it.
+            return False
+        try:
+            interval = max(
+                1.0,
+                float(os.environ.get("NEXUS_DURABLE_WATCHDOG_INTERVAL", "30")),
+            )
+            stale_after = max(
+                interval * 2.0,
+                float(os.environ.get("NEXUS_DURABLE_STALE_AFTER", "300")),
+            )
+        except (TypeError, ValueError):
+            interval, stale_after = 30.0, 300.0
+
+        async def _watch() -> None:
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    await self.watchdog_durable_background_tasks(stale_after=stale_after)
+                    # Also retry interrupted records left by a prior bounded
+                    # cancellation once their old task has actually exited.
+                    self.recover_durable_background_tasks()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "[BACKGROUND] durable watchdog pass failed",
+                        exc_info=True,
+                    )
+
+        self._v5_durable_watchdog_task = loop.create_task(_watch())
+        return True
+
+    async def _stop_durable_background_watchdog(self) -> None:
+        task = getattr(self, "_v5_durable_watchdog_task", None)
+        self._v5_durable_watchdog_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     def _schedule_durable_background_record(self, record: Dict[str, Any]) -> str:
         store = self._durable_background_store()
@@ -339,12 +390,17 @@ class V5BackgroundRunner:
                     owner_token=owner_token,
                 )
 
+        persisted_attempt = max(0, int(record.get("attempt", 0) or 0))
+        remaining_retries = max(
+            0,
+            int(record.get("max_retries", 0) or 0) - persisted_attempt,
+        )
         return self._submit_task_priority(
             str(record.get("name") or factory_key),
             attempt_factory,
             priority=int(record.get("priority", 0) or 0),
             timeout_s=float(record.get("timeout_s") or 0.0),
-            retries=int(record.get("max_retries", 0) or 0),
+            retries=remaining_retries,
             lane=str(record.get("lane") or "default"),
             task_id=task_id,
             on_done=finished,

@@ -1,11 +1,31 @@
-"""Canonical, validated runtime event envelope for NEXUS adapters and stores."""
+"""Canonical, validated runtime event envelope for NEXUS adapters and stores.
+
+Ordering contract (replay-safe):
+    ``sequence`` is a per-conversation monotonic integer allocated by the
+    server's ``_next_work_event_sequence_unlocked`` under a process + OS-level
+    interprocess lock, and is never taken from producer input.  Events emitted
+    concurrently by parallel tools, sub-agents, or processes therefore never
+    collide: every canonical event in one conversation gets a distinct,
+    strictly increasing sequence that also survives process restarts.  A
+    producer-supplied ``sequence`` key is preserved only as ``source_sequence``
+    (see ``server.append_work_event``) and ignored by ``from_work_event``.
+
+Identity contract:
+    ``event_id`` is taken verbatim from ``event_id``/``id`` when the producer
+    supplies one (hive sub-agent events emit ``sub_<agent>_<rand>``).  When no
+    id is present, ``from_work_event`` derives a deterministic id from the
+    conversation and the allocated sequence, so the same event re-read from the
+    same log line always yields the same ``event_id``.
+"""
 
 from __future__ import annotations
 
+import logging
 import time
-import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger("nexus.events")
 
 EVENT_TYPES = frozenset(
     """run.started run.status run.completed run.failed run.cancelled run.timed_out
@@ -16,11 +36,40 @@ plan.step.started plan.step.updated plan.step.completed plan.step.failed
 tool.started tool.delta tool.completed tool.failed command.started command.stdout command.stderr command.completed command.failed
 file.read file.created file.edited file.diff search.started search.result search.completed search.failed
 web.started web.result web.completed web.failed test.started test.output test.completed test.failed
-subagent.started subagent.status subagent.result subagent.failed subagent.completed handoff.started handoff.completed
+subagent.started subagent.status subagent.result subagent.failed subagent.completed handoff.started handoff.completed handoff.failed
 approval.requested guardrail.blocked agent.thinking agent.completed
 memory.updated skill.used skill.created skill.updated error retry status.changed
-checkpoint.created checkpoint.started checkpoint.completed checkpoint.failed checkpoint.restored checkpoint.deleted""".split()
+checkpoint.created checkpoint.started checkpoint.completed checkpoint.failed checkpoint.restored checkpoint.deleted
+mcp.started mcp.completed mcp.failed
+learning.evidence learning.policy
+goal.created goal.updated goal.completed
+reliability.recovery reliability.quarantine reliability.unquarantine reliability.stall reliability.checkpoint_failed""".split()
 )
+
+# Documented vocabulary gap (audit P14): these types are accepted for replay
+# compatibility with historical logs but no current producer or consumer emits
+# them. Kept in EVENT_TYPES so old log lines still canonicalize; do not add
+# new producers for them without also removing them from this set.
+DEPRECATED_EVENT_TYPES = frozenset(
+    """checkpoint.started checkpoint.completed checkpoint.restored checkpoint.deleted
+command.failed
+conversation.created conversation.updated
+goal.updated
+guardrail.blocked
+phase.started phase.updated phase.completed phase.failed
+plan.completed plan.failed
+plan.step.updated plan.step.completed plan.step.failed
+search.started search.completed search.failed
+test.started test.completed test.failed
+tool.delta
+web.started web.completed web.failed""".split()
+)
+
+# Kinds that legitimately map to the tool lifecycle and must not be flagged
+# as non-canonical producers.
+_TOOL_LIKE_KINDS = frozenset({"tool", "bash", "terminal", "shell"})
+
+_SEEN_NON_CANONICAL_KINDS: set[str] = set()
 EVENT_STATUSES = frozenset({
     "pending", "running", "success", "failed", "blocked", "skipped", "cancelled", "timed_out",
 })
@@ -75,13 +124,41 @@ def infer_event_type(event: Dict[str, Any], status: str) -> str:
         base = "test"
     elif kind in {"hive", "subagent"}:
         base = "subagent"
+    elif kind == "handoff":
+        base = "handoff"
+    elif kind == "mcp":
+        base = "mcp"
+    elif kind == "checkpoint":
+        base = "checkpoint"
+    elif kind == "learning":
+        if event.get("evidence_id"):
+            return "learning.evidence"
+        if event.get("policy_key") or event.get("nudges") or event.get("bad_tool_count") is not None:
+            return "learning.policy"
+        base = "learning"
+    elif kind == "approval":
+        return "approval.requested"
     elif kind == "skill":
         return "skill.used"
     elif kind in {"error", "retry"}:
         return kind
     elif stage:
         return "status.changed"
+    elif kind in _TOOL_LIKE_KINDS:
+        base = "tool"
     else:
+        # Unknown kind: keep canonical output by mapping to the kind's own
+        # lifecycle when it is canonical, otherwise degrade to tool.* but
+        # flag the non-canonical producer once per kind (audit P16).
+        candidate = f"{kind}.{('started' if status in {'pending', 'running'} else 'completed' if status == 'success' else 'failed')}"
+        if candidate in EVENT_TYPES:
+            return candidate
+        if kind not in _SEEN_NON_CANONICAL_KINDS:
+            _SEEN_NON_CANONICAL_KINDS.add(kind)
+            logger.warning(
+                "non-canonical event producer: kind=%r status=%r degraded to %s",
+                kind, status, "tool.*",
+            )
         base = "tool"
     suffix = "started" if status in {"pending", "running"} else "completed" if status == "success" else "failed"
     return f"{base}.{suffix}"
@@ -135,7 +212,14 @@ class CanonicalEvent:
             raw_status = "success"
         status = canonical_status(raw_status)
         run_id = str(event.get("run_id") or event.get("turn_id") or conversation_id)
-        event_id = str(event.get("event_id") or event.get("id") or f"evt_{uuid.uuid4().hex}")
+        # Deterministic fallback: sequence is unique per conversation, so
+        # ``evt_<conversation>_<sequence>`` is both stable across replays and
+        # collision-free, unlike a random uuid.
+        event_id = str(
+            event.get("event_id")
+            or event.get("id")
+            or f"evt_{conversation_id}_{sequence}"
+        )
         path = event.get("path")
         related_files = list(event.get("related_files") or ([str(path)] if path else []))
         error_value = (event.get("error") or event.get("stderr")) if status == "failed" else event.get("error")

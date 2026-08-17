@@ -5,7 +5,9 @@ import pytest
 import tools.test_runner.scripts.test_runner as test_runner_module
 from tools.creating.scripts.creating import CreatingTool
 from tools.modifying.scripts.modifying import ModifyingTool
-from tools.test_runner.scripts.test_runner import TestRunnerTool
+# Alias so pytest's ``Test*`` collection pattern does not treat the
+# imported tool class (which has an __init__) as a test class.
+from tools.test_runner.scripts.test_runner import TestRunnerTool as LocalTestRunnerTool
 
 
 def test_test_runner_auto_detects_node_test_script(tmp_path):
@@ -13,7 +15,7 @@ def test_test_runner_auto_detects_node_test_script(tmp_path):
         json.dumps({"scripts": {"test": "vitest run"}}), encoding="utf-8"
     )
 
-    assert TestRunnerTool()._detect_command(tmp_path, "auto", None) == "npm test"
+    assert LocalTestRunnerTool()._detect_command(tmp_path, "auto", None) == "npm test"
 
 
 @pytest.mark.asyncio
@@ -31,7 +33,7 @@ async def test_test_runner_forwards_timeout_and_reports_execution_metadata(tmp_p
             yield "passed"
 
     monkeypatch.setattr(test_runner_module, "SovereignSandbox", FakeSandbox)
-    result = await TestRunnerTool(root_dir=str(tmp_path)).execute(
+    result = await LocalTestRunnerTool(root_dir=str(tmp_path)).execute(
         command="npm run build", timeout=9
     )
 
@@ -57,7 +59,7 @@ async def test_test_runner_fails_closed_when_exit_code_is_missing(tmp_path, monk
             yield "completed output"
 
     monkeypatch.setattr(test_runner_module, "SovereignSandbox", MissingExitSandbox)
-    result = await TestRunnerTool(root_dir=str(tmp_path)).execute(command="pytest -q")
+    result = await LocalTestRunnerTool(root_dir=str(tmp_path)).execute(command="pytest -q")
     assert result.success is False
 
 

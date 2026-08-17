@@ -27,6 +27,7 @@ import uuid
 from typing import Any, Dict
 
 from providers.reliability import redact_secrets
+from .learning_evidence import V5LearningEvidence
 
 _DESCRIPTION_LIMIT = 200
 _ERROR_LIMIT = 500
@@ -46,8 +47,15 @@ _EPISODIC_IMPORTANCE_GAMMA = 0.3
 _EPISODIC_SCORE_LIMIT = 200
 
 
-class V5Learning:
-    """Mixin that deterministically records turn-level learning signals."""
+class V5Learning(V5LearningEvidence):
+    """Mixin that deterministically records turn-level learning signals.
+
+    Inherits ``V5LearningEvidence`` (the durable, provenance-bearing
+    evidence store surface) so any loop that mixes in ``V5Learning`` —
+    ``NexusLoopV5`` included — automatically gains ``collect_evidence``,
+    ``retrieve_lessons`` and ``_evidence_lessons_prompt`` with no core.py
+    wiring change.
+    """
 
     @staticmethod
     def _action_get(action: Any, key: str, default: Any = None) -> Any:
@@ -263,10 +271,24 @@ class V5Learning:
             await asyncio.to_thread(self._log_turn_replay, perceived, result, turn)
         except Exception as e:
             self.logger.warning(f"[LEARNING] turn replay logging failed: {e}")
+        evidence = 0
+        try:
+            # Durable evidence harvest (V5LearningEvidence mixin, if mixed in):
+            # verified tool outcomes / failures / retries / verifier verdicts
+            # / user corrections land in .nexus_v5/evidence.jsonl so later
+            # planning turns can retrieve them. Replays are NOT re-logged
+            # here -- _log_turn_replay above already owns the single replay
+            # line per turn.
+            collect_evidence = getattr(self, "collect_evidence", None)
+            if callable(collect_evidence):
+                evidence = await collect_evidence(perceived, result, turn)
+        except Exception as e:
+            self.logger.warning(f"[LEARNING] evidence collection failed: {e}")
         replay_status = "logged" if getattr(self, "_replay_logged", False) else "not logged"
         self.logger.info(
             f"[LEARNING] turn {self._current_turn_id or self.session_id}: "
-            f"{failures} failure(s), {learnings} learning(s), replay {replay_status}"
+            f"{failures} failure(s), {learnings} learning(s), "
+            f"{evidence} evidence(s), replay {replay_status}"
         )
 
     def learning_signals_digest(self, limit: int = 6) -> str:

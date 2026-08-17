@@ -123,26 +123,14 @@ class MetaAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=str(e))
 
     async def send_typing(self, chat_id: str):
-        """Send typing indicator via Graph API (WhatsApp only)."""
+        """Typing indicator via Graph API (WhatsApp only).
+
+        The WhatsApp Cloud API exposes no typing action, so a text send was
+        previously used to fake one — delivering a real ". . ." message to the
+        user on every reply. Keep the hook as a no-op so callers keep working.
+        """
         if self.platform != "whatsapp" or not self._client:
             return
-        try:
-            phone_id = self._phone_number_id(chat_id)
-            url = f"{META_GRAPH_URL}/{phone_id}/messages"
-            await self._client.post(
-                url,
-                params={"access_token": self.access_token},
-                json={
-                    "messaging_product": "whatsapp",
-                    "recipient_type": "individual",
-                    "to": chat_id,
-                    "type": "text",
-                    "text": {"body": ". . ."},
-                },
-            )
-        except Exception:
-            logger.warning("gateway/platforms/meta.py async send_typing: suppressed error", exc_info=True)
-            pass
 
     @staticmethod
     def parse_whatsapp_webhook(payload: dict) -> List[MessageEvent]:

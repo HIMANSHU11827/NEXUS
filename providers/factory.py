@@ -3,7 +3,7 @@ import importlib
 import logging
 import os
 import threading
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from utils.singleton import ThreadSafeSingleton
 from providers.reliability import redact_secrets
@@ -188,16 +188,28 @@ class NexusProviderFactory(ThreadSafeSingleton):
     def __init__(self):
         if getattr(self, "_initialized", False):
             return
-        self._initialized = True
-        self.loader = get_loader()
-        provider_config = self.loader.get("provider", {})
-        provider_name = ""
-        if isinstance(provider_config, dict):
-            provider_name = str(provider_config.get("default_provider") or "").strip()
-        self.group = self.loader.get_system("provider_group", "cloud")
-        self.name = provider_name or self.loader.get_system("provider_name", "openrouter")
-        self._consecutive_errors = 0
-        logger.info("ProviderFactory init: default=%r group=%r name=%r", provider_name, self.group, self.name)
+        # Singleton-init race (found via real multi-agent hive run):
+        # ``ThreadSafeSingleton.__new__`` publishes the instance before
+        # ``__init__`` runs, so a concurrent caller can observe the instance
+        # mid-initialization. ``self.loader``/``self.name`` were assigned only
+        # *after* ``_initialized`` was set to True, so racing threads crashed
+        # with ``AttributeError: 'NexusProviderFactory' object has no
+        # attribute 'loader'`` (or 'name'). Hold the class lock for the whole
+        # init block and publish ``_initialized`` LAST so the flag is only
+        # ever observed when the instance is fully usable.
+        with type(self)._lock:
+            if getattr(self, "_initialized", False):
+                return
+            self.loader = get_loader()
+            provider_config = self.loader.get("provider", {})
+            provider_name = ""
+            if isinstance(provider_config, dict):
+                provider_name = str(provider_config.get("default_provider") or "").strip()
+            self.group = self.loader.get_system("provider_group", "cloud")
+            self.name = provider_name or self.loader.get_system("provider_name", "openrouter")
+            self._consecutive_errors = 0
+            self._initialized = True
+            logger.info("ProviderFactory init: default=%r group=%r name=%r", provider_name, self.group, self.name)
 
     @staticmethod
     def offline_mode() -> bool:
@@ -395,6 +407,98 @@ class NexusProviderFactory(ThreadSafeSingleton):
             pass
         return None
 
+    def _auto_health(self) -> Any:
+        """Best-effort persisted health registry for auto resolution.
+
+        Only consulted when a health DB already exists on disk (the router
+        writes one under ``<root>/.nexus/provider_health.sqlite3``); a missing
+        DB means no signal yet, so every detected provider stays eligible.
+        """
+        try:
+            from providers.health import ProviderHealthRegistry
+            path = os.path.join(os.getcwd(), ".nexus", "provider_health.sqlite3")
+            if os.path.exists(path):
+                return ProviderHealthRegistry(store_path=path)
+        except Exception:
+            logger.debug("providers/factory.py: auto health registry unavailable", exc_info=True)
+        return None
+
+    def _resolve_auto_default(self) -> Optional[Any]:
+        """Resolve ``default_provider: auto`` to the first working provider.
+
+        Ordering is deliberately local-first: keyless local OpenAI-compatible
+        servers that are actually running (LM Studio, Ollama, llama.cpp, VLM)
+        beat keyed cloud providers. Each candidate is constructed and its
+        credentials validated before selection; degraded providers (from the
+        persisted health DB) are skipped. When nothing works, a diagnostic
+        listing every candidate and why it was skipped is logged and None is
+        returned so callers can surface the problem.
+        """
+        tried: List[str] = []
+        try:
+            from providers.auto_detect import detect_available_providers
+            available = detect_available_providers() or {}
+        except Exception:
+            logger.debug("providers/factory.py: auto-detect unavailable", exc_info=True)
+            available = {}
+        if not available:
+            logger.warning(
+                "ProviderFactory: default_provider=auto resolved to nothing — "
+                "no API keys, OAuth tokens, or running local servers detected"
+            )
+            return None
+
+        ordered: List[str] = []
+        for local_id in ("lm_studio", "ollama", "llama_cpp", "vlm"):
+            if local_id in available and local_id not in ordered:
+                ordered.append(local_id)
+        for name in sorted(available.keys()):
+            if name not in ordered:
+                ordered.append(name)
+
+        health = self._auto_health()
+        for name in ordered:
+            provider = self.get_provider_by_name(self.group, name)
+            if provider is None:
+                tried.append(f"{name}: failed to construct")
+                continue
+            is_local = self._is_local_provider(name, provider)
+            if self.offline_mode() and not is_local:
+                tried.append(f"{name}: skipped (offline mode blocks remote providers)")
+                continue
+            if health is not None:
+                try:
+                    if health.is_degraded(name):
+                        tried.append(f"{name}: skipped (degraded per recent health)")
+                        continue
+                except Exception:
+                    pass
+            if is_local:
+                logger.info("ProviderFactory: auto resolved local provider %r", name)
+                return provider
+            validator = getattr(provider, "validate_api_key", None)
+            has_key = bool(validator()) if callable(validator) else bool(getattr(provider, "api_key", None))
+            if not has_key:
+                tried.append(f"{name}: no usable credential")
+                continue
+            logger.info("ProviderFactory: auto resolved keyed provider %r", name)
+            return provider
+        logger.warning("ProviderFactory: default_provider=auto found no working provider — tried: %s", "; ".join(tried))
+        return None
+
+    @staticmethod
+    def _apply_env_model(provider: Any) -> None:
+        """Apply the global ``NEXUS_MODEL`` override to a resolved provider.
+
+        Mirrors the orchestrator contract where ``NEXUS_MODEL`` wins over the
+        provider.yml model default when no explicit model kwarg is supplied.
+        """
+        if provider is None:
+            return
+        model = os.environ.get("NEXUS_MODEL", "").strip()
+        if model:
+            provider.model = model
+
     def get_provider(self) -> Any:
         """Returns the active provider, iterating the fallback chain.
 
@@ -403,6 +507,11 @@ class NexusProviderFactory(ThreadSafeSingleton):
         This makes the system resilient: a dead/expired key on the default provider
         automatically falls through to the next configured provider instead of
         silently emitting empty output.
+
+        ``default_provider: auto`` resolves through :meth:`_resolve_auto_default`
+        (running keyless locals first, then keyed providers, health-aware).
+        ``NEXUS_PROVIDER`` overrides the configured default on every entry path
+        and ``NEXUS_MODEL`` is applied to the resolved provider.
         """
         if self._provider and self._consecutive_errors < 3 and not (
             self.offline_mode() and not self._is_local_provider(
@@ -414,6 +523,9 @@ class NexusProviderFactory(ThreadSafeSingleton):
             cfg = self.loader.get("provider", {})
             chain = cfg.get("fallback_chain", []) if isinstance(cfg, dict) else []
             default = str(cfg.get("default_provider") or "").strip()
+            env_provider = os.environ.get("NEXUS_PROVIDER", "").strip()
+            if env_provider:
+                default = env_provider
             candidates = []
             if default:
                 candidates.append(default)
@@ -421,6 +533,17 @@ class NexusProviderFactory(ThreadSafeSingleton):
                 if n not in candidates:
                     candidates.append(n)
             for name in candidates:
+                if str(name).strip().lower() == "auto":
+                    provider = self._resolve_auto_default()
+                    if provider is not None:
+                        self._provider = provider
+                        self._consecutive_errors = 0
+                        self._apply_env_model(provider)
+                        return provider
+                    logger.warning(
+                        "ProviderFactory: default_provider=auto resolved to no working provider; falling back to fallback_chain"
+                    )
+                    continue
                 provider = self.get_provider_by_name(self.group, name)
                 is_local = self._is_local_provider(name, provider)
                 if self.offline_mode() and not is_local:
@@ -436,12 +559,18 @@ class NexusProviderFactory(ThreadSafeSingleton):
                 if has_key:
                     self._provider = provider
                     self._consecutive_errors = 0
+                    self._apply_env_model(provider)
                     return provider
         except Exception:
             logger.warning("providers/factory.py: get_provider fallback failed", exc_info=True)
         if self.offline_mode() and not self._is_local_provider_name(self.name):
             return None
+        if str(self.name).strip().lower() == "auto":
+            self._provider = self._resolve_auto_default()
+            self._apply_env_model(self._provider)
+            return self._provider
         self._provider = self.get_provider_by_name(self.group, self.name)
+        self._apply_env_model(self._provider)
         return self._provider
 
     def reset(self) -> None:

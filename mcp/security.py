@@ -29,13 +29,17 @@ def redact_secret_text(value: str) -> str:
 def read_bounded_line(stream: TextIO, maximum: int = MAX_MCP_LINE_CHARS) -> Tuple[str, bool]:
     """Read one newline-delimited MCP message without unbounded allocation."""
     line = stream.readline(maximum + 1)
-    oversized = len(line) > maximum
-    if oversized and not line.endswith("\n"):
-        while True:
-            remainder = stream.readline(maximum + 1)
-            if not remainder or remainder.endswith("\n"):
-                break
-    return line if not oversized else "", oversized
+    if len(line) <= maximum:
+        return line, False
+    # A line of exactly ``maximum`` chars followed by a newline is valid but
+    # arrives as ``maximum + 1`` chars; everything longer is oversized.
+    if len(line) == maximum + 1 and line.endswith("\n"):
+        return line, False
+    while True:
+        remainder = stream.readline(maximum + 1)
+        if not remainder or remainder.endswith("\n"):
+            break
+    return "", True
 
 
 def workspace_root(arguments: Dict[str, Any]) -> str:

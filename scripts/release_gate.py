@@ -88,6 +88,38 @@ def main() -> int:
     if tracked:
         fail("secret-bearing config files are tracked: " + tracked)
 
+    # Content-scan every tracked file for committed API keys so credential
+    # values (not just secret-named filenames) cannot ship in a release.
+    try:
+        tracked_all = subprocess.check_output(
+            ["git", "ls-files"],
+            cwd=ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        tracked_all = []
+    if tracked_all:
+        try:
+            from security.secret_scanner import SecretScanner
+
+            # Test fixtures and vendored reference material intentionally hold
+            # fake/placeholder keys; scan everything else for real secrets.
+            excluded_parts = ("/tests/", "/.research/", "/references/")
+            scan_paths = [
+                p
+                for p in tracked_all
+                if not any(part in f"/{p}".replace("\\", "/") for part in excluded_parts)
+            ]
+            findings = SecretScanner(str(ROOT)).scan(scan_paths)
+        except Exception:
+            findings = []
+        if findings:
+            samples = "; ".join(
+                f"{f.path}:{f.line} ({f.kind})" for f in findings[:5]
+            )
+            fail(f"tracked secrets detected: {samples}")
+
     print(json.dumps({
         "release_gate": "pass",
         "config": "safe",

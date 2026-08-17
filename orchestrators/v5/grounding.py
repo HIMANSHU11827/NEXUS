@@ -19,7 +19,26 @@ class V5ContextGrounding:
 
     def _build_stable_prompt(self) -> str:
         if getattr(self, "_stable_prompt_built", False) and self._stable_prompt_cache:
-            return self._stable_prompt_cache
+            base = self._stable_prompt_cache
+        else:
+            base = self._build_stable_prompt_base()
+            self._stable_prompt_cache = base
+            self._stable_prompt_built = True
+        # Verified lessons are intentionally NOT cached: new evidence must be
+        # visible on the very next planning turn, so the durable lesson tail
+        # is re-rendered on every call.
+        lessons = ""
+        loader = getattr(self, "_evidence_lessons_prompt", None)
+        if callable(loader):
+            try:
+                lessons = loader()
+            except Exception:
+                lessons = ""
+        if lessons:
+            base = f"{base}\n\n{lessons}" if base else lessons
+        return base
+
+    def _build_stable_prompt_base(self) -> str:
         parts: List[str] = []
         loader = getattr(self, "_load_soul_md", None)
         if callable(loader):
@@ -49,8 +68,6 @@ class V5ContextGrounding:
                 lines.append(f"  /{name}: {desc}" if desc else f"  /{name}")
             parts.append("\n".join(lines))
         result = "\n\n".join(parts)
-        self._stable_prompt_cache = result
-        self._stable_prompt_built = True
         return result
 
     def _load_tool_descriptions(self) -> str:

@@ -218,3 +218,78 @@ def test_create_hive_reconciles_fast_terminal_agents_before_persisting(tmp_path,
 
     assert result["hive"]["status"] == "success"
     assert server._HIVES["hive_fast"]["status"] == "success"
+
+
+def test_api_hive_consolidation_stores_result_in_manifest(tmp_path, monkeypatch):
+    """Regression: API hives must be consolidated and the result surfaced (P03)."""
+    import asyncio
+    import server
+
+    class Engine:
+        async def consolidate_hive(self, hive_id, timeout=None):
+            assert hive_id == "hive_c"
+            return "consolidated answer"
+
+    monkeypatch.setattr(server, "_HIVES", {"hive_c": {"id": "hive_c"}})
+    monkeypatch.setattr(server, "_persist_hive_manifest", lambda: None)
+
+    asyncio.run(server._consolidate_api_hive("hive_c", Engine()))
+
+    assert server._HIVES["hive_c"]["result"] == "consolidated answer"
+    assert server._HIVES["hive_c"].get("consolidation_error", "") == ""
+
+
+def test_list_hives_surfaces_engine_failure_without_fake_personas(tmp_path, monkeypatch):
+    """Regression (P36): a broken hive engine must not masquerade as a
+    WORKER roster; the response reports the engine as unavailable."""
+    import server
+
+    class BrokenEngine:
+        def list_personas(self):
+            raise RuntimeError("hive engine down with sk-secretvalue123")
+
+    monkeypatch.setattr(server, "_get_hive_engine", lambda: BrokenEngine())
+    monkeypatch.setattr(server, "_HIVES", {})
+    monkeypatch.setattr(server, "_persist_hive_manifest", lambda: None)
+
+    result = server.list_hives()
+
+    assert result["personas"] == []
+    assert result["engine"]["available"] is False
+    assert "sk-secretvalue123" not in result["engine"]["error"]
+    assert "hive engine down" in result["engine"]["error"]
+
+
+def test_list_hives_reports_engine_available_when_healthy(tmp_path, monkeypatch):
+    import server
+
+    class HealthyEngine:
+        def list_personas(self):
+            return {"WORKER": "worker", "TESTER": "tester"}
+
+    monkeypatch.setattr(server, "_get_hive_engine", lambda: HealthyEngine())
+    monkeypatch.setattr(server, "_HIVES", {})
+    monkeypatch.setattr(server, "_persist_hive_manifest", lambda: None)
+
+    result = server.list_hives()
+
+    assert result["personas"] == ["WORKER", "TESTER"]
+    assert result["engine"]["available"] is True
+    assert result["engine"]["error"] == ""
+
+
+def test_api_hive_consolidation_records_engine_failure(tmp_path, monkeypatch):
+    """Regression: a failed consolidation must leave a visible error (P03)."""
+    import asyncio
+    import server
+
+    class BrokenEngine:
+        async def consolidate_hive(self, hive_id, timeout=None):
+            raise RuntimeError("engine exploded")
+
+    monkeypatch.setattr(server, "_HIVES", {"hive_d": {"id": "hive_d"}})
+    monkeypatch.setattr(server, "_persist_hive_manifest", lambda: None)
+
+    asyncio.run(server._consolidate_api_hive("hive_d", BrokenEngine()))
+
+    assert "engine exploded" in server._HIVES["hive_d"]["consolidation_error"]

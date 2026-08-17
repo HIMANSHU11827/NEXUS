@@ -92,7 +92,9 @@ class _FakeExecutor(V5ToolExecutor):
         self.tool_registry = None
         self.logger = logging.getLogger("test_redesign_permissions")
 
-    async def _emit_tool_event(self, call, *, status, result="", error="", exit_code=None):
+    async def _emit_tool_event(
+        self, call, *, status, result="", error="", exit_code=None, background=False
+    ):
         self._stream_events.append({"event_type": "tool.call", "tool": call.name, "status": status})
 
     async def _emit_tool_chunk(self, call, text, sequence, stream="stdout"):

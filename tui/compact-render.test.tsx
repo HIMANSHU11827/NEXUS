@@ -1,7 +1,6 @@
 import React from 'react';
 import assert from 'node:assert/strict';
 import {Box} from 'ink';
-import {NexusBanner} from './banner.js';
 import {InputComposer} from './input-composer.js';
 import {StatusBar} from './status-bar.js';
 import {resolveTuiLayout} from './layout.js';
@@ -16,7 +15,6 @@ for (const width of [20, 39, 57, 58, 78]) {
     const layout = resolveTuiLayout(width, height);
     const frame = await renderInkFrame(
         <Box width={width} height={height} flexDirection="column">
-            <NexusBanner width={layout.chatContentWidth} isWorking phase="verifying" runId="7f4c2a1d" elapsedMs={134000} />
             <Box flexGrow={1} />
             <InputComposer value="" onChange={() => {}} onSubmit={() => {}} isBusy showHints={layout.showComposerHints} width={layout.mainWidth} />
             <StatusBar

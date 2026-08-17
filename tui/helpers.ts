@@ -6,8 +6,10 @@
 import {existsSync, readFileSync} from 'node:fs';
 import {mkdir, readFile, readdir, stat, writeFile} from 'node:fs/promises';
 import {execFileSync, spawn, execFile as _execFile} from 'node:child_process';
+import {randomBytes} from 'node:crypto';
 import {promisify} from 'node:util';
 import path from 'node:path';
+import {NEXUS_BLUE, NEXUS_BLUE_BRIGHT, NEXUS_ORANGE, NEXUS_ORANGE_BRIGHT} from './theme.js';
 
 // ── [NEXUS CONFIG]
 const configuredApi = process.env.NEXUS_API?.trim();
@@ -16,9 +18,12 @@ const configuredPort = process.env.NEXUS_API_PORT?.trim() || '8000';
 export const API_BASE = configuredApi
     ? configuredApi.replace(/\/$/, '')
     : `http://${configuredHost}:${configuredPort}/api`;
-const DASHBOARD_TOKEN = process.env.NEXUS_DASHBOARD_TOKEN?.trim();
+// The repository launcher injects a token, but direct `npm start` usage does
+// not. Generate a per-process local token so the embedded server and TUI use
+// the same authenticated contract without falling back to a shared constant.
+export const DASHBOARD_TOKEN = process.env.NEXUS_DASHBOARD_TOKEN?.trim() || randomBytes(32).toString('hex');
 export const API_AUTH_HEADERS: Record<string, string> = {
-    Authorization: `Bearer ${DASHBOARD_TOKEN || 'nexus-local-tui'}`
+    Authorization: `Bearer ${DASHBOARD_TOKEN}`
 };
 export const API_JSON_HEADERS: Record<string, string> = {
     ...API_AUTH_HEADERS,
@@ -65,6 +70,10 @@ export const permissionLabel = (mode: PermissionMode) => `perm: ${mode}`;
 export const PROJECT_ROOT = existsSync(path.resolve(process.cwd(), 'pyproject.toml'))
     ? process.cwd()
     : path.resolve(process.cwd(), '..');
+const venvPython = process.platform === 'win32'
+    ? path.join(PROJECT_ROOT, '.venv', 'Scripts', 'python.exe')
+    : path.join(PROJECT_ROOT, '.venv', 'bin', 'python');
+export const PYTHON_EXECUTABLE = existsSync(venvPython) ? venvPython : 'python';
 export const execFileAsync = promisify(_execFile);
 
 export const syncStopVoiceProcess = () => {
@@ -88,7 +97,105 @@ export interface Message {
     role: string;
     content: string;
     activityId?: string;
+    progress?: ProgressSummary;
 }
+
+/**
+ * Public execution telemetry rendered between tool rows.  This is deliberately
+ * smaller than a canonical event: provider messages, model reasoning, raw
+ * arguments, and arbitrary payload fields never cross this projection.
+ */
+export interface ProgressSummary {
+    id: string;
+    currentAction: string;
+    evidence?: string;
+    retryReason?: string;
+    nextAction?: string;
+    phase?: string;
+    tool?: string;
+    outcome?: string;
+    planId?: string;
+    stepId?: string;
+    stepIndex?: number;
+}
+
+const visibleProgressText = (value: unknown, maxLength = 320): string => {
+    const withoutPrivateBlocks = String(value ?? '')
+        .replace(/<think\b[^>]*>[\s\S]*?(?:<\/think>|$)/gi, ' ')
+        .replace(/<reasoning\b[^>]*>[\s\S]*?(?:<\/reasoning>|$)/gi, ' ')
+        .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+        .replace(/[\u0000-\u001f\u007f]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!withoutPrivateBlocks) return '';
+    if (/^(?:chain[- ]of[- ]thought|reasoning|hidden thought|internal thought|thought|analysis)\s*:/i.test(withoutPrivateBlocks)) {
+        return '';
+    }
+    return withoutPrivateBlocks.slice(0, Math.max(1, maxLength));
+};
+
+const progressPayload = (event: Record<string, any>): Record<string, any> =>
+    event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+        ? event.payload
+        : {};
+
+/** Project one deterministic public assistant.progress event into safe UI text. */
+export const progressSummaryFromWorkEvent = (input: Record<string, any>): ProgressSummary | null => {
+    if (!input || typeof input !== 'object') return null;
+    const eventType = String(input.event_type || input.type || '').toLowerCase();
+    if (eventType !== 'assistant.progress') return null;
+    if (input.visibility && String(input.visibility).toLowerCase() !== 'public') return null;
+
+    const payload = progressPayload(input);
+    if (payload.projection !== 'deterministic-v1') return null;
+    const currentAction = visibleProgressText(payload.current_action);
+    if (!currentAction) return null;
+
+    const id = visibleProgressText(
+        input.event_id || input.id || `progress-${input.sequence || currentAction}`,
+        180
+    );
+    const evidence = visibleProgressText(payload.evidence, 360);
+    const retryReason = visibleProgressText(payload.retry_reason, 280);
+    const nextAction = visibleProgressText(payload.next_action, 160);
+    const phase = visibleProgressText(payload.phase, 80);
+    const tool = visibleProgressText(payload.tool, 120);
+    const outcome = visibleProgressText(payload.outcome, 80);
+    const planId = visibleProgressText(payload.plan_id, 120);
+    const stepId = visibleProgressText(payload.step_id, 160);
+    const rawStepIndex = Number(payload.step_index);
+    const stepIndex = Number.isFinite(rawStepIndex) && rawStepIndex >= 0
+        ? (rawStepIndex === 0 ? 1 : rawStepIndex)
+        : undefined;
+
+    return {
+        id: id || `progress-${String(input.sequence || 'event')}`,
+        currentAction,
+        ...(evidence ? {evidence} : {}),
+        ...(retryReason ? {retryReason} : {}),
+        ...(nextAction ? {nextAction} : {}),
+        ...(phase ? {phase} : {}),
+        ...(tool ? {tool} : {}),
+        ...(outcome ? {outcome} : {}),
+        ...(planId ? {planId} : {}),
+        ...(stepId ? {stepId} : {}),
+        ...(stepIndex !== undefined ? {stepIndex} : {})
+    };
+};
+
+const humanizeProgressCode = (value: string): string => value
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/** One concise transcript sentence built only from the safe projection. */
+export const progressSummaryText = (progress: ProgressSummary): string => {
+    const parts = [progress.currentAction];
+    if (progress.evidence) parts.push(`evidence: ${progress.evidence}`);
+    if (progress.retryReason) parts.push(`retry: ${progress.retryReason}`);
+    if (progress.nextAction) parts.push(`next: ${humanizeProgressCode(progress.nextAction)}`);
+    return parts.filter(Boolean).join(' · ');
+};
 
 export interface FileStatus {
     name: string;
@@ -96,6 +203,56 @@ export interface FileStatus {
     additions?: number;
     deletions?: number;
 }
+
+const optionalFileCount = (value: unknown): number | undefined => {
+    const count = Number(value);
+    return Number.isFinite(count) && count >= 0 ? count : undefined;
+};
+
+/** Project only real file mutations into the sidebar's CHANGES list. */
+export const fileStatusFromWorkEvent = (input: Record<string, any>): FileStatus | null => {
+    const event = adaptCanonicalEvent(input);
+    const kind = String(event.kind || event.type || '').toLowerCase();
+    const eventType = String(event.event_type || event.type || '').toLowerCase();
+    const action = String(event.operation || event.action || event.title || event.tool || '').toLowerCase();
+    const isFile = kind === 'file' || eventType.startsWith('file.') || Boolean(event.path || event.file || event.file_path);
+    const isRead = eventType === 'file.read' || /\b(read|view|open|inspect)\b/.test(action);
+    const isMutation = eventType === 'file.created'
+        || eventType === 'file.edited'
+        || eventType === 'file.diff'
+        || /\b(create|created|write|written|edit|edited|modify|modified|update|updated|delete|deleted|remove|removed)\b/.test(action);
+    if (!isFile || isRead || !isMutation) return null;
+
+    const target = String(
+        event.target
+        || event.path
+        || event.file
+        || event.file_path
+        || event.related_files?.[0]
+        || event.payload?.target
+        || event.payload?.path
+        || ''
+    ).trim();
+    if (!target) return null;
+
+    const changes = event.changed_lines || event.line_changes || event.payload?.changed_lines || event.payload?.line_changes;
+    const additions = optionalFileCount(
+        typeof changes === 'object' && changes !== null
+            ? changes.added ?? changes.additions ?? changes.inserted
+            : event.additions ?? event.insertions
+    );
+    const deletions = optionalFileCount(
+        typeof changes === 'object' && changes !== null
+            ? changes.removed ?? changes.deleted ?? changes.deletions
+            : event.deletions ?? event.removals
+    );
+    return {
+        name: target,
+        status: String(event.operation || event.action || eventType || 'modified').toUpperCase(),
+        ...(additions !== undefined ? {additions} : {}),
+        ...(deletions !== undefined ? {deletions} : {})
+    };
+};
 
 export type TimelineKind = 'read' | 'write' | 'tool' | 'success' | 'error' | 'text' | 'step';
 
@@ -110,6 +267,7 @@ export interface UsageStats {
     contextLimit: number;
     inputTokens: number;
     outputTokens: number;
+    source: 'provider' | 'unavailable';
 }
 
 export interface AgentInfo {
@@ -127,6 +285,285 @@ export interface TaskItem {
     /** Local wall-clock time when the task was first observed (real runtime timing). */
     startedAt?: number;
 }
+
+export interface PlanChecklistItem {
+    id: string;
+    index: number;
+    description: string;
+    status: string;
+    planId?: string;
+    evidence?: string;
+    retryReason?: string;
+    nextAction?: string;
+}
+
+export const normalizePlanChecklistStatus = (value: unknown): string => {
+    const status = String(value ?? '').trim().toLowerCase();
+    if (['success', 'succeeded', 'done', 'completed', 'complete', 'applied'].includes(status)) return 'done';
+    if (['failed', 'failure', 'error'].includes(status)) return 'failed';
+    if (['blocked', 'waiting', 'paused', 'denied', 'rejected'].includes(status)) return 'blocked';
+    if (['running', 'in_progress', 'working', 'active', 'started', 'approved'].includes(status)) return 'running';
+    if (['cancelled', 'canceled', 'skipped'].includes(status)) return status === 'canceled' ? 'cancelled' : status;
+    return 'pending';
+};
+
+const planItemKey = (value: unknown): string => String(value ?? '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const planStepDescription = (item: unknown): string => {
+    if (typeof item === 'string') return visibleProgressText(item, 300);
+    if (!item || typeof item !== 'object') return '';
+    const value = item as Record<string, unknown>;
+    return visibleProgressText(value.description ?? value.step ?? value.label ?? value.title, 300);
+};
+
+const planStepStatus = (item: unknown): string => {
+    if (!item || typeof item !== 'object') return 'pending';
+    const value = item as Record<string, unknown>;
+    return normalizePlanChecklistStatus(value.status ?? value.state);
+};
+
+/**
+ * Merge a canonical plan lifecycle event without discarding previously known
+ * step identity/status. Full step lists define order; targeted updates modify
+ * only their addressed step.
+ */
+export const mergePlanChecklistEvent = (
+    previous: PlanChecklistItem[],
+    input: Record<string, any>
+): PlanChecklistItem[] => {
+    const event = adaptCanonicalEvent(input);
+    const eventType = String(event.event_type || event.type || '').toLowerCase();
+    const eventKind = String(event.kind || '').toLowerCase();
+    if (eventKind !== 'plan' && !eventType.startsWith('plan.')) return previous;
+
+    const payload = progressPayload(event);
+    const planId = visibleProgressText(event.plan_id ?? payload.plan_id, 120);
+    const rawSteps = [event.items, event.steps, payload.items, payload.steps]
+        .find(Array.isArray) as unknown[] | undefined;
+    const priorById = new Map(previous.map(item => [item.id, item]));
+    const priorByText = new Map(previous.map(item => [planItemKey(item.description), item]));
+    let next = previous.map(item => ({...item}));
+
+    if (rawSteps?.length) {
+        next = rawSteps.map((raw, offset) => {
+            const value = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+            const description = planStepDescription(raw);
+            const rawIndex = Number(value.index ?? value.step_index ?? offset + 1);
+            const index = Number.isFinite(rawIndex) && rawIndex > 0 ? rawIndex : offset + 1;
+            const rawId = visibleProgressText(value.step_id ?? value.id, 160);
+            const fallbackId = `${planId || event.run_id || event.turn_id || 'plan'}-step-${index}`;
+            const existing = (rawId && priorById.get(rawId)) || priorByText.get(planItemKey(description));
+            const explicitStatus = value.status != null || value.state != null;
+            return {
+                id: rawId || existing?.id || fallbackId,
+                index,
+                description: description || existing?.description || `Step ${index}`,
+                status: explicitStatus ? planStepStatus(raw) : existing?.status || normalizePlanChecklistStatus(event.status),
+                ...(planId || existing?.planId ? {planId: planId || existing?.planId} : {}),
+                ...(existing?.evidence ? {evidence: existing.evidence} : {}),
+                ...(existing?.retryReason ? {retryReason: existing.retryReason} : {}),
+                ...(existing?.nextAction ? {nextAction: existing.nextAction} : {})
+            };
+        });
+    }
+
+    const rawStepIndex = Number(event.step_index ?? payload.step_index);
+    const targetedIndex = Number.isFinite(rawStepIndex)
+        ? (rawStepIndex === 0 ? 1 : rawStepIndex)
+        : 0;
+    const targetedId = visibleProgressText(event.step_id ?? payload.step_id, 160);
+    const description = visibleProgressText(event.description ?? payload.description, 300);
+    const isStepLifecycle = eventType.startsWith('plan.step.');
+    if (targetedIndex || targetedId || (description && isStepLifecycle)) {
+        const matchIndex = next.findIndex(item =>
+            (targetedId && item.id === targetedId)
+            || (targetedIndex > 0 && item.index === targetedIndex)
+            || (description && planItemKey(item.description) === planItemKey(description))
+        );
+        const update = (item: PlanChecklistItem): PlanChecklistItem => ({
+            ...item,
+            status: normalizePlanChecklistStatus(event.status),
+            ...(description ? {description} : {}),
+            ...(planId ? {planId} : {})
+        });
+        if (matchIndex >= 0) {
+            next[matchIndex] = update(next[matchIndex]);
+        } else {
+            const index = targetedIndex || next.length + 1;
+            next.push(update({
+                id: targetedId || `${planId || event.run_id || 'plan'}-step-${index}`,
+                index,
+                description: description || `Step ${index}`,
+                status: 'pending'
+            }));
+        }
+    }
+
+    if (!targetedIndex && !targetedId && !isStepLifecycle) {
+        const planStatus = normalizePlanChecklistStatus(event.status);
+        if (planStatus === 'done') next = finalizePlanChecklist(next, 'done');
+        if (planStatus === 'failed') next = finalizePlanChecklist(next, 'failed');
+    }
+
+    return next.sort((left, right) => left.index - right.index);
+};
+
+/** Overlay the session's durable WorkItems while preserving plan-event order. */
+export const mergePlanChecklistTasks = (
+    previous: PlanChecklistItem[],
+    tasks: TaskItem[],
+    appendUnmatched = true
+): PlanChecklistItem[] => {
+    if (!Array.isArray(tasks) || tasks.length === 0) return previous;
+    const orderedTasks = [...tasks].sort((left, right) =>
+        (left.startedAt || 0) - (right.startedAt || 0)
+    );
+    const taskById = new Map(orderedTasks.map(task => [task.id, task]));
+    const taskByText = new Map(orderedTasks.map(task => [planItemKey(task.subject), task]));
+    const consumed = new Set<string>();
+    const merged = previous.map(item => {
+        const task = taskById.get(item.id) || taskByText.get(planItemKey(item.description));
+        if (!task) return item;
+        consumed.add(task.id);
+        return {...item, id: task.id, description: task.subject || item.description, status: normalizePlanChecklistStatus(task.status)};
+    });
+    if (!appendUnmatched) return merged;
+    for (const task of orderedTasks) {
+        if (consumed.has(task.id)) continue;
+        merged.push({
+            id: task.id,
+            index: merged.length + 1,
+            description: task.subject,
+            status: normalizePlanChecklistStatus(task.status)
+        });
+    }
+    return merged;
+};
+
+/** Attach safe progress evidence to a known plan step when identity is present. */
+export const mergeProgressIntoPlanChecklist = (
+    previous: PlanChecklistItem[],
+    progress: ProgressSummary
+): PlanChecklistItem[] => {
+    if (!progress.stepId && !progress.stepIndex) return previous;
+    const index = previous.findIndex(item =>
+        (progress.stepId && item.id === progress.stepId)
+        || (progress.stepIndex && item.index === progress.stepIndex)
+    );
+    if (index < 0) return previous;
+    const outcome = normalizePlanChecklistStatus(progress.outcome);
+    const next = [...previous];
+    next[index] = {
+        ...next[index],
+        ...(progress.planId ? {planId: progress.planId} : {}),
+        ...(progress.evidence ? {evidence: progress.evidence} : {}),
+        ...(progress.retryReason ? {retryReason: progress.retryReason} : {}),
+        ...(progress.nextAction ? {nextAction: progress.nextAction} : {}),
+        ...(['done', 'failed', 'blocked', 'running'].includes(outcome) ? {status: outcome} : {})
+    };
+    return next;
+};
+
+export const finalizePlanChecklist = (
+    items: PlanChecklistItem[],
+    terminal: 'done' | 'failed' | 'cancelled'
+): PlanChecklistItem[] => items.map(item => {
+    if (['done', 'failed', 'cancelled', 'skipped'].includes(item.status)) return item;
+    if (terminal === 'done') return {...item, status: 'done'};
+    if (item.status === 'running') return {...item, status: terminal};
+    return item;
+});
+
+export const planChecklistStatus = (items: PlanChecklistItem[], fallback = 'planning'): string => {
+    if (items.length === 0) return fallback;
+    if (items.some(item => item.status === 'running')) return 'running';
+    if (items.some(item => item.status === 'failed')) return 'failed';
+    if (items.every(item => ['done', 'skipped'].includes(item.status))) return 'done';
+    if (items.some(item => item.status === 'blocked')) return 'blocked';
+    return 'planning';
+};
+
+export interface QueueSnapshotTask {
+    id: number;
+    state: string;
+    summary: string;
+    session_id?: string;
+    attempts?: number;
+    max_attempts?: number;
+}
+
+/** Format the bounded server queue snapshot for the interactive command log. */
+export const queueSnapshotLines = (value: unknown): string[] => {
+    if (!value || typeof value !== 'object') return ['Queue status unavailable.'];
+    const snapshot = value as Record<string, any>;
+    const states = snapshot.states && typeof snapshot.states === 'object' ? snapshot.states : {};
+    const stateLine = Object.entries(states)
+        .map(([state, count]) => `${state}: ${Number(count) || 0}`)
+        .join(' · ');
+    const scope = String(snapshot.scope || 'project');
+    const lines = [
+        `queue (${scope}): ${Number(snapshot.pending) || 0} pending · mode: ${String(snapshot.mode || 'unknown')} · worker: ${String(snapshot.worker || 'unknown')}`,
+        stateLine ? `states: ${stateLine}` : 'states: unavailable'
+    ];
+    const tasks = Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
+    if (tasks.length === 0) {
+        lines.push('unfinished: none');
+        return lines;
+    }
+    lines.push('unfinished:');
+    for (const task of tasks.slice(0, 20)) {
+        if (!task || typeof task !== 'object') continue;
+        const id = String(task.id ?? '?');
+        const state = String(task.state || 'unknown');
+        const summary = String(task.summary || 'Task').replace(/\s+/g, ' ').trim();
+        const attempts = task.attempts != null && task.max_attempts != null
+            ? ` · ${task.attempts}/${task.max_attempts}`
+            : '';
+        lines.push(`  #${id} ${state}${attempts} · ${summary || 'Task'}`);
+    }
+    return lines;
+};
+
+/**
+ * Keep internal checklist/status identifiers out of user-facing task rows.
+ * The backend task id remains available on TaskItem.id for actions and
+ * reconciliation; only accidental serialization prefixes are hidden.
+ */
+export const cleanTaskSubject = (value: unknown): string => {
+    let subject = String(value ?? '').trim();
+    subject = subject.replace(
+        /^\[?(?:pending|queued|running|completed|failed|blocked|cancelled|skipped)(?:[_-]?[a-f0-9]{8,})\]\s*/i,
+        ''
+    );
+    subject = subject.replace(/^\[(?:task[_-])?[a-f0-9]{8,}\]\s*/i, '');
+    return subject.trim();
+};
+
+const taskStatusForTui = (value: unknown): string => {
+    const status = String(value ?? '').trim().toLowerCase();
+    if (['running', 'waiting', 'ready_for_review'].includes(status)) return 'running';
+    if (['applied', 'completed', 'succeeded', 'success', 'done'].includes(status)) return 'completed';
+    if (['failed', 'error'].includes(status)) return 'failed';
+    if (['cancelled', 'canceled'].includes(status)) return 'cancelled';
+    return 'pending';
+};
+
+/** Convert canonical session work items into the compact TUI task shape. */
+export const taskItemsFromWorkItems = (value: unknown): TaskItem[] => {
+    if (!Array.isArray(value)) return [];
+    return value
+        .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+        .map(item => ({
+            id: String(item.task_id || item.id || '').trim(),
+            subject: cleanTaskSubject(item.title || item.subject || 'Task'),
+            status: taskStatusForTui(item.status),
+            startedAt: typeof item.created_at === 'number' ? item.created_at * 1000 : undefined
+        }))
+        .filter(task => Boolean(task.id));
+};
 
 export type ActivityKind =
     | 'tool' | 'command' | 'file' | 'test' | 'search' | 'browser'
@@ -204,6 +641,8 @@ export interface ActivityItem {
     parallel?: boolean;
     maxParallel?: number;
     cooldownMs?: number;
+    /** Hive sub-agent identity (related_subagent / subagent_id / worker_id / agent_id). */
+    relatedSubagent?: string;
 }
 
 export const mergeActivityTargetFields = (
@@ -217,13 +656,26 @@ export const mergeActivityTargetFields = (
     detail: String(incoming.detail || '').trim() || existing.detail
 });
 
-export type PanelMode = 'workspace' | 'hive' | 'agent' | 'activity' | 'question' | 'plan' | 'mcp';
+export type PanelMode = 'workspace' | 'hive' | 'agent' | 'activity' | 'question' | 'approval' | 'plan' | 'mcp';
 
 export interface PendingQuestion {
     id: string;
     prompt: string;
     options: string[];
     allowCustom?: boolean;
+}
+
+export interface PendingApproval {
+    id?: string;
+    requestId: string;
+    tool: string;
+    action: string;
+    reason?: string;
+    sessionId?: string;
+    turnId?: string;
+    expiresAt?: number;
+    title?: string;
+    status?: string;
 }
 
 export const voicePhaseLabel = (phase: string) => {
@@ -246,12 +698,12 @@ export const voicePhaseLabel = (phase: string) => {
 export const voicePhaseColor = (phase: string) => {
     const normalized = String(phase || 'off').toLowerCase();
     if (normalized === 'error') return 'red';
-    if (normalized === 'speaking' || normalized === 'processing' || normalized === 'hearing') return 'yellow';
+    if (normalized === 'speaking' || normalized === 'processing' || normalized === 'hearing') return NEXUS_ORANGE;
     if (normalized === 'waiting' || normalized === 'listening' || normalized === 'ready') return 'green';
-    if (normalized === 'paused') return 'magentaBright';
-    if (normalized === 'starting') return 'blueBright';
+    if (normalized === 'paused') return NEXUS_ORANGE_BRIGHT;
+    if (normalized === 'starting') return NEXUS_BLUE_BRIGHT;
     if (normalized === 'off' || normalized === 'stopped' || normalized === 'idle') return 'grey30';
-    return 'cyan';
+    return NEXUS_BLUE;
 };
 
 export const voiceBarsForFrame = (phase: string, frame: number, count = 10) => {
@@ -283,7 +735,6 @@ export const voiceBarsForFrame = (phase: string, frame: number, count = 10) => {
     });
 };
 
-export const CONTEXT_LIMIT = 256000;
 export const MAX_TIMELINE_ITEMS = 32;
 export const CONTEXT_BAR_WIDTH = 24;
 export const THEME = {
@@ -295,7 +746,7 @@ export const THEME = {
     paletteBg: '#202228',
     border: '#262a33',
     borderSoft: '#20242c',
-    accent: '#3b82f6'
+    accent: NEXUS_BLUE
 };
 export type WorkingPhase =
     | 'thinking'
@@ -321,25 +772,25 @@ export type WorkingPhase =
     | 'working';
 
 export const WORKING_STATES: Record<WorkingPhase, {frames: string[]; label: string; action: string; status: string; color: string}> = {
-    thinking: {frames: ['●─◌─◌', '◌─●─◌', '◌─◌─●', '◌─●─◌'], label: 'thinking', action: '', status: '', color: 'cyan'},
-    querying: {frames: ['●─◌─◌', '◌─●─◌', '◌─◌─●', '◌─●─◌'], label: 'thinking', action: '', status: '', color: 'cyan'},
-    streaming: {frames: ['●─◌─◌', '◌─●─◌', '◌─◌─●', '◌─●─◌'], label: 'thinking', action: '', status: '', color: 'cyan'},
+    thinking: {frames: ['●─◌─◌', '◌─●─◌', '◌─◌─●', '◌─●─◌'], label: 'thinking', action: '', status: '', color: NEXUS_BLUE},
+    querying: {frames: ['●─◌─◌', '◌─●─◌', '◌─◌─●', '◌─●─◌'], label: 'thinking', action: '', status: '', color: NEXUS_BLUE},
+    streaming: {frames: ['●─◌─◌', '◌─●─◌', '◌─◌─●', '◌─●─◌'], label: 'thinking', action: '', status: '', color: NEXUS_BLUE},
     tool: {frames: ['◆', '◇', '◆', '◇'], label: 'tools', action: 'run', status: 'working', color: 'green'},
-    skill: {frames: ['✦', '✧', '✦', '✧'], label: 'skills', action: 'use', status: 'working', color: 'magentaBright'},
-    plugin: {frames: ['⟐', '⟡', '⟐', '⟡'], label: 'plugins', action: 'bind', status: 'working', color: 'yellowBright'},
-    mcp: {frames: ['⎇', '⎉', '⎇', '⎉'], label: 'mcp', action: 'link', status: 'working', color: 'cyanBright'},
+    skill: {frames: ['✦', '✧', '✦', '✧'], label: 'skills', action: 'use', status: 'working', color: NEXUS_BLUE_BRIGHT},
+    plugin: {frames: ['⟐', '⟡', '⟐', '⟡'], label: 'plugins', action: 'bind', status: 'working', color: NEXUS_ORANGE_BRIGHT},
+    mcp: {frames: ['⎇', '⎉', '⎇', '⎉'], label: 'mcp', action: 'link', status: 'working', color: NEXUS_BLUE_BRIGHT},
     hive: {frames: ['⬡', '⬢', '⬡', '⬢'], label: 'hive', action: 'sync', status: 'working', color: 'blueBright'},
-    config: {frames: ['◇', '◈', '◇', '◈'], label: 'config', action: 'set', status: 'working', color: 'yellow'},
-    settings: {frames: ['⚙', '⚙', '⚙', '⚙'], label: 'settings', action: 'tune', status: 'working', color: 'cyan'},
-    compact: {frames: ['◇◇→◇', '◇◇→◆', '◇→◆', '◆'], label: 'compact', action: '', status: 'compressing', color: 'magentaBright'},
+    config: {frames: ['◇', '◈', '◇', '◈'], label: 'config', action: 'set', status: 'working', color: NEXUS_ORANGE},
+    settings: {frames: ['⚙', '⚙', '⚙', '⚙'], label: 'settings', action: 'tune', status: 'working', color: NEXUS_BLUE},
+    compact: {frames: ['◇◇→◇', '◇◇→◆', '◇→◆', '◆'], label: 'compact', action: '', status: 'compressing', color: NEXUS_ORANGE_BRIGHT},
     evolution: {frames: ['◆', '◇', '◆', '◇'], label: 'tools', action: 'run', status: 'working', color: 'greenBright'},
     self_improvement: {frames: ['◆', '◇', '◆', '◇'], label: 'tools', action: 'run', status: 'working', color: 'greenBright'},
-    knowledge: {frames: ['✦', '✧', '✦', '✧'], label: 'skills', action: 'use', status: 'working', color: 'yellow'},
-    memory: {frames: ['◇◇→◇', '◇◇→◆', '◇→◆', '◆'], label: 'compact', action: '', status: 'compressing', color: 'yellowBright'},
+    knowledge: {frames: ['✦', '✧', '✦', '✧'], label: 'skills', action: 'use', status: 'working', color: NEXUS_ORANGE},
+    memory: {frames: ['◇◇→◇', '◇◇→◆', '◇→◆', '◆'], label: 'compact', action: '', status: 'compressing', color: NEXUS_ORANGE_BRIGHT},
     no_planning: {frames: ['●─◌─◌', '◌─●─◌', '◌─◌─●', '◌─●─◌'], label: 'thinking', action: '', status: '', color: 'grey'},
-    simple_planning: {frames: ['●─◌─◌', '◌─●─◌', '◌─◌─●', '◌─●─◌'], label: 'thinking', action: '', status: '', color: 'cyan'},
-    advance_planning: {frames: ['●─◌─◌', '◌─●─◌', '◌─◌─●', '◌─●─◌'], label: 'thinking', action: '', status: '', color: 'cyanBright'},
-    auditing: {frames: ['◆', '◇', '◆', '◇'], label: 'tools', action: 'run', status: 'working', color: 'yellowBright'},
+    simple_planning: {frames: ['●─◌─◌', '◌─●─◌', '◌─◌─●', '◌─●─◌'], label: 'thinking', action: '', status: '', color: NEXUS_BLUE},
+    advance_planning: {frames: ['●─◌─◌', '◌─●─◌', '◌─◌─●', '◌─●─◌'], label: 'thinking', action: '', status: '', color: NEXUS_BLUE_BRIGHT},
+    auditing: {frames: ['◆', '◇', '◆', '◇'], label: 'tools', action: 'run', status: 'working', color: NEXUS_ORANGE_BRIGHT},
     verifying: {frames: ['◆', '◇', '◆', '◇'], label: 'tools', action: 'run', status: 'working', color: 'greenBright'},
     working: {frames: ['◆', '◇', '◆', '◇'], label: 'tools', action: 'run', status: 'working', color: 'white'}
 };
@@ -355,6 +806,7 @@ export interface CommandDefinition {
     category: string;
     aliases: string[];
     args: Record<string, string>;
+    execution: string;
 }
 
 const normalizeCommandName = (value: unknown): string => {
@@ -389,7 +841,8 @@ export const normalizeCommandRegistry = (payload: unknown): CommandDefinition[] 
             description: String(item.description || ''),
             category: String(item.category || 'general'),
             aliases: [...new Set(aliases)],
-            args: Object.fromEntries(Object.entries(rawArgs).map(([key, value]) => [key, String(value)]))
+            args: Object.fromEntries(Object.entries(rawArgs).map(([key, value]) => [key, String(value)])),
+            execution: String(item.execution || 'shared'),
         });
     }
     return commands.sort((left, right) => left.name.localeCompare(right.name));
@@ -524,8 +977,8 @@ export const commandMatches = (query: string, commands: CommandDefinition[]) => 
 
 export const timelineColor = (kind: TimelineKind) => {
     if (kind === 'read') return 'blue';
-    if (kind === 'write') return 'cyan';
-    if (kind === 'tool') return 'blueBright';
+    if (kind === 'write') return NEXUS_BLUE;
+    if (kind === 'tool') return NEXUS_BLUE_BRIGHT;
     if (kind === 'success') return 'green';
     if (kind === 'error') return 'red';
     if (kind === 'text') return 'grey';
@@ -624,7 +1077,7 @@ export const statusColor = (status: string) => {
     const normalized = status.toLowerCase();
     if (normalized.includes('error') || normalized.includes('fail')) return 'red';
     if (normalized.includes('done') || normalized.includes('complete')) return 'green';
-    if (normalized.includes('progress') || normalized.includes('running')) return 'cyan';
+    if (normalized.includes('progress') || normalized.includes('running')) return NEXUS_BLUE;
     return 'grey30';
 };
 
@@ -642,23 +1095,23 @@ export const activityColor = (kind: ActivityKind) => {
     if (kind === 'file') return 'grey';
     if (kind === 'search') return 'blueBright';
     if (kind === 'todo') return 'green';
-    if (kind === 'plan') return 'yellowBright';
+    if (kind === 'plan') return NEXUS_ORANGE_BRIGHT;
     if (kind === 'test') return 'greenBright';
-    if (kind === 'browser') return 'cyanBright';
-    if (kind === 'approval' || kind === 'retry') return 'yellowBright';
+    if (kind === 'browser') return NEXUS_BLUE_BRIGHT;
+    if (kind === 'approval' || kind === 'retry') return NEXUS_ORANGE_BRIGHT;
     if (kind === 'error') return 'red';
-    if (kind === 'provider') return 'magentaBright';
+    if (kind === 'provider') return NEXUS_BLUE_BRIGHT;
     if (kind === 'rag' || kind === 'memory') return 'blueBright';
     if (kind === 'background') return 'grey';
-    if (kind === 'run' || kind === 'terminal') return 'cyan';
-    if (kind === 'mcp') return 'magenta';
-    if (kind === 'skill') return 'yellowBright';
-    if (kind === 'plugin') return 'yellow';
-    if (kind === 'hive') return 'cyanBright';
-    if (kind === 'config') return 'yellow';
-    if (kind === 'settings') return 'cyan';
-    if (kind === 'compact') return 'magentaBright';
-    return 'blueBright';
+    if (kind === 'run' || kind === 'terminal') return NEXUS_BLUE;
+    if (kind === 'mcp') return NEXUS_ORANGE;
+    if (kind === 'skill') return NEXUS_BLUE_BRIGHT;
+    if (kind === 'plugin') return NEXUS_ORANGE;
+    if (kind === 'hive') return NEXUS_ORANGE_BRIGHT;
+    if (kind === 'config') return NEXUS_ORANGE;
+    if (kind === 'settings') return NEXUS_BLUE;
+    if (kind === 'compact') return NEXUS_ORANGE_BRIGHT;
+    return NEXUS_BLUE_BRIGHT;
 };
 
 export const activityGlyph = (kind: ActivityKind) => {
@@ -687,7 +1140,7 @@ export const activityGlyph = (kind: ActivityKind) => {
 };
 
 export const IDENTITY_LOGOS = ['⠶', '⡇', '⠿', '⟐', '◈', '⎇', '⌬', '✦', '⬡', '◆', '◇', '⌁', '⟒', '⊕', '⊖'];
-export const IDENTITY_COLORS = ['yellowBright', 'cyanBright', 'magentaBright', 'greenBright', 'blueBright', 'yellow', 'cyan', 'magenta'];
+export const IDENTITY_COLORS = [NEXUS_BLUE, NEXUS_ORANGE, NEXUS_BLUE_BRIGHT, NEXUS_ORANGE_BRIGHT];
 
 const stableHash = (value: string) => {
     let hash = 2166136261;
@@ -938,14 +1391,14 @@ const activityActionIdentity = (activity: Omit<ActivityItem, 'id' | 'number'>) =
         if (operation.includes('read') || operation.includes('view')) return {logo: '→', color: 'grey'};
         if (operation.includes('create') || operation.includes('write')) return {logo: '+', color: 'greenBright'};
         if (operation.includes('delete') || operation.includes('remove')) return {logo: '×', color: 'red'};
-        return {logo: '✎', color: 'magentaBright'};
+        return {logo: '✎', color: NEXUS_ORANGE_BRIGHT};
     }
     if (activity.kind === 'search') return {logo: '⌕', color: 'blueBright'};
-    if (activity.kind === 'run' || activity.kind === 'terminal') return {logo: '$', color: 'cyanBright'};
+    if (activity.kind === 'run' || activity.kind === 'terminal') return {logo: '$', color: NEXUS_BLUE_BRIGHT};
     if (activity.kind === 'todo') return {logo: '☑', color: 'green'};
-    if (activity.kind === 'config') return {logo: '◇', color: 'yellow'};
-    if (activity.kind === 'settings') return {logo: '⚙', color: 'cyan'};
-    if (activity.kind === 'compact') return {logo: '◆', color: 'magentaBright'};
+    if (activity.kind === 'config') return {logo: '◇', color: NEXUS_ORANGE};
+    if (activity.kind === 'settings') return {logo: '⚙', color: NEXUS_BLUE};
+    if (activity.kind === 'compact') return {logo: '◆', color: NEXUS_ORANGE_BRIGHT};
     if (activity.kind === 'tool') return {logo: '◆', color: 'green'};
     return null;
 };
@@ -1100,9 +1553,10 @@ export const runLocalResult = async (file: string, args: string[], cwd = PROJECT
     }
 };
 
-export const startDetached = (file: string, args: string[], cwd = PROJECT_ROOT) => {
+export const startDetached = (file: string, args: string[], cwd = PROJECT_ROOT, env?: NodeJS.ProcessEnv) => {
     const child = spawn(file, args, {
         cwd,
+        env: env ? {...process.env, ...env} : process.env,
         detached: true,
         stdio: 'ignore',
         windowsHide: true
@@ -1420,7 +1874,7 @@ export const readTodoMarkdown = async (): Promise<TaskItem[]> => {
                     const checked = match[1].toLowerCase() === 'x';
                     return {
                         id: `todo-md-${index}`,
-                        subject: match[2].replace(/^Phase\s+\d+:\s*/i, '').trim(),
+                        subject: cleanTaskSubject(match[2].replace(/^Phase\s+\d+:\s*/i, '').trim()),
                         status: checked ? 'completed' : 'pending'
                     };
                 })
@@ -1451,6 +1905,12 @@ export const cleanVisibleAssistantText = (text: string) => {
     cleaned = cleaned.replace(/\[THINKING:[^\]]+\]/g, '');
     cleaned = cleaned.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
     cleaned = cleaned.replace(/<\/?thinking>/gi, '');
+    // DeepSeek-style full-width DSML envelopes are transport markup, not
+    // assistant prose. Remove complete blocks before rendering the TUI.
+    cleaned = cleaned.replace(
+        /<[^<>]*DSML[^<>]*tool_calls[^>]*>[\s\S]*?<\/[^<>]*DSML[^<>]*tool_calls\s*>/gi,
+        ''
+    );
     cleaned = cleaned.replace(/TASK_COMPLETE/g, '');
     cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
     return cleaned.trim();
@@ -1516,10 +1976,26 @@ export const sanitizeComposerInput = (value: string) => value
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
 
 export const parseQuestionMarker = (text: string): PendingQuestion | null => {
-    const match = text.match(/\[QUESTION:(.*?)\]/s);
-    if (!match) return null;
+    const markerStart = text.indexOf('[QUESTION:');
+    if (markerStart < 0) return null;
     try {
-        const data = JSON.parse(match[1]);
+        const jsonStart = markerStart + '[QUESTION:'.length;
+        const encoded = text.slice(jsonStart);
+        let data: any = null;
+        // The JSON contains an options array, so a non-greedy `]` regex is
+        // incorrect. Try JSON object boundaries until the payload decodes.
+        for (let index = encoded.indexOf('}'); index >= 0; index = encoded.indexOf('}', index + 1)) {
+            try {
+                const candidate = JSON.parse(encoded.slice(0, index + 1));
+                if (candidate && typeof candidate === 'object') {
+                    data = candidate;
+                    break;
+                }
+            } catch {
+                // Nested object/string boundaries are not the payload end.
+            }
+        }
+        if (!data) return null;
         const options = Array.isArray(data.options)
             ? data.options.map((option: unknown) => String(option)).filter(Boolean).slice(0, 8)
             : [];
@@ -1535,7 +2011,82 @@ export const parseQuestionMarker = (text: string): PendingQuestion | null => {
     }
 };
 
-export const stripQuestionMarkers = (text: string) => text.replace(/\[QUESTION:.*?\]/gs, '');
+/** Extract an ask_question result from a canonical tool lifecycle event. */
+export const questionFromToolEvent = (input: Record<string, any>): PendingQuestion | null => {
+    const event = adaptCanonicalEvent(input || {});
+    const tool = String(event.tool || event.name || '').trim().toLowerCase();
+    const status = String(event.status || '').trim().toLowerCase();
+    if (tool !== 'ask_question' || !['done', 'success', 'completed', 'ok'].includes(status)) return null;
+
+    const structured = event.metadata?.question
+        || event.payload?.metadata?.question
+        || event.question
+        || event.payload?.question;
+    if (structured && typeof structured === 'object') {
+        return parseQuestionMarker(`[QUESTION:${JSON.stringify(structured)}]`);
+    }
+    return parseQuestionMarker(String(event.output || event.result || event.payload?.output || event.payload?.result || ''));
+};
+
+/** Normalize a live approval request into the inspector's pending state. */
+export const approvalFromWorkEvent = (input: Record<string, any>): PendingApproval | null => {
+    const event = adaptCanonicalEvent(input || {});
+    const eventType = String(event.event_type || event.type || '').trim().toLowerCase();
+    const kind = String(event.kind || '').trim().toLowerCase();
+    const isApproval = kind === 'approval'
+        || kind === 'guardrail'
+        || eventType.includes('approval')
+        || eventType.includes('permission')
+        || eventType.includes('guardrail');
+    if (!isApproval) return null;
+
+    const status = String(event.status || '').trim().toLowerCase();
+    if (['done', 'success', 'succeeded', 'completed', 'failed', 'denied', 'rejected', 'cancelled', 'canceled'].includes(status)) {
+        return null;
+    }
+
+    const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+    const requestId = String(event.request_id || event.requestId || event.approval_id || event.id
+        || payload.request_id || payload.requestId || payload.approval_id || payload.id || '').trim();
+    const tool = String(event.tool || event.tool_name || event.related_tool || event.name
+        || payload.tool || payload.tool_name || payload.related_tool || payload.name || '').trim();
+    const action = String(event.action || event.target || event.command
+        || payload.action || payload.target || payload.command || '').trim();
+    if (!requestId || !tool || !action) return null;
+
+    const rawExpiresAt = Number(event.expires_at ?? event.expiresAt);
+    return {
+        id: requestId,
+        requestId,
+        tool,
+        action,
+        reason: String(event.reason || event.message || event.detail || payload.reason || payload.message || payload.detail || '').trim(),
+        sessionId: String(event.session_id || event.sessionId || payload.session_id || payload.sessionId || '').trim() || undefined,
+        turnId: String(event.turn_id || event.turnId || payload.turn_id || payload.turnId || '').trim() || undefined,
+        expiresAt: Number.isFinite(rawExpiresAt)
+            ? rawExpiresAt
+            : Number.isFinite(Number(payload.expires_at ?? payload.expiresAt))
+                ? Number(payload.expires_at ?? payload.expiresAt)
+                : undefined
+    };
+};
+
+export const stripQuestionMarkers = (text: string) => {
+    const markerStart = text.indexOf('[QUESTION:');
+    if (markerStart < 0) return text;
+    const jsonStart = markerStart + '[QUESTION:'.length;
+    const encoded = text.slice(jsonStart);
+    for (let index = encoded.indexOf('}'); index >= 0; index = encoded.indexOf('}', index + 1)) {
+        try {
+            JSON.parse(encoded.slice(0, index + 1));
+            const afterMarker = encoded.slice(index + 1).replace(/^\]/, '');
+            return `${text.slice(0, markerStart)}${afterMarker}`;
+        } catch {
+            // Continue until the complete JSON object is found.
+        }
+    }
+    return text;
+};
 
 export interface ChatLine {
     key: string;
@@ -1550,6 +2101,8 @@ export interface ChatLine {
     backgroundColor?: string;
     focused?: boolean;
     expanded?: boolean;
+    /** Message surface role; ChatLineView draws the role-colored boxed border. */
+    surface?: 'user' | 'assistant';
 }
 
 /** Parse the canonical activity envelope exactly as it arrives over SSE. */
@@ -1603,6 +2156,17 @@ export const activityFromWorkEvent = (event: Record<string, any>): Omit<Activity
         target,
         output
     ];
+    const relatedSubagent = String(
+        event.related_subagent
+        || event.subagent_id
+        || event.agent_id
+        || event.worker_id
+        || detailObject.related_subagent
+        || detailObject.subagent_id
+        || detailObject.agent_id
+        || detailObject.worker_id
+        || ''
+    ).trim() || undefined;
     const inferredKind = inferActivityKind(toolName, event);
     const explicitKinds = new Set<ActivityKind>([
         'tool', 'command', 'file', 'test', 'search', 'browser', 'mcp', 'skill',
@@ -1651,6 +2215,7 @@ export const activityFromWorkEvent = (event: Record<string, any>): Omit<Activity
         error,
         durationMs: event.duration_ms ?? event.durationMs,
         sources: sourceValues.flatMap(value => Array.isArray(value) ? value.map(String) : extractUrls(value)),
+        relatedSubagent,
         toolName
     };
     if (resolvedKind === 'file') return {...common, kind: 'file', files: target ? [target] : [], operation: String(event.operation || event.action || '')};

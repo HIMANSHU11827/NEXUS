@@ -115,8 +115,16 @@ class V5Hive:
         V1 accepted values narrowed to the documented three.
         """
         try:
-            value = str(os.environ.get("NEXUS_HIVE", "0") or "0").lower()
-            return value in ("1", "true", "yes")
+            raw = os.environ.get("NEXUS_HIVE")
+            if raw is not None:
+                value = str(raw or "").lower()
+                if value in ("0", "false", "no", "off"):
+                    return False
+                if value in ("1", "true", "yes", "on"):
+                    return True
+                if value != "auto":
+                    return False
+            return bool(getattr(self, "_v5_auto_hive", False))
         except Exception:
             return False
 
@@ -336,9 +344,15 @@ class V5Hive:
                 self._hive_mark_group_done(
                     hive_id, status="failed", reason="empty consolidation"
                 )
+                degradations = getattr(self, "_degradations", None)
+                if isinstance(degradations, list):
+                    degradations.append("hive produced empty consolidation")
             return consolidated or None
         except Exception as e:
             self._hive_log().warning("hive spawn failed (ignored): %s", e)
+            degradations = getattr(self, "_degradations", None)
+            if isinstance(degradations, list):
+                degradations.append(f"hive spawn failed: {e}")
             return None
 
     async def _inject_hive_context(self, perceived) -> None:
@@ -750,9 +764,11 @@ class V5Hive:
         """Record a hive failure on the current turn.  Never raises.
 
         Stores a ``subagent_untrusted`` note (True for rejected envelopes),
-        marks any tracked sub-agents failed, emits a best-effort
-        ``hive.failed`` runtime event, and duck-typed marks the turn object
-        failed when the loop exposes a hook.  Returns whether recorded.
+        marks any tracked sub-agents failed, surfaces the failure on the
+        turn's final result via the ``_degradations`` list, emits a
+        best-effort ``hive.failed`` runtime event, and duck-typed marks the
+        turn object failed when the loop exposes a hook.  Returns whether
+        recorded.
         """
         try:
             turn_id = str(getattr(self, "_current_turn_id", "") or "")
@@ -764,6 +780,9 @@ class V5Hive:
             }
             record.update(extra)
             setattr(self, "_v5_hive_turn_failure", record)
+            degradations = getattr(self, "_degradations", None)
+            if isinstance(degradations, list):
+                degradations.append(f"hive failed: {reason}")
             self._hive_mark_groups_failed(reason)
 
             emitter = getattr(self, "_emit_runtime_event", None)

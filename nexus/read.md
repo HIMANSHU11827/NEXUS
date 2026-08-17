@@ -23,7 +23,7 @@ python -m nexus --shell     # Legacy compatibility shell
 - First-run wizard with interactive menu (msvcrt-based keyboard navigation)
 - Export/import system (config + full system with ZIP)
 - `events.py` — `CanonicalEvent` dataclass + `EVENT_TYPES` (50 event types) + `infer_event_type()` heuristic
-- `commands.py` — `CommandRegistry` singleton with 42 built-in slash commands
+- `commands.py` — `CommandRegistry` singleton with the canonical 152-command catalog (shared and client execution entries)
 - `runtime.py` — `ChatRunRequest`, session/turn ID sanitization, provider normalization
 - `run_context.py` — `RunContext` durable identity + `start_run_context()` / `list_run_contexts()`
 - `control_plane.py` — `PlanStep` / `PlanVersion` plan data model; `create_plan_version()`, `create_checklist_plan()`, `transition_step()`, `project_plan_event()` (persisted to `.nexus_v5/plans/`)

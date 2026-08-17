@@ -49,6 +49,7 @@ class MetaLearningLayer:
         self.experience_buffer: List[Experience] = []
         self.strategy_performance: Dict[str, List[float]] = {}
         self.optimal_hyperparameters: Dict[str, Any] = {}
+        self.tool_policy: Dict[str, Dict[str, Any]] = {}
         self.logger = logging.getLogger("nexus.v5.meta_learning")
         
         # Load saved state
@@ -182,6 +183,66 @@ class MetaLearningLayer:
         # Save state
         self._save_state()
 
+    def on_verified_evidence(self, evidence: Dict[str, Any]) -> Dict[str, Any]:
+        """Nudge the persisted strategy performance from VERIFIED evidence only.
+
+        A verified tool outcome updates the durable per-tool counters
+        ``good_tool_count`` / ``bad_tool_count`` (with accumulated confidence)
+        in the persisted ``tool_policy`` table, so later runs can see which
+        tools execution has proven reliable. Assumption records never change
+        policy, and ``optimize`` / ``record_experience`` semantics are
+        untouched. Returns the nudges applied; never raises.
+        """
+        nudges: Dict[str, Any] = {}
+        try:
+            if not isinstance(evidence, dict):
+                return nudges
+            if str(evidence.get("claim_source") or "") != "verified":
+                self.logger.debug("policy nudge skipped: evidence is not verified")
+                return nudges
+            kind = str(evidence.get("kind") or "")
+            if kind not in {
+                "tool_outcome", "failure", "retry_success", "test_outcome",
+                "verification", "user_correction",
+            }:
+                return nudges
+            provenance = evidence.get("provenance")
+            if not isinstance(provenance, dict):
+                return nudges
+            tool = str(provenance.get("tool_name") or "").strip()
+            if not tool:
+                return nudges
+            confidence = float(evidence.get("confidence") or 0.0)
+            confidence = max(0.0, min(1.0, confidence))
+            policy = self.tool_policy.setdefault(tool, {
+                "good_tool_count": 0,
+                "bad_tool_count": 0,
+                "good_confidence_sum": 0.0,
+                "bad_confidence_sum": 0.0,
+            })
+            polarity = str(evidence.get("polarity") or "")
+            if polarity == "positive":
+                policy["good_tool_count"] = int(policy.get("good_tool_count", 0)) + 1
+                policy["good_confidence_sum"] = round(
+                    float(policy.get("good_confidence_sum", 0.0)) + confidence, 4
+                )
+                nudges["tool"] = tool
+                nudges["good_tool_count"] = policy["good_tool_count"]
+            elif polarity == "negative":
+                policy["bad_tool_count"] = int(policy.get("bad_tool_count", 0)) + 1
+                policy["bad_confidence_sum"] = round(
+                    float(policy.get("bad_confidence_sum", 0.0)) + confidence, 4
+                )
+                nudges["tool"] = tool
+                nudges["bad_tool_count"] = policy["bad_tool_count"]
+            else:
+                return nudges
+            policy["updated_at"] = datetime.now().isoformat()
+            self._save_state()
+        except Exception as e:
+            self.logger.warning(f"Meta-learning policy nudge skipped: {e}")
+        return nudges
+
     def _load_state(self):
         """Load meta-learning state from disk."""
         state_file = os.path.join(self.root_dir, ".nexus_v5_meta_learning.json")
@@ -192,6 +253,7 @@ class MetaLearningLayer:
                     self.config = MetaLearningConfig(**state.get("config", {}))
                     self.strategy_performance = state.get("strategy_performance", {})
                     self.optimal_hyperparameters = state.get("optimal_hyperparameters", {})
+                    self.tool_policy = state.get("tool_policy", {})
             except Exception as e:
                 self.logger.warning(f"Failed to load meta-learning state: {e}")
 
@@ -209,6 +271,7 @@ class MetaLearningLayer:
                 },
                 "strategy_performance": self.strategy_performance,
                 "optimal_hyperparameters": self.optimal_hyperparameters,
+                "tool_policy": self.tool_policy,
             }
             with open(state_file, 'w') as f:
                 json.dump(state, f, indent=2)

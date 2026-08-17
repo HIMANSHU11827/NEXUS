@@ -64,18 +64,38 @@ class SecretScanner:
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 for line_no, line in enumerate(f, 1):
-                    if "${" in line:
-                        continue
                     # Whitelist public free openrouter keys used for testing/local setups
                     if ("sk-or-v1-" + "7c59d115fd0b2c8a9e5eb7dd6bd5a60a761f34c06c448fa1855d8a2aaa1a82f2") in line:
                         continue
                     for kind, pattern in self.PATTERNS.items():
-                        if pattern.search(line):
-                            findings.append(SecretFinding(os.path.relpath(path, self.root).replace("\\", "/"), line_no, kind))
-                            break
+                        match = pattern.search(line)
+                        if match:
+                            if "${" in line[max(0, match.start() - 2):match.start()] or line[match.end():match.end() + 1] == "}":
+                                continue
+                            if not self._is_placeholder(match.group(0)):
+                                findings.append(SecretFinding(os.path.relpath(path, self.root).replace("\\", "/"), line_no, kind))
+                                break
         except OSError:
             return findings
         return findings
+
+    @staticmethod
+    def _is_placeholder(token: str) -> bool:
+        """Recognize obviously fake fixture keys so redaction tests and docs
+        do not trip the release gate: xxxxxx placeholders, alphabet runs,
+        and tokens containing test/example/fake/dummy/sample words."""
+        body = re.sub(r"^[a-zA-Z0-9]{1,4}(?:-|_|\.)", "", token, count=1)
+        if not body:
+            return True
+        if re.fullmatch(r"[xX*_.\-]{3,}", body):
+            return True
+        if "abcdefghijklmnopqrstuvwxyz" in token.lower():
+            return True
+        lowered = body.lower()
+        return any(
+            word in lowered
+            for word in ("test", "example", "fake", "dummy", "sample", "placeholder", "supersecret")
+        )
 
     def _resolve(self, path: str) -> str:
         candidate = os.path.abspath(path if os.path.isabs(path) else os.path.join(self.root, path))

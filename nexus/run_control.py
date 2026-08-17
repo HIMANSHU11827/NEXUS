@@ -8,7 +8,7 @@ import sqlite3
 from contextlib import contextmanager
 from threading import Event, RLock
 from time import monotonic, time
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 
 @dataclass
@@ -17,6 +17,9 @@ class RunControl:
     cancel_event: Event = field(default_factory=Event)
     reason: str = ""
     deadline_at: Optional[float] = None
+    execution_fence: Optional[Callable[[], bool]] = field(
+        default=None, repr=False, compare=False
+    )
     _state_lock: RLock = field(
         default_factory=RLock, init=False, repr=False, compare=False
     )

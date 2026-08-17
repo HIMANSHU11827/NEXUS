@@ -19,6 +19,7 @@ tested without any network access or live credentials.
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import time
@@ -220,7 +221,7 @@ class WeComAdapter(BasePlatformAdapter):
     ) -> bool:
         """Validate a WeCom URL verification handshake signature."""
         expected = _sha1_signature(token, timestamp, nonce, echostr)
-        return expected == msg_signature
+        return hmac.compare_digest(expected, msg_signature)
 
     @staticmethod
     def verify_signature(
@@ -228,7 +229,7 @@ class WeComAdapter(BasePlatformAdapter):
     ) -> bool:
         """Validate a WeCom callback message signature."""
         expected = _sha1_signature(token, timestamp, nonce, encrypt)
-        return expected == msg_signature
+        return hmac.compare_digest(expected, msg_signature)
 
     @staticmethod
     def decrypt_message(encoding_aes_key: str, encrypt_b64: str) -> Optional[str]:

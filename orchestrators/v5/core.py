@@ -50,7 +50,7 @@ import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
@@ -66,6 +66,7 @@ from .lifecycle import V5Lifecycle
 from .log import V5Logger
 from .checkpoint import V5Checkpoint
 from nexus.run_control import RunControlRegistry
+from nexus.runtime import safe_session_id
 from .model import V5ModelCaller
 from .direct_loop import V5DirectModelToolLoop
 from .parallel import V5ParallelExecutor
@@ -82,6 +83,7 @@ from .background_runner import V5BackgroundRunner
 from .active_loop import V5ActiveLoop
 from .compat import V5Compat
 from .grounding import V5ContextGrounding
+from .reliability import V5Reliability
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +176,14 @@ class V5LoopState(str, Enum):
     EVOLVING = "evolving"
     CONSCIOUS = "conscious"
     OUTPUTTING = "outputting"
+    RECOVERING = "recovering"
+    REPLANNING = "replanning"
+    DEGRADED = "degraded"
+    WAITING_FOR_PERMISSION = "waiting_for_permission"
+    WAITING_FOR_CREDENTIALS = "waiting_for_credentials"
+    WAITING_FOR_DEPENDENCY = "waiting_for_dependency"
+    BLOCKED_NON_RECOVERABLE = "blocked_non_recoverable"
+    PARTIALLY_COMPLETED = "partially_completed"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
@@ -188,7 +198,7 @@ class V5TurnContext:
     user_input: str
     input_type: str = "text"  # text, voice, vision, code
     metadata: Dict[str, Any] = field(default_factory=dict)
-    start_time: datetime = field(default_factory=datetime.utcnow)
+    start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     end_time: Optional[datetime] = None
     state: V5LoopState = V5LoopState.INITIALIZING
 
@@ -229,6 +239,13 @@ class V5Runtime:
     sandbox = None
     permissions = None
     threat_scan_enabled: bool = True
+
+    # Durable turn state restored by checkpoint resume
+    plan: List[Any] = field(default_factory=list)
+    actions: List[Any] = field(default_factory=list)
+    mental_state: Dict[str, Any] = field(default_factory=dict)
+    last_result: Optional[Dict[str, Any]] = None
+    context_summary: str = ""
 
 
 class _DuckIntent:
@@ -278,6 +295,7 @@ class NexusLoopV5(
     V5Compat,
     V5DirectModelToolLoop,
     V5ContextGrounding,
+    V5Reliability,
 ):
     """NEXUS V5 Loop - Self-adaptive quantum loop with V5 integration.
     
@@ -294,15 +312,25 @@ class NexusLoopV5(
 
     def __init__(self, root_dir: str, session_id: str = "default"):
         self.root_dir = os.path.abspath(root_dir or os.getcwd())
-        self.session_id = session_id
-        self.runtime = V5Runtime(session_id=session_id, root_dir=self.root_dir)
+        self.session_id = safe_session_id(session_id)
+        self.runtime = V5Runtime(session_id=self.session_id, root_dir=self.root_dir)
         self.logger = logging.getLogger("nexus.loop.v5")
 
         # V5 integration: Thread safety
         self._run_guard = threading.Lock()
         self._session_write_lock = threading.Lock()
+        # Non-fatal capability degradations hit during the current turn;
+        # surfaced on the final result so degraded runs are never silent.
+        self._degradations: List[str] = []
         self._abort_flag = asyncio.Event()
         self._run_controls = RunControlRegistry()
+        self._run_context_heartbeats: Dict[
+            str, tuple[asyncio.Event, asyncio.Task[Any]]
+        ] = {}
+        self._current_run_context: Any = None
+        self._detached_lifecycle_tasks: set[asyncio.Task[Any]] = set()
+        self._detached_lifecycle_task_count = 0
+        self._shutdown_fenced = False
         # A fresh process cannot own runs persisted by an earlier process.
         # Retire those orphaned contexts before accepting new work so the
         # control plane never reports a permanent running task after restart.
@@ -603,6 +631,24 @@ class NexusLoopV5(
 
     # ── Memory Persistence ──────────────────────────────────────────────
 
+    def _record_degradation(self, reason: str) -> None:
+        """Record a non-fatal capability degradation for the final result.
+
+        Never raises; keeps the most recent 32 distinct entries per turn so a
+        broken subsystem cannot flood the report.
+        """
+        try:
+            entries = getattr(self, "_degradations", None)
+            if entries is None:
+                entries = []
+                self._degradations = entries
+            text = str(reason or "").strip()[:300]
+            if text and text not in entries:
+                entries.append(text)
+                del entries[:-32]
+        except Exception:
+            pass
+
     def save_memory(self) -> None:
         """Persist short-term conversation memory to disk."""
         try:
@@ -619,10 +665,11 @@ class NexusLoopV5(
     def load_memory(self, session_id: Optional[str] = None) -> None:
         """Load short-term memory from disk."""
         if session_id:
-            self.session_id = session_id
+            self.session_id = safe_session_id(session_id)
+            self.runtime.session_id = self.session_id
             if self._memory_manager:
                 try:
-                    self._memory_manager.session_id = session_id
+                    self._memory_manager.session_id = self.session_id
                 except Exception:
                     pass
         try:
@@ -635,8 +682,18 @@ class NexusLoopV5(
             else:
                 self.runtime.memory = []
         except Exception as e:
-            self.logger.warning("load_memory: %s", e)
+            # Never silently drop a session into amnesia: quarantine the
+            # unreadable file for inspection and record the degradation so the
+            # run can surface it instead of pretending nothing was lost.
+            self.logger.warning("load_memory failed, quarantining corrupt file: %s", e)
+            try:
+                corrupt_path = f"{path}.corrupt-{int(time.time())}"
+                os.replace(path, corrupt_path)
+                self.logger.warning("load_memory: unreadable session moved to %s", corrupt_path)
+            except Exception:
+                pass
             self.runtime.memory = []
+            self._record_degradation(f"session memory reload failed: {e}")
 
     def sync_memory(self) -> None:
         """High-performance sync — CLI/GUI cohesion. Reload from disk if changed."""
@@ -649,8 +706,11 @@ class NexusLoopV5(
                     disk_mem = json.load(f)
                     if disk_mem != self.runtime.memory:
                         self.runtime.memory = disk_mem
-        except Exception:
-            pass
+        except Exception as e:
+            # A corrupt on-disk session must not wipe the in-memory state;
+            # keep what we have and make the degradation visible.
+            self.logger.warning("sync_memory skipped unreadable session file: %s", e)
+            self._record_degradation(f"session memory sync failed: {e}")
 
     def _write_session_bus(self, _messages=None) -> None:
         """Write session to session_bus for CLI/GUI/Gateway sync."""
@@ -1067,13 +1127,23 @@ class NexusLoopV5(
         """Execute tool calls through the tool executor, returning real results."""
         if not tool_calls:
             return []
+        try:
+            from providers.reliability import redact_secrets
+        except Exception:
+            redact_secrets = None
         results = []
         for call in tool_calls:
             try:
                 result = await self._run_tool(call)
                 results.append(result)
             except Exception as e:
-                results.append(f"Error executing tool: {str(e)}")
+                error_text = str(e)
+                if redact_secrets is not None:
+                    try:
+                        error_text = str(redact_secrets(error_text) or "")[:4000]
+                    except Exception:
+                        pass
+                results.append(f"Error executing tool: {error_text}")
         return results
 
     async def _create_plan_via_tool(self, task_desc):
@@ -1136,6 +1206,27 @@ class NexusLoopV5(
         # exact verb is domain-specific; short conversational prose is not.
         return len(text.split()) >= 24 and not text.endswith("?")
 
+    @staticmethod
+    def _should_auto_hive(task_desc: str) -> bool:
+        """Use Hive automatically only when parallel reasoning is useful."""
+        text = re.sub(r"\s+", " ", str(task_desc or "").strip().lower())
+        if not text:
+            return False
+        if re.search(
+            r"\b(?:parallel|multiple|all of|end[- ]to[- ]end|full architecture|"
+            r"compare|research|investigate|deep dive|refactor|migration|"
+            r"sub[- ]agent|specialist)\b",
+            text,
+        ):
+            return True
+        action_count = len(re.findall(
+            r"\b(?:build|create|implement|edit|modify|refactor|fix|debug|test|"
+            r"run|execute|deploy|install|read|inspect|review|analy[sz]e|"
+            r"search|research|find|generate|design|update|change)\b",
+            text,
+        ))
+        return action_count >= 2 and len(text.split()) >= 10
+
     async def _decide_planning(self, perceived) -> None:
         """Let V5 choose the complete execution route for this turn.
 
@@ -1150,6 +1241,7 @@ class NexusLoopV5(
             perceived.metadata = metadata
         request = str(getattr(perceived, "original_input", "") or "")
         fallback_plan = self._requires_planning(request, None)
+        auto_hive = fallback_plan and self._should_auto_hive(request)
         # The router must not turn greetings/social conversation into fake
         # execution plans, even if a provider over-predicts PLAN.
         if self._is_trivial_task(request):
@@ -1158,6 +1250,7 @@ class NexusLoopV5(
                 "planning_decision": "conversation:direct",
                 "tool_route": "none",
                 "hive_required": False,
+                "hive_auto": False,
                 "mcp_required": False,
                 "model_route": "fast",
                 "permission_route": "auto",
@@ -1198,11 +1291,29 @@ class NexusLoopV5(
                 text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.IGNORECASE).strip()
             legacy_decision = re.sub(r"[^a-z]", "", text.lower())
             if legacy_decision.startswith("direct"):
+                # The router is advisory.  An actionable request must never
+                # lose the planning/execution path because a fast router
+                # under-classified it as ordinary conversation.  This is the
+                # boundary that keeps requests such as "fix the failing test"
+                # from skipping planning entirely.
+                if fallback_plan:
+                    metadata.update({
+                        "planning_required": True,
+                        "planning_decision": "model:direct-overridden",
+                        "tool_route": "none",
+                        "hive_required": auto_hive,
+                        "hive_auto": auto_hive,
+                        "mcp_required": False,
+                        "model_route": "strong",
+                        "decision_source": "deterministic-action-boundary",
+                    })
+                    return
                 metadata.update({
                     "planning_required": False,
                     "planning_decision": "model:direct",
                     "tool_route": "none",
-                    "hive_required": False,
+                    "hive_required": auto_hive,
+                    "hive_auto": auto_hive,
                     "mcp_required": False,
                     "model_route": "fast",
                     "decision_source": "model",
@@ -1213,7 +1324,8 @@ class NexusLoopV5(
                     "planning_required": True,
                     "planning_decision": "model:plan",
                     "tool_route": "none",
-                    "hive_required": False,
+                    "hive_required": auto_hive,
+                    "hive_auto": auto_hive,
                     "mcp_required": False,
                     "model_route": "strong",
                     "decision_source": "model",
@@ -1225,27 +1337,41 @@ class NexusLoopV5(
             mode = str(route.get("mode", "")).upper()
             if mode not in {"PLAN", "DIRECT"}:
                 raise ValueError("router mode is invalid")
+            planning_required = mode == "PLAN" or fallback_plan
             tool = str(route.get("tool", "none")).lower()
             if tool not in {"none", "read", "write", "command", "search", "mixed"}:
                 tool = "none"
             metadata.update({
-                "planning_required": mode == "PLAN",
-                "planning_decision": f"model:{mode.lower()}",
+                "planning_required": planning_required,
+                "planning_decision": (
+                    f"model:{mode.lower()}-overridden"
+                    if mode == "DIRECT" and fallback_plan
+                    else f"model:{mode.lower()}"
+                ),
                 "tool_route": tool,
-                "hive_required": bool(route.get("hive", False)) and mode == "PLAN",
+                "hive_required": (
+                    bool(route.get("hive", False)) and mode == "PLAN"
+                ) or auto_hive,
+                "hive_auto": auto_hive,
                 "mcp_required": bool(route.get("mcp", False)),
-                "model_route": str(route.get("model", "fast")).lower(),
+                "model_route": (
+                    "strong" if planning_required
+                    else str(route.get("model", "fast")).lower()
+                ),
                 "permission_route": str(route.get("permission", "auto")).lower(),
                 "sandbox_route": str(route.get("sandbox", "normal")).lower(),
                 "voice_route": bool(route.get("voice", False)),
                 "skills_route": bool(route.get("skills", True)),
                 "plugins_route": bool(route.get("plugins", True)),
                 "compact_route": bool(route.get("compact", False)),
-                "evolution_route": bool(route.get("evolution", mode == "PLAN")),
+                "evolution_route": bool(route.get("evolution", planning_required)),
                 "forge_route": bool(route.get("forge", False)),
-                "gap_finder_route": bool(route.get("gap_finder", mode == "PLAN")),
-                "background_route": bool(route.get("background", mode == "PLAN")),
-                "decision_source": "model",
+                "gap_finder_route": bool(route.get("gap_finder", planning_required)),
+                "background_route": bool(route.get("background", planning_required)),
+                "decision_source": (
+                    "deterministic-action-boundary" if fallback_plan and mode == "DIRECT"
+                    else "model"
+                ),
             })
             if metadata["mcp_required"]:
                 current = str(getattr(perceived, "context_summary", "") or "")
@@ -1259,7 +1385,8 @@ class NexusLoopV5(
                 # MCP route from keywords. The planner receives the complete
                 # discovered registry and makes that decision itself.
                 "tool_route": "none",
-                "hive_required": False,
+                "hive_required": auto_hive,
+                "hive_auto": auto_hive,
                 "mcp_required": False,
                 "model_route": "strong" if fallback_plan else "fast",
                 "permission_route": "auto",
@@ -1282,6 +1409,9 @@ class NexusLoopV5(
         runtime = self.runtime
         runtime.feature_planning = bool(metadata.get("planning_required", True))
         runtime.feature_hive = bool(metadata.get("hive_required", False))
+        # The Hive mixin reads this per-turn flag when NEXUS_HIVE is automatic.
+        # An explicit NEXUS_HIVE=0 remains a fail-safe override.
+        self._v5_auto_hive = bool(metadata.get("hive_auto", False))
         runtime.evolution_enabled = bool(metadata.get("evolution_route", runtime.evolution_enabled))
 
         # The model may choose the interaction level, but never bypass safety.
@@ -1308,13 +1438,18 @@ class NexusLoopV5(
                 pass
 
     def _read_todo_md(self):
-        p = os.path.join(self.root_dir, "workspace", "TODO.md")
-        try:
-            if os.path.isfile(p):
-                with open(p, "r", encoding="utf-8") as f:
-                    return f.read()
-        except Exception:
-            pass
+        # Canonical plan path is ``workspace/todo.md`` (lowercase, written by
+        # the planning tool); ``TODO.md`` is accepted as a legacy fallback so
+        # a case-sensitive filesystem never loses the plan (audit P39).
+        workspace = os.path.join(self.root_dir, "workspace")
+        for name in ("todo.md", "TODO.md"):
+            p = os.path.join(workspace, name)
+            try:
+                if os.path.isfile(p):
+                    with open(p, "r", encoding="utf-8") as f:
+                        return f.read()
+            except Exception:
+                pass
         return ""
 
     def _save_checkpoint(self, messages, task_desc, turn):
@@ -1521,6 +1656,25 @@ class NexusLoopV5(
         except Exception as exc:
             self.logger.debug("direct message persistence failed: %s", exc)
 
+    async def _persist_direct_message_async(self, message: Dict[str, Any], turn_id: str) -> None:
+        """Async variant of ``_persist_direct_message``.
+
+        The blocking session-bus write is offloaded to a worker thread so
+        the event loop never stalls mid-tool-execution.
+        """
+        await asyncio.to_thread(self._persist_direct_message, message, turn_id)
+
+    async def _persist_turn_message_async(self, role: str, content: str, turn_id: str,
+                                          *, kind: str = "") -> None:
+        """Async variant of ``_persist_turn_message``.
+
+        The blocking session-bus write is offloaded to a worker thread so
+        the event loop never stalls during transcript persistence.
+        """
+        await asyncio.to_thread(
+            self._persist_turn_message, role, content, turn_id, kind=kind
+        )
+
     # Background tasks set (for test compatibility)
     @property
     def _background_tasks(self):
@@ -1535,17 +1689,175 @@ class NexusLoopV5(
     async def _finalize_session(self, task_desc, messages):
         pass
 
-    async def aclose(self):
-        """Drain background finalizers (V1 compat)."""
-        import asyncio as _asyncio
-        tasks = list(getattr(self, "_background_tasks", set()))
-        self._background_tasks = set()
-        for task in tasks:
+    def _observe_detached_lifecycle_task(
+        self, task: asyncio.Task[Any], *, owner: str
+    ) -> None:
+        """Consume a detached task's result without letting shutdown await it.
+
+        Cancellation-resistant code may outlive the bounded shutdown window.
+        Such a task is deliberately removed from every active-owner set and
+        retained only for observability.  Its eventual exception is consumed
+        so the event loop never reports an unhandled-task warning.
+        """
+        self._detached_lifecycle_tasks.add(task)
+        self._detached_lifecycle_task_count += 1
+
+        def _finished(completed: asyncio.Task[Any]) -> None:
+            self._detached_lifecycle_tasks.discard(completed)
+            if completed.cancelled():
+                return
             try:
-                if not task.done():
-                    await _asyncio.wait_for(task, timeout=5)
-            except Exception:
+                error = completed.exception()
+            except asyncio.CancelledError:
+                return
+            if error is not None:
+                self.logger.warning(
+                    "Detached lifecycle task %s failed after its owner was fenced: %s",
+                    owner,
+                    error,
+                )
+            else:
+                self.logger.info(
+                    "Detached lifecycle task %s exited after its owner was fenced",
+                    owner,
+                )
+
+        task.add_done_callback(_finished)
+
+    async def _cancel_tasks_bounded(
+        self,
+        tasks: set[asyncio.Task[Any]],
+        *,
+        timeout: float,
+        owner: str,
+    ) -> set[asyncio.Task[Any]]:
+        """Cancel tasks and await them for at most ``timeout`` seconds."""
+        active = {task for task in tasks if not task.done()}
+        for task in active:
+            task.cancel()
+        if not active:
+            return set()
+        done, pending = await asyncio.wait(active, timeout=max(0.0, timeout))
+        for task in done:
+            if task.cancelled():
+                continue
+            try:
+                task.exception()
+            except asyncio.CancelledError:
                 pass
+        for task in pending:
+            self._observe_detached_lifecycle_task(task, owner=owner)
+        return pending
+
+    async def _stop_run_context_heartbeat(
+        self, turn_id: str, *, timeout: float = 1.0
+    ) -> None:
+        """Stop, cancel, and boundedly await one turn's lease heartbeat."""
+        entry = self._run_context_heartbeats.pop(str(turn_id or ""), None)
+        if entry is None:
+            return
+        stop, task = entry
+        stop.set()
+        pending = await self._cancel_tasks_bounded(
+            {task}, timeout=timeout, owner=f"run-context-heartbeat:{turn_id}"
+        )
+        if pending:
+            self.logger.warning(
+                "Run-context heartbeat for %s ignored bounded cancellation and was detached",
+                turn_id,
+            )
+
+    async def aclose(self):
+        """Boundedly drain every V5/V1 background owner."""
+        import asyncio as _asyncio
+        import os as _os
+        try:
+            shutdown_timeout = max(
+                0.1, float(os.environ.get("NEXUS_SHUTDOWN_TIMEOUT", "10"))
+            )
+        except (TypeError, ValueError):
+            shutdown_timeout = 10.0
+        cancellation_timeout = min(1.0, shutdown_timeout)
+        self._shutdown_fenced = True
+        # Detached work must not publish terminal UI events after this loop has
+        # relinquished ownership. Durable jobs are fenced separately below.
+        self.work_event_sink = None
+        if getattr(self, "runtime", None) is not None:
+            self.runtime.work_event_sink = None
+
+        heartbeat_tasks = {
+            task for _stop, task in self._run_context_heartbeats.values()
+        }
+        for stop, _task in self._run_context_heartbeats.values():
+            stop.set()
+        self._run_context_heartbeats.clear()
+        await self._cancel_tasks_bounded(
+            heartbeat_tasks,
+            timeout=cancellation_timeout,
+            owner="run-context-heartbeats",
+        )
+        stop_scheduler = getattr(self, "_stop_scheduler", None)
+        if callable(stop_scheduler):
+            try:
+                stop_scheduler()
+            except Exception:
+                self.logger.debug("Could not stop scheduler", exc_info=True)
+        stop_watchdog = getattr(self, "_stop_durable_background_watchdog", None)
+        if callable(stop_watchdog):
+            try:
+                watchdog_stop_task = asyncio.create_task(stop_watchdog())
+                stopped, still_stopping = await asyncio.wait(
+                    {watchdog_stop_task}, timeout=cancellation_timeout
+                )
+                if stopped:
+                    await asyncio.gather(*stopped, return_exceptions=True)
+                if still_stopping:
+                    await self._cancel_tasks_bounded(
+                        still_stopping,
+                        timeout=cancellation_timeout,
+                        owner="durable-background-watchdog",
+                    )
+            except Exception:
+                self.logger.debug("Could not stop durable background watchdog", exc_info=True)
+        task_sets = [
+            getattr(self, "_background_tasks", set()),
+            getattr(self, "_v5_bg", set()),
+            getattr(self, "_v5_runner_tasks_set", set()),
+        ]
+        tasks = {
+            task for task_set in task_sets if isinstance(task_set, set)
+            for task in task_set if isinstance(task, _asyncio.Task)
+        }
+        if tasks:
+            done, pending = await _asyncio.wait(tasks, timeout=shutdown_timeout)
+            if done:
+                await _asyncio.gather(*done, return_exceptions=True)
+            if pending:
+                try:
+                    self._durable_background_store().interrupt_owned(
+                        _os.getpid(), "loop shutdown interrupted active job"
+                    )
+                except Exception:
+                    self.logger.debug("Could not persist interrupted background jobs", exc_info=True)
+                for task in pending:
+                    task.cancel()
+                cancelled_done, resistant = await _asyncio.wait(
+                    pending, timeout=cancellation_timeout
+                )
+                if cancelled_done:
+                    await _asyncio.gather(*cancelled_done, return_exceptions=True)
+                for task in resistant:
+                    self._observe_detached_lifecycle_task(
+                        task, owner="v5-background-shutdown"
+                    )
+                if resistant:
+                    self.logger.warning(
+                        "Detached %d cancellation-resistant V5 background task(s)",
+                        len(resistant),
+                    )
+        self._background_tasks = set()
+        self._v5_bg = set()
+        self._v5_runner_tasks_set = set()
 
     async def _retry_gap(self, gap):
         return False
@@ -1661,6 +1973,7 @@ class NexusLoopV5(
         conversation_history: Optional[List[Dict[str, Any]]] = None,
         task_id: str = "",
         idempotency_key: str = "",
+        execution_fence: Optional[Callable[[], bool]] = None,
         deadline_seconds: Optional[float] = None,
         deadline_at: Optional[float] = None,
     ) -> Any:
@@ -1698,7 +2011,10 @@ class NexusLoopV5(
                 max_tokens=max_tokens,
                 conversation_history=conversation_history,
                 task_id=task_id,
+                idempotency_key=idempotency_key,
+                execution_fence=execution_fence,
                 deadline_seconds=deadline_seconds,
+                deadline_at=deadline_at,
             ):
                 if event.get("type") == "content":
                     response_parts.append(str(event.get("data", "")))
@@ -1719,10 +2035,9 @@ class NexusLoopV5(
                     )
                 except Exception as e:
                     self.logger.warning(f"Memory sync failed: {e}")
-            # Close the per-turn learning loop: collect tool-failure
-            # and reflection signals into runtime.failures /
-            # runtime.learnings. Isolated so a learning failure can
-            # never break the turn.
+            # Per-turn learning signals (tool failures, reflections, turn
+            # replay) are collected inside ``_turn_events`` exactly once per
+            # turn; here only deferred background finalization is scheduled.
             self._start_background_finalization(
                 user_input, self._session_messages(), bool(result.get("success"))
             )
@@ -1753,6 +2068,7 @@ class NexusLoopV5(
         conversation_history: Optional[List[Dict[str, Any]]] = None,
         task_id: str = "",
         idempotency_key: str = "",
+        execution_fence: Optional[Callable[[], bool]] = None,
         deadline_seconds: Optional[float] = None,
         deadline_at: Optional[float] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -1794,6 +2110,7 @@ class NexusLoopV5(
                 conversation_history=conversation_history,
                 task_id=task_id,
                 idempotency_key=idempotency_key,
+                execution_fence=execution_fence,
                 deadline_seconds=deadline_seconds,
                 deadline_at=deadline_at,
             ):
@@ -1840,6 +2157,102 @@ class NexusLoopV5(
         conversation_history: Optional[List[Dict[str, Any]]] = None,
         task_id: str = "",
         idempotency_key: str = "",
+        execution_fence: Optional[Callable[[], bool]] = None,
+        deadline_seconds: Optional[float] = None,
+        deadline_at: Optional[float] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Contain setup failures so a caller always receives a terminal result.
+
+        The implementation below owns the normal lifecycle and its existing
+        timeout/cancel handling.  This outer boundary covers the small but
+        important preflight window before that lifecycle's inner ``try`` starts
+        (transcript restore, run registration, persistence, and ``run.started``).
+        A failure there must not leave a client waiting forever or a durable run
+        looking permanently active.
+        """
+        active_turn_id = str(turn_id or "")
+        try:
+            async for event in self._turn_events_impl(
+                task_desc,
+                input_type=input_type,
+                voice_mode=voice_mode,
+                provider=provider,
+                profile=profile,
+                model=model,
+                max_tokens=max_tokens,
+                turn_id=turn_id,
+                conversation_history=conversation_history,
+                task_id=task_id,
+                idempotency_key=idempotency_key,
+                execution_fence=execution_fence,
+                deadline_seconds=deadline_seconds,
+                deadline_at=deadline_at,
+            ):
+                if event.get("type") == "done" and isinstance(event.get("data"), dict):
+                    active_turn_id = str(
+                        event["data"].get("turn_id") or active_turn_id
+                    )
+                yield event
+        except asyncio.CancelledError:
+            # A caller's explicit stop is a run-level decision and is handled
+            # by stream_run/_turn_events' cancellation contract.
+            raise
+        except Exception as exc:
+            failure = str(exc) or exc.__class__.__name__
+            self.logger.error("V5 turn failed before terminal lifecycle: %s", failure, exc_info=True)
+            fallback_turn_id = str(turn_id or getattr(self, "_current_turn_id", "") or "")
+            if not fallback_turn_id:
+                try:
+                    fallback_turn_id = self._generate_turn_id()
+                except Exception:
+                    fallback_turn_id = "turn_failed"
+            try:
+                await self._emit_runtime_event(
+                    "run.failed",
+                    "Run failed before execution started",
+                    "failed",
+                    event_id=f"run_{fallback_turn_id}",
+                    task_id=task_id,
+                    error=failure,
+                )
+                for event in self._yield_pending_events():
+                    yield event
+            except Exception:
+                self.logger.debug("Could not emit preflight failure event", exc_info=True)
+            yield {
+                "type": "done",
+                "data": {
+                    "success": False,
+                    "error": failure,
+                    "response": "",
+                    "output": {"response": ""},
+                    "mental_state": {},
+                    "turn_id": fallback_turn_id,
+                    "state": V5LoopState.FAILED.value,
+                },
+            }
+        finally:
+            heartbeat_turn_id = str(
+                active_turn_id or getattr(self, "_current_turn_id", "") or ""
+            )
+            if heartbeat_turn_id:
+                await self._stop_run_context_heartbeat(heartbeat_turn_id)
+
+    async def _turn_events_impl(
+        self,
+        task_desc: str,
+        *,
+        input_type: str = "text",
+        voice_mode: bool = False,
+        provider: Optional[str] = None,
+        profile: Optional[str] = None,
+        model: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        turn_id: str = "",
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
+        task_id: str = "",
+        idempotency_key: str = "",
+        execution_fence: Optional[Callable[[], bool]] = None,
         deadline_seconds: Optional[float] = None,
         deadline_at: Optional[float] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -1851,6 +2264,16 @@ class NexusLoopV5(
         always yielded so consumers can never hang.
         """
         self._stream_events.clear()
+        # These are per-run values. Reusing them across turns eventually
+        # exhausts every later task and can write a prior success into a new
+        # failed turn's checkpoint.
+        init_budget = getattr(self, "_init_budget", None)
+        if callable(init_budget):
+            init_budget(reset=True)
+        self._degradations = []
+        self.runtime.last_result = None
+        self.runtime.actions = []
+        self.runtime.plan = {}
 
         # API callers may reset the transient runtime before a new request.
         # Restore the prior transcript as data only; tool side effects are
@@ -1889,9 +2312,11 @@ class NexusLoopV5(
         )
         self.runtime.current_turn = turn
         self._current_turn_id = turn.turn_id
+        self._active_execution_plan = {}
         if deadline_at is None and deadline_seconds:
             deadline_at = time.monotonic() + float(deadline_seconds)
         control = self._run_controls.register(turn.turn_id, deadline_at=deadline_at)
+        control.execution_fence = execution_fence
 
         # Save the user message before model/tool work starts.  If the process
         # or browser disappears mid-run, refresh can still show the exact turn
@@ -1904,6 +2329,8 @@ class NexusLoopV5(
         # that the next session can offer to resume instead of guessing from
         # an incomplete assistant message.
         run_context = None
+        run_context_heartbeat_stop = asyncio.Event()
+        run_context_heartbeat_task = None
         try:
             from nexus.run_context import start_run_context
 
@@ -1919,6 +2346,31 @@ class NexusLoopV5(
                 voice_mode=voice_mode,
                 lease_seconds=900,
             )
+            self._current_run_context = run_context
+            async def _renew_run_context_lease() -> None:
+                while not run_context_heartbeat_stop.is_set():
+                    try:
+                        await asyncio.wait_for(
+                            run_context_heartbeat_stop.wait(), timeout=300.0
+                        )
+                        return
+                    except asyncio.TimeoutError:
+                        renewed = await asyncio.to_thread(
+                            run_context.heartbeat, 900.0
+                        )
+                        if not renewed:
+                            self._run_controls.request_cancel(
+                                turn.turn_id, "run_context_lease_lost"
+                            )
+                            return
+
+            run_context_heartbeat_task = asyncio.create_task(
+                _renew_run_context_lease()
+            )
+            self._run_context_heartbeats[turn.turn_id] = (
+                run_context_heartbeat_stop,
+                run_context_heartbeat_task,
+            )
         except Exception as exc:
             self.logger.debug("Could not persist run start: %s", exc)
 
@@ -1933,6 +2385,8 @@ class NexusLoopV5(
                 self.logger.debug("Could not persist work-item start: %s", exc)
 
         def finish_run_context(status: str, terminal_event: str, error: str = "") -> None:
+            run_context_heartbeat_stop.set()
+            self._current_run_context = None
             if run_context is None:
                 return
             try:
@@ -1951,14 +2405,49 @@ class NexusLoopV5(
                 except Exception as exc:
                     self.logger.debug("Could not persist work-item finish: %s", exc)
 
-        await self._emit_runtime_event(
-            "run.started",
-            "Run started",
-            "running",
-            event_id=f"run_{turn.turn_id}",
-            payload={"input_type": input_type, "voice_mode": voice_mode},
-            task_id=task_id,
-        )
+        try:
+            await self._emit_runtime_event(
+                "run.started",
+                "Run started",
+                "running",
+                event_id=f"run_{turn.turn_id}",
+                payload={"input_type": input_type, "voice_mode": voice_mode},
+                task_id=task_id,
+            )
+        except Exception as exc:
+            # The durable context was created before the first lifecycle
+            # event. If that event sink fails, close the context explicitly so
+            # recovery never sees a run that is permanently "running".
+            failure = str(exc) or exc.__class__.__name__
+            finish_run_context("failed", "run.failed", failure)
+            try:
+                await self._transition_to(V5LoopState.FAILED)
+            except Exception:
+                self.logger.debug("Could not transition failed preflight turn", exc_info=True)
+            turn.end_time = datetime.now(timezone.utc)
+            try:
+                await self._emit_runtime_event(
+                    "run.failed",
+                    "Run failed before execution started",
+                    "failed",
+                    event_id=f"run_{turn.turn_id}",
+                    task_id=task_id,
+                    error=failure,
+                )
+                for event in self._yield_pending_events():
+                    yield event
+            except Exception:
+                self.logger.debug("Could not emit preflight terminal event", exc_info=True)
+            yield {"type": "done", "data": {
+                "success": False,
+                "error": failure,
+                "response": "",
+                "output": {"response": ""},
+                "mental_state": {},
+                "turn_id": turn.turn_id,
+                "state": V5LoopState.FAILED.value,
+            }}
+            return
 
         mental_state: Dict[str, Any] = {}
         output: Dict[str, Any] = {}
@@ -1979,8 +2468,15 @@ class NexusLoopV5(
             # tool loop.  This activates planning/Hive/MCP policy and emits
             # truthful lifecycle evidence without mapping keywords to tools.
             context_summary = ""
+            planning_gate_error = ""
             perceived = await self._perceive_input(turn)
-            conversational = self._is_trivial_task(task_desc)
+            inject_skill = getattr(self, "_inject_skill_context", None)
+            if callable(inject_skill):
+                await inject_skill(perceived)
+            effective_task_desc = str(
+                getattr(perceived, "original_input", "") or task_desc
+            )
+            conversational = self._is_trivial_task(effective_task_desc)
             if not conversational:
                 await self._transition_to(V5LoopState.PLANNING)
                 await self._emit_runtime_event(
@@ -2012,17 +2508,61 @@ class NexusLoopV5(
                         perceived.context_summary = (
                             f"{getattr(perceived, 'context_summary', '')}{plan_context}"
                         ).strip()
+                    else:
+                        planning_gate_error = "planning required but no executable plan was produced"
+                        detail = str(getattr(self, "_last_planning_error", "") or "").strip()
+                        if detail:
+                            planning_gate_error += f": {detail[:4000]}"
                 except Exception as exc:
-                    self.logger.warning("Live plan generation failed; continuing with direct loop: %s", exc)
+                    planning_gate_error = (
+                        "planning required but plan generation failed"
+                    )
+                    self.logger.warning(
+                        "Live plan generation failed; stopping before tool execution: %s",
+                        exc,
+                    )
+                if planning_gate_error:
+                    await self._emit_runtime_event(
+                        "planning.failed",
+                        "No executable plan was produced",
+                        "failed",
+                        event_id=f"planning_failed_{turn.turn_id}",
+                        parent_id=f"planning_{turn.turn_id}",
+                        payload={
+                            "planning_required": True,
+                            "error": planning_gate_error,
+                        },
+                        visibility="internal",
+                    )
+                    # A planner outage must not erase durable continuation
+                    # context. Allow one explicit direct-loop fallback, but
+                    # require a real tool result before accepting success.
+                    context_summary = (
+                        f"{getattr(perceived, 'context_summary', '')}\n\n"
+                        "[PLANNING FALLBACK]\n"
+                        "The required planner did not produce an executable plan. "
+                        "You may proceed only with a justified registered tool call; "
+                        "a prose-only answer is not completion."
+                    ).strip()
+                    await self._emit_runtime_event(
+                        "planning.fallback",
+                        "Using verified direct-loop fallback",
+                        "running",
+                        event_id=f"planning_fallback_{turn.turn_id}",
+                        parent_id=f"planning_{turn.turn_id}",
+                        payload={"reason": planning_gate_error, "requires_tool_result": True},
+                        visibility="internal",
+                    )
             if not conversational:
                 await self._emit_runtime_event(
                     "planning.decided",
-                    "Execution route selected",
-                    "completed",
+                    "Execution route selected" if not planning_gate_error else "Execution blocked",
+                    "completed" if not planning_gate_error else "failed",
                     event_id=f"planning_decided_{turn.turn_id}",
                     parent_id=f"planning_{turn.turn_id}",
                     payload={
                         "planning_required": bool(route_metadata.get("planning_required")),
+                        "planning_succeeded": not bool(planning_gate_error),
                         "hive_required": bool(route_metadata.get("hive_required")),
                         "mcp_required": bool(route_metadata.get("mcp_required")),
                         "decision_source": route_metadata.get("decision_source", "unknown"),
@@ -2042,7 +2582,7 @@ class NexusLoopV5(
                     # launching the four-way memory fan-out a second time.
                     ctx = turn.metadata.get("_memory_context")
                     if ctx is None:
-                        ctx = await self._memory_manager.prefetch_all(task_desc)
+                        ctx = await self._memory_manager.prefetch_all(effective_task_desc)
                     context_summary = self._merge_memory_context(
                         context_summary, ctx
                     )
@@ -2143,21 +2683,86 @@ class NexusLoopV5(
                 except Exception as exc:
                     self.logger.debug("Resume checkpoint context unavailable: %s", exc)
             result = await self._run_direct_model_tool_loop(
-                task_desc, context_summary=context_summary,
+                effective_task_desc, context_summary=context_summary,
                 conversation_history=self._session_messages(),
                 provider=provider, profile=profile, model=model,
                 max_tokens=max_tokens,
             )
+            # Surface every degraded subsystem/fallback the turn hit so users
+            # are never shown a silent half-success story.
+            _degradations = list(getattr(self, "_degradations", []) or [])
+            _extra = result.get("degradation") if isinstance(result, dict) else None
+            if isinstance(_extra, list):
+                _degradations.extend(str(item) for item in _extra)
+            if _degradations and isinstance(result, dict):
+                result["degradation"] = sorted(set(_degradations))
+
+            if planning_gate_error:
+                fallback_calls = int(result.get("calls_executed", 0) or 0)
+                fallback_verified = bool(result.get("success")) and fallback_calls > 0
+                result["planning_fallback"] = True
+                result["planning_error"] = planning_gate_error
+                if not fallback_verified:
+                    response = (
+                        "I couldn't complete this actionable request because no "
+                        "executable plan was produced and the direct fallback did not "
+                        "produce a verified tool result."
+                    )
+                    result.update({
+                        "success": False,
+                        "response": response,
+                        "error": planning_gate_error,
+                        "verification": self._verification_payload(
+                            result.get("actions") or [],
+                            fallback_calls,
+                            response,
+                            planning_gate_error,
+                        ),
+                    })
             for event in self._yield_pending_events():
                 yield event
             if not isinstance(result, dict):
                 result = {"success": False, "result": result}
+
+            # Forward only provider-reported telemetry.  The direct loop may
+            # use conservative estimates internally for safety limits, but
+            # those estimates are intentionally never exposed as UI usage.
+            measured = getattr(self, "_last_turn_usage", None)
+            if isinstance(measured, dict) and (
+                int(measured.get("input_tokens", 0) or 0)
+                or int(measured.get("output_tokens", 0) or 0)
+            ):
+                result["usage"] = {
+                    "source": "provider",
+                    "available": True,
+                    "input_tokens": int(measured.get("input_tokens", 0) or 0),
+                    "output_tokens": int(measured.get("output_tokens", 0) or 0),
+                    "reasoning_tokens": int(measured.get("reasoning_tokens", 0) or 0),
+                    "total_tokens": int(measured.get("input_tokens", 0) or 0)
+                    + int(measured.get("output_tokens", 0) or 0),
+                    "context_tokens": int(measured.get("context_tokens", 0) or 0),
+                    "context_window": self._context_window_for_provider(provider, model),
+                }
+            budget_report = getattr(self, "_budget_report", None)
+            if callable(budget_report):
+                result["budget"] = budget_report()
 
             # Keep all run-level state and checkpoints aligned with the
             # canonical direct loop.  Older PAORR paths updated these fields;
             # leaving them stale makes a later successful turn look failed
             # and makes resume snapshots lose the actual evidence.
             self.runtime.last_result = dict(result)
+            self.runtime.actions = list(result.get("actions") or [])
+            self.runtime.plan = dict(
+                getattr(self, "_active_execution_plan", {}) or {}
+            )
+            # Close the per-turn learning loop: collect tool-failure and
+            # reflection signals into runtime.failures / runtime.learnings
+            # and log the turn replay exactly once. Isolated so a learning
+            # failure can never break the turn.
+            collect = getattr(self, "_collect_turn_signals", None)
+            if callable(collect):
+                await collect(perceived, result, turn)
             # Arbitration point: a cancel/deadline request may arrive after
             # the provider/tool loop returns but before terminal persistence.
             # Re-check here so a late request cannot be overwritten by a
@@ -2192,7 +2797,7 @@ class NexusLoopV5(
                 yield {"type": "content", "data": response}
             terminal_state = V5LoopState.COMPLETED if bool(result.get("success", False)) else V5LoopState.FAILED
             await self._transition_to(terminal_state)
-            turn.end_time = datetime.utcnow()
+            turn.end_time = datetime.now(timezone.utc)
             self.runtime.turn_history.append(turn)
             done = {
                 **result,
@@ -2220,7 +2825,7 @@ class NexusLoopV5(
         except asyncio.TimeoutError:
             await self._transition_to(V5LoopState.TIMED_OUT)
             if turn.end_time is None:
-                turn.end_time = datetime.utcnow()
+                turn.end_time = datetime.now(timezone.utc)
             finish_run_context("timed_out", "run.timed_out", "deadline exceeded")
             await self._emit_runtime_event(
                 "run.timed_out", "Run timed out", "failed", event_id=f"run_{turn.turn_id}",
@@ -2238,7 +2843,7 @@ class NexusLoopV5(
         except asyncio.CancelledError:
             await self._transition_to(V5LoopState.CANCELLED)
             if turn.end_time is None:
-                turn.end_time = datetime.utcnow()
+                turn.end_time = datetime.now(timezone.utc)
             finish_run_context("cancelled", "run.cancelled", "cancelled")
             await self._emit_runtime_event(
                 "message.failed",
@@ -2273,7 +2878,7 @@ class NexusLoopV5(
             self.logger.error(f"V5 loop error: {e}", exc_info=True)
             await self._transition_to(V5LoopState.FAILED)
             if turn.end_time is None:
-                turn.end_time = datetime.utcnow()
+                turn.end_time = datetime.now(timezone.utc)
             finish_run_context("failed", "run.failed", str(e))
             await self._emit_runtime_event(
                 "message.failed",
@@ -2323,10 +2928,21 @@ class NexusLoopV5(
     # STATE MACHINE
     # ─────────────────────────────────────────────────────────────────────────
 
-    async def _transition_to(self, new_state: V5LoopState):
-        """Transition to a new state and trigger callbacks."""
+    async def _transition_to(self, new_state: V5LoopState, reason: str = ""):
+        """Transition to a new state and trigger callbacks.
+
+        Mirrors every transition through the validated reliability state
+        machine; a failed checkpoint save is surfaced (logged + event) but
+        never crashes the run, so state changes remain observable even when
+        persistence degrades.
+        """
         if self.runtime.current_turn:
             self.runtime.current_turn.state = new_state
+
+        try:
+            self._mirror_transition(new_state, reason=reason or "loop phase")
+        except Exception:
+            pass
 
         try:
             self._log_stage(new_state.value)
@@ -2334,9 +2950,43 @@ class NexusLoopV5(
             pass
 
         try:
-            self._checkpoint_save(phase=new_state.value)
+            # fsync'd JSON checkpoint I/O is blocking: run it in a worker
+            # thread so a save can never stall the async state transition
+            # (heartbeat tasks, SSE streaming, cancellation checks).
+            await asyncio.to_thread(self._checkpoint_save, phase=new_state.value)
+        except Exception as exc:
+            self._checkpoint_failed("_transition_to.checkpoint_save", exc)
+
+        try:
+            self._progress_record("state_change", signature=f"state:{new_state.value}", status="ok")
         except Exception:
             pass
+
+        if new_state in (
+            V5LoopState.COMPLETED,
+            V5LoopState.CANCELLED,
+            V5LoopState.TIMED_OUT,
+            V5LoopState.FAILED,
+        ):
+            try:
+                evidence = None
+                verification = getattr(self, "last_verification_payload", None) or (
+                    getattr(self.runtime, "last_result", None) or {}
+                ).get("verification")
+                if isinstance(verification, dict):
+                    evidence = [
+                        str(item)
+                        for item in (
+                            verification.get("evidence")
+                            or verification.get("summary")
+                            or verification.get("result", "")
+                        )
+                        if str(item)
+                    ]
+                    evidence = evidence[:5] or None
+                self._record_terminal_goal(new_state, evidence=evidence)
+            except Exception:
+                pass
 
         for callback in self._state_callbacks.get(new_state, []):
             try:

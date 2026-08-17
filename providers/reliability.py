@@ -9,6 +9,7 @@ This module is wired into the real call path in :mod:`providers.router`.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import inspect
 import logging
 import os
@@ -16,6 +17,7 @@ import random
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, Optional, TypeVar, Union
@@ -222,6 +224,11 @@ def _classify_exception_type(error: BaseException) -> Optional[FailureClass]:
     module = type(error).__module__.lower()
     if isinstance(error, TimeoutError) or "timeout" in name:
         return FailureClass.TIMEOUT
+    if isinstance(error, TypeError):
+        # A deterministic argument-contract failure (e.g. the provider rejects
+        # a clamped kwarg). Retrying identical arguments cannot help, so treat
+        # it as a fail-fast invalid request instead of an UNKNOWN retry storm.
+        return FailureClass.INVALID_REQUEST
     if "connection" in name or "sslerror" in name or "proxyerror" in name:
         return FailureClass.NETWORK_ERROR
     if "jsondecodeerror" in name or (isinstance(error, ValueError) and "json" in module):
@@ -532,6 +539,37 @@ def _looks_like_error_string(result: Any) -> bool:
     return low.startswith("error:") or low.startswith("error in ") or low.startswith("[provider_error]")
 
 
+def _retry_deadline(kwargs: Dict[str, Any]) -> Optional[float]:
+    """Wall-clock deadline for a retry cycle, from a positive ``timeout`` kwarg.
+
+    The same ``timeout`` value is forwarded to the callable as its transport
+    timeout; here it additionally caps retry/sleep time so total call time is
+    bounded. Returns None (unlimited) when absent or non-positive.
+    """
+    try:
+        budget = float(kwargs.get("timeout") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if budget <= 0:
+        return None
+    return time.monotonic() + budget
+
+
+_SYNC_ATTEMPT_EXECUTOR: Optional[ThreadPoolExecutor] = None
+_SYNC_ATTEMPT_EXECUTOR_LOCK = threading.Lock()
+
+
+def _sync_attempt_executor() -> ThreadPoolExecutor:
+    """Shared worker pool used to bound in-flight sync provider attempts."""
+    global _SYNC_ATTEMPT_EXECUTOR
+    with _SYNC_ATTEMPT_EXECUTOR_LOCK:
+        if _SYNC_ATTEMPT_EXECUTOR is None:
+            _SYNC_ATTEMPT_EXECUTOR = ThreadPoolExecutor(
+                max_workers=8, thread_name_prefix="nexus-sync-attempt"
+            )
+        return _SYNC_ATTEMPT_EXECUTOR
+
+
 def call_with_reliability(
     provider_id: Any,
     func: Optional[Callable[..., T]] = None,
@@ -563,6 +601,13 @@ def call_with_reliability(
 
     Raises :class:`ProviderCallError` (never containing secrets) on final
     failure, or :class:`CircuitOpenError` if the provider breaker is open.
+
+    A positive ``timeout`` kwarg bounds the whole retry cycle: it is forwarded
+    to the callable as its per-attempt transport timeout *and* used as the
+    wall-clock budget for retries, so a pathological provider (repeated
+    ``Retry-After`` headers, stalled connections) can never exceed the caller's
+    budget. When no ``timeout`` is supplied the cycle is bounded only by
+    ``max_attempts`` (backwards compatible).
     """
     provider_form = func is not None
     if provider_form:
@@ -580,6 +625,7 @@ def call_with_reliability(
 
     breaker = breakers.get(p_id) if (breakers is not None and provider_form) else None
     provider_label = p_id or "gateway/tool"
+    deadline = _retry_deadline(kwargs)
 
     # ``inspect.iscoroutinefunction`` does not recognize an object whose
     # asynchronous behavior is implemented by ``async __call__``. Treat such
@@ -592,10 +638,23 @@ def call_with_reliability(
         async def _async_call() -> T:
             last: Optional[Classification] = None
             for attempt in range(1, max(1, rp.max_attempts) + 1):
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ProviderCallError(
+                            last or classify_failure(body="retry budget exhausted"), p_id
+                        )
+                else:
+                    remaining = None
                 if breaker is not None:
                     breaker.before_call()  # raises CircuitOpenError when open
                 try:
-                    result = await fn(*args, **kwargs)
+                    if remaining is not None:
+                        # Bound the in-flight attempt too: a stalled call must
+                        # not eat the whole budget while we wait for it.
+                        result = await asyncio.wait_for(fn(*args, **kwargs), timeout=remaining)
+                    else:
+                        result = await fn(*args, **kwargs)
                     if _looks_like_error_string(result):
                         raise ProviderCallError(classify_failure(body=result), p_id)
                     if breaker is not None:
@@ -634,6 +693,11 @@ def call_with_reliability(
 
                 delay = rp.compute_delay(attempt, classification.retry_after)
                 if delay > 0:
+                    if deadline is not None:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise ProviderCallError(classification, p_id)
+                        delay = min(delay, remaining)
                     if sleep is time.sleep:
                         await asyncio.sleep(delay)
                     else:
@@ -645,10 +709,35 @@ def call_with_reliability(
 
     last = None
     for attempt in range(1, max(1, rp.max_attempts) + 1):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ProviderCallError(
+                last or classify_failure(body="retry budget exhausted"), p_id
+            )
         if breaker is not None:
             breaker.before_call()  # raises CircuitOpenError when open
         try:
-            result = fn(*args, **kwargs)
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ProviderCallError(
+                        last or classify_failure(body="retry budget exhausted"), p_id
+                    )
+            else:
+                remaining = None
+            if remaining is not None:
+                # Bound the in-flight attempt for the sync path too (the async
+                # path uses ``asyncio.wait_for`` above): run the attempt in a
+                # worker thread so a stalled call cannot eat the whole retry
+                # budget while the caller waits on it.
+                future = _sync_attempt_executor().submit(fn, *args, **kwargs)
+                try:
+                    result = future.result(timeout=remaining)
+                except concurrent.futures.TimeoutError:
+                    raise TimeoutError(
+                        f"attempt exceeded deadline ({remaining:.1f}s)"
+                    )
+            else:
+                result = fn(*args, **kwargs)
             if _looks_like_error_string(result):
                 raise ProviderCallError(
                     classify_failure(body=result), p_id
@@ -685,6 +774,11 @@ def call_with_reliability(
 
         delay = rp.compute_delay(attempt, classification.retry_after)
         if delay > 0:
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ProviderCallError(classification, p_id)
+                delay = min(delay, remaining)
             sleep(delay)
 
     raise ProviderCallError(last or classify_failure(body="unknown failure"), p_id)

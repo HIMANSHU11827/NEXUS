@@ -28,7 +28,7 @@ import os
 import ssl
 from typing import List, Optional
 
-from gateway.base import BasePlatformAdapter, MessageEvent, SendResult
+from gateway.base import BasePlatformAdapter, HEALTH_HEALTHY, HEALTH_UNAVAILABLE, MessageEvent, SendResult
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +180,12 @@ class IRCAdapter(BasePlatformAdapter):
             pass
         except Exception as e:  # pragma: no cover - network dependent
             logger.debug(f"IRC read loop error: {e}")
+        # EOF or a transport error ends the read loop. Report the adapter down
+        # so the gateway supervisor schedules a reconnect; a stale "healthy"
+        # flag would leave a dead socket invisible forever.
+        self.connected = False
+        self.health = HEALTH_UNAVAILABLE
+        self.last_error = "IRC connection closed by server"
 
     # ------------------------------------------------------------------ #
     # Parsing

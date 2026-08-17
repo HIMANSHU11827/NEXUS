@@ -5,41 +5,48 @@ from gateway.platforms import all_adapters, get_adapter
 from gateway.run import GatewayRunner
 from gateway.supervisor import GatewaySupervisor, PlatformRuntime
 
+# Every adapter class exported by ``gateway.platforms`` must also be
+# importable from the ``gateway`` package itself, so callers can rely on a
+# single public import surface regardless of platform family. Kept in sync
+# with ``gateway/platforms/__init__.py`` (audit P23).
+_PLATFORM_ADAPTER_NAMES = (
+    "BlueBubblesAdapter",
+    "DingtalkAdapter",
+    "DiscordAdapter",
+    "EmailAdapter",
+    "FeishuAdapter",
+    "GoogleChatAdapter",
+    "IRCAdapter",
+    "LineAdapter",
+    "MattermostAdapter",
+    "MatrixAdapter",
+    "MetaAdapter",
+    "QQBotAdapter",
+    "SMSAdapter",
+    "SignalAdapter",
+    "SlackAdapter",
+    "TeamsAdapter",
+    "TelegramAdapter",
+    "WeComAdapter",
+    "WeixinAdapter",
+    "WhatsAppAdapter",
+    "YuanbaoAdapter",
+)
+
 __all__ = [
     "BasePlatformAdapter",
-    "DiscordAdapter",
-    "EmailAdapter",
     "GatewayRunner",
     "GatewaySupervisor",
-    "MattermostAdapter",
-    "MatrixAdapter",
     "MessageEvent",
     "MessageType",
-    "MetaAdapter",
     "PlatformRuntime",
-    "SMSAdapter",
     "SendResult",
-    "SignalAdapter",
-    "SlackAdapter",
-    "TelegramAdapter",
-    "WhatsAppAdapter",
     "get_adapter",
     "all_adapters",
+    *_PLATFORM_ADAPTER_NAMES,
 ]
 
-_LAZY_PLATFORM_EXPORTS = {
-    "DiscordAdapter",
-    "EmailAdapter",
-    "MattermostAdapter",
-    "MatrixAdapter",
-    "MetaAdapter",
-    "SMSAdapter",
-    "SendResult",
-    "SignalAdapter",
-    "SlackAdapter",
-    "TelegramAdapter",
-    "WhatsAppAdapter",
-}
+_LAZY_PLATFORM_EXPORTS = set(_PLATFORM_ADAPTER_NAMES)
 
 
 def __getattr__(name: str):

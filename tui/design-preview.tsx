@@ -4,7 +4,7 @@ import {mkdir, writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {Box, render} from 'ink';
 import chalk from 'chalk';
-import {NexusBanner, WorkingStatus} from './banner.js';
+import {WorkingStatus} from './banner.js';
 import {ChatLineView, buildChatLines} from './chat-view.js';
 import {InputComposer} from './input-composer.js';
 import {StatusBar} from './status-bar.js';
@@ -81,14 +81,6 @@ const Preview = () => {
     return (
         <Box width={WIDTH} height={HEIGHT} flexDirection="row" backgroundColor={THEME.appBg}>
             <Box width={layout.mainWidth} height={HEIGHT} flexDirection="column" backgroundColor={THEME.panelAltBg}>
-                <NexusBanner
-                    width={layout.chatContentWidth}
-                    isWorking
-                    phase="verifying"
-                    runId="7f4c2a1d"
-                    elapsedMs={134000}
-                    connectionState="online"
-                />
                 <Box width={layout.chatContentWidth + 2} height={layout.chatViewportHeight} paddingX={1} flexDirection="column">
                     {chatLines.map(line => <ChatLineView key={line.key} line={line} width={layout.chatContentWidth} frame={3} />)}
                     <WorkingStatus
@@ -116,7 +108,7 @@ const Preview = () => {
             </Box>
             <NexusWorkspacePanel
                 timeline={[]}
-                usage={{contextTokens: 2300, contextLimit: 8000, inputTokens: 1100, outputTokens: 1200}}
+                usage={{contextTokens: 2300, contextLimit: 8000, inputTokens: 1100, outputTokens: 1200, source: 'provider'}}
                 mode="workspace"
                 agents={[]}
                 tasks={[]}

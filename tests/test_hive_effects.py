@@ -164,3 +164,56 @@ async def test_cancelled_sync_effect_remains_uncertain_for_safe_retry(tmp_path):
     decision, message = ledger.claim(key, "retry-agent", "write")
     assert decision == "uncertain"
     assert "duplicate" in message
+
+
+@pytest.mark.asyncio
+async def test_stale_cancellation_resistant_sync_tool_is_not_duplicated(tmp_path):
+    import asyncio
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+    model_calls = 0
+
+    async def llm(_messages):
+        nonlocal model_calls
+        model_calls += 1
+        if model_calls == 1:
+            return '<tool_call>{"tool":"write","params":{}}</tool_call>'
+        return "FINAL ANSWER: done"
+
+    def write():
+        calls.append("write")
+        started.set()
+        release.wait(timeout=2)
+        return "late write"
+
+    engine = NexusHiveEngine(
+        str(tmp_path),
+        max_agent_retries=0,
+        replacement_cancel_timeout=0.05,
+        shutdown_timeout=0.05,
+    )
+    engine.set_llm_call(llm)
+    hive_id, agents = await engine.spawn_hive(
+        [("perform write", "ENGINEER")], tool_registry={"write": write}
+    )
+    agent = agents[0]
+    await asyncio.wait_for(asyncio.to_thread(started.wait, 1), 1)
+    agent.last_heartbeat -= 100
+    agent.last_progress_at -= 100
+
+    replaced = await engine.recover_stuck_agents(
+        stale_after=1, hive_id=hive_id
+    )
+    assert replaced == []
+    assert calls == ["write"]
+    assert agent.replacement_count == 0
+    assert agent.status == "failed"
+    assert "duplicate" in agent.error.lower()
+
+    release.set()
+    await asyncio.sleep(0.05)
+    assert calls == ["write"]
+    await engine.aclose()

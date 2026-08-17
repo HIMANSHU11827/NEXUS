@@ -573,7 +573,11 @@ class NexusSkillEngine:
     # ─── Mutation ─────────────────────────────────────────────
 
     def craft_skill(self, name, prompt, category="crafted", description="", mode="inject"):
+        import re as _re
         safe_name = name.lower().replace(" ", "_").replace("-", "_")
+        safe_name = _re.sub(r"[^a-z0-9_]", "", safe_name)[:64]
+        if not safe_name:
+            return {"error": "invalid skill name", "created": False}
         fpath = Path(self._root) / ".opencode" / "skills" / safe_name / "SKILL.md"
         fpath.parent.mkdir(parents=True, exist_ok=True)
         desc = description or f"Auto-crafted skill: {name}"

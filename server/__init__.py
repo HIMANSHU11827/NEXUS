@@ -150,6 +150,7 @@ _RUNTIME_SETTINGS = {
     "additional_dirs": [],
     "workspace_root": "",
     "thinking": True,
+    "effort": "medium",
 }
 _RUNTIME_FEATURE_DEFAULTS = {
     "hive": True,
@@ -172,6 +173,7 @@ _HIVES_LOCK = threading.Lock()
 _HIVE_ENGINE = None
 _HIVE_ENGINE_LOCK = threading.Lock()
 _HIVE_MANIFEST_PATH = os.path.join(_PROJECT_ROOT, "workspace", "hives", "index.json")
+_HIVE_CONSOLIDATION_TASKS: set = set()
 
 
 def _persist_hive_manifest() -> None:
@@ -186,6 +188,41 @@ def _persist_hive_manifest() -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, _HIVE_MANIFEST_PATH)
+
+
+async def _consolidate_api_hive(hive_id: str, hive_engine: Any) -> None:
+    """Consolidate an API-created hive and persist its result.
+
+    Runs detached so ``POST /api/hives`` can return immediately; the final
+    consolidated text (or a consolidation error) is stored on the hive
+    manifest entry and surfaced by ``GET /api/hives``.
+    """
+    try:
+        timeout = max(1.0, float(os.environ.get("NEXUS_HIVE_TIMEOUT", "120")))
+        consolidated = await hive_engine.consolidate_hive(hive_id, timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        with _HIVES_LOCK:
+            entry = _HIVES.get(hive_id)
+            if entry is not None:
+                entry["consolidation_error"] = (
+                    f"consolidation timed out after {timeout:g}s: {exc}"
+                )
+        _persist_hive_manifest()
+        return
+    except Exception as exc:
+        logger.warning("hive %s consolidation failed: %s", hive_id, exc, exc_info=True)
+        with _HIVES_LOCK:
+            entry = _HIVES.get(hive_id)
+            if entry is not None:
+                entry["consolidation_error"] = str(exc)
+        _persist_hive_manifest()
+        return
+    with _HIVES_LOCK:
+        entry = _HIVES.get(hive_id)
+        if entry is not None:
+            entry["result"] = str(consolidated or "").strip()
+            entry["consolidated_at"] = time.time()
+    _persist_hive_manifest()
 
 
 def _load_hive_manifest() -> None:
@@ -408,12 +445,16 @@ async def _queue_driver_supervisor() -> None:
 _CHECKPOINTS_ROOT = os.path.join(_PROJECT_ROOT, "workspace", "checkpoints")
 # Heavy/generated/app-runtime paths never enter a checkpoint snapshot. This keeps
 # snapshots small and fast, and guarantees restore never touches those areas.
+# ``workspace/`` itself is the default snapshot root, so its internal stores
+# (checkpoints, work events) must be excluded by name or every snapshot copies
+# all prior checkpoints and a restore can delete newer ones.
 _CHECKPOINT_SKIP_NAMES = frozenset({
     ".git", ".venv", ".voice-venv", ".research", ".kilo", ".opencode", ".tmp",
     ".cache", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".tox",
     ".playwright-cli", ".playwright-mcp", ".nexus", "workspace", "models",
     "bin", "logs", "graphify-out", "queue", "dist", "build", "node_modules",
     "__pycache__", ".idea", ".vscode", ".next", "coverage", "htmlcov", "deploy",
+    "checkpoints", "work_events",
 })
 _CHECKPOINT_SKIP_SUFFIXES = frozenset({
     ".pyc", ".pyo", ".so", ".dll", ".exe", ".pyd", ".gguf", ".safetensors",
@@ -513,14 +554,14 @@ async def _hive_supervisor_loop() -> None:
 @asynccontextmanager
 async def _app_lifespan(_app: FastAPI):
     """Join response-detached learning tasks before asyncio tears down."""
-    global _CRON_TICK_TASK, _QUEUE_DRIVER, _QUEUE_DRIVER_TASK, _QUEUE_DRIVER_STOPPING, _HIVE_SUPERVISOR_TASK
+    global _CRON_TICK_TASK, _QUEUE_DRIVER, _QUEUE_DRIVER_TASK, _QUEUE_DRIVER_STOPPING, _HIVE_SUPERVISOR_TASK, _HIVE_ENGINE
     _validate_public_deployment()
     _warm_workspace_summary()
-    if os.environ.get("NEXUS_HIVE_AUTO_RESUME", "false").lower() in {"1", "true", "yes", "on"}:
+    if os.environ.get("NEXUS_HIVE_AUTO_RESUME", "true").lower() in {"1", "true", "yes", "on"}:
         await _auto_resume_interrupted_hives()
     _QUEUE_DRIVER_STOPPING = False
     _CRON_TICK_TASK = asyncio.create_task(_cron_tick_loop())
-    if os.environ.get("NEXUS_EMBED_QUEUE_DRIVER", "false").lower() in {"1", "true", "yes", "on"}:
+    if _embed_queue_driver_enabled():
         _QUEUE_DRIVER_TASK = asyncio.create_task(_queue_driver_supervisor())
     if os.environ.get("NEXUS_HIVE_STUCK_RECOVERY", "true").lower() in {"1", "true", "yes", "on"}:
         _HIVE_SUPERVISOR_TASK = asyncio.create_task(_hive_supervisor_loop())
@@ -543,6 +584,24 @@ async def _app_lifespan(_app: FastAPI):
         _HIVE_SUPERVISOR_TASK.cancel()
         await asyncio.gather(_HIVE_SUPERVISOR_TASK, return_exceptions=True)
     _HIVE_SUPERVISOR_TASK = None
+    pending_consolidations = [t for t in _HIVE_CONSOLIDATION_TASKS if not t.done()]
+    for task in pending_consolidations:
+        task.cancel()
+    if pending_consolidations:
+        await asyncio.gather(*pending_consolidations, return_exceptions=True)
+    _HIVE_CONSOLIDATION_TASKS.clear()
+    with _HIVE_ENGINE_LOCK:
+        hive_engine, _HIVE_ENGINE = _HIVE_ENGINE, None
+    if hive_engine is not None:
+        try:
+            await asyncio.wait_for(
+                hive_engine.aclose(),
+                timeout=max(1.0, float(os.environ.get("NEXUS_HIVE_DRAIN_TIMEOUT", "15"))),
+            )
+        except asyncio.TimeoutError:
+            logger.error("Hive engine shutdown exceeded its bounded drain timeout")
+        except Exception:
+            logger.exception("Hive engine shutdown failed")
     if _CRON_TICK_TASK is not None and not _CRON_TICK_TASK.done():
         _CRON_TICK_TASK.cancel()
         await asyncio.gather(_CRON_TICK_TASK, return_exceptions=True)
@@ -725,7 +784,24 @@ async def auth_login(provider: str = "token", redirect: str = ""):
     if not oauth:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
 
-    base_redirect = redirect or f"{os.environ.get('NEXUS_API_BASE', 'http://127.0.0.1:8000')}/api/auth/callback"
+    configured_base = os.environ.get("NEXUS_API_BASE", "http://127.0.0.1:8000")
+    if redirect:
+        # Only loopback or the configured API origin may be used as the OAuth
+        # redirect target; an attacker-controlled redirect_uri could capture
+        # authorization codes with a loosely registered provider client.
+        try:
+            parsed = urllib.parse.urlparse(redirect)
+        except Exception:
+            parsed = None
+        if parsed and parsed.scheme in ("http", "https") and parsed.netloc:
+            loopback_ok = parsed.hostname in ("127.0.0.1", "localhost", "::1")
+            same_origin = redirect.rstrip("/") == configured_base.rstrip("/")
+            if not (loopback_ok or same_origin):
+                raise HTTPException(status_code=400, detail="redirect must be loopback or the configured API origin")
+        elif parsed and parsed.path and not redirect.startswith(("/", "?")):
+            raise HTTPException(status_code=400, detail="redirect must be a relative path or loopback URL")
+
+    base_redirect = redirect or f"{configured_base}/api/auth/callback"
     redirect_uri = f"{base_redirect}?provider={provider}"
     url, state = get_oauth_authorize_url(provider, redirect_uri)
     return RedirectResponse(url=url)
@@ -1026,7 +1102,11 @@ def safe_workspace_read_path(raw_path: str) -> str:
         value = os.path.join(_PROJECT_ROOT, value)
     root = os.path.realpath(os.path.abspath(_PROJECT_ROOT))
     path = os.path.realpath(os.path.abspath(value))
-    if os.path.commonpath([root, path]) != root:
+    try:
+        inside = os.path.commonpath([root, path]) == root
+    except ValueError:
+        inside = False
+    if not inside:
         raise HTTPException(status_code=400, detail="Path is outside the NEXUS workspace")
     if not os.path.exists(path) or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not found")
@@ -1917,6 +1997,24 @@ def set_active_session(session_id: str, source: str = "cli-api") -> None:
         logger.warning("set_active_session: failed for %s: %s", session_id, e)
 
 
+_CHAT_SESSION_GUARD_LOCK = threading.Lock()
+_CHAT_SESSION_GUARDS: Dict[str, asyncio.Lock] = {}
+
+
+def _chat_session_guard(session_id: str) -> asyncio.Lock:
+    """Per-session asyncio lock that makes the ``/api/chat`` run-start check
+    atomic. ``stream_run`` serializes runs through its own run guard, but the
+    route's ``is_running`` check happens long before that guard is acquired;
+    without this lock two concurrent requests for the same session can both
+    pass the check and both start a run."""
+    with _CHAT_SESSION_GUARD_LOCK:
+        guard = _CHAT_SESSION_GUARDS.get(session_id)
+        if guard is None:
+            guard = asyncio.Lock()
+            _CHAT_SESSION_GUARDS[session_id] = guard
+        return guard
+
+
 def _normalize_permission_mode(mode: str) -> str:
     aliases = {
         "": "auto",
@@ -2223,6 +2321,8 @@ def _load_runtime_preferences() -> None:
             os.environ["NEXUS_SANDBOX_TIER"] = str(_RUNTIME_SETTINGS["sandbox_tier"])
         if "thinking" in runtime:
             _RUNTIME_SETTINGS["thinking"] = bool(runtime.get("thinking", True))
+        if "effort" in runtime:
+            _RUNTIME_SETTINGS["effort"] = str(runtime.get("effort") or "medium").strip().lower()
         if "model" in runtime:
             _RUNTIME_SETTINGS["model"] = str(runtime.get("model") or "").strip()
         if "provider" in runtime:
@@ -2253,6 +2353,7 @@ def _save_runtime_preferences() -> None:
             runtime["permission_allowlist"] = list(_RUNTIME_SETTINGS.get("permission_allowlist") or [])
             runtime["sandbox_tier"] = _normalize_sandbox_tier(_RUNTIME_SETTINGS.get("sandbox_tier") or "normal")
             runtime["thinking"] = bool(_RUNTIME_SETTINGS.get("thinking", True))
+            runtime["effort"] = str(_RUNTIME_SETTINGS.get("effort") or "medium").strip().lower()
             runtime["model"] = str(_RUNTIME_SETTINGS.get("model") or "").strip()
             runtime["provider"] = str(_RUNTIME_SETTINGS.get("provider") or "").strip()
             runtime["profile"] = str(_RUNTIME_SETTINGS.get("profile") or "").strip()
@@ -2714,9 +2815,21 @@ def _lifecycle_persistence_health() -> Dict[str, Any]:
     return {"available": True, "operation": "none", "error": "", "updated_at": 0.0}
 
 
+def _embed_queue_driver_enabled() -> bool:
+    """Whether the server should run the embedded queue worker.
+
+    Defaults to True: a server that accepts queued/cron work must have a
+    worker, otherwise tasks accumulate forever. Set
+    ``NEXUS_EMBED_QUEUE_DRIVER=false`` to run an external worker instead.
+    """
+    return os.environ.get("NEXUS_EMBED_QUEUE_DRIVER", "true").lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 @app.get("/api/health")
 def health():
-    embedded = os.environ.get("NEXUS_EMBED_QUEUE_DRIVER", "false").lower() in {"1", "true", "yes", "on"}
+    embedded = _embed_queue_driver_enabled()
     worker_running = bool(_QUEUE_DRIVER_TASK is not None and not _QUEUE_DRIVER_TASK.done())
     if embedded and not worker_running:
         # A server that advertises an embedded worker while that worker is
@@ -2732,6 +2845,71 @@ def health():
     }
 
 
+@app.get("/api/queue")
+def queue_snapshot(session_id: str = "", include_global: bool = False, limit: int = 50):
+    """Return a safe, bounded snapshot of the durable task queue.
+
+    The TUI's ``/tasks`` view is intentionally backed by canonical session
+    work-items.  This endpoint is the separate operator view for the SQLite
+    queue that runs cron/autonomous work, so a client can distinguish queued
+    work from an in-flight interactive turn without receiving lease tokens or
+    raw payload metadata.
+    """
+    try:
+        from queue.status import default_status_path, read_incident, read_status
+        from queue.store import TaskQueue
+
+        requested_session = safe_session_id(session_id) if session_id else ""
+        bounded_limit = _work_item_limit(limit)
+        queue = TaskQueue(root=_PROJECT_ROOT)
+        states = queue.list_states(requested_session, include_global=include_global)
+        rows = []
+        for row in queue.list_unfinished():
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+            task_session = str(meta.get("session_id") or "")
+            if requested_session and task_session != requested_session:
+                if not (include_global and not task_session):
+                    continue
+            description = redact_secrets(str(payload.get("task_desc") or "")).strip()
+            rows.append({
+                "id": int(row.get("id")),
+                "state": str(row.get("state") or "unknown"),
+                "summary": description[:240],
+                "session_id": task_session,
+                "priority": int(payload.get("priority") or 0),
+                "attempts": int(row.get("attempts") or 0),
+                "max_attempts": int(row.get("max_attempts") or 0),
+                "created_at": float(row.get("created_at") or 0),
+                "updated_at": float(row.get("updated_at") or 0),
+                "leased_until": row.get("leased_until"),
+"error": redact_secrets(str(row.get("error") or ""))[:500],
+            })
+            if len(rows) >= bounded_limit:
+                break
+
+        status_path = default_status_path(_PROJECT_ROOT)
+        embedded = _embed_queue_driver_enabled()
+        worker_running = bool(_QUEUE_DRIVER_TASK is not None and not _QUEUE_DRIVER_TASK.done())
+        scope = "session+global" if requested_session and include_global else "session" if requested_session else "project"
+        return {
+            "status": "success",
+            "scope": scope,
+            "mode": "embedded" if embedded else "external",
+            "worker": "running" if worker_running else "external" if not embedded else "stopped",
+            "pending": queue.pending_count(requested_session, include_global=include_global),
+            "states": states,
+            "runtime": read_status(status_path),
+            "incident": read_incident(_PROJECT_ROOT),
+            "tasks": rows,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Queue snapshot failed: %s", redact_secrets(exc), exc_info=True)
+        raise HTTPException(status_code=503, detail="Queue status unavailable") from exc
+
+
 @app.get("/api/metrics")
 def runtime_metrics():
     """Return bounded, restart-safe runtime metrics for operators."""
@@ -2744,7 +2922,7 @@ def runtime_metrics():
     )
     with _HIVES_LOCK:
         hive_statuses = [str(item.get("status") or "unknown").lower() for item in _HIVES.values()]
-    embedded = os.environ.get("NEXUS_EMBED_QUEUE_DRIVER", "false").lower() in {"1", "true", "yes", "on"}
+    embedded = _embed_queue_driver_enabled()
     return {
         "status": "success",
         "service": "nexus-api",
@@ -2883,6 +3061,25 @@ def create_session():
         raise HTTPException(status_code=500, detail=_public_api_failure("Session creation", e))
 
 
+def _command_load_session(session_id: str):
+    """Session switch callback used by the shared slash-command registry."""
+    sid = safe_session_id(session_id)
+    loop = get_loop(sid)
+    apply_runtime_settings(loop)
+    set_active_session(sid, source="cli-api:command-session")
+    return {"id": loop.session_id}
+
+
+def _command_sync_permission_mode(mode: str) -> None:
+    from safety.safety_store import sync_permission_from_legacy
+    sync_permission_from_legacy(mode)
+
+
+def _command_sync_sandbox_tier(tier: str) -> None:
+    from safety.safety_store import sync_sandbox_from_legacy
+    sync_sandbox_from_legacy(tier)
+
+
 @app.post("/api/sessions/load")
 async def load_session(request: Request):
     try:
@@ -2965,6 +3162,14 @@ async def chat(request: Request):
     turn_id = chat_request.turn_id
     task_id = str(data.get("task_id") or "")
     max_tokens = chat_request.max_tokens
+    requested_effort = str(data.get("reasoning_effort") or _RUNTIME_SETTINGS.get("effort") or "medium").strip().lower()
+    if requested_effort == "extra_high":
+        requested_effort = "xhigh"
+    effort_tokens = {"minimal": 1024, "low": 2048, "medium": 4096, "high": 8192, "xhigh": 12288, "max": 16384, "ultra": 24576}
+    if max_tokens is None and requested_effort in effort_tokens:
+        max_tokens = effort_tokens[requested_effort]
+    if requested_effort in effort_tokens:
+        _RUNTIME_SETTINGS["effort"] = requested_effort
     conversation_history = chat_request.messages
     stream = bool(data.get("stream", False))
     canonical_events = bool(data.get("canonical_events", False))
@@ -3077,6 +3282,12 @@ async def chat(request: Request):
         event_queue: asyncio.Queue = asyncio.Queue(maxsize=_WORK_EVENT_STREAM_QUEUE_SIZE)
         chunk_queue: asyncio.Queue = asyncio.Queue(maxsize=_CHAT_CHUNK_QUEUE_SIZE)
         owner_loop = asyncio.get_running_loop()
+        # Keep the generator handle outside ``pump_run`` so cancellation of
+        # the SSE producer can explicitly close the underlying V5 stream.
+        # Merely requesting an abort is cooperative; without aclose(), an
+        # async generator blocked in a provider/tool await can retain the V5
+        # run lock and make the next prompt look like a duplicate run.
+        stream_gen = None
 
         def enqueue_event(event):
             # Persistence is authoritative. If a slow client fills the live
@@ -3117,7 +3328,7 @@ async def chat(request: Request):
             return event
 
         async def pump_run():
-            nonlocal stream_succeeded
+            nonlocal stream_succeeded, stream_gen
             response_parts: list[str] = []
             completed_normally = False
             run_succeeded = True
@@ -3135,15 +3346,32 @@ async def chat(request: Request):
                 if task_id:
                     run_kwargs["task_id"] = task_id
                 run_kwargs["deadline_seconds"] = run_timeout
-                async for chunk in nexus_loop.stream_run(
-                    effective_prompt,
-                    **run_kwargs,
-                ):
+
+                def handle_chunk(chunk: dict) -> None:
+                    nonlocal run_succeeded, stream_succeeded
                     if chunk.get("type") == "content":
                         response_parts.append(str(chunk.get("data") or ""))
                     if chunk.get("type") == "done" and isinstance(chunk.get("data"), dict):
                         run_succeeded = bool(chunk["data"].get("success", True))
                         stream_succeeded = run_succeeded
+                    return chunk
+
+                stream_gen = nexus_loop.stream_run(
+                    effective_prompt,
+                    **run_kwargs,
+                )
+                async with _chat_session_guard(sid):
+                    if bool(getattr(nexus_loop, "is_running", False)):
+                        await chunk_queue.put(("error", "A run is already active for this session"))
+                        return
+                    try:
+                        first_chunk = await stream_gen.__anext__()
+                    except StopAsyncIteration:
+                        first_chunk = {"type": "done", "data": {"success": True}}
+                handle_chunk(first_chunk)
+                await chunk_queue.put(("chunk", first_chunk))
+                async for chunk in stream_gen:
+                    handle_chunk(chunk)
                     await chunk_queue.put(("chunk", chunk))
                 completed_normally = True
             except asyncio.TimeoutError:
@@ -3162,6 +3390,11 @@ async def chat(request: Request):
                 failure_reason = str(exc)
                 await chunk_queue.put(("error", str(exc)))
             finally:
+                if stream_gen is not None:
+                    try:
+                        await stream_gen.aclose()
+                    except Exception:
+                        logger.debug("chat stream close failed for %s", turn_id, exc_info=True)
                 if canonical_events and response_parts and (completed_normally or failure_reason):
                     stream_event_sink({
                         "event_id": f"message_{turn_id}",
@@ -3239,8 +3472,16 @@ async def chat(request: Request):
                     elif kind == "error":
                         safe_err = str(value).replace('\n', ' ').replace('\r', '')
                         yield "event: error\n" + _sse_data(f"[NEXUS_SYSTEM_ERROR]: {safe_err}")
-                    elif value.get("type") == "content":
+                    elif isinstance(value, dict) and value.get("type") == "content":
                         yield _sse_data(value['data'])
+                    elif isinstance(value, dict) and value.get("type") == "done":
+                        # Keep the existing terminal [DONE] protocol, but
+                        # expose measured provider usage before it so clients
+                        # can render a truthful context meter.
+                        done_data = value.get("data")
+                        usage = done_data.get("usage") if isinstance(done_data, dict) else None
+                        if isinstance(usage, dict) and usage.get("source") == "provider":
+                            yield "event: usage\n" + _sse_data(json.dumps(usage, ensure_ascii=False))
         except GeneratorExit:
             return
         except Exception as e:
@@ -3287,31 +3528,34 @@ async def chat(request: Request):
             run_kwargs["profile"] = safe_profile
         if task_id:
             run_kwargs["task_id"] = task_id
-        gen = nexus_loop.stream_run(
-            effective_prompt,
-            **run_kwargs,
-        )
         text = ""
-        try:
-            text = await asyncio.wait_for(_collect_all(gen), timeout=run_timeout)
-        except asyncio.TimeoutError:
-            request_abort = getattr(nexus_loop, "request_abort", None)
-            if callable(request_abort):
-                request_abort(turn_id, "deadline_exceeded")
-            if hasattr(gen, "aclose"):
-                await gen.aclose()
-            text = f"[NEXUS_SYSTEM_ERROR]: Response timed out after {run_timeout:.0f} seconds"
-        finally:
-            try:
-                await asyncio.to_thread(
-                    complete_chat_workflow,
-                    sid,
-                    prompt,
-                    turn_id,
-                    "failed" if text.startswith("[NEXUS_SYSTEM_ERROR]") else "done",
+        async with _chat_session_guard(sid):
+            if bool(getattr(nexus_loop, "is_running", False)):
+                text = "[NEXUS_SYSTEM_ERROR]: A run is already active for this session"
+            else:
+                gen = nexus_loop.stream_run(
+                    effective_prompt,
+                    **run_kwargs,
                 )
-            except Exception:
-                logger.debug("complete_chat_workflow failed for %s", sid, exc_info=True)
+                try:
+                    text = await asyncio.wait_for(_collect_all(gen), timeout=run_timeout)
+                except asyncio.TimeoutError:
+                    request_abort = getattr(nexus_loop, "request_abort", None)
+                    if callable(request_abort):
+                        request_abort(turn_id, "deadline_exceeded")
+                    if hasattr(gen, "aclose"):
+                        await gen.aclose()
+                    text = f"[NEXUS_SYSTEM_ERROR]: Response timed out after {run_timeout:.0f} seconds"
+        try:
+            await asyncio.to_thread(
+                complete_chat_workflow,
+                sid,
+                prompt,
+                turn_id,
+                "failed" if text.startswith("[NEXUS_SYSTEM_ERROR]") else "done",
+            )
+        except Exception:
+            logger.debug("complete_chat_workflow failed for %s", sid, exc_info=True)
         return {"response": text}
 
 
@@ -3394,6 +3638,10 @@ async def list_models():
 
 @app.get("/models/saved")
 @app.get("/api/models/saved")
+async def list_saved_models():
+    return await asyncio.to_thread(_list_saved_models_sync)
+
+
 def _list_saved_models_sync():
     """Return provider-configured models in the shape used by the GUI picker.
 
@@ -3434,12 +3682,6 @@ def _list_saved_models_sync():
     except Exception:
         logger.warning("server: saved model listing failed", exc_info=True)
     return {"models": models}
-
-
-@app.get("/models/saved")
-@app.get("/api/models/saved")
-async def list_saved_models():
-    return await asyncio.to_thread(_list_saved_models_sync)
 
 
 @app.post("/v1/chat/completions")
@@ -3638,6 +3880,46 @@ def _work_item_limit(limit: int) -> int:
     return value
 
 
+def _active_work_item_plan(items: List[Any]) -> Optional[Dict[str, Any]]:
+    """Project only the newest durable plan for TUI restart restoration.
+
+    A session can retain work items from several superseded plans. Returning
+    every item as one checklist makes old and new missions appear to be a
+    single plan after reconnect. Plan creation time, rather than a later
+    status update, selects the newest identity.
+    """
+    grouped: Dict[str, List[Any]] = {}
+    for item in items:
+        plan_id = str(getattr(item, "plan_id", "") or "").strip()
+        if plan_id:
+            grouped.setdefault(plan_id, []).append(item)
+    if not grouped:
+        return None
+    plan_id, steps = max(
+        grouped.items(),
+        key=lambda pair: max(float(getattr(item, "created_at", 0.0) or 0.0) for item in pair[1]),
+    )
+    def step_order(item: Any) -> tuple:
+        try:
+            index = int((getattr(item, "metadata", {}) or {}).get("step_index", 10**9))
+        except (TypeError, ValueError):
+            index = 10**9
+        return (
+            index,
+            float(getattr(item, "created_at", 0.0) or 0.0),
+            str(getattr(item, "task_id", "") or ""),
+        )
+
+    ordered = sorted(
+        steps,
+        key=step_order,
+    )
+    return {
+        "plan_id": plan_id,
+        "steps": [_public_work_item(item) for item in ordered],
+    }
+
+
 @app.get("/api/work-items")
 def list_work_items_api(session_id: str = "", limit: int = 100):
     """List durable WorkItems without changing the legacy /api/tasks contract."""
@@ -3652,6 +3934,7 @@ def list_work_items_api(session_id: str = "", limit: int = 100):
     return {
         "status": "success",
         "work_items": [_public_work_item(item) for item in items],
+        "active_plan": _active_work_item_plan(items),
         "projection_failures": pending_work_item_projection_failures(
             event_log_path=work_events_path(sid)
         ),
@@ -3805,7 +4088,12 @@ async def run_work_command_stream(request: Request):
 # ── New CLI Backend Endpoints ────────────────────────────────────────────────
 
 _TASKS: Dict[str, dict] = _load_tasks()
-_TASK_COUNTER = max([int(k.split("_")[1]) for k in _TASKS if "_" in k] or [0])
+try:
+    _TASK_COUNTER = max([int(k.split("_")[1]) for k in _TASKS if "_" in k] or [0])
+except (ValueError, IndexError, TypeError):
+    # A hand-edited tasks.json may contain non-numeric task ids; the server
+    # must still start, the next counter simply starts from zero.
+    _TASK_COUNTER = 0
 
 
 @app.get("/api/skills")
@@ -4106,18 +4394,25 @@ def delete_mcp(name: str):
 @app.get("/api/hives")
 def list_hives():
     """List hive status and active hives."""
+    hive = None
+    engine_error = ""
+    personas: List[str] = []
     try:
         hive = _get_hive_engine()
         personas = list(hive.list_personas().keys())
-    except Exception:
-        logger.warning("server: list_hives: suppressed error", exc_info=True)
-        personas = ["WORKER"]
+    except Exception as exc:
+        # Never fabricate personas when the engine is unavailable: the client
+        # must see the engine is down, not a fake WORKER roster (audit P36).
+        engine_error = str(exc)[:400]
+        logger.warning("server: list_hives: hive engine unavailable: %s", engine_error, exc_info=True)
 
     with _HIVES_LOCK:
         hives_list = []
         for hive_id, hive_data in _HIVES.items():
             agents = hive_data.get("agents", [])
-            engine_agents = [hive.get_agent(item.get("id", "")) for item in agents]
+            engine_agents = []
+            if hive is not None:
+                engine_agents = [hive.get_agent(item.get("id", "")) for item in agents]
             for item, live in zip(agents, engine_agents):
                 if live is not None:
                     item["status"] = live.status
@@ -4140,6 +4435,8 @@ def list_hives():
                 "status": hive_data.get("status", "unknown"),
                 "partial": partial,
                 "agents": agents,
+                "result": hive_data.get("result", ""),
+                "consolidation_error": hive_data.get("consolidation_error", ""),
             })
     _persist_hive_manifest()
 
@@ -4149,7 +4446,11 @@ def list_hives():
     return {
         "enabled": enabled,
         "personas": personas,
-        "hives": hives_list
+        "hives": hives_list,
+        "engine": {
+            "available": not bool(engine_error),
+            "error": redact_secrets(engine_error) if engine_error else "",
+        },
     }
 
 
@@ -4208,8 +4509,16 @@ async def create_hive(request: Request):
             "status": hive_status,
             "agents": agent_summaries,
             "created_at": time.time(),
+            "result": "",
+            "consolidation_error": "",
         }
     _persist_hive_manifest()
+
+    # Collect the consolidated result in the background so callers can poll
+    # GET /api/hives for the final answer instead of losing it.
+    task = asyncio.create_task(_consolidate_api_hive(hive_id, hive_engine))
+    _HIVE_CONSOLIDATION_TASKS.add(task)
+    task.add_done_callback(_HIVE_CONSOLIDATION_TASKS.discard)
 
     return {
         "status": "success",
@@ -4233,6 +4542,7 @@ async def cancel_hive(hive_id: str):
         await hive_engine.cancel_hive(hive_id)
     except Exception as e:
         logger.warning(f"Hive {hive_id} cancel engine call failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to cancel hive {hive_id}: {e}")
 
     with _HIVES_LOCK:
         # Mark as cancelled
@@ -4349,6 +4659,144 @@ async def resume_hive(hive_id: str):
     }
 
 
+# ---------------------------------------------------------------------------
+# Nexus Hive capability boundary (main-agent <-> Hive)
+#
+# The Nexus MAIN AGENT is OUTSIDE Hive.  These endpoints expose the clean
+# HiveCapability boundary: submit a goal, list/inspect runs, and manage
+# reusable Agent Teams.  They sit alongside the lower-level /api/hives
+# sub-agent spawner and DO NOT place the main agent inside Hive.
+# ---------------------------------------------------------------------------
+
+_HIVE_CAPABILITY = None
+
+
+def _get_hive_capability():
+    global _HIVE_CAPABILITY
+    if _HIVE_CAPABILITY is not None:
+        return _HIVE_CAPABILITY
+    from hive.capability import HiveCapability
+    from hive import DEFAULT_AVAILABLE_CAPABILITIES
+    engine = _get_hive_engine()
+    root = str(getattr(engine, "root", ".") or ".")
+    tool_registry = getattr(engine, "tool_registry", None)
+    _HIVE_CAPABILITY = HiveCapability(
+        root or ".",
+        engine=engine,
+        tool_registry=tool_registry,
+        available_capabilities=dict(DEFAULT_AVAILABLE_CAPABILITIES),
+        sink=None,
+    )
+    return _HIVE_CAPABILITY
+
+
+@app.post("/api/hive/goal")
+async def hive_submit_goal(request: Request):
+    """Hand a goal/task/long-running responsibility to Hive (S3)."""
+    try:
+        from hive import HiveRequest, CapabilityMode, ConnectionMode
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    try:
+        req = HiveRequest(
+            goal=str(body.get("goal") or body.get("task") or ""),
+            task=str(body.get("task") or ""),
+            expected_outcome=str(body.get("expected_outcome") or ""),
+            completion_criteria=list(body.get("completion_criteria") or []),
+            priority=int(body.get("priority", 5)),
+            team_preference=str(body.get("team_preference") or "") or None,
+            required_specializations=list(body.get("required_specializations") or []),
+            required_tools=list(body.get("required_tools") or []),
+            required_skills=list(body.get("required_skills") or []),
+            required_plugins=list(body.get("required_plugins") or []),
+            required_mcp_servers=list(body.get("required_mcp_servers") or []),
+            provider_preference=str(body.get("provider_preference") or "") or None,
+            model_preference=str(body.get("model_preference") or "") or None,
+            token_budget=int(body["token_budget"]) if body.get("token_budget") else None,
+            cost_budget=float(body["cost_budget"]) if body.get("cost_budget") else None,
+            runtime_budget_seconds=float(body["runtime_budget_seconds"]) if body.get("runtime_budget_seconds") else None,
+            max_agents=int(body["max_agents"]) if body.get("max_agents") else None,
+            max_parallel_agents=int(body["max_parallel_agents"]) if body.get("max_parallel_agents") else None,
+            allow_continuous=bool(body.get("allow_continuous", False)),
+            require_human_approval=bool(body.get("require_human_approval", False)),
+            final_output_format=str(body.get("final_output_format") or "text"),
+            capability_mode=str(body.get("capability_mode") or CapabilityMode.ROLE_BASED.value),
+            connection_mode=str(body.get("connection_mode") or ConnectionMode.INHERIT.value),
+        )
+        cap = _get_hive_capability()
+        if body.get("execute", False):
+            summary = await cap.plan_and_execute(req)
+        else:
+            summary = await cap.submit_goal(req)
+        return {"status": "success", "run": summary.to_dict()}
+    except Exception as e:
+        import logging as _log
+        _log.warning("Hive goal submission failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=400, detail=f"Hive goal rejected: {e}")
+
+
+@app.get("/api/hive/runs")
+async def hive_list_runs():
+    """List Hive runs created via the capability boundary."""
+    try:
+        cap = _get_hive_capability()
+        runs = []
+        for rid in cap.list_runs(limit=100):
+            try:
+                runs.append((await cap.get_run(rid)).to_dict())
+            except Exception:
+                runs.append({"hive_run_id": rid, "status": "unknown"})
+        return {"status": "success", "runs": runs, "count": len(runs)}
+    except Exception as e:
+        import logging as _log
+        _log.warning("Hive list runs failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Hive list failed: {e}")
+
+
+@app.post("/api/hive/runs/{run_id}/continuous")
+async def hive_run_continuous(run_id: str):
+    """Run a Hive run as a controlled long-running / 24/7 loop (§17, §19)."""
+    try:
+        cap = _get_hive_capability()
+        summary = await cap.run_continuous(run_id)
+        return {"status": "success", "run": summary.to_dict()}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Hive run {run_id} not found")
+    except Exception as e:
+        import logging as _log
+        _log.warning("Hive continuous run failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Hive continuous run failed: {e}")
+
+
+@app.post("/api/hive/runs/{run_id}/cancel")
+async def hive_cancel_run(run_id: str):
+    """Cancel a Hive run (operator control)."""
+    try:
+        cap = _get_hive_capability()
+        await cap.cancel(run_id)
+        return {"status": "success", "hive_run_id": run_id}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Hive run {run_id} not found")
+    except Exception as e:
+        import logging as _log
+        _log.warning("Hive cancel failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Hive cancel failed: {e}")
+
+
+@app.get("/api/hive/teams")
+async def hive_list_teams():
+    """List reusable Agent Team templates (plug-and-play)."""
+    try:
+        from hive import list_team_templates
+        teams = [t.to_dict() for t in list_team_templates()]
+        return {"status": "success", "teams": teams, "count": len(teams)}
+    except Exception as e:
+        import logging as _log
+        _log.warning("Hive list teams failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Hive teams failed: {e}")
+
+
 @app.get("/api/gateways")
 def list_gateways():
     """List available gateway platforms and their status."""
@@ -4362,7 +4810,7 @@ def list_gateways():
     gateways = []
     for platform in all_adapters():
         required = _PLATFORM_ENV_MAP.get(platform, [])
-        has_env = _has_required_env(required) if required else False
+        has_env = _has_required_env(required)
         gateways.append({
             "id": platform,
             "name": platform.replace("_", " ").title(),
@@ -5088,7 +5536,11 @@ def _unzip_workspace_file_sync(source: str, destination: str) -> None:
     with zipfile.ZipFile(source) as archive:
         for member in archive.infolist():
             target = os.path.realpath(os.path.join(destination, member.filename))
-            if os.path.commonpath([root, target]) != root:
+            try:
+                inside = os.path.commonpath([root, target]) == root
+            except ValueError:
+                inside = False
+            if not inside:
                 raise HTTPException(status_code=400, detail="Archive contains an unsafe path")
         archive.extractall(destination)
 
@@ -5212,7 +5664,11 @@ async def list_files(request: Request):
 
     project_root_real = os.path.realpath(os.path.abspath(_PROJECT_ROOT))
     target = os.path.realpath(os.path.abspath(os.path.join(project_root_real, relative_path)))
-    if os.path.commonpath([project_root_real, target]) != project_root_real:
+    try:
+        inside = os.path.commonpath([project_root_real, target]) == project_root_real
+    except ValueError:
+        inside = False
+    if not inside:
         raise HTTPException(status_code=403, detail="Path is outside project root")
 
     if not os.path.exists(target):
@@ -6018,8 +6474,9 @@ def get_status():
         "permission_modes": ["auto", "all", "allowlist", "ask"],
         "permission_allowlist": _RUNTIME_SETTINGS.get("permission_allowlist") or [],
         "thinking": bool(_RUNTIME_SETTINGS.get("thinking", True)),
+        "effort": str(_RUNTIME_SETTINGS.get("effort") or "medium"),
         "additional_dirs": _RUNTIME_SETTINGS.get("additional_dirs") or [],
-        "workspace_root": _PROJECT_ROOT,
+        "workspace_root": _workspace_root(),
         # Backend health and model-provider reachability are separate.  A
         # running API with a stopped local model is degraded, not healthy.
         "health": "degraded" if provider_status.get("configured") and not provider_status.get("reachable") else "ok",
@@ -6269,10 +6726,11 @@ async def set_provider(request: Request):
     """Switch provider override."""
     data = await request.json()
     provider = str(data.get("provider", "")).strip().lower().replace(" ", "_")
-    if not provider:
-        raise HTTPException(status_code=400, detail="provider is required")
+    if provider in {"clear", "reset", "off", "auto"}:
+        provider = ""
     _RUNTIME_SETTINGS["provider"] = provider
     apply_runtime_to_all_loops()
+    await asyncio.to_thread(_save_runtime_preferences)
     return {"status": "success", "provider": provider}
 
 
@@ -6299,6 +6757,7 @@ def list_commands():
             "category": command.category,
             "args": dict(command.args),
             "aliases": [f"/{alias.lstrip('/')}" for alias in command.aliases],
+            "execution": command.execution,
         })
     return {"commands": commands}
 
@@ -6323,13 +6782,31 @@ async def run_command(request: Request):
     if not cmd:
         raise HTTPException(status_code=404, detail=f"Unknown command: {raw}")
 
+    from utils.session_bus import get_active_session_id
+    requested_session = str(data.get("session_id") or "").strip()
+    session_id = safe_session_id(requested_session) if requested_session else get_active_session_id(
+        _PROJECT_ROOT, str(_RUNTIME_SETTINGS.get("session_id") or "default")
+    )
     ctx = CommandContext(
-        session_id=_RUNTIME_SETTINGS.get("session_id", "default"),
+        session_id=session_id,
         mode=_RUNTIME_SETTINGS.get("mode", "auto"),
         provider=_RUNTIME_SETTINGS.get("provider", ""),
         model=_RUNTIME_SETTINGS.get("model", ""),
         thinking=_RUNTIME_SETTINGS.get("thinking", True),
-        extra={"args": args_raw},
+        extra={
+            "args": args_raw,
+            "command": raw,
+            "root": str(_PROJECT_ROOT),
+            "runtime_settings": _RUNTIME_SETTINGS,
+            "persist_runtime": _save_runtime_preferences,
+            "apply_runtime": apply_runtime_to_all_loops,
+            "new_session": create_session,
+            "list_sessions": list_sessions,
+            "load_session": _command_load_session,
+            "load_history": get_history,
+            "sync_permission_mode": _command_sync_permission_mode,
+            "sync_sandbox_tier": _command_sync_sandbox_tier,
+        },
     )
     result = await cmd.execute(ctx)
     return {
@@ -6410,6 +6887,25 @@ async def set_thinking(request: Request):
     _RUNTIME_SETTINGS["thinking"] = enabled
     await asyncio.to_thread(_save_runtime_preferences)
     return {"status": "success", "thinking": enabled}
+
+
+@app.get("/api/effort")
+def get_effort():
+    return {"status": "success", "effort": str(_RUNTIME_SETTINGS.get("effort") or "medium")}
+
+
+@app.post("/api/effort")
+async def set_effort(request: Request):
+    data = await request.json()
+    effort = str(data.get("effort") or "medium").strip().lower()
+    if effort == "extra_high":
+        effort = "xhigh"
+    allowed = {"auto", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+    if effort not in allowed:
+        raise HTTPException(status_code=400, detail=f"Invalid effort. Choose from: {', '.join(sorted(allowed))}")
+    _RUNTIME_SETTINGS["effort"] = "medium" if effort == "auto" else effort
+    await asyncio.to_thread(_save_runtime_preferences)
+    return {"status": "success", "effort": _RUNTIME_SETTINGS["effort"]}
 
 
 # ── Safety settings API ──────────────────────────────────────────────────────
@@ -6513,7 +7009,7 @@ async def safety_save(request: Request):
         raise HTTPException(status_code=400, detail="; ".join(result.get("errors", ["Invalid settings"])))
     if result.get("permission_changed") or result.get("sandbox_changed"):
         _safety_apply_runtime()
-    result["workspace"] = _workspace_root
+    result["workspace"] = _workspace_root()
     return result
 
 
@@ -6534,7 +7030,7 @@ async def safety_reset(request: Request):
         logger.warning("safety: reset failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=503, detail="Safety store is unavailable")
     _safety_apply_runtime()
-    result["workspace"] = _workspace_root
+    result["workspace"] = _workspace_root()
     return result
 
 
@@ -6829,12 +7325,24 @@ async def add_working_dir(request: Request):
     raw_path = str(data.get("path", "")).strip()
     if not raw_path:
         raise HTTPException(status_code=400, detail="path is required")
-    target = os.path.abspath(os.path.join(_PROJECT_ROOT, raw_path)) if not os.path.isabs(raw_path) else os.path.abspath(raw_path)
+    # Validate and canonicalize exactly like /api/workspace/dirs so symlink
+    # escapes, network paths, and in-workspace duplicates are rejected.
+    validation = _validate_workspace_path(raw_path)
+    if not validation.get("valid"):
+        raise HTTPException(status_code=400, detail=validation.get("reason", "Invalid directory"))
+    target = validation["path"]
+    root = _workspace_root()
+    if target == root or _is_within(root, target):
+        raise HTTPException(status_code=400, detail="Path is inside the workspace root and does not need to be added")
     if not os.path.isdir(target):
         raise HTTPException(status_code=404, detail=f"Directory not found: {target}")
     dirs = _RUNTIME_SETTINGS.setdefault("additional_dirs", [])
-    if target not in dirs:
-        dirs.append(target)
+    if target in dirs:
+        raise HTTPException(status_code=409, detail="Directory is already added")
+    for existing in dirs:
+        if _is_within(existing, target) or _is_within(target, existing):
+            raise HTTPException(status_code=409, detail=f"Directory overlaps an existing additional directory: {existing}")
+    dirs.append(target)
     apply_runtime_to_all_loops()
     return {"status": "success", "path": target, "additional_dirs": dirs}
 
@@ -6859,7 +7367,11 @@ async def open_path(request: Request):
         raise HTTPException(status_code=400, detail="path is required")
     target = os.path.realpath(os.path.abspath(raw_path))
     project_root_real = os.path.realpath(os.path.abspath(_PROJECT_ROOT))
-    if os.path.commonpath([project_root_real, target]) != project_root_real:
+    try:
+        inside = os.path.commonpath([project_root_real, target]) == project_root_real
+    except ValueError:
+        inside = False
+    if not inside:
         raise HTTPException(status_code=403, detail="Opening paths outside the project is not allowed")
     if not os.path.exists(target):
         raise HTTPException(status_code=404, detail="Path not found")
@@ -6943,6 +7455,7 @@ _WORKSPACE_ACTIVITY: deque = deque(maxlen=200)
 _WORKSPACE_DIR_ACCESS: Dict[str, str] = {}
 _WORKSPACE_SCAN_LOCK = threading.RLock()
 _WORKSPACE_SCAN_STATE: Dict[str, Any] = {"status": "not_started", "started_at": 0.0, "finished_at": 0.0, "progress": 0.0, "current_file": "", "indexed": 0, "failed": 0, "skipped": 0, "message": ""}
+_WORKSPACE_INDEX_LOCK = threading.Lock()
 _WORKSPACE_SUMMARY_CACHE_LOCK = threading.RLock()
 _WORKSPACE_SUMMARY_CACHE: Dict[str, Any] = {"computed_at": 0.0, "root": None, "payload": None, "warming": False}
 _WORKSPACE_SUMMARY_TTL = 300.0
@@ -7015,6 +7528,11 @@ def _ensure_workspace_summary_refresh(root: str) -> None:
             _refresh_workspace_summary(root)
         except Exception:
             logger.warning("Workspace summary background refresh failed", exc_info=True)
+        finally:
+            # A failure must not wedge the cache in "warming" forever, or every
+            # later cold start busy-waits the full refresh loop.
+            with _WORKSPACE_SUMMARY_CACHE_LOCK:
+                _WORKSPACE_SUMMARY_CACHE["warming"] = False
     threading.Thread(target=worker, daemon=True).start()
 
 
@@ -7663,9 +8181,12 @@ def workspace_index_status():
 
 @app.post("/api/workspace/index/rebuild")
 def workspace_index_rebuild():
-    if _WORKSPACE_SCAN_STATE.get("status") == "scanning":
-        raise HTTPException(status_code=409, detail="An indexing job is already running")
-    _WORKSPACE_SCAN_STATE.update({"status": "scanning", "started_at": time.time(), "progress": 0.0, "current_file": "", "indexed": 0, "skipped": 0, "failed": 0, "message": ""})
+    # Check-and-set must be atomic: this is a sync threadpool handler, so two
+    # concurrent requests can both observe "not scanning" and start two walks.
+    with _WORKSPACE_INDEX_LOCK:
+        if _WORKSPACE_SCAN_STATE.get("status") == "scanning":
+            raise HTTPException(status_code=409, detail="An indexing job is already running")
+        _WORKSPACE_SCAN_STATE.update({"status": "scanning", "started_at": time.time(), "progress": 0.0, "current_file": "", "indexed": 0, "skipped": 0, "failed": 0, "message": ""})
     _invalidate_workspace_summary_cache()
     root = _workspace_root()
 

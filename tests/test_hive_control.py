@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -62,6 +63,7 @@ def test_stale_agent_is_restarted_with_same_identity_and_checkpoint(tmp_path):
         agent = agents[0]
         await asyncio.sleep(0.01)
         agent.last_heartbeat -= 100
+        agent.last_progress_at -= 100
 
         replaced = await engine.recover_stuck_agents(stale_after=1, hive_id=hive_id)
         assert replaced == [agent.agent_id]
@@ -72,6 +74,69 @@ def test_stale_agent_is_restarted_with_same_identity_and_checkpoint(tmp_path):
         await engine.cancel_hive(hive_id)
         blocker.set()
         await engine.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_fresh_liveness_prevents_replacing_healthy_long_operation(tmp_path):
+    async def scenario():
+        blocker = asyncio.Event()
+
+        async def llm(_messages):
+            await blocker.wait()
+            return "FINAL ANSWER: completed"
+
+        engine = NexusHiveEngine(str(tmp_path), max_agent_retries=0)
+        engine.set_llm_call(llm)
+        hive_id, agents = await engine.spawn_hive([("long healthy work", "WORKER")])
+        agent = agents[0]
+        await asyncio.sleep(0.01)
+        agent.last_progress_at -= 100
+        agent.last_heartbeat = time.time()
+
+        assert await engine.recover_stuck_agents(
+            stale_after=1, hive_id=hive_id
+        ) == []
+        assert agent.replacement_count == 0
+        assert agent.status == "running"
+
+        blocker.set()
+        await engine.consolidate_hive(hive_id, timeout=1)
+        await engine.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_aclose_detaches_and_fences_cancellation_resistant_agent(tmp_path):
+    async def scenario():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def resistant_llm(_messages):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+                return "late result must be fenced"
+
+        engine = NexusHiveEngine(
+            str(tmp_path), max_agent_retries=0, shutdown_timeout=0.05
+        )
+        engine.set_llm_call(resistant_llm)
+        _hive_id, agents = await engine.spawn_hive([("resist stop", "WORKER")])
+        await asyncio.wait_for(started.wait(), 1)
+
+        await asyncio.wait_for(engine.aclose(), 0.4)
+        agent = agents[0]
+        assert agent.status == "cancelled"
+        assert "fenced" in agent.error.lower()
+        assert engine._detached_task_count >= 1
+
+        release.set()
+        await asyncio.sleep(0.05)
+        assert agent.status == "cancelled"
+        assert agent.result != "late result must be fenced"
 
     asyncio.run(scenario())
 

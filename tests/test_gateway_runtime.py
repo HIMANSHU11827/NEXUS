@@ -32,6 +32,40 @@ def test_gateway_main_exports_run():
     assert callable(module.run)
 
 
+def test_gateway_package_exports_every_platform_adapter():
+    """Regression (P23): every adapter class in gateway.platforms must be
+    importable from the gateway package itself via the lazy export surface."""
+    import gateway
+    import gateway.platforms as platforms
+
+    adapter_class_names = set(platforms._CLASS_TO_PLATFORM.keys())
+    assert adapter_class_names  # sanity: the map is populated
+
+    for name in adapter_class_names:
+        assert name in gateway.__all__, f"{name} missing from gateway.__all__"
+        cls = getattr(gateway, name)
+        assert cls is getattr(platforms, name), f"{name} resolves differently"
+
+
+def test_webhook_stop_cleans_up_and_returns(monkeypatch):
+    module = importlib.import_module("gateway.webhook_server")
+
+    class Runner:
+        def __init__(self):
+            self.cleaned = False
+
+        async def cleanup(self):
+            self.cleaned = True
+
+    runner = Runner()
+    monkeypatch.setattr(module, "_webhook_runner", runner)
+
+    asyncio.run(asyncio.wait_for(module.stop_webhook_server(), timeout=0.2))
+
+    assert runner.cleaned is True
+    assert module._webhook_runner is None
+
+
 def test_send_result_redacts_adapter_error_text():
     result = SendResult(success=False, error="provider failed with sk-secret-value")
     assert result.error is not None
@@ -160,10 +194,14 @@ def test_gateway_handle_message_consumes_content_chunks(monkeypatch):
     class FakeLoop:
         root = "C:\\project"
 
+        def __init__(self, root_dir=None):
+            if root_dir:
+                self.root = root_dir
+
         def load_memory(self, session_id):
             self.session_id = session_id
 
-        async def stream_run(self, text):
+        async def stream_run(self, text, deadline_seconds=None):
             yield {"type": "status", "data": "Starting"}
             yield {"type": "content", "data": "hello "}
             yield {"type": "tools_discovered", "data": ["reading"]}
@@ -194,10 +232,14 @@ def test_gateway_handle_message_retains_legacy_string_chunk_support(monkeypatch)
     class FakeLoop:
         root = "C:\\project"
 
+        def __init__(self, root_dir=None):
+            if root_dir:
+                self.root = root_dir
+
         def load_memory(self, session_id):
             self.session_id = session_id
 
-        async def stream_run(self, text):
+        async def stream_run(self, text, deadline_seconds=None):
             yield "[NEXUS_ACTIVITY] hidden"
             yield "legacy "
             yield "response"
@@ -225,10 +267,14 @@ def test_gateway_reasoning_error_uses_safe_public_message(monkeypatch):
     class FailingLoop:
         root = "C:\\project"
 
+        def __init__(self, root_dir=None):
+            if root_dir:
+                self.root = root_dir
+
         def load_memory(self, session_id):
             self.session_id = session_id
 
-        async def stream_run(self, text):
+        async def stream_run(self, text, deadline_seconds=None):
             raise RuntimeError("provider failed with sk-secret-value")
             yield  # keep this an async generator
 
@@ -245,3 +291,49 @@ def test_gateway_reasoning_error_uses_safe_public_message(monkeypatch):
     asyncio.run(runner.handle_message(event))
 
     assert adapter.sent == ["[GATEWAY_ERROR]: The gateway could not complete this request."]
+
+
+def test_gateway_builds_real_loop_with_root_dir(tmp_path):
+    """Regression: GatewayRunner must construct NexusLoop with root_dir (P01)."""
+    import gateway.run as gateway_run
+    from orchestrators.v5.core import NexusLoopV5
+
+    runner = gateway_run.GatewayRunner(root=str(tmp_path))
+    event = MessageEvent(text="hi", sender_id="u", chat_id="c", platform="telegram")
+    loop = runner._get_loop(event)
+
+    assert isinstance(loop, NexusLoopV5)
+    assert loop.root_dir == str(tmp_path)
+
+
+def test_gateway_timeout_surfaces_timeout_message(monkeypatch):
+    """Regression: deadline on stream_run aborts the turn and the user is told (P02)."""
+    import gateway.run as gateway_run
+
+    class TimeoutLoop:
+        root = "C:\\project"
+
+        def __init__(self, root_dir=None):
+            if root_dir:
+                self.root = root_dir
+
+        def load_memory(self, session_id):
+            self.session_id = session_id
+
+        async def stream_run(self, text, deadline_seconds=None):
+            raise asyncio.TimeoutError("V5 run deadline exceeded")
+            yield  # keep this an async generator
+
+    monkeypatch.setattr(gateway_run, "NexusLoop", TimeoutLoop)
+    from utils import session_bus
+    monkeypatch.setattr(session_bus, "set_active_session_id", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(session_bus, "sync_loop_from_disk", lambda _loop: None)
+    monkeypatch.setattr("authentication.is_gateway_authorized", lambda _platform, _sender: True)
+
+    runner = GatewayRunner()
+    adapter = FakeAdapter("telegram")
+    runner.add_adapter(adapter)
+    event = MessageEvent(text="hi", sender_id="user", chat_id="chat", platform="telegram")
+    asyncio.run(runner.handle_message(event))
+
+    assert adapter.sent == ["[GATEWAY_ERROR]: The gateway request timed out. Please try again."]

@@ -4,8 +4,14 @@
   "description": "Read file contents",
   "entry": "scripts/reading.py",
   "class": "ReadingTool",
+  "execution": {
+    "read_only": true,
+    "max_output_chars": 32000
+  },
   "params": {
-    "path": {"type": "string", "description": "File path to read", "required": true}
+    "path": {"type": "string", "description": "File path to read", "required": true},
+    "start_line": {"type": "integer", "description": "Optional 1-based first line to read", "required": false},
+    "end_line": {"type": "integer", "description": "Optional inclusive last line to read", "required": false}
   },
   "category": "filesystem"
 }

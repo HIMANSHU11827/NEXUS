@@ -59,6 +59,11 @@ async def main():
     finally:
         # Graceful shutdown: cancel tasks, await disconnects, flush lifecycle state.
         try:
+            from gateway.webhook_server import stop_webhook_server
+            await stop_webhook_server()
+        except Exception:  # degrade softly on shutdown
+            logger.warning("gateway/main.py webhook stop suppressed error", exc_info=True)
+        try:
             await runner.stop_all()
         except Exception:  # degrade softly on shutdown
             logger.warning("gateway/main.py stop_all suppressed error", exc_info=True)

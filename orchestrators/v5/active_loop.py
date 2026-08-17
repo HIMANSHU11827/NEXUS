@@ -49,9 +49,13 @@ class V5ActiveLoop:
     def _active_mode_enabled(self) -> bool:
         """True when ``NEXUS_HIVE`` is on and active mode is not disabled."""
         try:
-            hive_on = str(os.environ.get("NEXUS_HIVE", "0") or "0").lower() in (
-                "1", "true", "yes", "on",
-            )
+            raw_hive = os.environ.get("NEXUS_HIVE")
+            if raw_hive is None or str(raw_hive).lower() == "auto":
+                hive_on = bool(getattr(self, "_v5_auto_hive", False))
+            else:
+                hive_on = str(raw_hive or "").lower() in (
+                    "1", "true", "yes", "on",
+                )
             if not hive_on:
                 return False
             active = str(

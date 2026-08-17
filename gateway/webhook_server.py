@@ -14,13 +14,12 @@ Run alongside the GatewayRunner to receive incoming messages from each
 platform's webhook/callback API.
 """
 
-import asyncio
 import hashlib
 import hmac
 import json
 import logging
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from aiohttp import web
 
@@ -30,6 +29,7 @@ routes = web.RouteTableDef()
 _adapters: Dict[str, object] = {}
 _verify_token: str = ""
 _app_secret: str = ""
+_webhook_runner: Optional["web.AppRunner"] = None
 
 # Platforms that share the Meta Graph API payload shape.
 _META_FAMILY = {"meta", "whatsapp", "facebook", "instagram"}
@@ -86,6 +86,7 @@ async def webhook(request: web.Request) -> web.Response:
         payload = json.loads(raw.decode("utf-8"))
         logger.debug(f"Webhook payload: {json.dumps(payload)[:500]}...")
 
+        failed = 0
         for platform, adapter in _adapters.items():
             if platform not in _META_FAMILY:
                 # Other platforms have their own route and signature scheme; do
@@ -95,8 +96,14 @@ async def webhook(request: web.Request) -> web.Response:
                 if hasattr(adapter, "handle_webhook_payload"):
                     await adapter.handle_webhook_payload(payload)
             except Exception as e:
+                failed += 1
                 logger.error(f"[{platform}] webhook handler error: {e}")
 
+        if failed:
+            # Never tell the platform the event was handled when it was not:
+            # a non-2xx response makes the platform retry with backoff, and
+            # the ingress dedupe forgets the key so the retry is processed.
+            return web.Response(status=500, text="HANDLER_ERROR")
         return web.Response(status=200, text="EVENT_RECEIVED")
     except Exception as e:
         logger.error(f"Webhook parse error: {e}")
@@ -132,10 +139,10 @@ async def _dispatch_event(adapter, event) -> None:
         return
     # Ingress de-duplication shared with gateway/run.py. Lazy import keeps the
     # aiohttp-only webhook module free of the heavyweight gateway import graph
-    # until a message actually arrives. The event is marked so the gateway
-    # handler below does not double-count this same delivery.
+    # until a message actually arrives.
+    event_key = None
     try:
-        from gateway.run import mark_handled, seen_event
+        from gateway.run import seen_event, mark_handled, dedupe_key_for_event
         if seen_event(event):
             adapter_name = getattr(adapter, "platform", type(adapter).__name__)
             logger.info(
@@ -143,15 +150,31 @@ async def _dispatch_event(adapter, event) -> None:
                 adapter_name, getattr(event, "message_id", None),
             )
             return
+        # The canonical gateway handler runs its own ingress check. Without
+        # this mark it would see the LRU record we just created and drop the
+        # very delivery we accepted. Marking here only tags this object; a
+        # re-delivery parses a fresh object, so retries are unaffected.
         mark_handled(event)
+        event_key = dedupe_key_for_event(event)
     except Exception:  # degrade softly — never drop on dedupe machinery failure
         logger.debug("webhook dedupe check failed", exc_info=True)
     handler = getattr(adapter, "_on_message", None)
     if handler is None:
         return
-    result = handler(event)
-    if hasattr(result, "__await__"):
-        await result
+    try:
+        result = handler(event)
+        if hasattr(result, "__await__"):
+            await result
+    except Exception:
+        # Handler failure must not consume the event: forget the ingress
+        # record so the platform's retry is processed instead of dropped.
+        if event_key is not None:
+            try:
+                from gateway.run import ingress_dedupe
+                ingress_dedupe.forget(event_key)
+            except Exception:
+                logger.debug("webhook dedupe forget failed", exc_info=True)
+        raise
 
 
 def _line_route() -> list:
@@ -646,6 +669,28 @@ async def start_webhook_server(
     site = web.TCPSite(runner, host, port)
     await site.start()
 
-    # Keep running
-    while True:
-        await asyncio.sleep(3600)
+    global _webhook_runner
+    old_runner = _webhook_runner
+    _webhook_runner = runner
+    if old_runner is not None:
+        try:
+            await old_runner.cleanup()
+        except Exception:
+            logger.debug("previous webhook runner cleanup failed", exc_info=True)
+
+
+async def stop_webhook_server():
+    """Stop the webhook HTTP server and release its sockets/tasks.
+
+    Without an explicit runner cleanup, a restarted gateway leaks the old
+    aiohttp server (bound sockets + background tasks) until process exit.
+    """
+    global _webhook_runner
+    runner = _webhook_runner
+    _webhook_runner = None
+    if runner is None:
+        return
+    try:
+        await runner.cleanup()
+    except Exception:
+        logger.debug("webhook server cleanup failed", exc_info=True)

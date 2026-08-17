@@ -29,9 +29,9 @@ class OllamaProvider(NexusBaseProvider):
             name = str(function.get("name") or "").strip()
             if not name:
                 continue
-            arguments = function.get("arguments", {})
-            if not isinstance(arguments, dict):
-                arguments = {}
+            arguments = NexusBaseProvider.normalize_tool_arguments(
+                function.get("arguments", {}), tool_name=name
+            )
             envelopes.append(f"<function={name}>{json.dumps(arguments, ensure_ascii=False)}")
         return "\n".join(envelopes)
 

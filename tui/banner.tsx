@@ -2,6 +2,7 @@
 import React from 'react';
 import {Box, Text} from 'ink';
 import {voicePhaseColor, WORKING_STATES, THEME, type ActivityItem, type WorkingPhase} from './helpers.js';
+import {NEXUS_BLUE_BRIGHT, NEXUS_ORANGE, NEXUS_ORANGE_BRIGHT} from './theme.js';
 
 const formatElapsed = (elapsedMs = 0) => {
     const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
@@ -54,7 +55,7 @@ export const NexusBanner = React.memo(({
     elapsedMs = 0,
     connectionState = 'online'
 }: NexusBannerProps) => {
-    const stateColor = connectionState === 'offline' ? 'red' : isWorking ? 'yellowBright' : connectionState === 'connecting' ? 'yellow' : 'green';
+    const stateColor = connectionState === 'offline' ? 'red' : isWorking ? NEXUS_ORANGE_BRIGHT : connectionState === 'connecting' ? NEXUS_ORANGE : 'green';
     const stateLabel = connectionState === 'offline' ? 'Offline' : isWorking ? 'Working' : connectionState === 'connecting' ? 'Connecting' : 'Ready';
     const compact = width < 64;
     const tiny = width < 34;
@@ -63,7 +64,7 @@ export const NexusBanner = React.memo(({
     return (
         <Box height={3} paddingX={1} borderStyle="single" borderColor={THEME.borderSoft} justifyContent="space-between">
             <Box>
-                <Text bold color="cyanBright">{tiny ? 'NX' : 'NEXUS'}</Text>
+                <Text bold color={NEXUS_BLUE_BRIGHT}>{tiny ? 'NX' : 'NEXUS'}</Text>
                 {!tiny && <Text color="grey">  |  </Text>}
                 <Text color={stateColor}>{tiny ? ' ' : ''}● {stateLabel}</Text>
                 {!compact && isWorking && <Text color="grey">  ·  {phaseDisplayLabel(phase)}</Text>}
@@ -72,7 +73,6 @@ export const NexusBanner = React.memo(({
             </Box>
             {!tiny && <Box>
                 <Text color="grey">{width < 48 ? 'Esc' : 'Esc stop'}</Text>
-                {!compact && <Text color="grey">  |  Ctrl+O inspector</Text>}
             </Box>}
         </Box>
     );
@@ -99,7 +99,7 @@ export const WorkingStatus = React.memo(({
         <Box width={width} backgroundColor={THEME.panelSoftBg} paddingX={1} justifyContent="space-between">
             <Box>
                 <Text color={state.color}>{symbol}</Text>
-                <Text color="yellowBright" bold> Working</Text>
+                <Text color={NEXUS_ORANGE_BRIGHT} bold> Working</Text>
                 <Text color="grey">  {detail}</Text>
             </Box>
             {width >= 60 && <Text color="grey">{formatElapsed(elapsedMs)}  ·  Tab focus · Enter details</Text>}

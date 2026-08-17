@@ -224,6 +224,17 @@ def _provider_annotations(provider_id: Any,
     return annotations
 
 
+def _annotation_float(value: Any, default: float) -> float:
+    """Coerce an annotation to float; malformed/absent values fall back to
+    ``default`` instead of raising into the ranking path."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _profile_penalty(provider: Any) -> float:
     """Small ranking penalty for providers whose live profile state says "hurt".
 
@@ -272,9 +283,19 @@ def score_model(task: Any, provider: Any, caps: Any = None,
         bench_score = benchmarks.get(bench)
         if bench_score is None:
             continue
-        acc += float(bench_score) * float(weight)
+        try:
+            acc += float(bench_score) * float(weight)
+        except (TypeError, ValueError):
+            continue
         denom += float(weight)
-    quality = acc / denom if denom else float(info.get("quality", _DEFAULT_QUALITY))
+    if denom:
+        quality = acc / denom
+    else:
+        raw_quality = info.get("quality", _DEFAULT_QUALITY)
+        try:
+            quality = float(raw_quality) if raw_quality is not None else _DEFAULT_QUALITY
+        except (TypeError, ValueError):
+            quality = _DEFAULT_QUALITY
 
     # Capability signal: more context / richer tool support nudges an
     # otherwise-tied benchmark score upward (bounded so it stays a nudge).
@@ -325,8 +346,11 @@ def rank_models(task: Any, candidates: Sequence[str], caps: Any = None, *,
     scored = []
     for name in names:
         info = _provider_annotations(name, annotations)
-        latency = float(info.get("latency_ms", 0.0) or 0.0)
-        cost = float(info.get("cost_per_1m", 0.0) or 0.0)
+        # Malformed annotations (non-numeric latency/cost) are treated as
+        # over-budget so they never sneak past a hard filter, while still
+        # appearing in the relaxed best-score ordering below.
+        latency = _annotation_float(info.get("latency_ms"), float("inf"))
+        cost = _annotation_float(info.get("cost_per_1m"), float("inf"))
         scored.append((
             score_model(task, name, caps=caps, annotations=annotations, health=health),
             name,

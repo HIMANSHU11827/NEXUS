@@ -30,6 +30,7 @@ class MemoryTool(BaseTool):
         return {}
 
     def _save(self, data: Dict[str, Any]):
+        self.assert_execution_active()
         self._get_store().write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     async def execute(self, action: str, key: Optional[str] = None, content: Optional[str] = None, query: Optional[str] = None, **kwargs) -> ToolResult:
@@ -86,8 +87,8 @@ class MemoryTool(BaseTool):
             elif action == "search":
                 if not query:
                     return ToolResult(success=True, output="\n".join(store.keys()))
-                matches = [k for k in store.values() if query.lower() in k["content"].lower()]
-                return ToolResult(success=True, output=str(matches))
+                matches = [k for k, v in store.items() if query.lower() in v["content"].lower()]
+                return ToolResult(success=True, output="\n".join(matches) or "No memories matched")
 
             elif action == "list":
                 return ToolResult(success=True, output="\n".join(store.keys()) or "No memories stored")

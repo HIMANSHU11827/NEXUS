@@ -1,11 +1,11 @@
 /** Right-side run inspector for task, live activity, context, and changes. */
-import React from 'react';
-import {Box, Text} from 'ink';
+import React, {useState} from 'react';
+import {Box, Text, useInput} from 'ink';
 import {HivePanelBody} from './hive-panel.js';
-import {MCPPanelBody, activityKindLabel} from './inline-activity.js';
+import {MCPPanelBody, activityKindLabel, mcpServerActive} from './inline-activity.js';
 import type {McpServerItem} from './inline-activity.js';
-import {WorkspacePanelBody} from './task-list.js';
-import {ActivityPanelBody, QuestionPanelBody, PlanPanelBody} from './details-panel.js';
+import {TodoPanelBody, WorkspacePanelBody} from './task-list.js';
+import {ActivityPanelBody, ApprovalPanelBody, QuestionPanelBody, PlanChecklistRows, PlanPanelBody} from './details-panel.js';
 import {phaseDisplayLabel} from './banner.js';
 import {
     THEME,
@@ -22,9 +22,12 @@ import {
     type TimelineEvent,
     type UsageStats,
     type TaskItem,
+    type PendingApproval,
     type PendingQuestion,
+    type PlanChecklistItem,
     type WorkingPhase
 } from './helpers.js';
+import {NEXUS_BLUE_BRIGHT, NEXUS_ORANGE_BRIGHT} from './theme.js';
 
 interface NexusWorkspacePanelProps {
     timeline: TimelineEvent[];
@@ -35,9 +38,10 @@ interface NexusWorkspacePanelProps {
     touchedFiles: FileStatus[];
     activityItems: ActivityItem[];
     pendingQuestion: PendingQuestion | null;
+    pendingApproval?: PendingApproval | null;
     selectedQuestionIndex: number;
     questionCustomMode?: boolean;
-    planItems: string[];
+    planItems: PlanChecklistItem[];
     planStatus: string;
     planExpanded: boolean;
     mcpConnectedCount: number;
@@ -61,14 +65,53 @@ const Divider = ({width}: {width: number}) => (
     <Text color={THEME.borderSoft}>{'─'.repeat(Math.max(1, width - 4))}</Text>
 );
 
+const CollapsibleSection = ({
+    title,
+    shortcut,
+    count,
+    initiallyExpanded = true,
+    children
+}: {
+    title: string;
+    shortcut: string;
+    count?: number;
+    initiallyExpanded?: boolean;
+    children: React.ReactNode;
+}) => {
+    const [expanded, setExpanded] = useState(initiallyExpanded);
+    useInput((input, key) => {
+        // Ctrl+H/T/M toggles sections without stealing ordinary composer text.
+        if (key.ctrl && input.toLowerCase() === shortcut.toLowerCase()) {
+            setExpanded(value => !value);
+        }
+    });
+    return (
+        <Box flexDirection="column" marginTop={1}>
+            <Text color={NEXUS_BLUE_BRIGHT} bold>{expanded ? '▼' : '▶'} {title}{count !== undefined ? ` ${count}` : ''} <Text color="grey30">[{shortcut}]</Text></Text>
+            {expanded && <Box flexDirection="column" marginTop={1}>{children}</Box>}
+        </Box>
+    );
+};
+
 const ContextMeter = ({usage, width}: {usage: UsageStats; width: number}) => {
+    if (usage.source !== 'provider') {
+        return (
+            <Box flexDirection="column">
+                <Box justifyContent="space-between">
+                    <SectionLabel>CONTEXT</SectionLabel>
+                    <Text color="grey">unavailable</Text>
+                </Box>
+                <Text color="grey">Provider token usage not reported</Text>
+            </Box>
+        );
+    }
     const rawPercent = usage.contextLimit > 0
         ? Math.min(100, (usage.contextTokens / usage.contextLimit) * 100)
         : 0;
     const barWidth = Math.max(8, Math.min(28, width - 10));
     const filledCells = rawPercent > 0 ? Math.max(1, Math.round(rawPercent / 100 * barWidth)) : 0;
     const emptyCells = Math.max(0, barWidth - filledCells);
-    const color = rawPercent >= 85 ? 'red' : rawPercent >= 60 ? 'yellow' : 'green';
+    const color = rawPercent >= 85 ? 'red' : rawPercent >= 60 ? NEXUS_ORANGE_BRIGHT : 'green';
 
     return (
         <Box flexDirection="column">
@@ -104,7 +147,13 @@ const WorkspaceSummary = ({
     touchedFiles,
     usage,
     width,
-    height
+    height,
+    agents,
+    tasks,
+    mcpServers,
+    selectedAgentId,
+    planItems,
+    planStatus
 }: {
     currentTask: string;
     isWorking: boolean;
@@ -115,6 +164,12 @@ const WorkspaceSummary = ({
     usage: UsageStats;
     width: number;
     height: number;
+    agents: AgentInfo[];
+    tasks: TaskItem[];
+    mcpServers: McpServerItem[];
+    selectedAgentId: string | null;
+    planItems: PlanChecklistItem[];
+    planStatus: string;
 }) => {
     const live = activityItems.find(item => ['running', 'queued', 'pending', 'in_progress', 'working', 'active'].includes(item.status.toLowerCase()));
     const recent = activityItems.slice(0, height >= 30 ? 2 : height >= 22 ? 1 : 0);
@@ -123,14 +178,42 @@ const WorkspaceSummary = ({
 
     return (
         <Box flexDirection="column" flexGrow={1}>
-            <SectionLabel>TASK</SectionLabel>
-            <Text color="white" wrap={height < 22 ? 'truncate' : 'wrap'}>{currentTask || 'Ready for your next instruction'}</Text>
+            <SectionLabel>WORKSPACE</SectionLabel>
 
-            <Box marginY={1}><Divider width={width} /></Box>
+            {planItems.length > 0 && (
+                <Box flexDirection="column" marginTop={1}>
+                    <Box justifyContent="space-between">
+                        <Text color={NEXUS_BLUE_BRIGHT} bold>PLAN</Text>
+                        <Text color={planStatus === 'failed' ? 'red' : planStatus === 'done' ? 'green' : planStatus === 'blocked' ? NEXUS_ORANGE_BRIGHT : 'grey'}>{planStatus}</Text>
+                    </Box>
+                    <Box marginTop={1} flexDirection="column">
+                        <PlanChecklistRows items={planItems} maxItems={height >= 30 ? 8 : 4} />
+                    </Box>
+                </Box>
+            )}
 
+            {agents.length > 0 && (
+                <CollapsibleSection title="HIVE / SUB-AGENTS" shortcut="h" count={agents.length}>
+                    <HivePanelBody agents={agents} selectedAgentId={selectedAgentId} tasks={[]} width={Math.max(20, width - 2)} />
+                </CollapsibleSection>
+            )}
+
+            {tasks.length > 0 && planItems.length === 0 && (
+                <CollapsibleSection title="TODO LIST" shortcut="t" count={tasks.length}>
+                    <TodoPanelBody tasks={tasks} width={Math.max(20, width - 2)} />
+                </CollapsibleSection>
+            )}
+
+            {mcpServers.some(mcpServerActive) && (
+                <CollapsibleSection title="MCP" shortcut="m" count={mcpServers.filter(mcpServerActive).length}>
+                    <MCPPanelBody servers={mcpServers.filter(mcpServerActive)} />
+                </CollapsibleSection>
+            )}
+
+            {false && <>
             <SectionLabel>ACTIVITY</SectionLabel>
             <Box justifyContent="space-between">
-                <Text color={isWorking ? 'yellowBright' : 'green'} bold>{isWorking ? '● Working' : '● Ready'}</Text>
+                <Text color={isWorking ? NEXUS_ORANGE_BRIGHT : 'green'} bold>{isWorking ? '● Working' : '● Ready'}</Text>
                 {isWorking && elapsedMs > 0 && <Text color="grey">{formatDurationMs(elapsedMs)}</Text>}
             </Box>
             <Text color="grey" wrap="truncate">{live?.title || phaseDisplayLabel(workingPhase)}</Text>
@@ -143,8 +226,9 @@ const WorkspaceSummary = ({
                     <Text color="grey" wrap="truncate">{compactTaskSubject(activity.summary || activity.title || activity.toolName || 'activity', Math.max(12, width - 6))}</Text>
                 </Box>
             ))}
+            </>}
 
-            {showContext && <><Box marginY={1}><Divider width={width} /></Box><ContextMeter usage={usage} width={width} /></>}
+            {showContext && <><Box marginY={0}><Divider width={width} /></Box><ContextMeter usage={usage} width={width} /></>}
 
             {showChanges && <>
                 <Box marginY={1}><Divider width={width} /></Box>
@@ -160,8 +244,8 @@ const WorkspaceSummary = ({
                         </Box>
                         {(file.additions != null || file.deletions != null) && (
                             <Box>
-                                <Text color="green">+{file.additions || 0}</Text>
-                                <Text color="red"> -{file.deletions || 0}</Text>
+                                {file.additions != null && <Text color="green">+{file.additions}</Text>}
+                                {file.deletions != null && <Text color="red"> -{file.deletions}</Text>}
                             </Box>
                         )}
                     </Box>
@@ -181,6 +265,7 @@ export const NexusWorkspacePanel = React.memo(({
     touchedFiles,
     activityItems,
     pendingQuestion,
+    pendingApproval,
     selectedQuestionIndex,
     questionCustomMode,
     planItems,
@@ -222,6 +307,12 @@ export const NexusWorkspacePanel = React.memo(({
                     elapsedMs={elapsedMs}
                     activityItems={activityItems}
                     touchedFiles={touchedFiles}
+                    agents={agents}
+                    tasks={tasks}
+                    mcpServers={mcpServers}
+                    selectedAgentId={selectedAgentId}
+                    planItems={planItems}
+                    planStatus={planStatus}
                     usage={usage}
                     width={width}
                     height={height}
@@ -229,10 +320,12 @@ export const NexusWorkspacePanel = React.memo(({
             ) : (
                 <Box flexDirection="column" flexGrow={1}>
                     <Box justifyContent="space-between" marginBottom={1}>
-                        <Text bold color="cyanBright">NEXUS</Text>
+                        <Text bold color={NEXUS_BLUE_BRIGHT}>NEXUS</Text>
                         <Text color="blueBright" bold>{mode.toUpperCase()}</Text>
                     </Box>
-                    {mode === 'question' ? (
+                    {mode === 'approval' ? (
+                        <ApprovalPanelBody approval={pendingApproval || null} width={width} />
+                    ) : mode === 'question' ? (
                         <QuestionPanelBody question={pendingQuestion} selectedIndex={selectedQuestionIndex} customActive={questionCustomMode === true} width={width} />
                     ) : mode === 'plan' ? (
                         <PlanPanelBody items={planItems} status={planStatus} expanded={planExpanded} />

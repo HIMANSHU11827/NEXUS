@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import queue
+import random
 import re
 import threading
 from typing import Any, AsyncGenerator, Dict, List, Optional
@@ -64,6 +65,50 @@ class V5ModelCaller:
             return True
         return re.search(r"\b\d{3}\b.*(?:error|failed|unauthorized|invalid)", head) is not None
 
+    # ────────────────────────────────────────────────────────────────────
+    # BOUNDED LLM RETRY (DeepSeek Harness llm-retry pattern)
+    # Retryable codes: EMPTY_RESPONSE / RATE_LIMIT / SERVER / TIMEOUT /
+    # TRANSPORT. Exponential backoff 500ms base, 10s cap, with jitter;
+    # total attempt budget bounded by NEXUS_LLM_RETRIES (default 3).
+    # ────────────────────────────────────────────────────────────────────
+
+    def _llm_retry_budget(self) -> int:
+        """Total LLM attempt budget (env NEXUS_LLM_RETRIES, default 3)."""
+        try:
+            return max(1, int(os.environ.get("NEXUS_LLM_RETRIES", "3")))
+        except (TypeError, ValueError):
+            return 3
+
+    @staticmethod
+    def _is_retryable_llm_failure(value: Any) -> bool:
+        """True when a model call failure is transient and worth a retry.
+
+        Matches rate-limit, server, timeout and transport/connectivity
+        failures. Auth, billing/quota and invalid-request failures are
+        permanent and never retried.
+        """
+        text = str(value or "").lower()
+        markers = (
+            "rate limit", "rate limited", "too many requests", "429",
+            "500", "502", "503", "504", "bad gateway", "server error",
+            "internal server", "service unavailable", "temporarily",
+            "timed out", "timeout", "timedout", "connection", "connect timed",
+            "network", "transport", "empty response", "no response",
+            "read timed", "eof", "socket", "reset by peer",
+        )
+        return any(marker in text for marker in markers)
+
+    async def _llm_retry_sleep(self, attempt: int) -> None:
+        """Bounded exponential backoff (500ms base, 10s cap) with jitter."""
+        delay = min(10.0, 0.5 * (2 ** max(0, attempt - 1)))
+        delay = min(10.0, delay * (0.5 + random.random()))
+        await asyncio.sleep(delay)
+
+    def _llm_should_retry_empty(self) -> bool:
+        """False when no provider is configured, so empty is never retried."""
+        brain = getattr(self, "brain", None)
+        return bool(brain is not None and hasattr(brain, "generate"))
+
     def _call_model(
         self,
         messages: List[Dict],
@@ -83,6 +128,7 @@ class V5ModelCaller:
         """
         brain = self.brain
         if not brain or not hasattr(brain, "generate"):
+            self._last_model_error = "no model configured"
             return ""
         # Respect env var overrides
         provider = provider or os.environ.get("NEXUS_PROVIDER", "").strip() or None
@@ -106,10 +152,13 @@ class V5ModelCaller:
         try:
             result = str(brain.generate(**kwargs) or "")
             if self._is_provider_error_text(result):
+                self._last_model_error = str(result)[:1000]
                 self.logger.warning("_call_model: provider error text returned")
                 return ""
+            self._last_model_error = ""
             return result
         except Exception as e:
+            self._last_model_error = str(e)[:1000]
             self.logger.warning(f"_call_model error: {e}")
             return ""
 
@@ -126,41 +175,90 @@ class V5ModelCaller:
         tool_choice: Optional[str] = None,
     ) -> str:
         """Call the model off the event loop with a hard timeout so a slow or
-        hanging provider can never freeze the turn indefinitely."""
+        hanging provider can never freeze the turn indefinitely.
+
+        Transient failures (timeouts, rate limits, server/transport errors
+        and empty responses) are retried with bounded exponential backoff
+        (500ms base, 10s cap, jitter, ``NEXUS_LLM_RETRIES`` attempts); a
+        persistent failure returns "" exactly like before, but records the
+        reason on ``self._last_model_error`` so the loop surfaces a truthful
+        message instead of a silently empty turn."""
         check_deadline = getattr(self, "_check_deadline", None)
         if callable(check_deadline):
             check_deadline()
         effective_timeout = self._effective_model_timeout(timeout)
-        try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._call_model,
-                    messages,
-                    provider=provider,
-                    profile=profile,
-                    model=model,
-                    max_tokens=max_tokens,
+        max_attempts = self._llm_retry_budget()
+        last_error = ""
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._call_model,
+                        messages,
+                        provider=provider,
+                        profile=profile,
+                        model=model,
+                        max_tokens=max_tokens,
+                        timeout=effective_timeout,
+                        tools=tools,
+                        tool_choice=tool_choice,
+                    ),
                     timeout=effective_timeout,
-                    tools=tools,
-                    tool_choice=tool_choice,
-                ),
-                timeout=effective_timeout,
-            )
-        except asyncio.TimeoutError:
-            check_deadline = getattr(self, "_check_deadline", None)
-            if callable(check_deadline):
-                check_deadline()
-            self.logger.error("Model call timed out after %.0fs", timeout)
-            return ""
-        except Exception as e:
-            self.logger.error(f"Model call failed: {e}")
-            return ""
+                )
+                if str(result or "").strip():
+                    return result
+                # EMPTY_RESPONSE is retryable (unless no provider is
+                # configured at all).  Keep the last known error text so the
+                # exhausted path can report the real cause; permanent
+                # failures (auth/billing) are never retried.
+                last_error = str(getattr(self, "_last_model_error", "") or "")
+                should_retry = (
+                    self._llm_should_retry_empty()
+                    and attempt < max_attempts
+                    and (not last_error or self._is_retryable_llm_failure(last_error))
+                )
+                if should_retry:
+                    await self._llm_retry_sleep(attempt)
+                    continue
+                self.logger.error(
+                    "Model call returned no usable response after %d attempt(s): %s",
+                    attempt, last_error or "empty response",
+                )
+                self._last_model_error = last_error or "empty model response"
+                return ""
+            except asyncio.TimeoutError:
+                last_error = f"model call timed out after {timeout:.0f}s"
+                if attempt < max_attempts:
+                    check_deadline = getattr(self, "_check_deadline", None)
+                    if callable(check_deadline):
+                        check_deadline()
+                    await self._llm_retry_sleep(attempt)
+                    continue
+                check_deadline = getattr(self, "_check_deadline", None)
+                if callable(check_deadline):
+                    check_deadline()
+                self._last_model_error = last_error
+                self.logger.error(
+                    "Model call timed out after %.0fs (%d attempts)", timeout, attempt
+                )
+                return ""
+            except Exception as e:
+                if attempt < max_attempts and self._is_retryable_llm_failure(str(e)):
+                    last_error = str(e)[:1000]
+                    await self._llm_retry_sleep(attempt)
+                    continue
+                self._last_model_error = str(e)[:1000]
+                self.logger.error(f"Model call failed: {e}")
+                return ""
+        self._last_model_error = last_error or "empty model response"
+        return ""
 
     def _call_model_raw(self, messages: List[Dict], **kwargs: Any) -> Any:
         """Return a structured provider response without losing tool calls."""
         self._last_model_error = ""
         brain = self.brain
         if not brain or not hasattr(brain, "generate"):
+            self._last_model_error = "no model configured"
             return ""
         provider = kwargs.pop("provider", None) or os.environ.get("NEXUS_PROVIDER", "").strip() or None
         profile = kwargs.pop("profile", None) or getattr(self, "profile_override", "") or None
@@ -178,14 +276,29 @@ class V5ModelCaller:
         if model:
             request["model"] = model
         try:
-            return brain.generate(**request)
+            result = brain.generate(**request)
+            # Provider adapters retain their real API usage on the router
+            # side-channel because the public generate() contract remains a
+            # text result. Preserve that telemetry alongside the text so the
+            # direct loop can forward it to the UI.
+            usage = getattr(brain, "_last_usage", None)
+            if isinstance(usage, dict) and usage:
+                return {"message": {"content": str(result or "")}, "usage": dict(usage)}
+            return result
         except Exception as exc:
             self._last_model_error = str(exc)[:1000]
             self.logger.warning("_call_model_raw error: %s", exc)
             return ""
 
     async def _safe_model_call_raw(self, messages: List[Dict], *, timeout: float = 180.0, **kwargs: Any) -> Any:
-        """Async bounded wrapper for the structured model response."""
+        """Async bounded wrapper for the structured model response.
+
+        Retries transient failures (timeouts, rate limits, server/transport
+        errors and empty responses) with the same bounded backoff as
+        ``_safe_model_call``; on persistent failure returns "" and records
+        the reason on ``self._last_model_error`` so the direct loop can
+        surface a truthful provider-failure response instead of an empty
+        turn."""
         check_deadline = getattr(self, "_check_deadline", None)
         if callable(check_deadline):
             check_deadline()
@@ -195,26 +308,62 @@ class V5ModelCaller:
             await trigger("pre_llm_call", messages, dict(kwargs))
         effective_timeout = self._effective_model_timeout(timeout)
         kwargs.setdefault("timeout", max(0.001, float(effective_timeout)))
-        try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(self._call_model_raw, messages, **kwargs), timeout=effective_timeout
-            )
-            if callable(trigger):
-                await trigger("post_llm_call", messages, result)
-            return result
-        except asyncio.TimeoutError:
-            check_deadline = getattr(self, "_check_deadline", None)
-            if callable(check_deadline):
-                check_deadline()
-            self._last_model_error = f"model call timed out after {timeout:.0f}s"
-            self.logger.error("Raw model call timed out after %.0fs", timeout)
-            if callable(trigger):
-                await trigger("post_llm_call", messages, {"error": "model timeout"})
-        except Exception as exc:
-            self._last_model_error = str(exc)[:1000]
-            self.logger.error("Raw model call failed: %s", exc)
-            if callable(trigger):
-                await trigger("post_llm_call", messages, {"error": str(exc)[:1000]})
+        max_attempts = self._llm_retry_budget()
+        last_error = ""
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(self._call_model_raw, messages, **kwargs), timeout=effective_timeout
+                )
+                if result not in ("", None):
+                    if callable(trigger):
+                        await trigger("post_llm_call", messages, result)
+                    return result
+                # EMPTY_RESPONSE retry (unless no provider is configured);
+                # permanent failures (auth/billing) are never retried.
+                last_error = str(getattr(self, "_last_model_error", "") or "")
+                should_retry = (
+                    self._llm_should_retry_empty()
+                    and attempt < max_attempts
+                    and (not last_error or self._is_retryable_llm_failure(last_error))
+                )
+                if should_retry:
+                    await self._llm_retry_sleep(attempt)
+                    continue
+                self._last_model_error = last_error or "empty model response"
+                self.logger.error(
+                    "Raw model call returned no usable response after %d attempt(s): %s",
+                    attempt, last_error or "empty response",
+                )
+                if callable(trigger):
+                    await trigger("post_llm_call", messages, {"error": self._last_model_error})
+                return ""
+            except asyncio.TimeoutError:
+                last_error = f"model call timed out after {timeout:.0f}s"
+                if attempt < max_attempts:
+                    check_deadline = getattr(self, "_check_deadline", None)
+                    if callable(check_deadline):
+                        check_deadline()
+                    await self._llm_retry_sleep(attempt)
+                    continue
+                check_deadline = getattr(self, "_check_deadline", None)
+                if callable(check_deadline):
+                    check_deadline()
+                self._last_model_error = last_error
+                self.logger.error("Raw model call timed out after %.0fs", timeout)
+                if callable(trigger):
+                    await trigger("post_llm_call", messages, {"error": "model timeout"})
+                return ""
+            except Exception as exc:
+                if attempt < max_attempts and self._is_retryable_llm_failure(str(exc)):
+                    last_error = str(exc)[:1000]
+                    await self._llm_retry_sleep(attempt)
+                    continue
+                self._last_model_error = str(exc)[:1000]
+                self.logger.error("Raw model call failed: %s", exc)
+                if callable(trigger):
+                    await trigger("post_llm_call", messages, {"error": str(exc)[:1000]})
+                return ""
         return ""
 
     def _select_model_for_phase(self, phase: str) -> str:

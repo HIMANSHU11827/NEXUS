@@ -96,8 +96,18 @@ def test_runtime_metrics_exposes_stale_safe_queue_status(monkeypatch, tmp_path):
     monkeypatch.delenv("NEXUS_EMBED_QUEUE_DRIVER", raising=False)
     payload = server.runtime_metrics()
     assert payload["status"] == "success"
-    assert payload["queue"]["mode"] == "external"
+    assert payload["queue"]["mode"] == "embedded"
     assert payload["queue"]["runtime"]["healthy"] is False
+
+
+def test_runtime_metrics_external_mode_when_worker_disabled(monkeypatch, tmp_path):
+    import server
+
+    monkeypatch.setattr(server, "_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("NEXUS_EMBED_QUEUE_DRIVER", "false")
+    payload = server.runtime_metrics()
+    assert payload["status"] == "success"
+    assert payload["queue"]["mode"] == "external"
 
 
 def test_prometheus_metrics_exposes_runtime_health_and_quarantine(monkeypatch, tmp_path):

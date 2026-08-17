@@ -13,3 +13,6 @@ Execute shell commands through `SovereignSandbox.stream_execute` — 3-tier sand
   Unix-only `head`/`tail` commands produce a structured repair hint. Explicit
   `bash` and `wsl` selections are honored when installed and otherwise fail
   clearly rather than falling back to `cmd`.
+- Long-running preview/development servers may use `background=true` (and
+  common server commands are auto-detected); detached launches return promptly
+  and are not killed when the observing terminal stream is closed.

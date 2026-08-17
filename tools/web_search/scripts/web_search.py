@@ -6,7 +6,9 @@ import html
 import ipaddress
 import logging
 import os
+import random
 import re
+import time
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from socket import SOCK_STREAM, getaddrinfo
@@ -29,6 +31,81 @@ logger = logging.getLogger("nexus.tools.web_search")
 # uses direct HTTPS by default; operators who require a corporate proxy can
 # opt back in with NEXUS_WEB_USE_PROXY=1.
 _DIRECT_OPENER = build_opener(ProxyHandler({}))
+
+#: Bounded retry policy for transient network failures (timeouts, refused
+#: connections, DNS failures, HTTP 429 / 5xx).  Permanent failures (HTTP 4xx
+#: other than 429, malformed URLs) and the SSRF guard are never retried.
+_WEB_SEARCH_MAX_ATTEMPTS_DEFAULT = 3
+_WEB_SEARCH_BACKOFF_BASE_DEFAULT = 0.5
+_WEB_SEARCH_BACKOFF_MULTIPLIER = 2.0
+_WEB_SEARCH_JITTER = 0.25
+_WEB_SEARCH_MAX_DELAY = 10.0
+
+
+def _web_retry_policy() -> tuple[int, float]:
+    """Return ``(max_attempts, backoff_base)`` from env, falling back to defaults."""
+    max_attempts = _WEB_SEARCH_MAX_ATTEMPTS_DEFAULT
+    raw_attempts = os.environ.get("NEXUS_WEB_SEARCH_MAX_ATTEMPTS", "")
+    if raw_attempts:
+        try:
+            max_attempts = max(1, int(float(raw_attempts)))
+        except (TypeError, ValueError):
+            logger.warning("Invalid NEXUS_WEB_SEARCH_MAX_ATTEMPTS=%r; using default", raw_attempts)
+    backoff_base = _WEB_SEARCH_BACKOFF_BASE_DEFAULT
+    raw_base = os.environ.get("NEXUS_WEB_SEARCH_BACKOFF_BASE", "")
+    if raw_base:
+        try:
+            backoff_base = max(0.0, float(raw_base))
+        except (TypeError, ValueError):
+            logger.warning("Invalid NEXUS_WEB_SEARCH_BACKOFF_BASE=%r; using default", raw_base)
+    return max_attempts, backoff_base
+
+
+_WEB_SEARCH_MAX_ATTEMPTS, _WEB_SEARCH_BACKOFF_BASE = _web_retry_policy()
+
+
+def _is_transient_failure(exc: BaseException) -> bool:
+    """True only for network failures worth a bounded retry."""
+    if isinstance(exc, urlerror.HTTPError):
+        return exc.code == 429 or exc.code >= 500
+    if isinstance(exc, urlerror.URLError):
+        return True
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return True
+    return False
+
+
+def _retry_transient(fn, *args, **kwargs):
+    """Call ``fn`` with bounded exponential backoff + jitter on transient failures.
+
+    Permanent errors and the final transient failure propagate unchanged.
+    Sleeps are bounded by ``_WEB_SEARCH_MAX_DELAY`` so a retry storm can never
+    exceed the per-attempt budget by more than a fixed ceiling.
+    """
+    delay = _WEB_SEARCH_BACKOFF_BASE
+    for attempt in range(_WEB_SEARCH_MAX_ATTEMPTS):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            if not _is_transient_failure(exc) or attempt + 1 >= _WEB_SEARCH_MAX_ATTEMPTS:
+                raise
+            sleep_for = min(delay + random.uniform(0, _WEB_SEARCH_JITTER), _WEB_SEARCH_MAX_DELAY)
+            logger.warning(
+                "web_search transient failure (attempt %d/%d): %s — retrying in %.2fs",
+                attempt + 1,
+                _WEB_SEARCH_MAX_ATTEMPTS,
+                exc,
+                sleep_for,
+            )
+            time.sleep(sleep_for)
+            delay = min(delay * _WEB_SEARCH_BACKOFF_MULTIPLIER, _WEB_SEARCH_MAX_DELAY)
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
+def _read_url(request: Request, timeout: int) -> bytes:
+    """Perform and fully consume one blocking urllib response."""
+    with _open_url(request, timeout=timeout) as response:
+        return response.read()
 
 
 def _open_url(request: Request, timeout: int):
@@ -229,7 +306,7 @@ class WebSearchTool(BaseTool):
                 },
             )
             status, payload = await asyncio.to_thread(
-                _fetch_response, req, max(5, timeout or 20)
+                _retry_transient, _fetch_response, req, max(5, timeout or 20)
             )
             raw = payload.decode("utf-8", errors="replace")
             if not raw:
@@ -266,8 +343,7 @@ class WebSearchTool(BaseTool):
             headers={"User-Agent": "Mozilla/5.0 (compatible; NEXUS/1.0; +local-agent)"},
         )
         try:
-            with _open_url(rss_request, timeout=15) as response:
-                rss_document = response.read()
+            rss_document = _retry_transient(_read_url, rss_request, 15)
             root = _xml_fromstring(rss_document)
             results: list[dict[str, str]] = []
             for item in root.findall(".//item"):
@@ -292,8 +368,7 @@ class WebSearchTool(BaseTool):
                 "Accept": "text/html,application/xhtml+xml",
             },
         )
-        with _open_url(request, timeout=15) as response:
-            document = response.read().decode("utf-8", errors="replace")
+        document = _retry_transient(_read_url, request, 15).decode("utf-8", errors="replace")
         parser = _DuckDuckGoResultsParser()
         parser.feed(document)
         return parser.results[:limit]

@@ -374,7 +374,7 @@ class MemoryManager:
             # Default to the most-recently-modified session file so a fresh process
             # resumes the real conversation instead of inventing a random id that
             # can never be looked up (which made NEXUS "forget everything").
-            self.session_id = self._resolve_latest_session_id()
+            self.session_id = self._resolve_latest_session_id(self.root)
         self.max_session_lines = max_session_lines
         self._memory: List[Dict[str, str]] = []
         self._pool = ThreadPoolExecutor(max_workers=2)
@@ -552,6 +552,21 @@ class MemoryManager:
 
         return ctx
 
+    def _run_memory_forge(self, forge: Any, title: str, content: str) -> None:
+        """Run one memory forge attempt in the calling thread; never raises.
+
+        The forge runs off the event loop via ``asyncio.to_thread``; a failure
+        must never surface to ``sync_all`` callers and must be visible in logs.
+        """
+        try:
+            forge.forge(title, content)
+        except Exception:
+            logger.warning(
+                "sync_all: MemoryForge.forge failed for %r; memory forge skipped (session sync continues)",
+                title,
+                exc_info=True,
+            )
+
     async def sync_all(
         self,
         user_message: str,
@@ -605,14 +620,17 @@ class MemoryManager:
                 if evidence:
                     tasks.append(
                         asyncio.to_thread(
-                            forge.forge,
+                            self._run_memory_forge,
+                            forge,
                             f"session_{self.session_id}",
-                            f"Verified: {evidence}"
+                            f"Verified: {evidence}",
                         )
                     )
         except Exception:
-            logger.warning("memory/__init__.py:129 : suppressed error", exc_info=True)
-            pass
+            logger.warning(
+                "sync_all: MemoryForge setup failed; memory forge skipped (session sync continues)",
+                exc_info=True,
+            )
 
         await asyncio.gather(*tasks, return_exceptions=True)
 

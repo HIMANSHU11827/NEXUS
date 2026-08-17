@@ -31,6 +31,24 @@ def test_supervisor_rejects_unhealthy_probe(tmp_path):
     assert supervisor.probe() is False
 
 
+def test_supervisor_quarantines_unexpected_clean_exit(tmp_path):
+    supervisor = NexusSupervisor(
+        str(tmp_path),
+        command=[sys.executable, "-c", "import time; time.sleep(0.03)"],
+        interval=0.001,
+        startup_timeout=0.02,
+        max_restarts=2,
+        crash_window=60,
+    )
+    supervisor.probe = lambda: True
+    supervisor._dispatch_quarantine_alert = lambda _incident: {"status": "sent"}
+
+    assert supervisor.run() == 2
+    incident = supervisor._incident()
+    assert incident["failure_count"] == 2
+    assert "exited unexpectedly" in incident["last_error"]
+
+
 def test_supervisor_singleton_lock_rejects_live_duplicate_and_reclaims_stale(tmp_path):
     first = NexusSupervisor(str(tmp_path))
     second = NexusSupervisor(str(tmp_path))

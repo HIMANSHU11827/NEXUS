@@ -17,6 +17,7 @@ import os
 import re
 import time
 import uuid
+import asyncio
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -274,10 +275,26 @@ class V5Verifier:
                 "last_edit_at": state.get("stale_at"),
                 "changed_paths": list(state.get("changed_paths") or [])[:200],
             })
-        except Exception:
+        except Exception as exc:
             # Verification must remain provider-independent and never fail
-            # merely because its optional durable ledger is unavailable.
-            pass
+            # merely because its optional durable ledger is unavailable, but
+            # the outage must not be silent — surface it as a status event.
+            try:
+                emitter = getattr(self, "_emit_runtime_event", None)
+                if callable(emitter):
+                    emit = emitter(
+                        "status.changed",
+                        "verification ledger unavailable",
+                        "failed",
+                        event_id=f"ledger-{uuid.uuid4().hex[:12]}",
+                        payload={
+                            "error": f"verifier ledger error: {type(exc).__name__}",
+                        },
+                    )
+                    if inspect.isawaitable(emit):
+                        await emit
+            except Exception:
+                pass
 
         if failed:
             result["success"] = False
@@ -319,7 +336,7 @@ class V5Verifier:
         try:
             verdict = evaluator(envelope)
             if inspect.isawaitable(verdict):
-                verdict = await verdict
+                verdict = await asyncio.wait_for(verdict, timeout=90.0)
             if isinstance(verdict, bool):
                 aligned = verdict
                 reason = "provider evaluator returned a boolean verdict"

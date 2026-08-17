@@ -52,9 +52,9 @@ class AnthropicProvider(NexusBaseProvider):
                 name = str(block.get("name") or "").strip()
                 if not name:
                     continue
-                arguments = block.get("input", {})
-                if not isinstance(arguments, dict):
-                    arguments = {}
+                arguments = NexusBaseProvider.normalize_tool_arguments(
+                    block.get("input", {}), tool_name=name
+                )
                 envelopes.append(f"<function={name}>{json.dumps(arguments, ensure_ascii=False)}")
         return "\n".join(envelopes)
 
@@ -191,11 +191,10 @@ class AnthropicProvider(NexusBaseProvider):
                                     if current_tool_use is not None:
                                         name = current_tool_use["name"]
                                         input_str = current_tool_use["input"]
-                                        try:
-                                            arguments = json.loads(input_str) if input_str.strip() else {}
-                                        except json.JSONDecodeError:
-                                            arguments = {}
-                                        if isinstance(arguments, dict) and name:
+                                        arguments = NexusBaseProvider.normalize_tool_arguments(
+                                            input_str, tool_name=name
+                                        )
+                                        if name:
                                             accumulated_envelopes.append(
                                                 f"<function={name}>{json.dumps(arguments, ensure_ascii=False)}"
                                             )

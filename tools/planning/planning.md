@@ -1,7 +1,9 @@
 # Planning Tool
 **Version:** 2.0.0
 
-Create and maintain one truthful, task-specific plan in `todo.md`.
+Create and maintain one truthful, task-specific plan. The canonical file is
+`workspace/todo.md` when the workspace directory exists; otherwise it is
+`todo.md` at the project root.
 
 ## Parameters
 - `goal` (string, required for create): Task or goal to plan

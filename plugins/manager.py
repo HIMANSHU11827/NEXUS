@@ -47,6 +47,7 @@ from plugins.trust import (
 )
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
 from tools.nexus_tools.registry import ToolEntry
+from tools.nexus_tools.result import ToolCallResult, normalize_result
 from utils.singleton import ThreadSafeSingleton
 
 logger = logging.getLogger(__name__)
@@ -197,13 +198,47 @@ class PluginToolAdapter(BaseTool):
         # Optional fault callback used by the manager's crash-loop tracking.
         self._on_error = on_error
 
+    @staticmethod
+    def _error_text(result: Dict[str, Any]) -> str:
+        """Extract a bounded human-readable error from MCP-style plugin data."""
+        value = result.get("error") or result.get("message") or result.get("content")
+        if isinstance(value, list):
+            value = "\n".join(
+                str(item.get("text", item)) if isinstance(item, dict) else str(item)
+                for item in value
+            )
+        return str(value or "Plugin tool reported an error")[:4000]
+
+    def _normalize_plugin_result(self, result: Any) -> ToolCallResult:
+        """Canonicalize every plugin return before it reaches core execution."""
+        raw = result
+        if isinstance(result, dict) and result.get("isError") is True:
+            raw = dict(result)
+            raw["status"] = "error"
+            raw.setdefault("error", self._error_text(raw))
+        return normalize_result(
+            raw,
+            name=self.name,
+            tool_call_id="",
+            started_at="",
+            monotonic_start=time.monotonic(),
+            max_output_chars=0,
+        )
+
+    def _normalize_stream_chunk(self, chunk: Any) -> Any:
+        """Validate stream chunks while preserving ordinary incremental text."""
+        normalized = self._normalize_plugin_result(chunk)
+        if isinstance(chunk, str) and normalized.success:
+            return normalized.output
+        return normalized
+
     async def execute(self, **kwargs) -> ToolResult:
         try:
             if inspect.iscoroutinefunction(self._handler):
                 result = await self._handler(**kwargs)
             else:
                 result = await asyncio.to_thread(self._handler, **kwargs)
-            return ToolResult(success=True, output=str(result) if result is not None else "")
+            return self._normalize_plugin_result(result)
         except Exception as e:
             logger.warning(f"Plugin tool '{self.name}' error: {e}")
             if self._on_error is not None:
@@ -218,7 +253,7 @@ class PluginToolAdapter(BaseTool):
         try:
             if inspect.isasyncgenfunction(self._handler):
                 async for chunk in self._handler(**kwargs):
-                    yield str(chunk)
+                    yield self._normalize_stream_chunk(chunk)
                 return
             if inspect.isgeneratorfunction(self._handler):
                 iterator = self._handler(**kwargs)
@@ -227,13 +262,10 @@ class PluginToolAdapter(BaseTool):
                     chunk = await asyncio.to_thread(next, iterator, sentinel)
                     if chunk is sentinel:
                         break
-                    yield str(chunk)
+                    yield self._normalize_stream_chunk(chunk)
                 return
             result = await self.execute(**kwargs)
-            if result.output:
-                yield result.output
-            if result.error:
-                yield result.error
+            yield result
         except Exception as e:
             # A streaming plugin failure degrades to an error chunk instead of
             # propagating into the core loop.
@@ -243,7 +275,7 @@ class PluginToolAdapter(BaseTool):
                     self._on_error(str(e))
                 except Exception:
                     logger.debug("Plugin tool on_error callback failed", exc_info=True)
-            yield str(e)
+            yield ToolResult(success=False, error=str(e))
 
 
 class HookRegistry:
@@ -411,6 +443,14 @@ class PluginContext:
             root_dir=self._dir,
             on_error=self._fault_cb("tool"),
         )
+        if name in self._kernel.tools._tools and name not in self._registered_tools:
+            self._deny("tool", name, "tools")
+            logger.warning(
+                "[PLUGIN:%s] Denied tool '%s': name already registered by another plugin",
+                self._name,
+                name,
+            )
+            return False
         entry = ToolEntry(name=name, schema=schema, instance=adapter)
         self._kernel.tools._tools[name] = entry
         self._registered_tools[name] = adapter
@@ -801,6 +841,7 @@ class PluginManager(ThreadSafeSingleton):
                              PluginStage.INITIALIZED, PluginStage.ENABLED):
                 rec.transition(PluginStage.VALIDATED)
             rec.transition(PluginStage.LOADING)
+            ctx = None
             try:
                 default_capabilities = resolve_capabilities(meta, rec.capabilities)
                 ctx = PluginContext(
@@ -840,6 +881,8 @@ class PluginManager(ThreadSafeSingleton):
                 return True
             except Exception as e:
                 logger.error(f"Failed to load plugin '{name}': {e}")
+                if ctx is not None:
+                    self._unregister_all(ctx, name)
                 self._fail(rec, str(e))
                 return False
 

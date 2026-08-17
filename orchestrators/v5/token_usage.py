@@ -64,4 +64,71 @@ def estimate_messages_tokens(messages: Any) -> int:
     return max(0, (total_chars + 3) // 4)
 
 
-__all__ = ["TokenUsage", "estimate_messages_tokens", "normalize_usage"]
+# (substring, input_usd_per_million, output_usd_per_million) — public list
+# prices, kept compact on purpose. Order matters: specific keys first so a
+# generic key ("gpt-4") never shadows "gpt-4o-mini".
+_ESTIMATED_PRICES_PER_MT = [
+    ("gpt-4o-mini", 0.15, 0.60),
+    ("gpt-4o", 2.50, 10.00),
+    ("gpt-4.1", 2.00, 8.00),
+    ("gpt-4", 30.00, 60.00),
+    ("o4-mini", 1.10, 4.40),
+    ("o3", 2.00, 8.00),
+    ("claude-3-7-sonnet", 3.00, 15.00),
+    ("claude-3-5-sonnet", 3.00, 15.00),
+    ("claude-sonnet", 3.00, 15.00),
+    ("claude-3-5-haiku", 0.80, 4.00),
+    ("claude-3-haiku", 0.25, 1.25),
+    ("claude-opus", 15.00, 75.00),
+    ("deepseek-reasoner", 0.55, 2.19),
+    ("deepseek-chat", 0.27, 1.10),
+    ("deepseek", 0.55, 2.19),
+    ("gemini-2.5-pro", 1.25, 10.00),
+    ("gemini-2.5-flash", 0.30, 2.50),
+    ("gemini", 1.25, 10.00),
+]
+
+_LOCAL_PROVIDER_MARKERS = (
+    "local", "ollama", "lmstudio", "llama", "kobold", "vllm", "text-generation",
+)
+
+# Conservative mid-range fallback when the model is unknown: $1.00 / $2.00 per
+# million tokens.
+_DEFAULT_PRICE_IN = 1.00
+_DEFAULT_PRICE_OUT = 2.00
+
+
+def estimate_cost_usd(
+    provider: Any,
+    model: Any,
+    input_tokens: int,
+    output_tokens: int,
+) -> float:
+    """Estimate the USD cost of a model call from public list prices.
+
+    Providers do not report cost, so this is a documented estimate: local
+    providers cost zero, known cloud models use their list price, and unknown
+    models fall back to a conservative mid-range rate. Never raises.
+    """
+    prov = str(provider or "").lower()
+    mod = str(model or "").lower()
+    if any(marker in prov for marker in _LOCAL_PROVIDER_MARKERS):
+        return 0.0
+    price_in, price_out = _DEFAULT_PRICE_IN, _DEFAULT_PRICE_OUT
+    for key, pin, pout in _ESTIMATED_PRICES_PER_MT:
+        if key in mod or key in prov:
+            price_in, price_out = pin, pout
+            break
+    return max(
+        0.0,
+        max(0, int(input_tokens)) * price_in / 1_000_000
+        + max(0, int(output_tokens)) * price_out / 1_000_000,
+    )
+
+
+__all__ = [
+    "TokenUsage",
+    "estimate_cost_usd",
+    "estimate_messages_tokens",
+    "normalize_usage",
+]

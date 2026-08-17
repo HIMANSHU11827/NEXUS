@@ -1,5 +1,7 @@
 import time
 
+import pytest
+
 from queue.store import STATE_RETRYING, TaskQueue
 
 
@@ -118,3 +120,27 @@ def test_enqueue_idempotency_key_returns_one_durable_task(tmp_path):
     )
     assert second_id == first_id
     assert len(TaskQueue(db_path=db).list_unfinished()) == 1
+
+
+def test_corrupted_payload_is_marked_not_silently_emptied(tmp_path):
+    """Regression: a corrupt payload must stay diagnosable (P12)."""
+    row = {"payload": "{not valid json", "id": "t1"}
+    parsed = TaskQueue._row_to_dict(row)
+    payload = parsed["payload"]
+    assert payload.get("_payload_error"), payload
+    assert "not valid json" in str(payload.get("_raw_payload"))
+
+
+def test_corrupted_payload_driver_fails_with_clear_reason(tmp_path):
+    """Regression: the driver explains corruption instead of 'no task_desc' (P12)."""
+    import asyncio
+
+    from queue.driver import QueueDriver
+
+    class FakeQueue:
+        db_path = str(tmp_path / "tasks.db")
+
+    driver = QueueDriver(queue=FakeQueue())  # type: ignore[arg-type]
+    task = {"payload": {"_payload_error": "invalid json payload: Expecting value", "_raw_payload": "{"}}
+    with pytest.raises(ValueError, match="corrupted"):
+        asyncio.run(driver.run_task(task))

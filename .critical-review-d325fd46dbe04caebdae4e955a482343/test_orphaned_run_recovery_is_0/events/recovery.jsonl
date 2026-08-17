@@ -1,0 +1,1 @@
+{"id": "recovery_run-a", "event_id": "recovery_run-a", "event_type": "run.failed", "type": "run.failed", "kind": "run", "title": "Run recovered after process restart", "status": "failed", "run_id": "run-a", "turn_id": "run-a", "task_id": "task-a", "error": "process restarted before terminal event", "visibility": "public", "sequence": 1}

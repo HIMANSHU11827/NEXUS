@@ -21,6 +21,7 @@ are pure functions tested without network access or live credentials.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import os
 import time
@@ -214,7 +215,7 @@ class WeixinAdapter(BasePlatformAdapter):
     ) -> bool:
         """Validate a Weixin URL verification handshake signature."""
         expected = _sha1_signature(token, timestamp, nonce, echostr)
-        return expected == msg_signature
+        return hmac.compare_digest(expected, msg_signature)
 
     @staticmethod
     def verify_signature(
@@ -222,7 +223,7 @@ class WeixinAdapter(BasePlatformAdapter):
     ) -> bool:
         """Validate a Weixin callback message signature (plaintext mode)."""
         expected = _sha1_signature(token, timestamp, nonce)
-        return expected == msg_signature
+        return hmac.compare_digest(expected, msg_signature)
 
     @staticmethod
     def decrypt_message(encoding_aes_key: str, encrypt_b64: str) -> Optional[str]:

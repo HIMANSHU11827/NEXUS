@@ -17,6 +17,27 @@ class CodeSearchTool(BaseTool):
     name = "code_search"
     description = "Search code with glob, regex, and structure analysis"
 
+    # ReDoS guard: reject patterns with nested/repeated quantifiers or
+    # backreference-free unbounded alternation groups that allow catastrophic
+    # backtracking, and cap pattern length so pathological input cannot hang
+    # the worker thread.
+    _RE_DOS_GUARD = re.compile(
+        r"\([^()]*[+*?][^()]*\)[+*]|\([^()]*\|[^()]*\)[+*]|"
+        r"\([^()]*\)\{[0-9]+,[0-9]*\}"
+    )
+    MAX_PATTERN_LEN = 500
+
+    def _validate_pattern(self, pattern: str) -> Optional[str]:
+        if len(pattern) > self.MAX_PATTERN_LEN:
+            return f"pattern too long ({len(pattern)} chars, max {self.MAX_PATTERN_LEN})"
+        if self._RE_DOS_GUARD.search(pattern):
+            return "pattern rejected: nested quantifiers may cause unbounded backtracking"
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            return f"invalid regex: {exc}"
+        return None
+
     async def execute(self, pattern: str, path: str = ".", include: Optional[str] = None, mode: str = "grep", **kwargs) -> ToolResult:
         """Run the bounded filesystem scan without blocking the event loop."""
         return await asyncio.to_thread(
@@ -25,6 +46,9 @@ class CodeSearchTool(BaseTool):
 
     def _execute_sync(self, pattern: str, path: str = ".", include: Optional[str] = None, mode: str = "grep", **kwargs) -> ToolResult:
         try:
+            invalid = self._validate_pattern(pattern) if mode == "grep" else None
+            if invalid:
+                return ToolResult(success=False, error=f"Invalid pattern: {invalid}")
             root = Path(self.root_dir).resolve() if self.root_dir else Path.cwd().resolve()
             search_path = (root / path).resolve()
 

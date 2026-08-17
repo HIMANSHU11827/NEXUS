@@ -239,3 +239,37 @@ def test_checkpoint_directory_is_bounded_for_long_running_sessions(tmp_path):
     latest = loop._checkpoint_load(f"run-{overshoot - 1}")
     assert latest, "newest checkpoint was pruned"
     assert latest["plan"] == [{"step": "x"}]
+
+
+def test_checkpoint_list_reads_underscore_phase_from_payload(tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="ckpt-phase")
+    _seed(loop, plan=[], actions=[], memory=[])
+    loop._checkpoint_save(turn_id="run_with_underscores", phase="timed_out")
+
+    entry = loop._checkpoint_list(limit=1)[0]
+
+    assert entry["turn_id"] == "run_with_underscores"
+    assert entry["phase"] == "timed_out"
+
+
+def test_checkpoint_paths_hash_raw_identity_and_do_not_collide(tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="ckpt-identity")
+    _seed(loop, plan=[], actions=[], memory=[])
+
+    first = loop._checkpoint_save(turn_id="run/a", phase="timed/out")
+    second = loop._checkpoint_save(turn_id="run_a", phase="timed_out")
+
+    assert first and second and first != second
+    assert loop._checkpoint_load("run/a", "timed/out")["turn_id"] == "run/a"
+    assert loop._checkpoint_load("run_a", "timed_out")["turn_id"] == "run_a"
+
+
+def test_explicit_checkpoint_load_rejects_payload_identity_mismatch(tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="ckpt-identity-check")
+    _seed(loop, plan=[], actions=[], memory=[])
+    path = Path(loop._checkpoint_save(turn_id="expected", phase="executing"))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["turn_id"] = "different"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert loop._checkpoint_load("expected", "executing") == {}

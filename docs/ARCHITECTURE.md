@@ -4,7 +4,7 @@ Nexus AI is a local-first autonomous AI agent framework with a Python backend an
 
 ## Core Runtime
 
-- **nexus/** - Boot loader (`boot()` function). Entry point for `python -m nexus`, `--setup`, `--server`, `--gui`, and `--shell`. The default route launches the Ink TUI and starts `gui.api:app` when needed.
+- **nexus/** - Boot loader (`boot()` function). Entry point for `python -m nexus`, `--setup`, `--server`, `--gui`, and `--shell`. The default route launches the Ink TUI and starts the canonical `server:app` API when needed.
 - **nexus/events.py** - Canonical event system with ~50 event types (run, conversation, message, plan, tool, command, file, search, web, test, subagent lifecycle). Events flow via `work_event_sink` callback and stream to GUI via SSE.
 - **orchestrators/v5/core.py** - V5 `NexusLoop` - the main agent loop. The live path uses the transcript-driven direct model/tool loop, registry discovery, memory, provider routing, and canonical event emission.
 - **kernel/** - Central singleton with lazy-loaded subsystems, workspace ownership, shared module cache, and health stats.
@@ -36,7 +36,7 @@ Nexus AI is a local-first autonomous AI agent framework with a Python backend an
 
 - **tools/** - Registry-discovered tools organized in subdirectories:
   - Implemented (18): `code_search/`, `creating/`, `deep_research/`, `deleting/`, `git_ops/`, `hive/`, `knowledge/`, `memory/`, `modifying/`, `planning/`, `reading/`, `reasoning/`, `shortcuts/`, `system/`, `task/`, `terminal/`, `test_runner/`, `web_search/`
-  - Unimplemented stubs (13): `bash_timeout_control/`, `browser_open/`, `fault_tolerant_command_runner/`, `file_path_resolver/`, `live_news_tool/`, `long_running_command_handler/`, `news_aggregator_live/`, `nexus_codebase_research/`, `safe_file_path_tracking/`, `sandbox_path_validation/`, `sandbox_path_validator/`, `workspace_path_guard/`, `workspace_path_validation/` — registered via `.json` metadata but marked `unavailable`
+  - Unimplemented stubs: none — all stale stub tools were retired and their directories removed; the registry's `DISABLED_TOOL_NAMES` skips any retired/empty tool dir at discovery
   - Each tool has a `<name>.jsnol` metadata file and handler scripts (stub tools use `.json` only)
 - **tools/nexus_tools/registry.py** - `ToolRegistry` for tool discovery and management (note: `bash` is retired — `terminal` is the only command-execution tool)
 - **tools/threat_patterns.py** - Threat pattern detection for security (41 regex patterns, 3 scopes)

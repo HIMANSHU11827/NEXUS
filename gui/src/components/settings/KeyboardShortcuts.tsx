@@ -4,7 +4,7 @@ export function KeyboardShortcuts() {
   const [activeTab, setActiveTab] = useState<'general' | 'chat' | 'navigation'>('general')
   
   const generalShortcuts = [
-    { keys: ['Ctrl', 'K'], action: 'Open command palette', context: undefined as string | undefined },
+    { keys: ['Ctrl', 'K'], action: 'Focus chat-history search', context: undefined as string | undefined },
     { keys: ['Ctrl', ','], action: 'Open settings', context: undefined as string | undefined },
     { keys: ['Esc'], action: 'Close modal or dialog', context: undefined as string | undefined },
   ]
@@ -13,7 +13,7 @@ export function KeyboardShortcuts() {
     { keys: ['Enter'], action: 'Send the message in the composer', context: undefined as string | undefined },
     { keys: ['Shift', 'Enter'], action: 'Insert a new line in the composer', context: undefined as string | undefined },
     { keys: ['Ctrl', 'B'], action: 'Show or hide the chat history sidebar', context: undefined as string | undefined },
-    { keys: ['Ctrl', 'K'], action: 'Focus the chat-history search box', context: undefined as string | undefined },
+    { keys: ['/'], action: 'Open the slash-command palette in the composer', context: undefined as string | undefined },
   ]
   
   const navigationShortcuts = [

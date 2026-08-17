@@ -220,10 +220,14 @@ async def test_handle_message_skips_duplicate_message_ids(monkeypatch, tmp_path)
     class FakeLoop:
         root = "C:\\project"
 
+        def __init__(self, root_dir=None):
+            if root_dir:
+                self.root = root_dir
+
         def load_memory(self, session_id):
             self.session_id = session_id
 
-        async def stream_run(self, text):
+        async def stream_run(self, text, deadline_seconds=None):
             yield {"type": "content", "data": "pong"}
 
     monkeypatch.setattr(gateway_run, "NexusLoop", FakeLoop)

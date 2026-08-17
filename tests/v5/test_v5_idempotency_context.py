@@ -25,6 +25,27 @@ def test_stream_run_propagates_idempotency_key_into_turn_context(tmp_path):
     assert captured["idempotency_key"] == "queue:test:1"
 
 
+def test_run_propagates_idempotency_and_absolute_deadline(tmp_path):
+    loop = NexusLoopV5(str(tmp_path), session_id="run-parity")
+    captured = {}
+
+    async def fake_turn_events(*_args, **kwargs):
+        captured.update(kwargs)
+        yield {"type": "done", "data": {"success": True, "response": "ok"}}
+
+    loop._turn_events = fake_turn_events
+    result = asyncio.run(loop.run(
+        "perform one side effect",
+        task_id="task-2",
+        idempotency_key="queue:test:2",
+        deadline_at=12345.0,
+    ))
+
+    assert result["success"] is True
+    assert captured["idempotency_key"] == "queue:test:2"
+    assert captured["deadline_at"] == 12345.0
+
+
 async def _collect(iterator):
     values = []
     async for item in iterator:

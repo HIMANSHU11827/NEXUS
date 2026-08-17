@@ -99,8 +99,10 @@ async def test_server_cancel_handler_releases_a_live_v5_tool_wait(tmp_path):
             await pending
 
 
-def test_set_model_can_switch_to_an_enabled_named_profile(monkeypatch):
+def test_set_model_can_switch_to_an_enabled_named_profile(tmp_path, monkeypatch):
     import server
+
+    monkeypatch.setattr(server, "_CONFIG_PATH", str(tmp_path / "config" / "settings.yml"))
 
     class Profile:
         model_id = "deepseek-v4-flash"

@@ -81,6 +81,50 @@ def _env_timeout_ms() -> int:
     return DEFAULT_TOOL_TIMEOUT_MS
 
 
+def _env_default_max_retries() -> int:
+    """Default per-tool retry count for tools that declare no execution.max_retries.
+
+    Defaults to 0 (no retry) so existing behavior is unchanged; operators can
+    set NEXUS_TOOL_DEFAULT_MAX_RETRIES=2 to make every tool retry transient
+    failures (still refused for side-effecting tools without an opt-in).
+    """
+    raw = os.environ.get("NEXUS_TOOL_DEFAULT_MAX_RETRIES")
+    if raw:
+        try:
+            value = int(float(raw))
+            if value >= 0:
+                return value
+        except (TypeError, ValueError):
+            logger.warning("Invalid NEXUS_TOOL_DEFAULT_MAX_RETRIES=%r; using 0", raw)
+    return 0
+
+
+def _env_retry_backoff_base_ms() -> int:
+    """Initial registry retry delay, overridable via NEXUS_TOOL_RETRY_BACKOFF_BASE (seconds)."""
+    raw = os.environ.get("NEXUS_TOOL_RETRY_BACKOFF_BASE")
+    if raw:
+        try:
+            value = float(raw)
+            if value >= 0:
+                return int(value * 1000)
+        except (TypeError, ValueError):
+            logger.warning("Invalid NEXUS_TOOL_RETRY_BACKOFF_BASE=%r; using default", raw)
+    return 500
+
+
+def _env_retry_backoff_max_ms() -> int:
+    """Cap for exponential registry retry backoff, overridable via NEXUS_TOOL_RETRY_BACKOFF_MAX (seconds)."""
+    raw = os.environ.get("NEXUS_TOOL_RETRY_BACKOFF_MAX")
+    if raw:
+        try:
+            value = float(raw)
+            if value >= 0:
+                return int(value * 1000)
+        except (TypeError, ValueError):
+            logger.warning("Invalid NEXUS_TOOL_RETRY_BACKOFF_MAX=%r; using default", raw)
+    return 15_000
+
+
 def _policy_int(value: Any, default: int = 0, minimum: int = 0) -> int:
     try:
         return max(minimum, int(value))
@@ -307,6 +351,11 @@ class ToolRegistry:
         self.root = root or os.getcwd()
         self._tools: Dict[str, ToolEntry] = {}
         self._mcp_clients: List[Any] = []
+        # Per-server MCP lifecycle report: name -> {running, health, tools,
+        # trusted, pending_approval, degraded, error}. Written by
+        # init_mcp_tools/_start_mcp_server so API/GUI can show live state
+        # instead of a silent failure.
+        self._mcp_server_status: Dict[str, Dict[str, Any]] = {}
         self._discover()
         # Skills and MCP tools are extensions of the same model-facing
         # registry.  Discover them here so callers do not need a second,
@@ -552,6 +601,8 @@ class ToolRegistry:
         definitions = entry.schema.get("params") or {}
         if isinstance(definitions, dict):
             for param_name, definition in definitions.items():
+                if param_name == "additionalProperties":
+                    continue
                 if isinstance(definition, dict) and "default" in definition:
                     params.setdefault(param_name, definition["default"])
 
@@ -562,6 +613,8 @@ class ToolRegistry:
         if not isinstance(definitions, dict):
             return
         for param_name, definition in definitions.items():
+            if param_name == "additionalProperties":
+                continue
             if not isinstance(definition, dict) or param_name not in params or params[param_name] is None:
                 continue
             expected_name = definition.get("type")
@@ -586,7 +639,152 @@ class ToolRegistry:
                 params[param_name] = str(value)
 
     @staticmethod
-    def _validate_params(entry: ToolEntry, params: Dict[str, Any]) -> None:
+    def _matches_schema_type(value: Any, expected: str) -> bool:
+        if expected == "null":
+            return value is None
+        if expected == "boolean":
+            return isinstance(value, bool)
+        if expected == "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        if expected == "number":
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+        if expected == "string":
+            return isinstance(value, str)
+        if expected == "object":
+            return isinstance(value, dict)
+        if expected == "array":
+            return isinstance(value, list)
+        return True
+
+    @classmethod
+    def _validate_schema_value(
+        cls,
+        entry: ToolEntry,
+        value: Any,
+        schema: Dict[str, Any],
+        path: str,
+        *,
+        required: bool = False,
+    ) -> None:
+        """Recursively validate the runtime JSON-Schema subset NEXUS exposes."""
+        if not isinstance(schema, dict):
+            raise ValueError(f"Tool '{entry.name}' has an invalid schema for '{path}'")
+
+        expected = schema.get("type")
+        expected_names = list(expected) if isinstance(expected, (list, tuple)) else [expected]
+        expected_names = [str(name) for name in expected_names if name]
+        if not expected_names:
+            if "properties" in schema:
+                expected_names = ["object"]
+            elif "items" in schema:
+                expected_names = ["array"]
+
+        if value is None:
+            if "null" in expected_names:
+                return
+            if required:
+                raise ValueError(f"Tool '{entry.name}' requires non-null parameter '{path}'")
+            if expected_names:
+                raise TypeError(
+                    f"Tool '{entry.name}' parameter '{path}' must be {' or '.join(expected_names)}"
+                )
+            return
+        if expected_names and not any(cls._matches_schema_type(value, name) for name in expected_names):
+            raise TypeError(
+                f"Tool '{entry.name}' parameter '{path}' must be {' or '.join(expected_names)}"
+            )
+
+        enum_values = schema.get("enum")
+        if isinstance(enum_values, (list, tuple, set)) and value not in enum_values:
+            raise ValueError(
+                f"Tool '{entry.name}' parameter '{path}' must be one of: {list(enum_values)}"
+            )
+
+        if isinstance(value, str):
+            min_length = schema.get("minLength")
+            max_length = schema.get("maxLength")
+            if isinstance(min_length, int) and len(value) < min_length:
+                raise ValueError(f"Tool '{entry.name}' parameter '{path}' is shorter than minLength {min_length}")
+            if isinstance(max_length, int) and len(value) > max_length:
+                raise ValueError(f"Tool '{entry.name}' parameter '{path}' exceeds maxLength {max_length}")
+            pattern = schema.get("pattern")
+            if isinstance(pattern, str):
+                try:
+                    matches = re.search(pattern, value) is not None
+                except re.error as exc:
+                    raise ValueError(
+                        f"Tool '{entry.name}' has an invalid pattern schema for '{path}': {exc}"
+                    ) from exc
+                if not matches:
+                    raise ValueError(f"Tool '{entry.name}' parameter '{path}' does not match pattern {pattern!r}")
+
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            minimum = schema.get("minimum")
+            maximum = schema.get("maximum")
+            if isinstance(minimum, (int, float)) and value < minimum:
+                raise ValueError(f"Tool '{entry.name}' parameter '{path}' must be >= {minimum}")
+            if isinstance(maximum, (int, float)) and value > maximum:
+                raise ValueError(f"Tool '{entry.name}' parameter '{path}' must be <= {maximum}")
+            exclusive_minimum = schema.get("exclusiveMinimum")
+            exclusive_maximum = schema.get("exclusiveMaximum")
+            if isinstance(exclusive_minimum, (int, float)) and not isinstance(exclusive_minimum, bool) and value <= exclusive_minimum:
+                raise ValueError(f"Tool '{entry.name}' parameter '{path}' must be > {exclusive_minimum}")
+            if isinstance(exclusive_maximum, (int, float)) and not isinstance(exclusive_maximum, bool) and value >= exclusive_maximum:
+                raise ValueError(f"Tool '{entry.name}' parameter '{path}' must be < {exclusive_maximum}")
+            if exclusive_minimum is True and isinstance(minimum, (int, float)) and value <= minimum:
+                raise ValueError(f"Tool '{entry.name}' parameter '{path}' must be > {minimum}")
+            if exclusive_maximum is True and isinstance(maximum, (int, float)) and value >= maximum:
+                raise ValueError(f"Tool '{entry.name}' parameter '{path}' must be < {maximum}")
+
+        if isinstance(value, list):
+            min_items = schema.get("minItems")
+            max_items = schema.get("maxItems")
+            if isinstance(min_items, int) and len(value) < min_items:
+                raise ValueError(f"Tool '{entry.name}' parameter '{path}' has fewer than minItems {min_items}")
+            if isinstance(max_items, int) and len(value) > max_items:
+                raise ValueError(f"Tool '{entry.name}' parameter '{path}' exceeds maxItems {max_items}")
+            items = schema.get("items")
+            if isinstance(items, dict):
+                for index, item in enumerate(value):
+                    cls._validate_schema_value(entry, item, items, f"{path}[{index}]")
+            elif isinstance(items, list):
+                for index, item_schema in enumerate(items[:len(value)]):
+                    cls._validate_schema_value(entry, value[index], item_schema, f"{path}[{index}]")
+
+        if isinstance(value, dict):
+            properties = schema.get("properties") or {}
+            if not isinstance(properties, dict):
+                raise ValueError(f"Tool '{entry.name}' has an invalid properties schema for '{path}'")
+            required_names = schema.get("required") or []
+            if not isinstance(required_names, (list, tuple, set)):
+                raise ValueError(f"Tool '{entry.name}' has an invalid required schema for '{path}'")
+            required_set = {str(name) for name in required_names}
+            for name, child_schema in properties.items():
+                if not isinstance(child_schema, dict):
+                    raise ValueError(f"Tool '{entry.name}' has an invalid schema for '{path}.{name}'")
+                child_required = name in required_set or child_schema.get("required") is True
+                child_path = str(name) if path == "parameters" else f"{path}.{name}"
+                if name not in value:
+                    if child_required:
+                        raise ValueError(f"Tool '{entry.name}' requires parameter '{child_path}'")
+                    continue
+                cls._validate_schema_value(
+                    entry, value[name], child_schema, child_path, required=child_required,
+                )
+            additional = schema.get("additionalProperties", True)
+            extras = sorted(str(name) for name in value if name not in properties)
+            if additional is False and extras:
+                raise ValueError(
+                    f"Tool '{entry.name}' received undeclared parameter(s): {extras} "
+                    "(schema sets additionalProperties: false)"
+                )
+            if isinstance(additional, dict):
+                for name in extras:
+                    child_path = str(name) if path == "parameters" else f"{path}.{name}"
+                    cls._validate_schema_value(entry, value[name], additional, child_path)
+
+    @classmethod
+    def _validate_params(cls, entry: ToolEntry, params: Dict[str, Any]) -> None:
         """Validate the portable subset of JSON schema used by ``*.jsnol``.
 
         Tool handlers remain responsible for domain validation.  This boundary
@@ -603,9 +801,12 @@ class ToolRegistry:
         required = entry.schema.get("required") or []
         if not isinstance(required, (list, tuple, set)):
             raise ValueError(f"Tool '{entry.name}' has an invalid required schema")
-        for param_name in required:
-            if str(param_name) not in params:
+        required_names = {str(param_name) for param_name in required}
+        for param_name in required_names:
+            if param_name not in params:
                 raise ValueError(f"Tool '{entry.name}' requires parameter '{param_name}'")
+            if params[param_name] is None:
+                raise ValueError(f"Tool '{entry.name}' requires non-null parameter '{param_name}'")
         # Strict schemas may disallow undeclared keys.  ``additionalProperties``
         # can live on the tool schema, inside the ``params`` map, or in the raw
         # MCP ``inputSchema`` — honor all three spellings.  When it is not
@@ -613,14 +814,13 @@ class ToolRegistry:
         additional_properties: Any = entry.schema.get("additionalProperties")
         if isinstance(entry.schema.get("params"), dict):
             params_level = entry.schema["params"].get("additionalProperties")
-            if isinstance(params_level, bool):
+            if isinstance(params_level, (bool, dict)):
                 additional_properties = params_level
-        if additional_properties is not False:
-            input_schema = entry.schema.get("inputSchema")
-            if isinstance(input_schema, dict) and input_schema.get("additionalProperties") is False:
-                additional_properties = False
+        input_schema = entry.schema.get("inputSchema")
+        if additional_properties is None and isinstance(input_schema, dict):
+            additional_properties = input_schema.get("additionalProperties")
         if additional_properties is False:
-            declared = set(definitions.keys())
+            declared = {str(key) for key in definitions if key != "additionalProperties"}
             undeclared = sorted(str(key) for key in params if key not in declared)
             if undeclared:
                 raise ValueError(
@@ -636,15 +836,26 @@ class ToolRegistry:
             "array": list,
         }
         for param_name, definition in definitions.items():
+            if param_name == "additionalProperties":
+                continue
             if not isinstance(definition, dict):
                 raise ValueError(f"Tool '{entry.name}' has an invalid schema for '{param_name}'")
-            if definition.get("required") and param_name not in params:
+            is_required = definition.get("required") is True or param_name in required_names
+            if is_required and param_name not in params:
                 raise ValueError(f"Tool '{entry.name}' requires parameter '{param_name}'")
-            if param_name not in params or params[param_name] is None:
+            if param_name not in params:
                 continue
             expected_name = definition.get("type")
             expected_type = python_types.get(expected_name)
             value = params[param_name]
+            if value is None:
+                if is_required:
+                    raise ValueError(f"Tool '{entry.name}' requires non-null parameter '{param_name}'")
+                if expected_type:
+                    raise TypeError(
+                        f"Tool '{entry.name}' parameter '{param_name}' must be {expected_name}"
+                    )
+                continue
             if expected_type and (
                 not isinstance(value, expected_type)
                 or expected_name in {"integer", "number"} and isinstance(value, bool)
@@ -657,6 +868,27 @@ class ToolRegistry:
                 raise ValueError(
                     f"Tool '{entry.name}' parameter '{param_name}' must be one of: {list(enum_values)}"
                 )
+
+        recursive_required = set(required_names)
+        recursive_required.update(
+            str(name) for name, definition in definitions.items()
+            if name != "additionalProperties"
+            and isinstance(definition, dict)
+            and definition.get("required") is True
+        )
+        root_schema = {
+            "type": "object",
+            "properties": {
+                str(name): definition for name, definition in definitions.items()
+                if name != "additionalProperties"
+            },
+            "required": sorted(recursive_required),
+            "additionalProperties": (
+                additional_properties
+                if isinstance(additional_properties, (bool, dict)) else True
+            ),
+        }
+        cls._validate_schema_value(entry, params, root_schema, "parameters")
 
     @classmethod
     def _prepare_execution(cls, entry: ToolEntry, params: Dict[str, Any]) -> None:
@@ -677,7 +909,10 @@ class ToolRegistry:
         """Write full tool output to the tool-results archive. Returns the path."""
         archive_dir = os.path.join(self.root, "context_archive", "tool-results")
         os.makedirs(archive_dir, exist_ok=True)
-        base = str(call_id) if call_id else f"{entry.name}_{int(time.monotonic() * 1000)}"
+        base = (
+            f"{entry.name}_{call_id}"
+            if call_id else f"{entry.name}_{int(time.monotonic() * 1000)}"
+        )
         safe = re.sub(r"[^A-Za-z0-9_.-]", "_", base)
         path = os.path.join(archive_dir, f"{safe}.txt")
         with open(path, "w", encoding="utf-8", errors="replace") as fh:
@@ -740,6 +975,30 @@ class ToolRegistry:
         call_id = getattr(result, "tool_call_id", None) or None
         return self._maybe_persist(entry, result, call_id)
 
+    def _normalize_execution_result(
+        self,
+        entry: ToolEntry,
+        result: Any,
+        envelope: "tuple[str, str, float]",
+    ) -> ToolCallResult:
+        """Canonicalize a handler result before it crosses the registry boundary.
+
+        Normalization is intentionally unbounded here. The registry's existing
+        finalizer then persists oversized output and replaces it with a preview,
+        preserving the full-output contract instead of truncating before the
+        archive write.
+        """
+        call_id, started_at, monotonic_start = envelope
+        normalized = normalize_result(
+            result,
+            name=entry.name,
+            tool_call_id=call_id,
+            started_at=started_at,
+            monotonic_start=monotonic_start,
+            max_output_chars=0,
+        )
+        return self._finalize_result(entry, normalized)
+
     def list_tools(self, include_unavailable: bool = False) -> Dict[str, Dict[str, Any]]:
         """Return structured tool summaries keyed by canonical tool name.
 
@@ -786,8 +1045,9 @@ class ToolRegistry:
         runtime_context = params.pop("_runtime_context", None)
         cancel_token = params.pop("_cancel_token", None)
         self._prepare_execution(entry, params)
+        envelope = start_envelope(entry.name)
 
-        configured_retries = _policy_int(entry.execution.get("max_retries", 0), 0, 0)
+        configured_retries = _policy_int(entry.execution.get("max_retries", _env_default_max_retries()), 0, 0)
         max_retries = configured_retries if entry.retries_allowed(params) else 0
         if configured_retries and not max_retries:
             logger.warning(
@@ -796,50 +1056,59 @@ class ToolRegistry:
                 entry.name,
                 configured_retries,
             )
-        retry_delay_ms = _policy_int(entry.execution.get("retry_delay_ms", 1000), 1000, 0)
+        retry_delay_ms = _policy_int(entry.execution.get("retry_delay_ms", _env_retry_backoff_base_ms()), 500, 0)
+        retry_backoff_max_ms = _env_retry_backoff_max_ms()
         attempts = 0
 
         while True:
             try:
                 async with entry._semaphore:
                     if _is_cancelled(cancel_token):
-                        return ToolCallResult(
+                        return self._normalize_execution_result(entry, ToolCallResult(
                             name=entry.name, status=STATUS_BLOCKED,
                             error_info={"type": "CancelledError", "message": "Tool execution cancelled"},
                             error="Cancelled",
-                        )
+                        ), envelope)
                     self._bind_runtime_context(entry, runtime_context)
                     await entry.wait_for_cooldown()
+                    active_check = getattr(entry.instance, "assert_execution_active", None)
+                    if callable(active_check):
+                        active_check()
 
                     result = await asyncio.wait_for(
                         entry.instance.execute(**params),
                         timeout=entry.timeout_ms / 1000.0 if entry.timeout_ms > 0 else None,
                     )
-                return self._finalize_result(entry, result)
+                return self._normalize_execution_result(entry, result, envelope)
             except asyncio.TimeoutError:
                 attempts += 1
                 if attempts > max_retries:
-                    return ToolCallResult(
-                        name=entry.name, status=STATUS_TIMEOUT,
-                        error_info={"type": "TimeoutError", "message": f"Timeout after {entry.timeout_ms}ms ({attempts} attempts)", "retryable": True},
-                        error=f"Timeout after {entry.timeout_ms}ms",
-                    )
+                    return self._finalize_result(entry, error_result(
+                        TimeoutError(f"Timeout after {entry.timeout_ms}ms ({attempts} attempts)"),
+                        name=entry.name,
+                        tool_call_id=envelope[0],
+                        started_at=envelope[1],
+                        monotonic_start=envelope[2],
+                        status=STATUS_TIMEOUT,
+                    ))
                 logger.warning("Tool '%s' timed out (attempt %d/%d), retrying in %dms...", entry.name, attempts, max_retries + 1, retry_delay_ms)
                 await asyncio.sleep(retry_delay_ms / 1000.0)
-                retry_delay_ms = min(retry_delay_ms * 2, 60_000)  # exponential backoff, cap 60s
+                retry_delay_ms = min(retry_delay_ms * 2, retry_backoff_max_ms)
             except Exception as exc:
                 error_cls = classify_error(exc)
                 if error_cls["retryable"] and attempts < max_retries:
                     attempts += 1
                     logger.warning("Tool '%s' failed (attempt %d/%d): %s — retrying in %dms...", entry.name, attempts, max_retries + 1, exc, retry_delay_ms)
                     await asyncio.sleep(retry_delay_ms / 1000.0)
-                    retry_delay_ms = min(retry_delay_ms * 2, 60_000)
+                    retry_delay_ms = min(retry_delay_ms * 2, retry_backoff_max_ms)
                     continue
-                return ToolCallResult(
-                    name=entry.name, status=STATUS_ERROR,
-                    error_info=error_cls,
-                    error=str(exc),
-                )
+                return self._finalize_result(entry, error_result(
+                    exc,
+                    name=entry.name,
+                    tool_call_id=envelope[0],
+                    started_at=envelope[1],
+                    monotonic_start=envelope[2],
+                ))
 
 
     async def stream_execute(self, name: str, **params) -> AsyncGenerator[Any, None]:
@@ -859,8 +1128,9 @@ class ToolRegistry:
         runtime_context = params.pop("_runtime_context", None)
         cancel_token = params.pop("_cancel_token", None)
         self._prepare_execution(entry, params)
+        envelope = start_envelope(entry.name)
 
-        configured_retries = _policy_int(entry.execution.get("max_retries", 0), 0, 0)
+        configured_retries = _policy_int(entry.execution.get("max_retries", _env_default_max_retries()), 0, 0)
         max_retries = configured_retries if entry.retries_allowed(params) else 0
         if configured_retries and not max_retries:
             logger.warning(
@@ -868,21 +1138,25 @@ class ToolRegistry:
                 "set execution.retry_side_effects=true only when the adapter is idempotent",
                 entry.name,
             )
-        retry_delay_ms = _policy_int(entry.execution.get("retry_delay_ms", 1000), 1000, 0)
+        retry_delay_ms = _policy_int(entry.execution.get("retry_delay_ms", _env_retry_backoff_base_ms()), 500, 0)
+        retry_backoff_max_ms = _env_retry_backoff_max_ms()
         attempts = 0
 
         while True:
             try:
                 async with entry._semaphore:
                     if _is_cancelled(cancel_token):
-                        yield ToolCallResult(
+                        yield self._normalize_execution_result(entry, ToolCallResult(
                             name=entry.name, status=STATUS_BLOCKED,
                             error_info={"type": "CancelledError", "message": "Tool execution cancelled"},
                             error="Cancelled",
-                        )
+                        ), envelope)
                         return
                     self._bind_runtime_context(entry, runtime_context)
                     await entry.wait_for_cooldown()
+                    active_check = getattr(entry.instance, "assert_execution_active", None)
+                    if callable(active_check):
+                        active_check()
 
                     stream_method = getattr(entry.instance, "stream_execute", None)
                     if callable(stream_method):
@@ -890,8 +1164,14 @@ class ToolRegistry:
                         if inspect.isasyncgen(result):
                             try:
                                 while True:
+                                    if callable(active_check):
+                                        active_check()
                                     if _is_cancelled(cancel_token):
-                                        yield ToolCallResult(name=entry.name, status=STATUS_BLOCKED, error="Cancelled")
+                                        yield self._normalize_execution_result(
+                                            entry,
+                                            ToolCallResult(name=entry.name, status=STATUS_BLOCKED, error="Cancelled"),
+                                            envelope,
+                                        )
                                         return
                                     try:
                                         chunk = await asyncio.wait_for(
@@ -900,7 +1180,7 @@ class ToolRegistry:
                                         )
                                     except StopAsyncIteration:
                                         break
-                                    yield self._finalize_result(entry, chunk) if _is_result_envelope(chunk) else chunk
+                                    yield self._normalize_execution_result(entry, chunk, envelope) if _is_result_envelope(chunk) else chunk
                             finally:
                                 close = getattr(result, "aclose", None)
                                 if callable(close):
@@ -909,53 +1189,64 @@ class ToolRegistry:
                         if inspect.isgenerator(result):
                             sentinel = object()
                             while True:
+                                if callable(active_check):
+                                    active_check()
                                 if _is_cancelled(cancel_token):
-                                    yield ToolCallResult(name=entry.name, status=STATUS_BLOCKED, error="Cancelled")
+                                    yield self._normalize_execution_result(
+                                        entry,
+                                        ToolCallResult(name=entry.name, status=STATUS_BLOCKED, error="Cancelled"),
+                                        envelope,
+                                    )
                                     return
                                 chunk = await asyncio.to_thread(next, result, sentinel)
                                 if chunk is sentinel:
                                     break
-                                yield self._finalize_result(entry, chunk) if _is_result_envelope(chunk) else chunk
+                                yield self._normalize_execution_result(entry, chunk, envelope) if _is_result_envelope(chunk) else chunk
                             return
                         if inspect.isawaitable(result):
-                            yield self._finalize_result(entry, await result)
+                            awaited = await asyncio.wait_for(
+                                result,
+                                timeout=entry.timeout_ms / 1000.0 if entry.timeout_ms > 0 else None,
+                            )
+                            yield self._normalize_execution_result(entry, awaited, envelope)
                             return
 
                     exec_result = await asyncio.wait_for(
                         entry.instance.execute(**params),
                         timeout=entry.timeout_ms / 1000.0 if entry.timeout_ms > 0 else None,
                     )
-                    yield self._finalize_result(entry, exec_result)
+                    yield self._normalize_execution_result(entry, exec_result, envelope)
                 return
             except asyncio.TimeoutError:
                 attempts += 1
                 if attempts > max_retries:
-                    yield ToolCallResult(
-                        name=entry.name, status=STATUS_TIMEOUT,
-                        error_info={"type": "TimeoutError", "message": f"Timeout after {entry.timeout_ms}ms ({attempts} attempts)", "retryable": True},
-                        error=f"Timeout after {entry.timeout_ms}ms",
-                    )
+                    yield self._finalize_result(entry, error_result(
+                        TimeoutError(f"Timeout after {entry.timeout_ms}ms ({attempts} attempts)"),
+                        name=entry.name,
+                        tool_call_id=envelope[0],
+                        started_at=envelope[1],
+                        monotonic_start=envelope[2],
+                        status=STATUS_TIMEOUT,
+                    ))
                     return
                 logger.warning("Tool '%s' stream timed out (attempt %d/%d), retrying in %dms...", entry.name, attempts, max_retries + 1, retry_delay_ms)
-                yield ToolCallResult(name=entry.name, status=STATUS_TIMEOUT,
-                    error_info={"type": "TimeoutError", "message": f"Attempt {attempts} timed out, retrying...", "retryable": True})
                 await asyncio.sleep(retry_delay_ms / 1000.0)
-                retry_delay_ms = min(retry_delay_ms * 2, 60_000)
+                retry_delay_ms = min(retry_delay_ms * 2, retry_backoff_max_ms)
             except Exception as exc:
                 error_cls = classify_error(exc)
                 if error_cls["retryable"] and attempts < max_retries:
                     attempts += 1
                     logger.warning("Tool '%s' stream failed (attempt %d/%d): %s — retrying in %dms...", entry.name, attempts, max_retries + 1, exc, retry_delay_ms)
-                    yield ToolCallResult(name=entry.name, status=STATUS_ERROR,
-                        error_info=error_cls)
                     await asyncio.sleep(retry_delay_ms / 1000.0)
-                    retry_delay_ms = min(retry_delay_ms * 2, 60_000)
+                    retry_delay_ms = min(retry_delay_ms * 2, retry_backoff_max_ms)
                     continue
-                yield ToolCallResult(
-                    name=entry.name, status=STATUS_ERROR,
-                    error_info=error_cls,
-                    error=str(exc),
-                )
+                yield self._finalize_result(entry, error_result(
+                    exc,
+                    name=entry.name,
+                    tool_call_id=envelope[0],
+                    started_at=envelope[1],
+                    monotonic_start=envelope[2],
+                ))
                 return
 
     # ── Health Checks ───────────────────────────────────────────────────
@@ -1080,6 +1371,44 @@ class ToolRegistry:
         }
 
     # ── MCP Auto-Connect ──────────────────────────────────────────────
+
+    def _mcp_approval_required(self) -> bool:
+        """Whether un-trusted MCP servers must be approved before connecting.
+
+        Off by default (backward compatible: the user wrote the config). Set
+        ``NEXUS_MCP_REQUIRE_APPROVAL=1`` to hold every server whose config does
+        not declare ``"trusted": true`` as pending until approved — the Claude
+        Code pattern of asking before connecting project-defined servers.
+        """
+        try:
+            return str(os.environ.get("NEXUS_MCP_REQUIRE_APPROVAL", "")).strip().lower() in {
+                "1", "true", "yes", "on",
+            }
+        except Exception:
+            return False
+
+    def _load_mcp_servers(self, config_path: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+        """Read and normalize the MCP server config into ``{name: cfg}``."""
+        try:
+            mcp_config_path = config_path or os.path.join(self.root, "config", "mcp_servers.json")
+            if not os.path.isfile(mcp_config_path):
+                return {}
+            with open(mcp_config_path, encoding="utf-8") as f:
+                servers = json.load(f)
+            if isinstance(servers, dict) and isinstance(servers.get("servers"), list):
+                # Accept the documented config shape: {"servers": [...]}
+                normalized = {}
+                for index, item in enumerate(servers["servers"]):
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get("name") or f"server_{index}")
+                    normalized[name] = item
+                servers = normalized
+            if not isinstance(servers, dict):
+                return {}
+            return {str(k): v for k, v in servers.items() if isinstance(v, dict)}
+        except Exception:
+            return {}
 
     def init_mcp_tools(self, config_path: Optional[str] = None) -> int:
         """Connect to configured MCP servers and register their tools.

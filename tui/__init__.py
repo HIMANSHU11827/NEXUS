@@ -47,6 +47,12 @@ class NexusShell:
     def _run_bash(self, command: str) -> int:
         console.print(f"Command started: {command}")
         root = getattr(self._brain, "root", os.getcwd())
+        from sandbox.risk import CommandRiskScorer
+
+        assessment = CommandRiskScorer().assess(command)
+        if assessment.blocked:
+            console.print(f"Command blocked: {assessment.summary()}", style="red")
+            return 1
         try:
             completed = subprocess.run(
                 command,
@@ -55,7 +61,11 @@ class NexusShell:
                 text=True,
                 capture_output=True,
                 check=False,
+                timeout=120,
             )
+        except subprocess.TimeoutExpired:
+            console.print("Command timed out after 120s", style="red")
+            return 1
         except OSError as exc:
             console.print(f"Command failed to start: {exc}")
             return 1
@@ -67,16 +77,30 @@ class NexusShell:
         return completed.returncode
 
     def _handle_slash(self, value: str) -> bool:
-        commands = {
-            "/verify": "Verify the current project changes and report actionable failures.",
-            "/test": "Run the relevant project tests and report actionable failures.",
-        }
-        prompt = commands.get(value.strip().split(maxsplit=1)[0])
-        if prompt is None:
+        from nexus.commands import CommandContext, get_registry
+
+        parts = value.strip().split(maxsplit=1)
+        command = get_registry().get(parts[0] if parts else "")
+        if command is None or command.execution != "shared":
             return False
-        self._pending_agent_prompt = prompt
-        self._pending_task_id = TaskTracker.create(prompt)
-        console.print(f"Queued task {self._pending_task_id}: {prompt}")
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            return False
+        try:
+            result = asyncio.run(command.execute(CommandContext(
+                session_id=self.session_id,
+                shell=self,
+                extra={"args": value, "command": parts[0] if parts else ""},
+            )))
+        except RuntimeError:
+            return False
+        if not result.success:
+            console.print(result.error or result.output, style="red")
+            return True
+        console.print(result.output or result.formatted)
         return True
 
     @staticmethod

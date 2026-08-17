@@ -55,10 +55,20 @@ def plan_transaction(root_dir: str | None):
 
 
 class PlanningTool(BaseTool):
-    """Create and maintain one truthful, task-specific todo.md plan."""
+    """Create and maintain one truthful, task-specific todo.md plan.
+
+    Equivalent legacy phase keys (``name``/``tasks``) are accepted when they
+    still contain real task-specific content, so a prompt-version change does
+    not strand an otherwise valid plan.
+    """
 
     name = "planning"
-    description = "Create, update, add, and complete task plans in todo.md"
+    description = (
+        "Create, update, add, and complete task plans. The canonical file is "
+        "workspace/todo.md when that directory exists. For create, plan_spec "
+        "must be {plan_type:'simple',steps:[3-8 strings]} or "
+        "{plan_type:'phased',phases:[{title:'...',subgoals:[...]}]}"
+    )
 
     async def execute(
         self,
@@ -126,11 +136,15 @@ class PlanningTool(BaseTool):
                     )
                 plan = self._ensure_stable_ids(plan, self._read_plan())
                 self._write_plan(plan)
-                self._sync_work_items(plan, str(kwargs.get("session_id") or "default"))
-                return ToolResult(success=True, output=plan, metadata={
+                durable_plan = self._sync_work_items(
+                    plan, str(kwargs.get("session_id") or "default")
+                )
+                return ToolResult(success=True, output=self._output_with_location(plan), metadata={
                     "file": self._todo_path(),
                     "action": "create",
                     "source": "llm",
+                    "plan_id": durable_plan.plan_id if durable_plan else "",
+                    "step_ids": [step.step_id for step in (durable_plan.steps if durable_plan else [])],
                 })
 
             plan = self._read_plan()
@@ -154,8 +168,15 @@ class PlanningTool(BaseTool):
 
             plan = self._ensure_stable_ids(plan, self._read_plan())
             self._write_plan(plan)
-            self._sync_work_items(plan, str(kwargs.get("session_id") or "default"))
-            return ToolResult(success=True, output=plan, metadata={"file": self._todo_path(), "action": operation})
+            durable_plan = self._sync_work_items(
+                plan, str(kwargs.get("session_id") or "default")
+            )
+            return ToolResult(success=True, output=self._output_with_location(plan), metadata={
+                "file": self._todo_path(),
+                "action": operation,
+                "plan_id": durable_plan.plan_id if durable_plan else "",
+                "step_ids": [step.step_id for step in (durable_plan.steps if durable_plan else [])],
+            })
         except Exception as exc:
             return ToolResult(success=False, error=str(exc))
 
@@ -165,6 +186,10 @@ class PlanningTool(BaseTool):
         workspace = os.path.join(self.root_dir, "workspace")
         return os.path.join(workspace, "todo.md") if os.path.isdir(workspace) else os.path.join(self.root_dir, "todo.md")
 
+    def _output_with_location(self, plan: str) -> str:
+        """Make the durable destination explicit in the model-visible result."""
+        return f"{plan}\n\nPersisted file: {os.path.abspath(self._todo_path())}"
+
     def _read_plan(self) -> str:
         path = self._todo_path()
         if not os.path.isfile(path):
@@ -173,6 +198,7 @@ class PlanningTool(BaseTool):
             return handle.read().strip()
 
     def _write_plan(self, plan: str) -> None:
+        self.assert_execution_active()
         path = self._todo_path()
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         fd, temporary_path = tempfile.mkstemp(
@@ -211,7 +237,7 @@ class PlanningTool(BaseTool):
 
         return re.sub(r"^(\s*(?:\d+\.\s+|-\s+))\[([ xX~>/])\]\s+(.+?)\s*$", replace, plan, flags=re.MULTILINE)
 
-    def _sync_work_items(self, plan: str, session_id: str) -> None:
+    def _sync_work_items(self, plan: str, session_id: str):
         rows = []
         for line in plan.splitlines():
             match = re.match(r"^\s*(?:\d+\.\s+|-\s+)\[([ xX~>/])\]\s+\[([^\]]+)\]\s+(.+?)\s*$", line)
@@ -221,7 +247,7 @@ class PlanningTool(BaseTool):
             status = {"x": "completed", "~": "in_progress", ">": "in_progress"}.get(mark.lower(), "pending")
             rows.append({"id": task_id, "title": title, "status": status})
         if not rows:
-            return
+            return None
         goal_match = re.search(r"^TASK NAME:\s*(.+?)\s*$", plan, flags=re.MULTILINE | re.IGNORECASE)
         goal = goal_match.group(1).strip() if goal_match else "Task checklist"
         durable_plan = create_checklist_plan(
@@ -232,6 +258,7 @@ class PlanningTool(BaseTool):
                 root=self.root_dir or ".", session_id=session_id, task_id=row["id"],
                 title=row["title"], checklist_status=row["status"], plan_id=durable_plan.plan_id,
             )
+        return durable_plan
 
     def _plan_from_spec(self, goal: str, plan_spec: Any) -> str:
         """Validate a model-generated JSON plan before writing it to todo.md."""
@@ -253,8 +280,12 @@ class PlanningTool(BaseTool):
             for index, raw_phase in enumerate(phases, start=1):
                 if not isinstance(raw_phase, dict):
                     continue
-                title = self._clean_plan_line(raw_phase.get("title", ""))
-                subgoals = raw_phase.get("subgoals")
+                # ``name``/``tasks`` was emitted by older prompt versions.
+                # Accept it when it is otherwise a valid task-specific phase.
+                title = self._clean_plan_line(
+                    raw_phase.get("title", raw_phase.get("name", ""))
+                )
+                subgoals = raw_phase.get("subgoals", raw_phase.get("tasks"))
                 if not title or not isinstance(subgoals, list):
                     continue
                 clean_subgoals = [self._clean_plan_line(item) for item in subgoals]
@@ -270,7 +301,11 @@ class PlanningTool(BaseTool):
         steps = plan_spec.get("steps")
         if not isinstance(steps, list):
             return ""
-        clean_steps = [self._clean_plan_line(item) for item in steps]
+        clean_steps = []
+        for item in steps:
+            if isinstance(item, dict):
+                item = item.get("description", item.get("title", ""))
+            clean_steps.append(self._clean_plan_line(item))
         clean_steps = [item for item in clean_steps if item][:8]
         if not 3 <= len(clean_steps) <= 8:
             return ""
@@ -401,12 +436,23 @@ class PlanningTool(BaseTool):
 
         def replace(match: re.Match) -> str:
             nonlocal found
-            if not found and item.lower() in match.group(2).lower():
+            if not found and match.group(2).strip().lower() == item.strip().lower():
                 found = True
                 return "[x] " + match.group(2)
             return match.group(0)
 
         updated = pattern.sub(replace, plan)
+        if not found:
+            found = False
+
+            def replace_sub(match: re.Match) -> str:
+                nonlocal found
+                if not found and item.lower() in match.group(2).lower():
+                    found = True
+                    return "[x] " + match.group(2)
+                return match.group(0)
+
+            updated = pattern.sub(replace_sub, plan)
         if not found:
             raise ValueError(f"Todo item not found: {item}")
         return updated

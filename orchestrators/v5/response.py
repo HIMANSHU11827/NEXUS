@@ -244,6 +244,12 @@ class V5ResponseBuilder:
             r"<(tool_use|tool_calls|tool_call|function_calls|function_call|invoke|invocation)>[\s\S]*?</\1>", "", stripped,
             flags=re.IGNORECASE | re.DOTALL,
         )
+        # DeepSeek emits the same envelope with full-width DSML delimiters.
+        # It is still transport markup and must never reach the final answer.
+        stripped = re.sub(
+            r"<[^<>]*DSML[^<>]*tool_calls[^>]*>[\s\S]*?</[^<>]*DSML[^<>]*tool_calls\s*>", "", stripped,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
         # Some providers emit the canonical tool name directly as an XML
         # element (for example ``<web_search>...</web_search>``).  These are
         # transport envelopes, not user-facing prose, so remove the complete
@@ -322,7 +328,7 @@ class V5ResponseBuilder:
     def _contains_tool_protocol(response: str) -> bool:
         """Identify provider tool envelopes, but never ordinary explanatory prose."""
         return bool(re.search(
-            r"<function(?:\s*(?:=|:)\s*[\w.-]+)?\s*>|<(?:tool_use|tool_calls|tool_call|invoke|web_search|code_search|reading|creating|modifying|deleting|bash|http_client|git_ops|test_runner|planning|hive|browser|search|knowledge|reasoning|task|system|deep_research|shortcuts|terminal|memory)\b",
+            r"<function(?:\s*(?:=|:)\s*[\w.-]+)?\s*>|<[^<>]*DSML[^<>]*tool_calls\b|<(?:tool_use|tool_calls|tool_call|invoke|web_search|code_search|reading|creating|modifying|deleting|bash|http_client|git_ops|test_runner|planning|hive|browser|search|knowledge|reasoning|task|system|deep_research|shortcuts|terminal|memory)\b",
             str(response or ""),
             flags=re.IGNORECASE,
         ))

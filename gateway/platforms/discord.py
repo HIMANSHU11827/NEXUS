@@ -60,7 +60,19 @@ class DiscordAdapter(BasePlatformAdapter):
             return False
 
         try:
+            # The supervisor reconnects by calling connect() again. Cancel any
+            # previous client task first, or the old gateway connection stays
+            # alive and both sessions deliver the same events.
+            old_run_task = self._run_task
             self._disconnecting = False
+            if old_run_task is not None and not old_run_task.done():
+                old_run_task.cancel()
+                try:
+                    await asyncio.wait_for(old_run_task, timeout=5.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+                except Exception:
+                    logger.debug("discord: stale client task exit failed", exc_info=True)
             intents = discord.Intents.default()
             intents.message_content = True
             self.client = discord.Client(intents=intents)

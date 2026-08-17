@@ -168,10 +168,11 @@ class SMSAdapter(BasePlatformAdapter):
                 "from_": self.from_number,
                 "body": text,
             }
-            if reply_to:
-                kwargs["status_callback"] = reply_to
-
-            message = self._client.messages.create(**kwargs)
+            # reply_to was previously forwarded as ``status_callback``, which
+            # Twilio interprets as a webhook URL — a message-id here always
+            # fails or fires an invalid endpoint. SMS has no reply semantics;
+            # drop it.
+            message = await asyncio.to_thread(self._client.messages.create, **kwargs)
             return SendResult(success=True, message_id=message.sid)
         except TwilioRestException as e:
             return SendResult(success=False, error=str(e))
