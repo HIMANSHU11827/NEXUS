@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from mcp.security import read_bounded_line, redact_secret_text
+from extensions.mcp.core.security import read_bounded_line, redact_secret_text
 
 logger = logging.getLogger(__name__)
 

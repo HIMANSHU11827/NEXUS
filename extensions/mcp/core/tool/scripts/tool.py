@@ -6,7 +6,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
-from mcp.client import MCPClient
+from extensions.mcp.core.client import MCPClient
 from tools.nexus_tools.base_tool import BaseTool, ToolResult
 
 logger = logging.getLogger(__name__)

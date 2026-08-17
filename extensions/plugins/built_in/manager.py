@@ -39,7 +39,7 @@ import time
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
-from plugins.trust import (
+from extensions.plugins.built_in.trust import (
     LEGACY_DEFAULT_CAPABILITIES,
     is_bundled_plugin_dir,
     is_user_plugin_load_allowed,

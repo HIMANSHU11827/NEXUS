@@ -17,7 +17,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
-from mcp.security import read_bounded_line
+from extensions.mcp.core.security import read_bounded_line
 
 logger = logging.getLogger(__name__)
 

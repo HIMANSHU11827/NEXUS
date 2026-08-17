@@ -18,7 +18,7 @@ except ImportError:
 import logging
 
 _logger = logging.getLogger("nexus.mcp.server")
-from mcp.security import (
+from extensions.mcp.core.security import (
     MAX_INDEX_FILES,
     MAX_RESULT_LIMIT,
     bounded_int,
