@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 def _function(name: str):
-    tree = ast.parse(Path("gui/api.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("apps/web/api.py").read_text(encoding="utf-8"))
     return next(
         node for node in tree.body
         if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == name
@@ -30,7 +30,7 @@ def test_generic_config_save_offloads_loader_persistence():
 
 
 def test_async_config_mutations_do_not_call_save_inline():
-    tree = ast.parse(Path("gui/api.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("apps/web/api.py").read_text(encoding="utf-8"))
     offenders = []
     for node in tree.body:
         if not isinstance(node, ast.AsyncFunctionDef):
@@ -65,7 +65,7 @@ def test_plugin_filesystem_mutations_are_offloaded():
 
 def test_plugin_endpoints_do_not_write_or_remove_files_inline():
     offenders = []
-    tree = ast.parse(Path("gui/api.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("apps/web/api.py").read_text(encoding="utf-8"))
     for node in tree.body:
         if not isinstance(node, ast.AsyncFunctionDef) or node.name not in {"create_local_plugin", "delete_plugin"}:
             continue
@@ -81,7 +81,7 @@ def test_plugin_endpoints_do_not_write_or_remove_files_inline():
 
 
 def test_session_metadata_writes_are_offloaded():
-    tree = ast.parse(Path("gui/api.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("apps/web/api.py").read_text(encoding="utf-8"))
     for name in {"rename_session", "chat"}:
         node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
         assert any(

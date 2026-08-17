@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 def _function(name: str):
-    tree = ast.parse(Path("gui/api.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("apps/web/api.py").read_text(encoding="utf-8"))
     return next(
         node for node in tree.body
         if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == name

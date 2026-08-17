@@ -49,7 +49,7 @@ import threading
 
 import uvicorn
 
-from server import app
+from apps.tui import app
 
 server_thread = None
 _server_ready = False

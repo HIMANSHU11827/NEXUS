@@ -2,7 +2,7 @@ import ast
 from pathlib import Path
 
 
-GUI_SOURCE = Path(__file__).resolve().parents[3] / "gui" / "api.py"
+GUI_SOURCE = Path(__file__).resolve().parents[3] / "apps" / "web" / "api.py"
 
 
 def test_upload_handler_offloads_persisted_bytes():

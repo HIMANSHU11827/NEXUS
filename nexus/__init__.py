@@ -133,7 +133,7 @@ def _mark_setup_complete(project_root: str, mode: str = "manual") -> None:
 
 
 def _quick_configure(project_root: str) -> None:
-    from tui.setup_wizard import (
+    from apps.tui.setup_wizard import (
         load_env,
         load_provider_yml,
         save_env,
@@ -633,7 +633,7 @@ def _run_ink_tui(project_root: str, console, wait_for_api: bool = True) -> int:
             backend_proc = None
         else:
             backend_proc = subprocess.Popen(
-                [sys.executable, "-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", "8000"],
+                [sys.executable, "-m", "uvicorn", "apps.api:app", "--host", "127.0.0.1", "--port", "8000"],
                 cwd=project_root,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -956,7 +956,7 @@ def boot():
         server_env = os.environ.copy()
         server_env.setdefault("NEXUS_ALLOW_LOCAL_ANON", "false")
         proc = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", "8000"],
+            [sys.executable, "-m", "uvicorn", "apps.api:app", "--host", "127.0.0.1", "--port", "8000"],
             cwd=project_root,
             env=server_env,
             stdout=subprocess.DEVNULL,

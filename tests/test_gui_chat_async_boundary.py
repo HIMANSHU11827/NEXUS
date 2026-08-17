@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 def test_chat_offloads_session_metadata_read():
-    tree = ast.parse(Path("gui/api.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("apps/web/api.py").read_text(encoding="utf-8"))
     node = next(item for item in tree.body if isinstance(item, ast.AsyncFunctionDef) and item.name == "chat")
     assert any(
         isinstance(call, ast.Call)

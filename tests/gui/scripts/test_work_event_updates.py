@@ -491,8 +491,8 @@ def test_active_stream_blocks_background_session_overwrite():
     # The agent must not let a background/second session silently overwrite an
     # in-flight stream. The live client guards the active stream by session id
     # and aborts stale requests instead of cross-talking.
-    app_source = (Path(__file__).parents[3] / "gui" / "src" / "App.tsx").read_text(encoding="utf-8")
-    use_source = (Path(__file__).parents[3] / "gui" / "src" / "hooks" / "useStreamChat.ts").read_text(encoding="utf-8")
+    app_source = (Path(__file__).parents[3] / "apps" / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
+    use_source = (Path(__file__).parents[3] / "apps" / "web" / "src" / "hooks" / "useStreamChat.ts").read_text(encoding="utf-8")
     # Abort controller is wired so a stale/duplicate session cannot keep writing.
     assert "AbortController" in use_source or "ctrl.abort" in use_source
     assert "activeStreamSessionRef" in app_source or "currentSessionIdRef" in app_source or "abort" in (app_source + use_source)
@@ -501,7 +501,7 @@ def test_active_stream_blocks_background_session_overwrite():
 def test_workspace_visibility_uses_public_allowlist():
     # Internal/grounding events and private diagnostics must never reach the
     # public timeline. The current implementation lives in MainChat.tsx.
-    source = (Path(__file__).parents[3] / "gui" / "src" / "components" / "MainChat.tsx").read_text(encoding="utf-8")
+    source = (Path(__file__).parents[3] / "apps" / "web" / "src" / "components" / "MainChat.tsx").read_text(encoding="utf-8")
     assert "if (String(event.visibility || '').toLowerCase() === 'internal') return false" in source
     assert "prompt_files" in source
     assert "critical preventive vaccine" in source
@@ -535,7 +535,7 @@ def test_timeline_never_fabricates_thinking_or_next_action_cards():
     # The timeline must render real work evidence, never invent a "thinking"
     # card or a "next action" placeholder. The timeline component is now
     # ActivityTimeline.tsx.
-    source = (Path(__file__).parents[3] / "gui" / "src" / "components" / "ActivityTimeline.tsx").read_text(encoding="utf-8")
+    source = (Path(__file__).parents[3] / "apps" / "web" / "src" / "components" / "ActivityTimeline.tsx").read_text(encoding="utf-8")
     assert "evt_thinking_virtual" not in source
     assert "No captured reasoning yet" not in source
     assert "<code>next action</code>" not in source
@@ -547,7 +547,7 @@ def test_timeline_never_fabricates_thinking_or_next_action_cards():
 def test_frontend_preserves_actionable_failure_approval_and_retry_events():
     # Failures, approval prompts, and retries must stay visible. In the current
     # frontend this is enforced by isActionableEvent in MainChat.tsx.
-    source = (Path(__file__).parents[3] / "gui" / "src" / "components" / "MainChat.tsx").read_text(encoding="utf-8")
+    source = (Path(__file__).parents[3] / "apps" / "web" / "src" / "components" / "MainChat.tsx").read_text(encoding="utf-8")
     assert "event.error || event.summary || fallbackTarget" in source or "actionableEventDetail" in source
     assert "kind.includes('approval')" in source
     assert "kind.includes('retry')" in source
@@ -558,9 +558,9 @@ def test_session_activity_fetch_is_request_scoped_and_full_history_is_unfiltered
     # A session's activity fetch is scoped to the active session id and returns
     # the full unfiltered history (no silent cap). The live client tracks the
     # active session id in the shared store and scopes every fetch to it.
-    app_source = (Path(__file__).parents[3] / "gui" / "src" / "App.tsx").read_text(encoding="utf-8")
-    use_source = (Path(__file__).parents[3] / "gui" / "src" / "hooks" / "useStreamChat.ts").read_text(encoding="utf-8")
-    main_source = (Path(__file__).parents[3] / "gui" / "src" / "components" / "MainChat.tsx").read_text(encoding="utf-8")
+    app_source = (Path(__file__).parents[3] / "apps" / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
+    use_source = (Path(__file__).parents[3] / "apps" / "web" / "src" / "hooks" / "useStreamChat.ts").read_text(encoding="utf-8")
+    main_source = (Path(__file__).parents[3] / "apps" / "web" / "src" / "components" / "MainChat.tsx").read_text(encoding="utf-8")
     # Session scoping is driven by the active session id.
     assert "activeSessionId" in (app_source + main_source + use_source)
     # Activity arrives through the session-scoped chat stream as canonical
@@ -572,7 +572,7 @@ def test_event_only_turns_stay_visible_and_replay_uses_event_indices():
     # A turn that produced only events (no chat reply) must still be visible,
     # and replay is keyed by stable event indices. The current timeline lives
     # in ActivityTimeline.tsx / MainChat.tsx.
-    root = Path(__file__).parents[3] / "gui" / "src"
+    root = Path(__file__).parents[3] / "apps" / "web" / "src"
     timeline_source = (root / "components" / "ActivityTimeline.tsx").read_text(encoding="utf-8")
     main_source = (root / "components" / "MainChat.tsx").read_text(encoding="utf-8")
     # Waiting/empty-turn state is surfaced rather than hidden.
@@ -585,8 +585,8 @@ def test_event_only_turns_stay_visible_and_replay_uses_event_indices():
 def test_network_and_empty_stream_failures_are_visible_in_the_turn():
     # A dropped connection or an empty stream must surface a visible,
     # retryable error in the turn rather than hanging silently.
-    use_source = (Path(__file__).parents[3] / "gui" / "src" / "hooks" / "useStreamChat.ts").read_text(encoding="utf-8")
-    app_source = (Path(__file__).parents[3] / "gui" / "src" / "App.tsx").read_text(encoding="utf-8")
+    use_source = (Path(__file__).parents[3] / "apps" / "web" / "src" / "hooks" / "useStreamChat.ts").read_text(encoding="utf-8")
+    app_source = (Path(__file__).parents[3] / "apps" / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
     # The stream aborts itself on timeout instead of hanging the GUI forever.
     assert "ctrl.abort" in use_source or "abort()" in use_source
     # A failed/empty turn produces a user-visible error, not a blank hang.
@@ -596,7 +596,7 @@ def test_network_and_empty_stream_failures_are_visible_in_the_turn():
 
 
 def test_legacy_async_stream_has_one_done_marker_owner():
-    source = (Path(__file__).parents[3] / "gui" / "api.py").read_text(encoding="utf-8")
+    source = (Path(__file__).parents[3] / "apps" / "web" / "api.py").read_text(encoding="utf-8")
     assert source.count('stream_queue.put(("done", ""))') == 1
 
 
@@ -604,7 +604,7 @@ def test_live_gui_state_is_bounded_and_keeps_stable_id_deduplication():
     # The live GUI caps retained events and output, and collapses stable ids
     # so the feed stays bounded and responsive. These live bounds now live in
     # useStreamChat.ts (boundedLiveOutput) and MainChat.tsx (deduplicateEvents).
-    root = Path(__file__).parents[3] / "gui" / "src"
+    root = Path(__file__).parents[3] / "apps" / "web" / "src"
     utility = (root / "hooks" / "useStreamChat.ts").read_text(encoding="utf-8")
     main_source = (root / "components" / "MainChat.tsx").read_text(encoding="utf-8")
     assert "MAX_LIVE_OUTPUT_CHARS = 256 * 1024" in utility
@@ -615,7 +615,7 @@ def test_live_gui_state_is_bounded_and_keeps_stable_id_deduplication():
 
 def test_live_command_output_is_tail_bounded_before_rendering():
     # Live command output is tail-bounded (old output dropped) before render.
-    root = Path(__file__).parents[3] / "gui" / "src"
+    root = Path(__file__).parents[3] / "apps" / "web" / "src"
     utility = (root / "hooks" / "useStreamChat.ts").read_text(encoding="utf-8")
     main_source = (root / "components" / "MainChat.tsx").read_text(encoding="utf-8")
     assert "MAX_LIVE_OUTPUT_CHARS = 256 * 1024" in utility
