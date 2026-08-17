@@ -1,4 +1,0 @@
-{
-  "_note": "MCP servers to auto-start with NEXUS. Each server must have a command and args.",
-  "servers": []
-}
