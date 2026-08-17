@@ -24,7 +24,7 @@ from nexus.core import Nexus, SystemContext
 from nexus.core.dependency_graph import DependencyGraph, DependencyNode
 from nexus.core.errors import LifecycleError, StartupError
 from nexus.core.state_machine import StateMachine
-from nexus.events import Event, EventBus
+from nexus.eventing import EventBus, Event
 from nexus.lifecycle import LifecycleManager, LifecycleState
 from nexus.registries import ToolRegistry_, build_default_registries
 from nexus.configure import ConfigureManager

@@ -1,12 +1,10 @@
 """Canonical event system.
 
 Thin, dependency-light event bus + store + dispatcher used by every subsystem to
-publish and subscribe to system events. The existing ``nexus.events`` module
-remains the legacy canonical event source; this package is the new
-authoritative, typed event infrastructure that subsystems should adopt going
-forward. It does not shadow ``nexus.events`` because it lives under
-``nexus/events/`` (a package) while the legacy one is ``nexus/events.py`` (a
-module) - callers import ``from nexus.events import EventBus``.
+publish and subscribe to system events. The legacy ``nexus.events`` module
+(``CanonicalEvent``) remains the historical canonical event source; this package
+lives at ``nexus.eventing`` specifically so it does NOT shadow that module. New
+subsystems should adopt this typed infrastructure going forward.
 """
 
 from __future__ import annotations
