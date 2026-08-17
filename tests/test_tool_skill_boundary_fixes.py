@@ -330,7 +330,7 @@ def test_skill_injection_receives_the_complete_bounded_instruction_block():
 
 def test_reading_metadata_declares_read_only_without_losing_existing_limits():
     metadata = json.loads(
-        (PROJECT_ROOT / "tools" / "reading" / "reading.jsnol").read_text(encoding="utf-8")
+        (PROJECT_ROOT / "extensions" / "tools" / "built_in" / "reading" / "reading.jsnol").read_text(encoding="utf-8")
     )
     assert metadata["execution"]["read_only"] is True
     assert metadata["execution"]["max_output_chars"] == 32000

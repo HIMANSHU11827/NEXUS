@@ -163,7 +163,7 @@ def test_reading_policy_persists_large_source_previews(tmp_path):
     from tools.nexus_tools.registry import ToolEntry
     from tools.reading.scripts.reading import ReadingTool
 
-    metadata = json.loads(Path("tools/reading/reading.jsnol").read_text(encoding="utf-8"))
+    metadata = json.loads(Path("extensions/tools/built_in/reading/reading.jsnol").read_text(encoding="utf-8"))
     assert metadata["execution"]["max_output_chars"] == 32000
 
     source = tmp_path / "large_source.py"
