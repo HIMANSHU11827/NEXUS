@@ -113,3 +113,4 @@ apps/web/vite_dev.log
 apps/web/workspace/
 apps/web/test-results/
 .nexus/
+workspace-under-test/
