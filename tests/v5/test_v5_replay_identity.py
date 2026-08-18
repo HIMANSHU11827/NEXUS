@@ -14,7 +14,7 @@ def test_replay_entries_have_unique_ids_and_record_digests(tmp_path):
     turn = SimpleNamespace(turn_id="turn-1")
     learner._log_turn_replay(perceived, result, turn)
     learner._log_turn_replay(perceived, result, turn)
-    lines = (tmp_path / ".nexus_v5" / "replays.jsonl").read_text(encoding="utf-8").splitlines()
+    lines = (tmp_path / ".nexus" / "v5" / "replays.jsonl").read_text(encoding="utf-8").splitlines()
     entries = [json.loads(line) for line in lines]
     assert len(entries) == 2
     assert entries[0]["entry_id"] != entries[1]["entry_id"]

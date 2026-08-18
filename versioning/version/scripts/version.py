@@ -2,10 +2,10 @@
 
 Two version systems exist in the codebase: ``evolution/version`` (this one,
 scans ``*.jsnol`` manifests) and ``lifecycle/version`` (X.Y helpers for
-lifecycle entities, owned by a companion agent — never edited here). The
+lifecycle entities, owned by a companion agent â€” never edited here). The
 versioning *within evolution/* is unified on this manager: every forge obtains
 its version exclusively through ``VersionManager.ensure`` (create) or
-``VersionManager.bump`` (refine) — there is no per-forge local bumping.
+``VersionManager.bump`` (refine) â€” there is no per-forge local bumping.
 
 To keep forge wiring intact without touching every caller, this manager gains
 a JSON-backed registry fallback: entity names that don't match a ``.jsnol``
@@ -21,7 +21,7 @@ import json
 import logging
 import os
 
-logger = logging.getLogger("evolution.version")
+logger = logging.getLogger("versioning.version")
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -96,7 +96,7 @@ class VersionManager:
         Returns the existing version when the entity is already tracked (a
         ``.jsnol`` manifest or the JSON registry), otherwise records ``version``
         as the initial version in the registry and returns it. Never returns
-        ``None`` — forges use this as the single version source for created
+        ``None`` â€” forges use this as the single version source for created
         artifacts.
         """
         existing = self.get_version(name)
@@ -131,7 +131,7 @@ class VersionManager:
         ``current`` is an optional seed: when the name is not yet tracked in the
         registry, it becomes the baseline so a pre-existing on-disk version is
         respected instead of silently resetting to a default. Every forge calls
-        this one function (or ``ensure``) for its versioning — no per-forge
+        this one function (or ``ensure``) for its versioning â€” no per-forge
         local bumping.
         """
         search_root = Path(root or self.root)
@@ -151,7 +151,7 @@ class VersionManager:
                 logger.warning("evolution/version/scripts/version.py:54 bump: suppressed error", exc_info=True)
                 pass
 
-        # Fallback: no .jsnol manifest matched — track arbitrary entity names
+        # Fallback: no .jsnol manifest matched â€” track arbitrary entity names
         # in a JSON registry so forges actually get bumps instead of None.
         tracked = self._fallback_versions.get(name)
         if tracked is None and current is not None:

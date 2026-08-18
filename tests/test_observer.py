@@ -5,7 +5,7 @@ from nexus.observer import run_observer
 
 
 def test_observer_replays_public_events_and_resumes_by_sequence(tmp_path):
-    events_dir = tmp_path / "workspace" / "work_events"
+    events_dir = tmp_path / ".nexus" / "workspace" / "work_events"
     events_dir.mkdir(parents=True)
     path = events_dir / "demo.jsonl"
     path.write_text(
@@ -30,7 +30,7 @@ def test_observer_replays_public_events_and_resumes_by_sequence(tmp_path):
 
 
 def test_observer_text_format_is_compact(tmp_path):
-    events_dir = tmp_path / "workspace" / "work_events"
+    events_dir = tmp_path / ".nexus" / "workspace" / "work_events"
     events_dir.mkdir(parents=True)
     (events_dir / "default.jsonl").write_text(
         json.dumps({"sequence": 1, "event_type": "tool.completed", "status": "success", "title": "Build", "target": "gui"}) + "\n",
@@ -42,7 +42,7 @@ def test_observer_text_format_is_compact(tmp_path):
 
 
 def test_observer_retries_trailing_partial_json_record(tmp_path):
-    events_dir = tmp_path / "workspace" / "work_events"
+    events_dir = tmp_path / ".nexus" / "workspace" / "work_events"
     events_dir.mkdir(parents=True)
     path = events_dir / "partial.jsonl"
     path.write_text('{"sequence": 1, "event_type": "run.started"', encoding="utf-8")
@@ -67,4 +67,4 @@ def test_observer_uses_canonical_session_path(tmp_path):
 
     path = event_path(str(tmp_path), "../../observer.json")
 
-    assert path == tmp_path / "workspace" / "work_events" / "observer.jsonl"
+    assert path == tmp_path / ".nexus" / "workspace" / "work_events" / "observer.jsonl"

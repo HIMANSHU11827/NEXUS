@@ -66,7 +66,7 @@ def test_recorded_experience_persists_and_is_read_back(tmp_path):
     loop._last_run_verified = True
     _run(loop._evolve_record_experience("durable lesson", True))
 
-    state_file = Path(tmp_path) / ".nexus_v5_meta_learning.json"
+    state_file = Path(tmp_path) / ".nexus" / "v5_meta_learning.json"
     assert state_file.exists(), "experience was not persisted to disk"
     saved = json.loads(state_file.read_text())
     assert saved["strategy_performance"], "no strategy performance was written"

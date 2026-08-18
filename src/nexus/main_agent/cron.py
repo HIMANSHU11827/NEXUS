@@ -52,7 +52,7 @@ class V5Cron:
             scheduler = NexusTaskScheduler(
                 self._cron_runner,
                 state_path=os.path.join(
-                    str(getattr(self, "root_dir", ".")), ".nexus_v5", "scheduled_tasks.json"
+                    str(getattr(self, "root_dir", ".")), ".nexus", "v5", "scheduled_tasks.json"
                 ),
             )
             self._v5_cron_scheduler = scheduler

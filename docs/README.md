@@ -11,7 +11,7 @@ The project is not trying to be a chatbot with plugins. It is trying to become a
 - Repo map and lightweight symbol graph for codebase understanding.
 - Persistent BM25 RAG plus hybrid keyword/vector result blending for project recall.
 - Persistent failure memory for self-correction and regression prevention.
-- Three primary interfaces — TUI, GUI, Gateway — all feeding one agent runtime.
+- Three primary interfaces â€” TUI, GUI, Gateway â€” all feeding one agent runtime.
 - FastAPI GUI API and React operator GUI.
 - TypeScript Ink TUI (API thin client; not the live terminal).
 - Multi-provider model routing, provider health telemetry, and local model experiments.
@@ -42,8 +42,8 @@ The project is not trying to be a chatbot with plugins. It is trying to become a
 - Experimental training and self-improvement systems.
 - MediaPipe Holistic Vision integration (543 landmarks tracking for face, body, and hands); full MediaPipe suite status is documented in `docs/MEDIAPIPE_SUITE.md`.
 - **NATE-Route**: Zero-training embedding-based tool router (all-MiniLM-L6-v2 + FAISS). 88% schema token reduction, 67% input token savings. Solves all 12 skill alignment problems. See `docs/NATE.md`.
-- **Self-Improving Lifecycle**: `evolution/local_trainer/` — auto harvests tool logs, fine-tunes embedding + Zupra-50M models, exports to GGUF, reloads into NATE. Self-improving cycle improves routing + local inference over time.
-- **Zupra Local Provider**: `models/providers/api/zupra.py` — MultivexAI/Zupra-1.6-50M-Instruct-Ultra-exp for fully offline CPU inference. No API key needed. Registered as "zupra" in provider factory.
+- **Self-Improving Lifecycle**: `evolution/local_trainer/` â€” auto harvests tool logs, fine-tunes embedding + Zupra-50M models, exports to GGUF, reloads into NATE. Self-improving cycle improves routing + local inference over time.
+- **Zupra Local Provider**: `models/providers/api/zupra.py` â€” MultivexAI/Zupra-1.6-50M-Instruct-Ultra-exp for fully offline CPU inference. No API key needed. Registered as "zupra" in provider factory.
 
 ## Architecture
 
@@ -83,9 +83,9 @@ A user can send a mission from **any** of these three interfaces:
 | **TUI** (Ink client) | `python -m nexus` | `apps/tui/` + `apps.web.api` backend on `:8000` |
 | **GUI** | `python -m nexus --gui` | React app + `apps.web.api` backend |
 | **Server** | `python -m nexus --server` | standalone `apps.api:app` API |
-| **Gateway** | `python -m nexus --gateway` | `gateways/` — Telegram, Discord, WhatsApp, Slack |
+| **Gateway** | `python -m nexus --gateway` | `gateways/` â€” Telegram, Discord, WhatsApp, Slack |
 
-TUI is **not** the terminal (host environment) — it is an Ink UI over the API.
+TUI is **not** the terminal (host environment) â€” it is an Ink UI over the API.
 
 All interfaces are **internally connected** via `src/nexus/common/session_bus.py`: one active `session_id`, shared chat history (`.nexus/logs/sessions/`), and mission timelines (`.nexus/workspace/work_events/`). Chat in GUI or TUI auto-join the same session and can continue without re-sending.
 
@@ -139,7 +139,7 @@ cd apps/web && npm run build
 Version integrity:
 
 ```powershell
-python -c "from evolution.version.scripts.version import VersionManager; vm=VersionManager('.'); print(vm.get_all_versions_report())"
+python -c "from versioning.version.scripts.version import VersionManager; vm=VersionManager('.'); print(vm.get_all_versions_report())"
 ```
 
 ## Current Status

@@ -34,7 +34,7 @@ logger = logging.getLogger("NEXUS_TOOL_REGISTRY")
 DEFAULT_TOOL_TIMEOUT_MS = 300_000
 
 #: Preview length exposed when an oversized tool output is persisted to disk.
-#: The full output is written to ``context_archive/tool-results/<id>.txt`` and
+#: The full output is written to ``.nexus/context_archive/tool-results/<id>.txt`` and
 #: the caller sees this many leading characters inside the persist envelope.
 PERSIST_PREVIEW_CHARS = 4000
 
@@ -918,13 +918,13 @@ class ToolRegistry:
         cls._validate_params(entry, params)
 
     # ── Output Persistence ───────────────────────────────────────────
-    # Oversized tool output is persisted to ``context_archive/tool-results/``
+    # Oversized tool output is persisted to ``.nexus/context_archive/tool-results/``
     # instead of being silently elided, so downstream consumers always know
     # where the full output lives and only see a small preview envelope.
 
     def _persist_tool_output(self, entry: ToolEntry, output_text: str, call_id: Optional[str] = None) -> str:
         """Write full tool output to the tool-results archive. Returns the path."""
-        archive_dir = os.path.join(self.root, "context_archive", "tool-results")
+        archive_dir = os.path.join(self.root, ".nexus", "context_archive", "tool-results")
         os.makedirs(archive_dir, exist_ok=True)
         base = (
             f"{entry.name}_{call_id}"

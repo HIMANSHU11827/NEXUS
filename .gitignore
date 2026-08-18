@@ -28,8 +28,6 @@ replay_pid*.log
 .nexus/
 
 # Local NEXUS runtime state, checkpoints, and generated evidence
-.nexus_v5/
-.nexus_v5_meta_learning.json
 .cache/
 context_archive/
 graphify-out/
@@ -103,8 +101,10 @@ graphify-out/cache/     # optional: commit for speed
 # Playwright/MCP browser artifacts
 .playwright-mcp/
 .nexus_queue.db
-HERMES.md
-MULTI_AGENT_TASKS.md
+apps/.cache/
+apps/logs/
+apps/workspace/
+apps/.nexus/
 .tmp/research-gemini
 apps/web/src/*.patch_ui.py
 apps/web/src/App.tsx.found_*.txt

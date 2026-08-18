@@ -26,7 +26,7 @@ from evolution.ledger.scripts.ledger import EvolutionLedger
 from evolution.memory_forge.scripts.forge import MemoryForge
 from evolution.quality import looks_like_provider_error, validate_forge_output
 from evolution.tool_forge.scripts.engine import ToolForge
-from evolution.version.scripts.version import VersionManager
+from versioning.version.scripts.version import VersionManager
 from evolution.skill_forge.scripts.forge import SkillForge
 from evolution.plugin_forge.scripts.forge import PluginForge
 from evolution.knowledge_forge.scripts.forge import KnowledgeForge

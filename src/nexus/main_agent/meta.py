@@ -245,7 +245,7 @@ class MetaLearningLayer:
 
     def _load_state(self):
         """Load meta-learning state from disk."""
-        state_file = os.path.join(self.root_dir, ".nexus_v5_meta_learning.json")
+        state_file = os.path.join(self.root_dir, ".nexus", "v5_meta_learning.json")
         if os.path.exists(state_file):
             try:
                 with open(state_file, 'r') as f:
@@ -259,7 +259,7 @@ class MetaLearningLayer:
 
     def _save_state(self):
         """Save meta-learning state to disk."""
-        state_file = os.path.join(self.root_dir, ".nexus_v5_meta_learning.json")
+        state_file = os.path.join(self.root_dir, ".nexus", "v5_meta_learning.json")
         try:
             state = {
                 "config": {
@@ -273,6 +273,7 @@ class MetaLearningLayer:
                 "optimal_hyperparameters": self.optimal_hyperparameters,
                 "tool_policy": self.tool_policy,
             }
+            os.makedirs(os.path.dirname(state_file), exist_ok=True)
             with open(state_file, 'w') as f:
                 json.dump(state, f, indent=2)
         except Exception as e:

@@ -285,6 +285,6 @@ def test_execute_code_action_sanitizes_turn_path_and_runs(tmp_path, monkeypatch)
     result = asyncio.run(loop._execute_code_action("print('ok')"))
 
     assert result == "ok"
-    expected = tmp_path / ".nexus_v5" / "tmp" / "code_action_escape.py"
+    expected = tmp_path / ".nexus" / "v5" / "tmp" / "code_action_escape.py"
     assert expected.read_text(encoding="utf-8") == "print('ok')"
     assert not (tmp_path.parent / "escape.py").exists()

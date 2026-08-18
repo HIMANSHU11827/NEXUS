@@ -18,7 +18,7 @@ class VerifierEventStore:
     def __init__(self, path: Optional[os.PathLike[str] | str] = None,
                  *, retention_seconds: float = 30 * 24 * 60 * 60,
                  max_events: int = 256) -> None:
-        self.path = Path(path) if path is not None else Path.cwd() / ".nexus_v5" / "verifier_events.sqlite3"
+        self.path = Path(path) if path is not None else Path.cwd() / ".nexus" / "v5" / "verifier_events.sqlite3"
         self.retention_seconds = max(60.0, float(retention_seconds))
         self.max_events = max(1, int(max_events))
 

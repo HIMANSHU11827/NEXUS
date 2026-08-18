@@ -3,7 +3,7 @@ Externalizes agent state — reasoning sessions and checkpoints — to the file
 system.  Manages "infinite" state by swapping memory to disk so a long-running
 agent can archive and later reload context without holding it in RAM.
 
-Layout under ``<root>/context_archive``:
+Layout under ``<root>/.nexus/context_archive``:
 - ``<session_id>.json``          archived reasoning session
 - ``<session_id>.<checkpoint>.json``  checkpoint snapshot (messages + metadata)
 """
@@ -25,7 +25,7 @@ __version__ = "14.0.0"
 class NexusFilePersistence:
     """Manages infinite state by swapping reasoning sessions to disk."""
 
-    def __init__(self, root: str, archive_dir: str = "context_archive") -> None:
+    def __init__(self, root: str, archive_dir: str = ".nexus/context_archive") -> None:
         self.root = os.path.abspath(root) if root else os.path.abspath(".")
         self.archive_dir = os.path.join(self.root, archive_dir)
         os.makedirs(self.archive_dir, exist_ok=True)

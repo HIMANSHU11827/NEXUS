@@ -431,7 +431,7 @@ def test_store_file_survives_and_is_valid_jsonl(tmp_path):
         "verification": {"success": False, "failed_actions": 1, "status": "failed"},
     }
     _run(loop.collect_evidence(None, result, _turn()))
-    evidence_file = tmp_path / ".nexus_v5" / "evidence.jsonl"
+    evidence_file = tmp_path / ".nexus" / "v5" / "evidence.jsonl"
     assert evidence_file.exists(), "evidence JSONL was not written to disk"
     lines = [l for l in evidence_file.read_text(encoding="utf-8").splitlines() if l.strip()]
     assert len(lines) == 2  # tool_outcome + verification
@@ -472,7 +472,7 @@ def test_collect_evidence_does_not_log_replays(tmp_path):
         ],
     }
     _run(loop.collect_evidence(None, result, _turn()))
-    replay_file = tmp_path / ".nexus_v5" / "replays.jsonl"
+    replay_file = tmp_path / ".nexus" / "v5" / "replays.jsonl"
     assert not replay_file.exists(), "evidence collection must never log replays"
 
 

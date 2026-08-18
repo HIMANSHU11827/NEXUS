@@ -17,7 +17,7 @@ def _safe_session_id(value: str) -> str:
 
 
 def event_path(project_root: str, session_id: str) -> Path:
-    return Path(project_root) / "workspace" / "work_events" / f"{_safe_session_id(session_id)}.jsonl"
+    return Path(project_root) / ".nexus" / "workspace" / "work_events" / f"{_safe_session_id(session_id)}.jsonl"
 
 
 def _read_new(path: Path, offset: int, after_sequence: int) -> tuple[int, int, list[dict]]:

@@ -14,8 +14,8 @@ from nexus.main_agent.bench import V5Bench
 
 
 def _write_replay(tmp_path, entries):
-    """Write JSONL replay entries under tmp_path/.nexus_v5/replays.jsonl."""
-    replay_dir = tmp_path / ".nexus_v5"
+    """Write JSONL replay entries under tmp_path/.nexus/v5/replays.jsonl."""
+    replay_dir = tmp_path / ".nexus" / "v5"
     replay_dir.mkdir(parents=True, exist_ok=True)
     lines = "\n".join(json.dumps(entry) for entry in entries)
     (replay_dir / "replays.jsonl").write_text(lines + "\n", encoding="utf-8")
@@ -28,7 +28,7 @@ def test_load_missing_replay_returns_empty(tmp_path):
     assert bench.load() == []
     assert bench.stats["skipped"] == 0
     assert bench.stats["replay_status"] == "missing"
-    assert bench.replay_path == str(tmp_path / ".nexus_v5" / "replays.jsonl")
+    assert bench.replay_path == str(tmp_path / ".nexus" / "v5" / "replays.jsonl")
 
 
 def test_evaluate_turn_all_actions_success():
@@ -106,7 +106,7 @@ def test_run_aggregates_stats(tmp_path):
 
 def test_run_skips_malformed_lines(tmp_path):
     """Invalid JSON and non-dict lines are counted in skipped."""
-    replay_dir = tmp_path / ".nexus_v5"
+    replay_dir = tmp_path / ".nexus" / "v5"
     replay_dir.mkdir(parents=True, exist_ok=True)
     (replay_dir / "replays.jsonl").write_text(
         "{not json}\n"

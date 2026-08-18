@@ -243,6 +243,7 @@ def _finish_expired_run_context(
 def run_context_path(root: str, session_id: str, run_id: str) -> str:
     return os.path.join(
         os.path.abspath(root),
+        ".nexus",
         "logs",
         "run_contexts",
         safe_session_id(session_id),
@@ -252,7 +253,7 @@ def run_context_path(root: str, session_id: str, run_id: str) -> str:
 
 def _session_context_dirs(root: str, session_id: str) -> List[str]:
     """Return canonical and pre-normalization session directories."""
-    base = os.path.join(os.path.abspath(root), "logs", "run_contexts")
+    base = os.path.join(os.path.abspath(root), ".nexus", "logs", "run_contexts")
     canonical = os.path.join(base, safe_session_id(session_id))
     legacy = os.path.join(base, _safe_id(session_id))
     return [canonical] if legacy == canonical else [canonical, legacy]
@@ -301,7 +302,7 @@ def load_run_context(root: str, session_id: str, run_id: str) -> Optional[Dict[s
 
 
 def list_run_contexts(root: str, session_id: str = "", limit: int = 100) -> List[Dict[str, Any]]:
-    base = os.path.join(os.path.abspath(root), "logs", "run_contexts")
+    base = os.path.join(os.path.abspath(root), ".nexus", "logs", "run_contexts")
     roots = []
     if session_id:
         roots.extend(_session_context_dirs(root, session_id))
@@ -393,7 +394,7 @@ def recover_orphaned_runs(
             "error": "process restarted before terminal event",
             "visibility": "public",
         }
-        log_dir = os.path.abspath(event_log_dir or os.path.join(root, "workspace", "work_events"))
+        log_dir = os.path.abspath(event_log_dir or os.path.join(root, ".nexus", "workspace", "work_events"))
         os.makedirs(log_dir, exist_ok=True)
         path = os.path.join(log_dir, f"{sid}.jsonl")
         # The read-modify-append of a recovery event must hold the same

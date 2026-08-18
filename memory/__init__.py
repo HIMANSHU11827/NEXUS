@@ -1,4 +1,4 @@
-"""Unified MemoryManager — central orchestrator for all NEXUS memory systems.
+"""Unified MemoryManager Ã¢â‚¬â€ central orchestrator for all NEXUS memory systems.
 
 Provides a single ``prefetch_all(user_msg)`` / ``sync_all(user_msg, response)``
 API that wraps session memory, failure memory, RAG, knowledge vault, evolution
@@ -38,8 +38,8 @@ from models.providers.core.reliability import redact_secrets
 
 logger = logging.getLogger("nexus.memory")
 
-_REPLAY_FILE_REL = os.path.join(".nexus_v5", "replays.jsonl")
-_MEMORY_EVIDENCE_REL = os.path.join(".nexus_v5", "memory_evidence.jsonl")
+_REPLAY_FILE_REL = os.path.join(".nexus", "v5", "replays.jsonl")
+_MEMORY_EVIDENCE_REL = os.path.join(".nexus", "v5", "memory_evidence.jsonl")
 _MEMORY_EVIDENCE_LOCK = threading.Lock()
 _EPISODIC_RECENCY_WINDOW = 86400.0
 _EPISODIC_RECENCY_ALPHA = 0.4
@@ -68,7 +68,7 @@ def _episodic_entry_failed(entry: Any) -> bool:
 
 
 def _episodic_score_entry(entry: Any, now: float) -> float:
-    """Smallville-style recency·α + relevance·β + importance·γ, in 0..1."""
+    """Smallville-style recencyÃ‚Â·ÃŽÂ± + relevanceÃ‚Â·ÃŽÂ² + importanceÃ‚Â·ÃŽÂ³, in 0..1."""
     if not isinstance(entry, dict):
         return 0.0
     try:
@@ -160,14 +160,14 @@ def _tool_evidence_text(
                 pieces.append(f"{label}: completed")
         text = "; ".join(pieces)
         if len(text) > limit:
-            text = text[:limit].rstrip() + "…"
+            text = text[:limit].rstrip() + "Ã¢â‚¬Â¦"
         return text
     except Exception:
         return ""
 
 
 def estimate_tokens(text: Any) -> int:
-    """Rough token estimate for budgeting — ~4 characters per token.
+    """Rough token estimate for budgeting Ã¢â‚¬â€ ~4 characters per token.
 
     ``chars // 4`` is a deliberate, cheap approximation of token counts for
     English text.  Used to cap memory writes and to budget context compaction.
@@ -183,7 +183,7 @@ _ELISION_MARKER = "[truncated {} chars]"
 def _truncate_with_marker(text: str, max_chars: int) -> str:
     """Truncate *text* to *max_chars*, appending an explicit elision marker.
 
-    Nothing is ever silently discarded — the marker states exactly how many
+    Nothing is ever silently discarded Ã¢â‚¬â€ the marker states exactly how many
     characters were elided.
     """
     if len(text) <= max_chars:
@@ -192,7 +192,7 @@ def _truncate_with_marker(text: str, max_chars: int) -> str:
 
 
 def _entry_meta(entry: Any) -> tuple:
-    """``(ts_epoch, verified)`` for a stored entry — soft-degrades on gaps.
+    """``(ts_epoch, verified)`` for a stored entry Ã¢â‚¬â€ soft-degrades on gaps.
 
     Missing/malformed timestamps count as "recent" (never age-evicted); a
     missing ``verified`` key is treated as unverified (low-value, evictable).
@@ -218,7 +218,7 @@ class MemoryBudget:
         max_entries: cap on total store size.
 
     Oversized values are truncated with an explicit ``[truncated N chars]``
-    marker (``fit_value``) — never a silent discard.  Store growth is trimmed
+    marker (``fit_value``) Ã¢â‚¬â€ never a silent discard.  Store growth is trimmed
     oldest/low-value-first (``trim_store``); recent verified facts are never
     silently dropped.
     """
@@ -285,7 +285,7 @@ def expire(
     - Unverified entries older than ``max_age_days`` are evicted first
       (oldest first).
     - Verified facts are exempt from age-based expiry and are only dropped
-      under the final hard cap ``max_entries`` — oldest-first, so the most
+      under the final hard cap ``max_entries`` Ã¢â‚¬â€ oldest-first, so the most
       recent verified facts survive.
     - Entries with no usable timestamp count as recent and are never
       age-evicted.
@@ -352,7 +352,7 @@ class MemoryContext:
 
 
 class MemoryManager:
-    """Unified memory orchestrator — wraps all NEXUS memory systems.
+    """Unified memory orchestrator Ã¢â‚¬â€ wraps all NEXUS memory systems.
 
     Usage:
         memory = MemoryManager(root_dir)
@@ -405,7 +405,7 @@ class MemoryManager:
             # completed transcript.  This is what lets a fresh process resume
             # the task that was interrupted instead of starting a new chat.
             candidates = []
-            contexts = os.path.join(root, "logs", "run_contexts")
+            contexts = os.path.join(root, ".nexus", "logs", "run_contexts")
             if os.path.isdir(contexts):
                 for session in os.listdir(contexts):
                     folder = os.path.join(contexts, session)
@@ -421,7 +421,7 @@ class MemoryManager:
                                 candidates.append((float(record.get("updated_at") or record.get("started_at") or 0), session))
                         except (OSError, ValueError, TypeError):
                             continue
-            checkpoints = os.path.join(root, ".nexus_v5", "checkpoints")
+            checkpoints = os.path.join(root, ".nexus", "v5", "checkpoints")
             if os.path.isdir(checkpoints):
                 terminal = {"complete", "completed", "done", "success", "succeeded", "finished"}
                 for name in os.listdir(checkpoints):
@@ -437,7 +437,7 @@ class MemoryManager:
                             candidates.append((float(record.get("ts") or os.path.getmtime(path)), session))
                     except (OSError, ValueError, TypeError):
                         continue
-            queue_db = os.path.join(root, ".nexus_queue.db")
+            queue_db = os.path.join(root, ".nexus", "queues", "queue.db")
             if os.path.exists(queue_db):
                 try:
                     conn = sqlite3.connect(queue_db)
@@ -454,7 +454,7 @@ class MemoryManager:
             if candidates:
                 return max(candidates, key=lambda item: item[0])[1]
 
-            queue_db = os.path.join(root, ".nexus_queue.db")
+            queue_db = os.path.join(root, ".nexus", "queues", "queue.db")
             if os.path.isfile(queue_db):
                 try:
                     connection = sqlite3.connect(queue_db)
@@ -473,7 +473,7 @@ class MemoryManager:
             if candidates:
                 return max(candidates, key=lambda item: item[0])[1]
 
-            checkpoint_dir = os.path.join(root, ".nexus_v5", "checkpoints")
+            checkpoint_dir = os.path.join(root, ".nexus", "v5", "checkpoints")
             if os.path.isdir(checkpoint_dir):
                 for name in os.listdir(checkpoint_dir):
                     if not name.endswith(".json"):
@@ -491,7 +491,7 @@ class MemoryManager:
             if candidates:
                 return max(candidates, key=lambda item: item[0])[1]
 
-            sess_dir = os.path.join(root, "logs", "sessions")
+            sess_dir = os.path.join(root, ".nexus", "logs", "sessions")
             if os.path.isdir(sess_dir):
                 try:
                     files = [
@@ -506,7 +506,7 @@ class MemoryManager:
                     pass
         return f"session_{uuid.uuid4().hex[:8]}"
 
-    # ─── Public API ───────────────────────────────────────────────────
+    # Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Public API Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     async def prefetch_all(self, user_message: str) -> MemoryContext:
         """Pre-turn: load all memory sources relevant to *user_message*.
@@ -694,11 +694,11 @@ class MemoryManager:
         return ids
 
     def shutdown(self, timeout: int = 5) -> None:
-        """Shutdown thread pool — drain in-flight work."""
+        """Shutdown thread pool Ã¢â‚¬â€ drain in-flight work."""
         self._pool.shutdown(wait=True)
         self._pool._threads.clear() if hasattr(self._pool, "_threads") else None
 
-    # ─── In-memory access ────────────────────────────────────────────
+    # Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ In-memory access Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     def get(self, key: str, default: str = "") -> str:
         """Get a flat memory value by key (episodic, working, etc.)."""
@@ -730,13 +730,13 @@ class MemoryManager:
         
         # Add file-based statistics
         try:
-            session_path = os.path.join(self.root, "logs", "sessions", f"{self.session_id}.json")
+            session_path = os.path.join(self.root, ".nexus", "logs", "sessions", f"{self.session_id}.json")
             if os.path.exists(session_path):
                 stats["session_file_size"] = os.path.getsize(session_path)
                 stats["session_file_modified"] = os.path.getmtime(session_path)
             
             # Count session files
-            sess_dir = os.path.join(self.root, "logs", "sessions")
+            sess_dir = os.path.join(self.root, ".nexus", "logs", "sessions")
             if os.path.isdir(sess_dir):
                 session_files = [f for f in os.listdir(sess_dir) if f.endswith(".json")]
                 stats["total_sessions"] = len(session_files)
@@ -850,14 +850,14 @@ class MemoryManager:
         if policy.get("clear_in_memory_on_shutdown", False):
             self._in_memory.clear()
 
-    # ─── Session memory ──────────────────────────────────────────────
+    # Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Session memory Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     def _prefetch_session(self, user_message: str) -> str:
         """Load last N turns from session JSON."""
         try:
-            path = os.path.join(self.root, "logs", "sessions", f"{self.session_id}.json")
+            path = os.path.join(self.root, ".nexus", "logs", "sessions", f"{self.session_id}.json")
             if not os.path.exists(path):
-                path = os.path.join(self.root, "logs", "session_memory.json")
+                path = os.path.join(self.root, ".nexus", "logs", "session_memory.json")
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -869,7 +869,7 @@ class MemoryManager:
                         if role not in ("user", "assistant"):
                             continue
                         # Unverified assistant claims are a conversation record,
-                        # not ground truth — never surface them back as recalled
+                        # not ground truth Ã¢â‚¬â€ never surface them back as recalled
                         # context.  Legacy entries (no ``verified`` key) and
                         # verified entries still recall normally.
                         if role == "assistant" and m.get("verified") is False:
@@ -890,7 +890,7 @@ class MemoryManager:
 
         Seeds from the existing on-disk history first so a fresh process does not
         truncate the session file to only its own turns (the loop also writes this
-        same file via _write_session_bus — this merge avoids clobbering it).
+        same file via _write_session_bus Ã¢â‚¬â€ this merge avoids clobbering it).
 
         Assistant text is tagged ``verified: False`` when no verified tool
         evidence backs it, so the record is kept but never recalled as ground
@@ -899,7 +899,7 @@ class MemoryManager:
         if not user_message and not response:
             return
         try:
-            path = os.path.join(self.root, "logs", "sessions", f"{self.session_id}.json")
+            path = os.path.join(self.root, ".nexus", "logs", "sessions", f"{self.session_id}.json")
             os.makedirs(os.path.dirname(path), exist_ok=True)
             # Serialize writers and replace atomically.  A direct ``open(...,
             # 'w')`` can leave a truncated session after a crash and concurrent
@@ -933,7 +933,7 @@ class MemoryManager:
         except Exception as e:
             logger.error(f"sync_session failed: {e}")
 
-    # ─── RAG retrieval ───────────────────────────────────────────────
+    # Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ RAG retrieval Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     def _prefetch_rag(self, user_message: str) -> str:
         """Retrieve RAG context for user message."""
@@ -950,7 +950,7 @@ class MemoryManager:
             pass
         return ""
 
-    # ─── Failure memory ──────────────────────────────────────────────
+    # Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Failure memory Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     def _prefetch_failures(self, user_message: str) -> str:
         """Load recent failure records as preventive vaccines."""
@@ -970,7 +970,7 @@ class MemoryManager:
             pass
         return ""
 
-    # ─── Knowledge vault ─────────────────────────────────────────────
+    # Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Knowledge vault Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     def _prefetch_knowledge(self, user_message: str) -> str:
         """Retrieve from knowledge vault (optional, degrades gracefully)."""
@@ -985,14 +985,14 @@ class MemoryManager:
             logger.debug("_prefetch_knowledge: suppressed error", exc_info=True)
         return ""
 
-    # ─── Episodic memory ─────────────────────────────────────────────
+    # Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Episodic memory Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     def _prefetch_episodic(
         self, limit: int = 5, user_message: str = ""
     ) -> List[Dict[str, Any]]:
         """Load the top ``limit`` replay entries relevant to *user_message*.
 
-        Reads ``<root>/.nexus_v5/replays.jsonl`` (written by the V5 loop's
+        Reads ``<root>/.nexus/v5/replays.jsonl`` (written by the V5 loop's
         turn replay). Query coverage is the primary ranking key when a user
         message is supplied; the existing recency/importance score breaks
         ties. Without a query, the historical score-only ordering is kept.
@@ -1053,7 +1053,7 @@ class MemoryManager:
             logger.warning("memory/__init__.py _prefetch_episodic: suppressed error: %s", e)
         return digests
 
-    # ─── Procedural memory (skills) ──────────────────────────────────
+    # Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Procedural memory (skills) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     def _prefetch_procedural(self, user_message: str = "", limit: int = 3) -> str:
         """Rank the durable skill corpus against *user_message*.
@@ -1085,7 +1085,7 @@ class MemoryManager:
             logger.debug("_prefetch_procedural: suppressed error", exc_info=True)
             return ""
 
-    # ─── .opencode/memory/ sync ──────────────────────────────────────
+    # Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ .opencode/memory/ sync Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     def _sync_opencode_memory(
         self,
@@ -1100,7 +1100,7 @@ class MemoryManager:
 
         Gated on verified evidence: only all-verified, non-empty tool results
         are written as cross-session learnings, and the persisted digest is the
-        tool's real output/status — never unverified raw model prose.
+        tool's real output/status Ã¢â‚¬â€ never unverified raw model prose.
         """
         if not verified or not tool_results:
             return

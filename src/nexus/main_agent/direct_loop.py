@@ -877,7 +877,7 @@ class V5DirectModelToolLoop:
     def _tool_result_archive_path(turn_id: str, call_slot: int, root_dir: str = "") -> str:
         """Resolve the archive file path for one oversized tool result."""
         safe_turn = re.sub(r"[^A-Za-z0-9_-]", "_", str(turn_id or "live")) or "live"
-        return os.path.join(root_dir, "context_archive", "tool-results",
+        return os.path.join(root_dir, ".nexus", "context_archive", "tool-results",
                             f"{safe_turn}_{int(call_slot)}.txt")
 
     @classmethod
@@ -886,7 +886,7 @@ class V5DirectModelToolLoop:
         """Bound one tool result before it enters the model transcript.
 
         Oversized results (> ``MAX_TOOL_RESULT_CHARS``) are persisted to
-        ``context_archive/tool-results/<turn>_<slot>.txt`` and replaced by a
+        ``.nexus/context_archive/tool-results/<turn>_<slot>.txt`` and replaced by a
         preview line so the prompt stays cheap while the full result remains
         readable by a future ``continue``.  Empty/whitespace results become an
         explicit "(name completed with no output)" marker.  Every failure here
@@ -898,13 +898,13 @@ class V5DirectModelToolLoop:
             if len(content) <= MAX_TOOL_RESULT_CHARS:
                 return content
             root_dir = root_dir or os.getcwd()
-            base = os.path.join(root_dir, "context_archive", "tool-results")
+            base = os.path.join(root_dir, ".nexus", "context_archive", "tool-results")
             os.makedirs(base, exist_ok=True)
             path = cls._tool_result_archive_path(turn_id, call_slot, root_dir)
             with open(path, "w", encoding="utf-8", errors="replace") as handle:
                 handle.write(content)
             preview = content[:TOOL_RESULT_PREVIEW_CHARS]
-            rel = os.path.join("context_archive", "tool-results",
+            rel = os.path.join(".nexus", "context_archive", "tool-results",
                                os.path.basename(path)).replace("\\", "/")
             return (f"[result {len(content)} chars persisted to {rel}; "
                     f"showing first {TOOL_RESULT_PREVIEW_CHARS} chars]\n{preview}")

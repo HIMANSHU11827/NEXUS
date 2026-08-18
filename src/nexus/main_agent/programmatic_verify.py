@@ -305,7 +305,7 @@ async def run_programmatic_verification(
         verifier_id = f"verify_{uuid.uuid4().hex[:24]}"
         result.verifier_id = verifier_id
         event_store = VerifierEventStore(
-            root_path / ".nexus_v5" / "verifier_events.sqlite3"
+            root_path / ".nexus" / "v5" / "verifier_events.sqlite3"
         )
         for command_fact in result.commands:
             event_store.record(
@@ -336,7 +336,7 @@ async def run_programmatic_verification(
                             + (f"\n[readiness] {result.readiness.error}" if result.readiness and result.readiness.error else ""))[-1500:],
         )
         result.event_id = str(event.get("event_id") or "")
-        state = VerifierStateStore(root_path / ".nexus_v5" / "verifier_state.json").record_verification(
+        state = VerifierStateStore(root_path / ".nexus" / "v5" / "verifier_state.json").record_verification(
             result.session_id, str(root_path), status=result.status,
             verifier_id=verifier_id, event_id=result.event_id,
         )

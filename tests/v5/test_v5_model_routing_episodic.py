@@ -116,8 +116,8 @@ def test_load_episodic_empty_when_replay_missing(tmp_path, monkeypatch):
 def test_load_episodic_newest_first_and_prefetch(tmp_path, monkeypatch):
     """Entries load newest-first and prefetch ranks failures on top."""
     loop = _make_loop(tmp_path, monkeypatch)
-    replay_dir = tmp_path / ".nexus_v5"
-    replay_dir.mkdir()
+    replay_dir = tmp_path / ".nexus" / "v5"
+    replay_dir.mkdir(parents=True)
     now = time.time()
     entries = [
         {
@@ -200,8 +200,8 @@ def test_memory_manager_prefetch_episodic_missing(tmp_path):
 
 def test_memory_manager_prefetch_episodic_with_replays(tmp_path):
     """MemoryManager populates the episodic store from replays.jsonl."""
-    replay_dir = tmp_path / ".nexus_v5"
-    replay_dir.mkdir()
+    replay_dir = tmp_path / ".nexus" / "v5"
+    replay_dir.mkdir(parents=True)
     now = time.time()
     entries = [
         {"timestamp": _iso(600, now), "input": "failed deploy", "success": False, "n_failed": 1},

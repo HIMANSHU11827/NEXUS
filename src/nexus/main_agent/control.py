@@ -23,7 +23,7 @@ Provides the V5 loop with the same run-control surface the V1 loop has:
   ``NEXUS_MAX_TURNS`` / ``NEXUS_MAX_BUDGET_USD`` env vars).
 - ``_snapshot_workspace()`` / ``_rollback_snapshot()`` / ``_undo_last()`` —
   per-turn git-based workspace snapshots under
-  ``<root_dir>/.nexus_v5/snapshots/<turn_id>/`` with restore-by-copy and
+  ``<root_dir>/.nexus/v5/snapshots/<turn_id>/`` with restore-by-copy and
   ``git apply`` patch fallback.
 
 Safe to mix into any class exposing ``runtime.hooks``, ``kernel``,
@@ -406,14 +406,14 @@ class V5Control:
     # WORKSPACE ROLLBACK / GIT SNAPSHOT (Codex lesson)
     # ─────────────────────────────────────────────────────────────────────
 
-    _SNAPSHOT_ROOT = ".nexus_v5"
+    _SNAPSHOT_ROOT = ".nexus/v5"
     _SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024
 
     def _snapshot_workspace(self, turn_id: str = "") -> str:
         """Capture a per-turn git snapshot of modified tracked files.
 
         Modified files (``git diff --name-only``) are saved under
-        ``<root_dir>/.nexus_v5/snapshots/<turn_id>/`` preserving relative
+        ``<root_dir>/.nexus/v5/snapshots/<turn_id>/`` preserving relative
         paths; each file stores the committed (``HEAD``) content so a later
         rollback restores the pre-turn state. When nothing is modified a
         ``snapshot.patch`` (``git diff --binary``) is written instead.

@@ -89,7 +89,7 @@ def _timestamp(value: Any, default: float = 0.0) -> float:
 def _run_contexts(root: str, session_id: str) -> List[Dict[str, Any]]:
     rows = []
     for alias in _session_aliases(session_id):
-        folder = os.path.join(root, "logs", "run_contexts", alias)
+        folder = os.path.join(root, ".nexus", "logs", "run_contexts", alias)
         if not os.path.isdir(folder):
             continue
         for name in os.listdir(folder):
@@ -101,7 +101,7 @@ def _run_contexts(root: str, session_id: str) -> List[Dict[str, Any]]:
 
 
 def _latest_checkpoint(root: str, session_id: str) -> Dict[str, Any]:
-    folder = os.path.join(root, ".nexus_v5", "checkpoints")
+    folder = os.path.join(root, ".nexus", "v5", "checkpoints")
     candidates = []
     if not os.path.isdir(folder):
         return {}
@@ -127,7 +127,7 @@ def _latest_checkpoint(root: str, session_id: str) -> Dict[str, Any]:
 
 
 def _todo(root: str) -> Dict[str, str]:
-    path = os.path.join(root, "workspace", "todo.md")
+    path = os.path.join(root, ".nexus", "workspace", "todo.md")
     try:
         content = open(path, "r", encoding="utf-8").read()
     except OSError:
@@ -136,7 +136,7 @@ def _todo(root: str) -> Dict[str, str]:
     if not pending:
         return {}
     task = next((line.split(":", 1)[1].strip() for line in content.splitlines() if line.lower().startswith("task:") and ":" in line), "")
-    return {"task": _text(task or pending[0], 500), "evidence": "workspace/todo.md"}
+    return {"task": _text(task or pending[0], 500), "evidence": ".nexus/workspace/todo.md"}
 
 
 def inspect_continuity(root: str, session_id: str = "default", queue: Any = None) -> ContinuitySnapshot:
@@ -154,14 +154,14 @@ def inspect_continuity(root: str, session_id: str = "default", queue: Any = None
             checkpoint = _latest_checkpoint(root, requested_session_id)
             return ContinuitySnapshot(True, session_id, _text(run.get("prompt_preview"), 500), status,
                                       _text(run.get("error")), _text(run.get("run_id")), "run_context",
-                                      _text(checkpoint.get("file")), "", "logs/run_contexts")
+                                      _text(checkpoint.get("file")), "", ".nexus/logs/run_contexts")
     checkpoint = _latest_checkpoint(root, requested_session_id)
     if checkpoint:
         task = _text(checkpoint.get("context_summary") or checkpoint.get("plan"), 500)
         if task:
             return ContinuitySnapshot(True, session_id, task, "checkpointed", "",
                                       _text(checkpoint.get("turn_id")), "checkpoint",
-                                      _text(checkpoint.get("file")), "", ".nexus_v5/checkpoints")
+                                      _text(checkpoint.get("file")), "", ".nexus/v5/checkpoints")
     todo = _todo(root)
     if todo:
         return ContinuitySnapshot(True, session_id, todo["task"], "unfinished", "", "", "todo", "", "", todo["evidence"])
@@ -175,7 +175,7 @@ def inspect_continuity(root: str, session_id: str = "default", queue: Any = None
             payload = row.get("payload") or {}
             return ContinuitySnapshot(True, session_id, _text(payload.get("task_desc"), 500),
                                       _text(row.get("state")), _text(row.get("error")), "", "task_queue", "",
-                                      _text(row.get("id")), ".nexus_queue.db")
+                                      _text(row.get("id")), ".nexus/queues/queue.db")
     return ContinuitySnapshot(session_id=session_id)
 
 

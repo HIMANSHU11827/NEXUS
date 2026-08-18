@@ -21,7 +21,7 @@ class NexusLogger:
 
     @staticmethod
     def setup(root_dir: str, level: int = logging.INFO):
-        log_dir = os.path.join(root_dir, "logs", "sessions")
+        log_dir = os.path.join(root_dir, ".nexus", "logs", "sessions")
         os.makedirs(log_dir, exist_ok=True)
         
         log_file = os.path.join(log_dir, f"nexus_{datetime.now().strftime('%Y%m%d')}.log")

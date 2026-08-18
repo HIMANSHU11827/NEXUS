@@ -82,8 +82,9 @@ class TaskQueue:
         self.root = os.path.abspath(root or os.path.dirname(db_path) if db_path else root or os.getcwd())
         if db_path is None:
             base = root or os.environ.get("NEXUS_ROOT") or os.getcwd()
-            db_path = os.path.join(base, ".nexus_queue.db")
+            db_path = os.path.join(base, ".nexus", "queues", "queue.db")
         self.db_path = os.path.abspath(db_path)
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self.default_max_attempts = default_max_attempts
         self._lock = threading.Lock()
         self._init_db()

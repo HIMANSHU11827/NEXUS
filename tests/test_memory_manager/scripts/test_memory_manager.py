@@ -80,7 +80,7 @@ class TestMemoryManager:
         assert "Active task" in s
 
     def test_prefetch_session_loads_file(self, mm):
-        sesh_dir = os.path.join(mm.root, "logs", "sessions")
+        sesh_dir = os.path.join(mm.root, ".nexus", "logs", "sessions")
         os.makedirs(sesh_dir, exist_ok=True)
         path = os.path.join(sesh_dir, "test_sesh.json")
         with open(path, "w", encoding="utf-8") as f:
@@ -96,7 +96,7 @@ class TestMemoryManager:
     def test_sync_session_writes_file(self, mm):
         import asyncio
         asyncio.run(mm.sync_all("test user message", "test response"))
-        sesh_path = os.path.join(mm.root, "logs", "sessions", "test_sesh.json")
+        sesh_path = os.path.join(mm.root, ".nexus", "logs", "sessions", "test_sesh.json")
         assert os.path.isfile(sesh_path)
         with open(sesh_path, encoding="utf-8") as f:
             data = json.load(f)
@@ -116,7 +116,7 @@ class TestMemoryManager:
             )
 
         asyncio.run(run())
-        path = tmp_path / "logs" / "sessions" / "concurrent.json"
+        path = tmp_path / ".nexus" / "logs" / "sessions" / "concurrent.json"
         data = json.loads(path.read_text(encoding="utf-8"))
         contents = {item.get("content") for item in data}
         assert {"first user", "first response", "second user", "second response"} <= contents
@@ -126,7 +126,7 @@ class TestMemoryManager:
     def test_sync_empty_does_nothing(self, mm):
         import asyncio
         asyncio.run(mm.sync_all("", ""))
-        sesh_path = os.path.join(mm.root, "logs", "sessions", "test_sesh.json")
+        sesh_path = os.path.join(mm.root, ".nexus", "logs", "sessions", "test_sesh.json")
         assert not os.path.isfile(sesh_path)
 
     def test_prefetch_rag_returns_string(self, mm):
@@ -158,7 +158,7 @@ class TestVerifiedMemoryGate:
         return path
 
     def _session_file(self, mm):
-        return os.path.join(mm.root, "logs", "sessions", "gate_sesh.json")
+        return os.path.join(mm.root, ".nexus", "logs", "sessions", "gate_sesh.json")
 
     def test_sync_all_unverified_tags_transcript_and_writes_no_learnings(self, mm):
         import asyncio
@@ -241,7 +241,7 @@ class TestVerifiedMemoryGate:
                 "user asks", "response", verified_actions=[{"verified": True}],
                 tool_results=tool_results, provenance=provenance,
             ))
-        evidence_path = os.path.join(mm.root, ".nexus_v5", "memory_evidence.jsonl")
+        evidence_path = os.path.join(mm.root, ".nexus", "v5", "memory_evidence.jsonl")
         with open(evidence_path, encoding="utf-8") as f:
             records = [json.loads(line) for line in f if line.strip()]
         assert len(records) == 1
@@ -254,7 +254,7 @@ class TestVerifiedMemoryGate:
 
     def test_prefetch_session_skips_unverified_assistant_claims(self, mm):
         import asyncio
-        os.makedirs(os.path.join(mm.root, "logs", "sessions"), exist_ok=True)
+        os.makedirs(os.path.join(mm.root, ".nexus", "logs", "sessions"), exist_ok=True)
         with open(self._session_file(mm), "w", encoding="utf-8") as f:
             json.dump([
                 {"role": "user", "content": "first q"},
@@ -270,7 +270,7 @@ class TestVerifiedMemoryGate:
     def test_legacy_assistant_entries_still_recall(self, mm):
         # Entries written before the gate (no ``verified`` key) remain recallable
         import asyncio
-        os.makedirs(os.path.join(mm.root, "logs", "sessions"), exist_ok=True)
+        os.makedirs(os.path.join(mm.root, ".nexus", "logs", "sessions"), exist_ok=True)
         with open(self._session_file(mm), "w", encoding="utf-8") as f:
             json.dump([
                 {"role": "user", "content": "q"},

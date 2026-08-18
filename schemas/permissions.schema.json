@@ -1,0 +1,116 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NEXUS Permission Grants",
+  "description": "Default permission grants for NEXUS executable components (permissions.json). Every tool, skill, plugin, MCP server, gateway, agent, and team must declare and respect these boundaries. Informational schema only; not enforced at runtime.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "default_mode", "allow", "sandbox"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Permissions document version (current file: 1.0)."
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable summary of the grants."
+    },
+    "default_mode": {
+      "type": "string",
+      "enum": ["auto", "ask", "deny"],
+      "description": "Default permission resolution mode when no specific grant applies."
+    },
+    "allow": {
+      "type": "object",
+      "description": "Capability grants by resource group.",
+      "properties": {
+        "filesystem": {
+          "type": "object",
+          "description": "File read/write scope and denied paths.",
+          "properties": {
+            "read": { "type": "array", "items": { "type": "string" }, "description": "Roots readable by default." },
+            "write": { "type": "array", "items": { "type": "string" }, "description": "Roots writable by default." },
+            "deny_paths": { "type": "array", "items": { "type": "string" }, "description": "Paths never accessible, regardless of other grants." }
+          }
+        },
+        "network": {
+          "type": "object",
+          "description": "Network access scope.",
+          "properties": {
+            "allowed_domains": { "type": "array", "items": { "type": "string" }, "description": "Domains reachable by default." },
+            "deny_all_other": { "type": "boolean", "description": "If true, all other domains are denied." }
+          }
+        },
+        "process": {
+          "type": "object",
+          "description": "Command execution scope.",
+          "properties": {
+            "allow_execution": { "type": "boolean", "description": "Whether subprocess execution is permitted." },
+            "allowed_commands": { "type": "array", "items": { "type": "string" }, "description": "Command names executable by default." }
+          }
+        },
+        "environment_variables": {
+          "type": "object",
+          "description": "Environment variable access scope.",
+          "properties": {
+            "read": { "type": "array", "items": { "type": "string" }, "description": "Variable names/patterns readable (e.g. PATH, NEXUS_*)." },
+            "deny": { "type": "array", "items": { "type": "string" }, "description": "Variable names/patterns never exposed (e.g. *_SECRET, *_TOKEN)." }
+          }
+        },
+        "secrets": {
+          "type": "object",
+          "properties": {
+            "access": { "type": "string", "enum": ["secret_manager_only"], "description": "How secrets may be accessed." }
+          }
+        },
+        "browser": {
+          "type": "object",
+          "properties": {
+            "allow": { "type": "boolean", "description": "Whether browser automation is permitted." }
+          }
+        },
+        "provider": {
+          "type": "object",
+          "properties": {
+            "access": { "type": "string", "enum": ["configured_only"], "description": "Which model providers may be used." }
+          }
+        },
+        "gateway": {
+          "type": "object",
+          "properties": {
+            "access": { "type": "string", "enum": ["enabled_only"], "description": "Which messaging gateways may be used." }
+          }
+        },
+        "tool": {
+          "type": "object",
+          "properties": {
+            "access": { "type": "string", "enum": ["registered_only"], "description": "Which tools may be invoked." }
+          }
+        },
+        "hive_delegation": {
+          "type": "object",
+          "properties": {
+            "allow": { "type": "boolean", "description": "Whether the main agent may delegate work to Hive sub-agents." }
+          }
+        }
+      }
+    },
+    "sandbox": {
+      "type": "object",
+      "description": "Command sandbox tiering.",
+      "additionalProperties": false,
+      "required": ["default_tier", "require_tier_for"],
+      "properties": {
+        "default_tier": {
+          "type": "string",
+          "enum": ["no_sandbox", "normal", "docker"],
+          "description": "Sandbox tier applied when no specific requirement exists."
+        },
+        "require_tier_for": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Resource categories that always run inside a sandbox."
+        }
+      }
+    }
+  }
+}

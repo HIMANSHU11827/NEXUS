@@ -1,4 +1,4 @@
-"""PluginForge — creates and refines NEXUS plugins.
+"""PluginForge â€” creates and refines NEXUS plugins.
 
 Redesigned (2026-08-05):
 - Versioning goes through ONE path: ``VersionManager`` (``ensure``/``bump``).
@@ -18,7 +18,7 @@ from evolution.quality import (
     rejected_result,
     validate_forge_output,
 )
-from evolution.version.scripts.version import VersionManager
+from versioning.version.scripts.version import VersionManager
 from models.providers.core.router import ModelRouter
 
 logger = logging.getLogger(__name__)
@@ -105,7 +105,7 @@ class PluginForge:
         return {"created": True, "name": name, "version": new_ver, "refined": True,
                 "status": "ok", "promoted": True}
 
-    # ── shared helpers ───────────────────────────────────────────────────
+    # â”€â”€ shared helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _rejected(self, name: str, reason: str, action: str = "forge") -> Dict[str, Any]:
         self._audit(name, action, old_version=None, new_version=None,

@@ -1,18 +1,18 @@
-"""Log Analyzer — reads ALL logs/, finds patterns, drives evolution."""
+"""Log Analyzer â€” reads ALL logs/, finds patterns, drives evolution."""
 __version__ = "2.0.0"
 import json
 import logging
 import os
 from typing import Any, Dict
 
-from evolution.version.scripts.version import VersionManager
+from versioning.version.scripts.version import VersionManager
 
 logger = logging.getLogger(__name__)
 
 class LogAnalyzer:
     def __init__(self, root_dir: str = "."):
         self.root = os.path.abspath(root_dir)
-        self.logs_dir = os.path.join(self.root, "logs")
+        self.logs_dir = os.path.join(self.root, ".nexus", "logs")
         self._router = None
         self.version = "1.0.0"
 
@@ -79,7 +79,7 @@ class LogAnalyzer:
             from collections import Counter
             freq = Counter(topics)
             for topic, count in freq.most_common(3):
-                patterns["skill_gaps"].append({"name": topic, "reason": f"Used successfully {count} times — consider promoting to skill"})
+                patterns["skill_gaps"].append({"name": topic, "reason": f"Used successfully {count} times â€” consider promoting to skill"})
         return patterns
 
     def evolve(self) -> Dict[str, Any]:

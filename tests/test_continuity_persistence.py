@@ -40,7 +40,7 @@ def test_newest_successful_run_suppresses_older_failure(tmp_path):
 
 
 def test_checkpoint_is_continuation_evidence_without_claiming_completion(tmp_path):
-    path = tmp_path / ".nexus_v5" / "checkpoints" / "turn_phase.json"
+    path = tmp_path / ".nexus" / "v5" / "checkpoints" / "turn_phase.json"
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({
         "session": "s1", "turn_id": "turn-1", "phase": "tools",
@@ -87,7 +87,7 @@ def test_no_durable_evidence_means_no_offer(tmp_path):
 
 
 def test_completed_checkpoint_is_not_continuation_evidence(tmp_path):
-    path = tmp_path / ".nexus_v5" / "checkpoints" / "turn_completed.json"
+    path = tmp_path / ".nexus" / "v5" / "checkpoints" / "turn_completed.json"
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({
         "session": "s1", "turn_id": "turn-1", "phase": "completed",
@@ -111,7 +111,7 @@ def test_run_context_reader_uses_safe_session_directory(tmp_path):
 
 
 def test_run_context_reader_falls_back_to_legacy_session_directory(tmp_path):
-    legacy_dir = tmp_path / "logs" / "run_contexts" / "team_alpha"
+    legacy_dir = tmp_path / ".nexus" / "logs" / "run_contexts" / "team_alpha"
     legacy_dir.mkdir(parents=True)
     (legacy_dir / "legacy.json").write_text(json.dumps({
         "run_id": "legacy",

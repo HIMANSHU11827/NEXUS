@@ -635,7 +635,7 @@ created_at: {time.time()}
     # ─── Health ───────────────────────────────────────────────
 
     def _load_health(self):
-        path = os.path.join(self._root, "logs", "skill_health.json")
+        path = os.path.join(self._root, ".nexus", "logs", "skill_health.json")
         if os.path.isfile(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
@@ -646,7 +646,7 @@ created_at: {time.time()}
                 pass
 
     def _save_health(self):
-        path = os.path.join(self._root, "logs", "skill_health.json")
+        path = os.path.join(self._root, ".nexus", "logs", "skill_health.json")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         try:
             with open(path, "w", encoding="utf-8") as f:

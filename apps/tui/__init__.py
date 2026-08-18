@@ -260,7 +260,7 @@ class NexusShell:
         console.print(Panel("\n".join(lines), title="Monitor", border_style="green"))
 
     def _show_work_events(self):
-        d = os.path.join(os.getcwd(), "workspace", "work_events")
+        d = os.path.join(os.getcwd(), ".nexus", "workspace", "work_events")
         if not os.path.isdir(d):
             console.print("[dim]No work events recorded.[/dim]"); return
         fs = sorted([f for f in os.listdir(d) if f.endswith(".jsonl")],

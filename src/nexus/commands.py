@@ -847,11 +847,11 @@ def _nexus_root(ctx: CommandContext) -> str:
 
 
 def _sessions_dir(ctx: CommandContext) -> str:
-    return os.path.join(_nexus_root(ctx), "logs", "sessions")
+    return os.path.join(_nexus_root(ctx), ".nexus", "logs", "sessions")
 
 
 def _latest_session_file(ctx: CommandContext) -> str:
-    """Path of the most recently written session JSON in logs/sessions; '' on failure."""
+    """Path of the most recently written session JSON in .nexus/logs/sessions; '' on failure."""
     directory = ctx.extra.get("sessions_dir") or _sessions_dir(ctx)
     if not os.path.isdir(directory):
         return ""
@@ -906,7 +906,7 @@ async def _cmd_compact(ctx: CommandContext) -> CommandResult:
 
 
 async def _cmd_context(ctx: CommandContext) -> CommandResult:
-    """Report session context usage from the latest logs/sessions file."""
+    """Report session context usage from the latest .nexus/logs/sessions file."""
     messages = _load_session_messages(ctx)
     if not messages:
         return CommandResult(output="no data yet", formatted="[dim]No session data yet[/dim]")
@@ -1060,7 +1060,7 @@ async def _cmd_plans(ctx: CommandContext) -> CommandResult:
     except Exception:
         return CommandResult(output="no data yet", formatted="[dim]Planning tool unavailable[/dim]")
     root = _nexus_root(ctx)
-    for base in (os.path.join(root, "workspace"), root):
+    for base in (os.path.join(root, ".nexus", "workspace"), os.path.join(root, "workspace"), root):
         try:
             tool = PlanningTool(root_dir=base)
             plan = tool._read_plan()
@@ -1200,7 +1200,7 @@ async def _cmd_login(ctx: CommandContext) -> CommandResult:
 
 
 async def _cmd_cost(ctx: CommandContext) -> CommandResult:
-    """Estimate cost for the latest run at $0.001/1K tokens from logs/sessions."""
+    """Estimate cost for the latest run at $0.001/1K tokens from .nexus/logs/sessions."""
     messages = _load_session_messages(ctx)
     if not messages:
         return CommandResult(output="no data yet", formatted="[dim]No session data yet[/dim]")

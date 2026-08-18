@@ -234,7 +234,7 @@ async def test_snapshot_rollback_with_git(tmp_path):
     loop = NexusLoopV5(root_dir=str(tmp_path))
     snap = loop._snapshot_workspace(turn_id="t1")
     assert snap and os.path.isdir(snap)
-    captured = tmp_path / ".nexus_v5" / "snapshots" / "t1" / "notes.txt"
+    captured = tmp_path / ".nexus" / "v5" / "snapshots" / "t1" / "notes.txt"
     assert captured.is_file()
     assert captured.read_text(encoding="utf-8") == "original content"
 

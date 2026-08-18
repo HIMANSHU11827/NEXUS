@@ -32,7 +32,7 @@ try:
 except Exception:  # pragma: no cover - defensive
     _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-WORKSPACE_ROOT = os.path.abspath(os.path.join(_REPO_ROOT, "workspace"))
+WORKSPACE_ROOT = os.path.abspath(os.path.join(_REPO_ROOT, ".nexus", "workspace"))
 KNOWLEDGE_VAULT = os.path.abspath(os.path.join(_REPO_ROOT, "knowledge"))
 
 

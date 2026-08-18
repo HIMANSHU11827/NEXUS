@@ -351,7 +351,7 @@ class V5EventEmitter:
 
                     path = call.params.get("path") or call.params.get("filepath")
                     root_dir = str(getattr(self, "root_dir", "") or os.getcwd())
-                    VerifierStateStore(Path(root_dir) / ".nexus_v5" / "verifier_state.json").mark_stale(
+                    VerifierStateStore(Path(root_dir) / ".nexus" / "v5" / "verifier_state.json").mark_stale(
                         str(getattr(self, "session_id", "default") or "default"), root_dir, [path]
                     )
                 except Exception:

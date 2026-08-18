@@ -1,0 +1,17 @@
+{
+  "name": "nexus-dev",
+  "image": "python:3.14-slim",
+  "containerEnv": {
+    "PYTHONPATH": "/workspaces/NEXUS AI/src"
+  },
+  "postCreateCommand": "pip install uv && uv sync && echo 'NEXUS ready. Run tests with: uv run pytest'",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff"
+      ]
+    }
+  }
+}

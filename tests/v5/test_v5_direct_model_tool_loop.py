@@ -1108,7 +1108,7 @@ def test_stream_turn_persists_transcript_for_refresh_and_resume(tmp_path):
         return [event async for event in loop._turn_events("hello", turn_id="turn-resume-1")]
 
     events = asyncio.run(collect())
-    transcript_path = tmp_path / "logs" / "sessions" / "resume-session.json"
+    transcript_path = tmp_path / ".nexus" / "logs" / "sessions" / "resume-session.json"
     transcript = __import__("json").loads(transcript_path.read_text(encoding="utf-8"))
 
     assert [message["role"] for message in transcript] == ["user", "assistant"]
@@ -1146,7 +1146,7 @@ def test_stream_turn_transcript_write_is_idempotent(tmp_path):
     loop._persist_turn_message("assistant", "same answer", "turn-1")
     loop._persist_turn_message("assistant", "updated answer", "turn-1")
 
-    transcript_path = tmp_path / "logs" / "sessions" / "idempotent-session.json"
+    transcript_path = tmp_path / ".nexus" / "logs" / "sessions" / "idempotent-session.json"
     transcript = __import__("json").loads(transcript_path.read_text(encoding="utf-8"))
     assert transcript == [
         {"role": "user", "content": "same prompt", "turn_id": "turn-1"},

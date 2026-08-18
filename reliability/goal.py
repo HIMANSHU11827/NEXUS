@@ -236,7 +236,7 @@ class GoalStore:
     trying to recover.
     """
 
-    def __init__(self, root_dir: str = ".nexus_v5/goals"):
+    def __init__(self, root_dir: str = ".nexus/v5/goals"):
         self._root_dir = root_dir
 
     def _path(self, goal_id: str) -> str:

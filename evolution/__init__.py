@@ -19,7 +19,7 @@ from evolution.self_improvement.scripts.engine import (
 from evolution.skill_forge.scripts.forge import SkillForge
 from evolution.status.scripts.status import EvolutionStatus
 from evolution.tool_forge.scripts.engine import ToolForge
-from evolution.version import VersionManager
+from versioning.version import VersionManager
 
 __all__ = [
     "EvolutionLog", "EvolutionLedger", "EvolutionStatus", "LogAnalyzer",

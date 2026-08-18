@@ -8,8 +8,8 @@ from memory import MemoryManager
 
 def test_prefetch_episodic_prefers_query_match_over_unrelated_recent_failure(tmp_path):
     """A relevant episode must not be displaced by a globally high failure score."""
-    replay_dir = tmp_path / ".nexus_v5"
-    replay_dir.mkdir()
+    replay_dir = tmp_path / ".nexus" / "v5"
+    replay_dir.mkdir(parents=True)
     now = time.time()
     entries = [
         {

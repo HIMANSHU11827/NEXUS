@@ -205,7 +205,7 @@ V5 mixin modules composed into `NexusLoopV5` (see `core.py` class bases; MRO = 2
 - `learning.py` — `_collect_turn_signals` records failures/reflections in Phase 6.5 (core.py:760)
 - `response.py` — `_generate_output` streams the final answer in Phase 7 (core.py:767)
 - `control.py` — `_check_abort` between phases (core.py:712, 766); `abort()`; `_fire_post_tool_hooks` after tools
-- `log.py` — `_log_stage`/`_log_tool`/`_log_runtime`/`_log_append`: every stage transition logs via `_transition_to` (core.py:909); JSONL audit trail at `.nexus_v5/v5_log.jsonl` (`_log_stats`, `_log_lines`)
+- `log.py` — `_log_stage`/`_log_tool`/`_log_runtime`/`_log_append`: every stage transition logs via `_transition_to` (core.py:909); JSONL audit trail at `.nexus/v5/v5_log.jsonl` (`_log_stats`, `_log_lines`)
 
 **Subsystems — attached at specific loop points:**
 - `hive.py` — `_inject_hive_context` in Phase 1 (core.py:706): spawns sub-agents for big tasks, injects `[HIVE_RESULT]`
@@ -386,7 +386,7 @@ print(result)
 - `V5Cron` — scheduled one-shot tasks via tasks.scheduler.NexusTaskScheduler with CronLifecycle tracking; thread-safe runner bridging into the async loop; _stop_scheduler on shutdown
 - `V5Lifecycle` — lifecycle/ framework integration: per-kind managers (tool, skill, plugin, cron, memory, self_improvement), register/transition/stats/events/hooks, _lifecycle_mark one-call helper
 - `V5BackgroundRunner` — generic fire-and-forget tasks with retry/backoff, background.* events, counters, _drain_runner_tasks
-- `V5Checkpoint` — durable per-phase snapshots (`.nexus_v5/checkpoints/<turn>_<phase>.json`) on every state transition + resume/load/list/clear; wired via `_checkpoint_save` in `_transition_to`
+- `V5Checkpoint` — durable per-phase snapshots (`.nexus/v5/checkpoints/<turn>_<phase>.json`) on every state transition + resume/load/list/clear; wired via `_checkpoint_save` in `_transition_to`
 - `V5Config` — configuration access via config.NexusConfigLoader: typed getters, provider configs, directory helpers, reload, runtime seeding (permissions.mode → permission_policy, sandbox.tier → sandbox_tier); wired via _init_config at loop start
 - `V5Permissions` — permission modes and checks (V5 with loop.py _init_permissions): the four main modes BYPASS / AUTO_PILOT / APPROVE / PRE_AUTHORIZED mapped from PermissionPolicy, PermissionSystem + process-wide ApprovalBroker access, pre-authorization whitelist, decision log
 - `V5Sandbox` — sandbox tiers and risk scoring: NO_SANDBOX / NORMAL / DOCKER tier switching, CommandRiskScorer assessment (score/blocked/summary), sync execute + async stream_execute wrappers over SovereignSandbox; _init_security replaces core's inline copy

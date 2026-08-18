@@ -455,7 +455,7 @@ class V5Hive:
         and timestamp.  Never raises.
         """
         try:
-            hive_dir = os.path.join(self.root, "workspace", "hive")
+            hive_dir = os.path.join(self.root, ".nexus", "workspace", "hive")
             if not os.path.isdir(hive_dir):
                 return
             feedback: Dict[str, Any] = {

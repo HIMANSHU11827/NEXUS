@@ -1,4 +1,4 @@
-"""MemoryForge — persists important cross-session context as structured memory.
+"""MemoryForge â€” persists important cross-session context as structured memory.
 
 Redesigned (2026-08-05):
 - Versioning goes through ONE path: ``VersionManager`` (``ensure``/``bump``).
@@ -7,7 +7,7 @@ Redesigned (2026-08-05):
   validation marks the result ``rejected`` (recorded in the ledger) and the
   memory is NOT written.
 - Evidence honesty: empty/whitespace or provider/error-shaped evidence is
-  rejected — an LLM/provider error message is never crystallized as a Learning.
+  rejected â€” an LLM/provider error message is never crystallized as a Learning.
 - Every public forge/refine is wrapped by ``forge_guard`` so a failure returns
   a structured ``{status: failed, evidence: {stdout, stderr}}`` instead of
   raising into the runtime.
@@ -27,7 +27,7 @@ from evolution.quality import (
     rejected_result,
     validate_forge_output,
 )
-from evolution.version.scripts.version import VersionManager
+from versioning.version.scripts.version import VersionManager
 from models.providers.core.router import ModelRouter
 
 logger = logging.getLogger(__name__)
@@ -124,7 +124,7 @@ class MemoryForge:
         return {"created": True, "name": name, "version": new_ver, "refined": True,
                 "status": "ok", "promoted": True}
 
-    # ── shared helpers ───────────────────────────────────────────────────
+    # â”€â”€ shared helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _rejected(self, kind: str, name: str, reason: str,
                   action: str = "forge") -> Dict[str, Any]:

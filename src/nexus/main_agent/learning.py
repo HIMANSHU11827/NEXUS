@@ -7,7 +7,7 @@ gap recording in ``orchestrators/loop.py`` ``_handle_tool_failure`` (line
 in ``_log_mission_replay`` (line 3255). Failures land in
 ``self.runtime.failures``, reflection signals in
 ``self.runtime.learnings``, and every turn appends one JSON line to
-``<root>/.nexus_v5/replays.jsonl``.
+``<root>/.nexus/v5/replays.jsonl``.
 
 All methods are defensive: they never raise and always log via
 ``self.logger`` when something goes wrong. The mixin never touches
@@ -37,7 +37,7 @@ _DIGEST_CHAR_LIMIT = 2000  # hard ceiling on the [LEARNING] block
 _INPUT_LIMIT = 500
 _RESPONSE_LIMIT = 200
 
-_REPLAY_DIR_NAME = ".nexus_v5"
+_REPLAY_DIR_NAME = ".nexus/v5"
 _REPLAY_FILE_NAME = "replays.jsonl"
 
 _EPISODIC_RECENCY_WINDOW = 86400.0
@@ -210,7 +210,7 @@ class V5Learning(V5LearningEvidence):
         return len(steps) if isinstance(steps, list) else 0
 
     def _log_turn_replay(self, perceived, result: Dict[str, Any], turn) -> None:
-        """Append one JSON line to ``<root>/.nexus_v5/replays.jsonl``.
+        """Append one JSON line to ``<root>/.nexus/v5/replays.jsonl``.
 
         Records the outcome of ``_log_turn_replay`` on
         ``self._replay_logged`` so the orchestrator can report the status.
@@ -275,7 +275,7 @@ class V5Learning(V5LearningEvidence):
         try:
             # Durable evidence harvest (V5LearningEvidence mixin, if mixed in):
             # verified tool outcomes / failures / retries / verifier verdicts
-            # / user corrections land in .nexus_v5/evidence.jsonl so later
+            # / user corrections land in .nexus/v5/evidence.jsonl so later
             # planning turns can retrieve them. Replays are NOT re-logged
             # here -- _log_turn_replay above already owns the single replay
             # line per turn.
@@ -347,7 +347,7 @@ class V5Learning(V5LearningEvidence):
     def _load_episodic(self, limit: int = 50) -> list:
         """Load replay JSONL entries as dicts, newest first, capped at ``limit``.
 
-        Reads ``<root_dir>/.nexus_v5/replays.jsonl`` (the schema written by
+        Reads ``<root_dir>/.nexus/v5/replays.jsonl`` (the schema written by
         ``_log_turn_replay``); malformed lines are skipped. Never raises.
         """
         try:

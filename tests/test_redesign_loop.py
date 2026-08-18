@@ -64,7 +64,7 @@ def test_oversized_tool_result_is_archived_and_previewed_in_loop(tmp_path):
     # The bounded transcript must not contain the full 60k payload.
     assert "x" * 60_000 not in tool_message["content"]
 
-    archive = tmp_path / "context_archive" / "tool-results" / "turn-archive_0.txt"
+    archive = tmp_path / ".nexus" / "context_archive" / "tool-results" / "turn-archive_0.txt"
     assert archive.exists()
     assert archive.read_text(encoding="utf-8") == "x" * 60_000
 
@@ -72,8 +72,8 @@ def test_oversized_tool_result_is_archived_and_previewed_in_loop(tmp_path):
 def test_oversized_tool_result_archive_degrades_to_original_on_error(tmp_path):
     loop = NexusLoopV5(str(tmp_path), session_id="archive-degrade-test")
     # Force the archive write to fail by making the base path unwritable.
-    blocking = tmp_path / "context_archive"
-    blocking.mkdir()
+    blocking = tmp_path / ".nexus" / "context_archive"
+    blocking.mkdir(parents=True)
     (blocking / "tool-results").write_text("not a dir", encoding="utf-8")
     content = "y" * (MAX_TOOL_RESULT_CHARS + 5)
     bounded = loop._bounded_tool_result(
@@ -187,7 +187,7 @@ def test_session_bus_replacement_uses_cross_process_mutex(tmp_path):
     second = NexusLoopV5(str(tmp_path), session_id="shared-session")
     first.runtime.memory = [{"role": "user", "content": "first"}]
     second.runtime.memory = [{"role": "user", "content": "second"}]
-    path = os.path.join(str(tmp_path), "logs", "sessions", "shared-session.json")
+    path = os.path.join(str(tmp_path), ".nexus", "logs", "sessions", "shared-session.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     entered = first._session_bus_interprocess_lock(path)
     entered.__enter__()
@@ -215,7 +215,7 @@ def test_v5_session_id_cannot_escape_session_directory(tmp_path):
     assert loop.session_id == "outside"
     loop._persist_turn_message("user", "safe", "turn-safe")
 
-    expected = tmp_path / "logs" / "sessions" / "outside.json"
+    expected = tmp_path / ".nexus" / "logs" / "sessions" / "outside.json"
     escaped = tmp_path.parent / "outside.json"
     assert expected.exists()
     assert not escaped.exists()

@@ -1,0 +1,10 @@
+{
+  "name": "nexus-root",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Root convenience scripts for NEXUS AI apps (no npm workspaces; the repo is not restructured).",
+  "scripts": {
+    "web:dev": "pnpm --dir apps/web dev",
+    "tui:build": "pnpm --dir apps/tui build"
+  }
+}

@@ -79,7 +79,7 @@ def detect_verification_recipe(root: str | Path) -> Optional[VerificationRecipe]
     path = Path(root).expanduser().resolve()
     if not path.is_dir():
         return None
-    manifest = path / ".nexus_v5" / "verification.json"
+    manifest = path / ".nexus" / "v5" / "verification.json"
     try:
         raw = json.loads(manifest.read_text(encoding="utf-8"))
         checks = raw.get("checks") if isinstance(raw, dict) else None

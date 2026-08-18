@@ -1374,7 +1374,7 @@ def list_work_events(session_id: str, limit: int = 200, active_turn_id: str = ""
         for evt in filtered_events
     )
 
-    # Fall back to workspace/todo.md only when the event log has no durable
+    # Fall back to .nexus/workspace/todo.md only when the event log has no durable
     # planning events. Injecting this snapshot into an existing turn makes
     # Planning appear first even when the agent actually searched, read, or ran
     # a command first.

@@ -42,7 +42,7 @@ logger = logging.getLogger("nexus.loop.v5.reliability")
 
 
 def _state_root() -> str:
-    return str(os.environ.get("NEXUS_V5_STATE_DIR") or ".nexus_v5")
+    return str(os.environ.get("NEXUS_V5_STATE_DIR") or ".nexus/v5")
 
 
 class V5Reliability:

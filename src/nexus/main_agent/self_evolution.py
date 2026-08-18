@@ -69,7 +69,7 @@ class SelfEvolutionLayer:
         self._recover_interrupted_deployment()
 
     def _transaction_manifest_path(self) -> str:
-        return os.path.join(self.root_dir, ".nexus_v5_evolution_transaction.json")
+        return os.path.join(self.root_dir, ".nexus", "v5", "evolution_transaction.json")
 
     def _write_transaction_manifest(self, manifest: Dict[str, Any]) -> None:
         """Durably publish the deployment journal before target replacement."""
@@ -295,7 +295,7 @@ class SelfEvolutionLayer:
         Changes target a dedicated v5 config file so deployments are real,
         coherent, and reversible.
         """
-        config_file = os.path.join(self.root_dir, ".nexus_v5_evolution_config.json")
+        config_file = os.path.join(self.root_dir, ".nexus", "v5", "evolution_config.json")
         changes = {}
         
         if opportunity == "enable_meta_learning":
@@ -560,7 +560,7 @@ class SelfEvolutionLayer:
 
     def _save_evolution_history(self):
         """Save evolution history to disk."""
-        history_file = os.path.join(self.root_dir, ".nexus_v5_evolution.json")
+        history_file = os.path.join(self.root_dir, ".nexus", "v5", "evolution.json")
         try:
             history_data = [
                 {
@@ -580,7 +580,7 @@ class SelfEvolutionLayer:
 
     def _load_evolution_history(self):
         """Load evolution history from disk."""
-        history_file = os.path.join(self.root_dir, ".nexus_v5_evolution.json")
+        history_file = os.path.join(self.root_dir, ".nexus", "v5", "evolution.json")
         if os.path.exists(history_file):
             try:
                 with open(history_file, 'r') as f:

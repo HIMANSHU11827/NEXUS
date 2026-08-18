@@ -30,11 +30,11 @@ def test_programmatic_verification_persists_trusted_facts(tmp_path, monkeypatch)
     assert result.event_id.startswith("ve_")
     assert result.commands[0].scope == "targeted"
     assert "secret-token" not in json.dumps(result.to_dict())
-    events = VerifierEventStore(tmp_path / ".nexus_v5" / "verifier_events.sqlite3").list_events(
+    events = VerifierEventStore(tmp_path / ".nexus" / "v5" / "verifier_events.sqlite3").list_events(
         "session-1", str(tmp_path)
     )
     assert events[0]["status"] == "passed"
-    state = VerifierStateStore(tmp_path / ".nexus_v5" / "verifier_state.json").get(
+    state = VerifierStateStore(tmp_path / ".nexus" / "v5" / "verifier_state.json").get(
         "session-1", str(tmp_path)
     )
     assert state["status"] == "passed"

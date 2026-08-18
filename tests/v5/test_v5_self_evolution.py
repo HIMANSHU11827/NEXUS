@@ -98,7 +98,8 @@ def test_new_layer_recovers_interrupted_transaction_manifest(tmp_path):
     existing.write_text("partial-new", encoding="utf-8")
     backup.write_text("old-existing", encoding="utf-8")
     created.write_text("partial-created", encoding="utf-8")
-    manifest = tmp_path / ".nexus_v5_evolution_transaction.json"
+    manifest = tmp_path / ".nexus" / "v5" / "evolution_transaction.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(
         __import__("json").dumps({
             "version": 1,
@@ -134,7 +135,7 @@ def test_successful_deployment_removes_transaction_backups(tmp_path):
     assert target.read_text(encoding="utf-8") == '{"new": true}'
     assert not list(tmp_path.glob("*.bak"))
     assert not list(tmp_path.glob(".nexus-evolution-backup-*.bak"))
-    assert not (tmp_path / ".nexus_v5_evolution_transaction.json").exists()
+    assert not (tmp_path / ".nexus" / "v5" / "evolution_transaction.json").exists()
     assert not layer._deployed_backups
 
 
@@ -143,7 +144,8 @@ def test_committed_transaction_recovery_removes_owned_backups(tmp_path):
     backup = tmp_path / ".nexus-evolution-backup-owned.bak"
     target.write_text('{"new": true}', encoding="utf-8")
     backup.write_text('{"old": true}', encoding="utf-8")
-    manifest = tmp_path / ".nexus_v5_evolution_transaction.json"
+    manifest = tmp_path / ".nexus" / "v5" / "evolution_transaction.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(
         __import__("json").dumps({
             "version": 1,

@@ -167,7 +167,7 @@ class NexusKernel(ThreadSafeSingleton):
         # ── 1. Path Initialization ──
         _curr = os.path.dirname(os.path.abspath(__file__))
         self.root = root_dir if root_dir else os.path.dirname(_curr)
-        self.workspace = os.path.join(self.root, "workspace")
+        self.workspace = os.path.join(self.root, ".nexus", "workspace")
         os.makedirs(self.workspace, exist_ok=True)
 
         # ── 2. Identity & Metrics ──

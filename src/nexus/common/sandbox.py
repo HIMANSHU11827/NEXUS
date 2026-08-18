@@ -13,7 +13,7 @@ class NexusSandbox:
 
     def __init__(self, root_dir: str):
         self.root = os.path.abspath(root_dir)
-        self.sandbox_base = os.path.join(self.root, "workspace", "sandboxes")
+        self.sandbox_base = os.path.join(self.root, ".nexus", "workspace", "sandboxes")
         os.makedirs(self.sandbox_base, exist_ok=True)
 
     def execute(self, command: str, files_to_mount: Optional[list] = None) -> Tuple[int, str, str]:

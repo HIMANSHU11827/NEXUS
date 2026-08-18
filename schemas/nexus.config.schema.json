@@ -1,0 +1,99 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NEXUS AI Root Configuration",
+  "description": "Root configuration document for the NEXUS AI autonomous multi-agent runtime (nexus.config.json). Informational schema only; not enforced at runtime.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "name", "description", "paths", "apps", "logging", "runtime"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Configuration document version (current file: 2.1.0)."
+    },
+    "name": {
+      "type": "string",
+      "description": "Runtime name."
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of the runtime."
+    },
+    "paths": {
+      "type": "object",
+      "description": "Path mappings for major subsystems, relative to the repository root.",
+      "additionalProperties": { "type": "string" },
+      "properties": {
+        "extensions": { "type": "string" },
+        "hive": { "type": "string" },
+        "gateways": { "type": "string" },
+        "models": { "type": "string" },
+        "memory": { "type": "string" },
+        "workflows": { "type": "string" },
+        "automation": { "type": "string" },
+        "queues": { "type": "string" },
+        "sandbox": { "type": "string" },
+        "security": { "type": "string" },
+        "reliability": { "type": "string" },
+        "knowledge": { "type": "string" },
+        "evolution": { "type": "string" },
+        "learning": { "type": "string" },
+        "evaluation": { "type": "string" },
+        "governance": { "type": "string" },
+        "maintenance": { "type": "string" },
+        "configure": { "type": "string" },
+        "schemas": { "type": "string" },
+        "data": { "type": "string" },
+        "storage": { "type": "string" }
+      }
+    },
+    "apps": {
+      "type": "object",
+      "description": "Application entry points, relative to the repository root.",
+      "additionalProperties": { "type": "string" },
+      "properties": {
+        "cli": { "type": "string" },
+        "api": { "type": "string" },
+        "gateway": { "type": "string" },
+        "tui": { "type": "string" },
+        "web": { "type": "string" },
+        "desktop": { "type": "string" },
+        "mobile": { "type": "string" }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "description": "Default logging configuration.",
+      "additionalProperties": false,
+      "required": ["level", "format"],
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+          "description": "Log verbosity level."
+        },
+        "format": {
+          "type": "string",
+          "enum": ["text", "json"],
+          "description": "Log output format."
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "description": "Runtime behavior settings.",
+      "additionalProperties": false,
+      "required": ["state_dir", "graceful_shutdown_timeout_seconds"],
+      "properties": {
+        "state_dir": {
+          "type": "string",
+          "description": "Directory used for runtime state (e.g. .nexus)."
+        },
+        "graceful_shutdown_timeout_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Grace period for draining work on shutdown."
+        }
+      }
+    }
+  }
+}

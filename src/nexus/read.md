@@ -26,7 +26,7 @@ python -m nexus --shell     # Legacy compatibility shell
 - `commands.py` — `CommandRegistry` singleton with the canonical 152-command catalog (shared and client execution entries)
 - `runtime.py` — `ChatRunRequest`, session/turn ID sanitization, provider normalization
 - `run_context.py` — `RunContext` durable identity + `start_run_context()` / `list_run_contexts()`
-- `control_plane.py` — `PlanStep` / `PlanVersion` plan data model; `create_plan_version()`, `create_checklist_plan()`, `transition_step()`, `project_plan_event()` (persisted to `.nexus_v5/plans/`)
+- `control_plane.py` — `PlanStep` / `PlanVersion` plan data model; `create_plan_version()`, `create_checklist_plan()`, `transition_step()`, `project_plan_event()` (persisted to `.nexus/plans/`)
 - `control_store.py` — `ControlStore`: session-scoped control-state persistence
 - `work_items.py` — `WorkItem` data model; `create_work_item()`, `reconcile_checklist_work_item()`, `project_work_item_event()`, `replay_work_item_event_log()`
 - `observer.py` — `follow_events()` event tailing + `run_observer()` CLI observer

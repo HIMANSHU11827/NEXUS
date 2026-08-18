@@ -23,7 +23,7 @@ class FailureMemory:
 
     def __init__(self, root_dir: str) -> None:
         self.root = os.path.abspath(root_dir)
-        self.path = os.path.join(self.root, "workspace", "failure_memory.jsonl")
+        self.path = os.path.join(self.root, ".nexus", "workspace", "failure_memory.jsonl")
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
 
     def record(self, task: str, tool: str, error: str, context: Optional[Dict[str, Any]] = None) -> None:

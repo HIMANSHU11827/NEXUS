@@ -103,7 +103,7 @@ class VerifierStateStore:
     ) -> None:
         if max_records < 1 or max_changed_paths < 1 or retention_seconds <= 0:
             raise ValueError("retention and bounds must be positive")
-        self.path = Path(path) if path is not None else Path.cwd() / ".nexus_v5" / "verifier_state.json"
+        self.path = Path(path) if path is not None else Path.cwd() / ".nexus" / "v5" / "verifier_state.json"
         self.lock_path = Path(str(self.path) + ".lock")
         self.max_records = int(max_records)
         self.max_changed_paths = int(max_changed_paths)

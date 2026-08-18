@@ -94,7 +94,7 @@ class RecoveryEngine:
     def __init__(
         self,
         *,
-        persist_dir: Optional[str] = ".nexus_v5/recovery",
+        persist_dir: Optional[str] = ".nexus/v5/recovery",
         event_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
         max_attempts: int = 3,
         base_delay: float = 0.5,
@@ -122,10 +122,10 @@ class RecoveryEngine:
     # ------------------------------------------------------------------ #
 
     def _strategy_path(self) -> str:
-        return os.path.join(self._persist_dir or ".nexus_v5/recovery", "strategies.json")
+        return os.path.join(self._persist_dir or ".nexus/v5/recovery", "strategies.json")
 
     def _quarantine_path(self) -> str:
-        return os.path.join(self._persist_dir or ".nexus_v5/recovery", "quarantine.json")
+        return os.path.join(self._persist_dir or ".nexus/v5/recovery", "quarantine.json")
 
     def _atomic_write(self, path: str, payload: Dict[str, Any]) -> None:
         if not self._persist_dir:

@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NEXUS Feature Flags",
+  "description": "Runtime feature flags for NEXUS (feature-flags.json). Flags are read by configure/feature_flags and may be overridden at runtime. Informational schema only; not enforced at runtime.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "description", "flags"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Flags document version (current file: 1.0)."
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable summary of how flags are consumed."
+    },
+    "flags": {
+      "type": "object",
+      "description": "Feature flag name to enabled-state mapping.",
+      "additionalProperties": { "type": "boolean" },
+      "properties": {
+        "autonomous_loop": { "type": "boolean", "description": "Enable the autonomous agent loop." },
+        "hive_multiagent": { "type": "boolean", "description": "Enable Hive multi-agent delegation." },
+        "mcp_enabled": { "type": "boolean", "description": "Enable MCP server/client integration." },
+        "gateway_supervision": { "type": "boolean", "description": "Enable gateway supervision." },
+        "learning_enabled": { "type": "boolean", "description": "Enable the learning subsystem." },
+        "evaluation_enabled": { "type": "boolean", "description": "Enable the evaluation subsystem." },
+        "evolution_experiments": { "type": "boolean", "description": "Enable experimental evolution workflows." },
+        "self_healing": { "type": "boolean", "description": "Enable self-healing/reliability behavior." },
+        "observability": { "type": "boolean", "description": "Enable observability collection." }
+      }
+    }
+  }
+}

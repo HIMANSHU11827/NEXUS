@@ -38,7 +38,7 @@ def test_sync_all_forge_failure_is_suppressed_and_logged(tmp_path, monkeypatch, 
     assert any("MemoryForge.forge" in record.getMessage() for record in warnings), (
         "forge failure must be logged with the forge function name"
     )
-    session_path = tmp_path / "logs" / "sessions" / "forge_fail.json"
+    session_path = tmp_path / ".nexus" / "logs" / "sessions" / "forge_fail.json"
     assert session_path.is_file(), "session persistence must continue despite forge failure"
 
 

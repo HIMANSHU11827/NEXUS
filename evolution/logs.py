@@ -2,7 +2,7 @@
 
 The evolution package historically imported ``EvolutionLog`` from this module,
 but the implementation was missing.  Keep the format intentionally simple:
-append-only JSONL under ``logs/evolution.jsonl`` so writes are inspectable,
+append-only JSONL under ``.nexus/logs/evolution.jsonl`` so writes are inspectable,
 recoverable, and safe to use from background finalization.
 """
 
@@ -20,7 +20,7 @@ class EvolutionLog:
 
     def __init__(self, root: str = ".") -> None:
         self.root = os.path.abspath(root)
-        self.path = os.path.join(self.root, "logs", "evolution.jsonl")
+        self.path = os.path.join(self.root, ".nexus", "logs", "evolution.jsonl")
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
 
     def _append(self, entry: Dict[str, Any]) -> Dict[str, Any]:

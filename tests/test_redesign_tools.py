@@ -104,8 +104,8 @@ def test_oversized_result_persists_with_preview_envelope(tmp_path):
     assert result.output.startswith("[Persisted to ")
     assert "len=300000 chars" in result.output
     assert "showing first 4000" in result.output
-    # Full output is on disk under context_archive/tool-results/.
-    results_dir = tmp_path / "context_archive" / "tool-results"
+    # Full output is on disk under .nexus/context_archive/tool-results/.
+    results_dir = tmp_path / ".nexus" / "context_archive" / "tool-results"
     files = sorted(results_dir.glob("big_output_*.txt"))
     assert len(files) == 1
     assert files[0].read_text(encoding="utf-8") == "x" * 300_000
@@ -127,7 +127,7 @@ def test_oversized_stream_result_persists(tmp_path):
     chunks = asyncio.run(collect())
     assert len(chunks) == 1
     assert chunks[0].output.startswith("[Persisted to ")
-    results_dir = tmp_path / "context_archive" / "tool-results"
+    results_dir = tmp_path / ".nexus" / "context_archive" / "tool-results"
     assert any(f.name.startswith("big_stream_") for f in results_dir.glob("*.txt"))
 
 
@@ -141,7 +141,7 @@ def test_small_output_not_persisted(tmp_path):
     registry = _registry_with(tmp_path, ToolEntry("small", {"params": {}}, SmallTool()))
     result = asyncio.run(registry.execute("small"))
     assert result.output == "tiny"
-    assert not (tmp_path / "context_archive").exists()
+    assert not (tmp_path / ".nexus" / "context_archive").exists()
 
 
 def test_elision_flag_result_is_persisted_too(tmp_path):
@@ -188,7 +188,7 @@ def test_reading_policy_persists_large_source_previews(tmp_path):
     assert result.success is True
     assert result.output.startswith("[Persisted to ")
     assert "showing first 4000" in result.output
-    archived = list((tmp_path / "context_archive" / "tool-results").glob("*.txt"))
+    archived = list((tmp_path / ".nexus" / "context_archive" / "tool-results").glob("*.txt"))
     assert len(archived) == 1
     assert archived[0].read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
 

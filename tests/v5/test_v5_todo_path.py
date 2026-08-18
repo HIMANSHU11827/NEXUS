@@ -1,7 +1,7 @@
 """V5 plan-path regression tests.
 
-The canonical plan file is ``workspace/todo.md`` (lowercase, written by the
-``planning`` tool). ``_read_todo_md`` must read the canonical path first and
+The canonical plan file is ``.nexus/workspace/todo.md`` (lowercase, written by
+the ``planning`` tool). ``_read_todo_md`` must read the canonical path first and
 fall back to the legacy ``TODO.md`` so a case-sensitive filesystem never
 loses the plan (audit P39).
 """
@@ -31,8 +31,8 @@ def _filesystem_is_case_sensitive(path) -> bool:
 
 
 def test_reads_canonical_lowercase_todo_md(tmp_path):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
+    workspace = tmp_path / ".nexus" / "workspace"
+    workspace.mkdir(parents=True)
     (workspace / "todo.md").write_text("canonical plan", encoding="utf-8")
 
     loop = _bare_loop_with_root(str(tmp_path))
@@ -43,8 +43,8 @@ def test_reads_canonical_lowercase_todo_md(tmp_path):
 def test_prefers_canonical_over_legacy_when_case_matters(tmp_path):
     if not _filesystem_is_case_sensitive(tmp_path):
         return  # both names collide on case-insensitive filesystems
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
+    workspace = tmp_path / ".nexus" / "workspace"
+    workspace.mkdir(parents=True)
     (workspace / "todo.md").write_text("canonical plan", encoding="utf-8")
     (workspace / "TODO.md").write_text("legacy plan", encoding="utf-8")
 
@@ -54,8 +54,8 @@ def test_prefers_canonical_over_legacy_when_case_matters(tmp_path):
 
 
 def test_falls_back_to_legacy_uppercase_todo_md(tmp_path):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
+    workspace = tmp_path / ".nexus" / "workspace"
+    workspace.mkdir(parents=True)
     (workspace / "TODO.md").write_text("legacy plan", encoding="utf-8")
 
     loop = _bare_loop_with_root(str(tmp_path))
@@ -70,8 +70,8 @@ def test_returns_empty_when_no_plan_exists(tmp_path):
 
 
 def test_ignores_unreadable_plan_file(tmp_path):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
+    workspace = tmp_path / ".nexus" / "workspace"
+    workspace.mkdir(parents=True)
     plan = workspace / "todo.md"
     plan.write_text("x", encoding="utf-8")
     loop = _bare_loop_with_root(str(tmp_path))

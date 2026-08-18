@@ -21,7 +21,7 @@ class NudgeEngine:
     def __init__(self, root_dir: str = "."):
         self.root = os.path.abspath(root_dir)
         self.state_path = os.path.join(self.root, "configs", "nudge_engine.json")
-        self.log_path = os.path.join(self.root, "logs", "nudges.jsonl")
+        self.log_path = os.path.join(self.root, ".nexus", "logs", "nudges.jsonl")
         os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
         os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
 

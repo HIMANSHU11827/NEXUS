@@ -3,7 +3,7 @@
 Two modes:
 
 1. **Deterministic** (default): ``V5Bench`` replays recorded turns from
-   ``<root>/.nexus_v5/replays.jsonl`` (written by
+   ``<root>/.nexus/v5/replays.jsonl`` (written by
    ``orchestrators/v5/learning.py`` ``V5Learning._log_turn_replay``) and
    scores each turn with a programmatic PASS/FAIL — no LLM judgment. Ports
    the SWE-bench / GAIA / tau-bench lesson from ``RESEARCH_LESSONS.md`` §3:
@@ -16,7 +16,7 @@ Two modes:
    (factual), PLANNER (plan quality). Verdicts are consolidated
    conservatively: Hive PASS requires all agents AND the deterministic
    verdict to pass. Repair suggestions are extracted from ENGINEER agents
-   and exported to ``workspace/v5_hive_bench_report.json``.
+   and exported to ``.nexus/workspace/v5_hive_bench_report.json``.
 
 The harness is standalone: importing it never starts a loop, and it runs
 from the CLI with::
@@ -209,7 +209,7 @@ class V5Bench:
     """Standalone replay-based eval harness for the V5 loop.
 
     Attributes:
-        root_dir: Directory holding ``.nexus_v5/replays.jsonl``.
+        root_dir: Directory holding ``.nexus/v5/replays.jsonl``.
         replay_path: Resolved path of the replay file (may be overridden).
         stats: Aggregated counters, filled by :meth:`run`.
     """
@@ -221,10 +221,10 @@ class V5Bench:
             root_dir: Base directory for the default replay location. When
                 empty, the current working directory is used.
             replay_path: Explicit replay file path; overrides the default
-                ``<root_dir>/.nexus_v5/replays.jsonl`` resolution.
+                ``<root_dir>/.nexus/v5/replays.jsonl`` resolution.
         """
         self.root_dir = root_dir or os.getcwd()
-        self.replay_path = replay_path or os.path.join(self.root_dir, ".nexus_v5", "replays.jsonl")
+        self.replay_path = replay_path or os.path.join(self.root_dir, ".nexus", "v5", "replays.jsonl")
         self.verdicts: List[Dict[str, Any]] = []
         self.stats: Dict[str, Any] = {
             "total": 0,
@@ -708,7 +708,7 @@ class V5HiveBench:
     def export_report(self, path: str = "") -> str:
         """Export the full Hive bench report to JSON (item #18)."""
         out_path = path or os.path.join(
-            self.root_dir, "workspace", "v5_hive_bench_report.json"
+            self.root_dir, ".nexus", "workspace", "v5_hive_bench_report.json"
         )
         try:
             os.makedirs(os.path.dirname(out_path), exist_ok=True)

@@ -38,13 +38,13 @@ def test_run_evidence_is_bounded_and_redacted(tmp_path):
             "verification": {"success": True, "evidence_ok": True,
                             "anomalies": ["Bearer verification-secret"]},
             "canonical_event_ids": ["verification-turn-1", "run-turn-1"],
-            "replay_path": "/workspace/.nexus_v5/replays.jsonl",
+            "replay_path": "/workspace/.nexus/v5/replays.jsonl",
             "replay_logged": True,
             "canonical_events": [
                 {"event_id": "evt-1", "type": "tool.completed", "status": "success", "sequence": 3,
                  "payload": {"secret": "should-not-be-copied"}},
             ],
-            "checkpoint_paths": [".nexus_v5/checkpoints/turn-1-act.json"],
+            "checkpoint_paths": [".nexus/v5/checkpoints/turn-1-act.json"],
             "error": "https://x.test/?api_key=sk-secret-value",
         },
         session_id="session-1",
@@ -56,7 +56,7 @@ def test_run_evidence_is_bounded_and_redacted(tmp_path):
     assert loaded["trace"]["canonical_event_ids"] == ["verification-turn-1", "run-turn-1"]
     assert loaded["trace"]["replay_path"].endswith("replays.jsonl")
     assert loaded["trace"]["replay"]["logged"] is True
-    assert loaded["trace"]["checkpoint_paths"] == [".nexus_v5/checkpoints/turn-1-act.json"]
+    assert loaded["trace"]["checkpoint_paths"] == [".nexus/v5/checkpoints/turn-1-act.json"]
     assert loaded["trace"]["canonical_events"] == [{
         "event_id": "evt-1", "type": "tool.completed", "status": "success",
         "sequence": 3, "parent_id": "", "related_tool": "",
@@ -169,7 +169,7 @@ def test_hermes_trajectory_adapter_preserves_identity_and_redacts_content():
 
 
 def test_artifact_statuses_resolve_and_link_replay_and_checkpoint(tmp_path):
-    replay_dir = tmp_path / ".nexus_v5"
+    replay_dir = tmp_path / ".nexus" / "v5"
     checkpoint_dir = replay_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True)
     (replay_dir / "replays.jsonl").write_text(json.dumps({
@@ -187,7 +187,7 @@ def test_artifact_statuses_resolve_and_link_replay_and_checkpoint(tmp_path):
         "turn_id": "turn-1",
         "success": True,
         "replay": {
-            "path": ".nexus_v5/replays.jsonl",
+            "path": ".nexus/v5/replays.jsonl",
             "entry_id": "replay_session-1_turn-1",
             "logged": True,
         },
@@ -201,15 +201,15 @@ def test_artifact_statuses_resolve_and_link_replay_and_checkpoint(tmp_path):
 
 
 def test_artifact_statuses_distinguish_missing_and_ambiguous_replay(tmp_path):
-    replay_dir = tmp_path / ".nexus_v5"
-    replay_dir.mkdir()
+    replay_dir = tmp_path / ".nexus" / "v5"
+    replay_dir.mkdir(parents=True)
     (replay_dir / "replays.jsonl").write_text("\n".join(json.dumps({
         "entry_id": "duplicate", "turn_id": "turn-1", "session_id": "session-1",
     }) for _ in range(2)) + "\n", encoding="utf-8")
     evidence = build_run_evidence({
         "turn_id": "turn-1", "success": True,
-        "replay": {"path": ".nexus_v5/replays.jsonl", "entry_id": "duplicate"},
-        "checkpoint_paths": [".nexus_v5/checkpoints/does-not-exist.json"],
+        "replay": {"path": ".nexus/v5/replays.jsonl", "entry_id": "duplicate"},
+        "checkpoint_paths": [".nexus/v5/checkpoints/does-not-exist.json"],
     }, session_id="session-1")
     path = write_run_evidence(str(tmp_path), evidence)
     loaded = json.loads(open(path, encoding="utf-8").read())

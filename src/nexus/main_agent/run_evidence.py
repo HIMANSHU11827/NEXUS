@@ -327,7 +327,7 @@ def _refresh_durable_verification(evidence: Dict[str, Any], root_dir: str) -> No
     verification = evidence.get("verification") if isinstance(evidence, dict) else None
     if not isinstance(verification, dict):
         return
-    state_path = Path(root_dir) / ".nexus_v5" / "verifier_state.json"
+    state_path = Path(root_dir) / ".nexus" / "v5" / "verifier_state.json"
     if not state_path.is_file():
         return
     try:

@@ -1,4 +1,4 @@
-> _(Architectural reference — may not reflect latest code changes)_
+> _(Architectural reference â€” may not reflect latest code changes)_
 
 # NEXUS AI: Sovereign Engineering Project Memory (A to Z)
 
@@ -33,21 +33,21 @@ The current `NexusLoop` uses a unified model/tool runtime rather than the remove
 | **TUI** | `python -m nexus` | `apps/tui/` + `apps.web.api` backend |
 | **Rich shell** | `python -m nexus --shell` | in-process Rich compat mode (legacy) |
 | **GUI** | `python -m nexus --gui` | `apps/web/` + `apps.web.api` |
-| **Gateway** | `python -m nexus --gateway` | `gateways/` — 21 platforms (Telegram, Discord, WhatsApp, Slack, Teams, etc.) |
+| **Gateway** | `python -m nexus --gateway` | `gateways/` â€” 21 platforms (Telegram, Discord, WhatsApp, Slack, Teams, etc.) |
 
 ---
 
 ## Implemented Upgrades
 
-1.  **7-State Sovereign Loop:** GROUNDING → PLANNING → INFERENCE → AUDITING → EXECUTION → VERIFICATION → EVOLVE
+1.  **7-State Sovereign Loop:** GROUNDING â†’ PLANNING â†’ INFERENCE â†’ AUDITING â†’ EXECUTION â†’ VERIFICATION â†’ EVOLVE
 2.  **Auto-Version Tracking:** VersionManager tracks all 67 `.jsnol` modules with semver bump on every forge refine
 3.  **Per-Module Evolution Structure:** Every evolution module has `<name>.jsnol` (metadata), `scripts/` (code), `<name>.md` (docs)
 4.  **Embedded Inline Versions:** Every script file has `__version__ = "1.0.0"` at the source level
 5.  **Tool Registry:** Current split tools under `extensions/tools/built_in/<name>/` with jsnol metadata + sandboxed execution, including dedicated `reading`, `creating`, `modifying`, and `deleting` filesystem tools instead of the removed `file_ops` tool.
 6.  **Sovereign Sandbox:** 3-tier security (`no_sandbox`, `normal`, `docker`) with `normal` as the safe default and risk-based filtering before command execution.
-7.  **NATE (NEXUS Native Tool Engine):** `src/nexus/capabilities/intelligence/nate/` — 5-layer fused tool calling runtime with universal format adapter, **NATE-Route** embedding router (all-MiniLM-L6-v2 + FAISS, 88% schema reduction, 67% token savings), STRAP clustering, necessity gate, OATS feedback. Solves all 12 skill alignment problems. Two-Phase Schema Loader integrated into NexusLoop. See `docs/NATE.md`.
-8.  **Self-Improving Lifecycle:** `evolution/local_trainer/` — auto harvests tool logs → fine-tunes embedding + Zupra-50M → exports GGUF → reloads. Triggered when 20-50+ examples accumulate.
-9.  **Zupra Local Provider:** `models/providers/api/zupra.py` — MultivexAI/Zupra-1.6-50M-Instruct-Ultra-exp for fully offline CPU inference. Registered in factory as "zupra". No API key needed.
+7.  **NATE (NEXUS Native Tool Engine):** `src/nexus/capabilities/intelligence/nate/` â€” 5-layer fused tool calling runtime with universal format adapter, **NATE-Route** embedding router (all-MiniLM-L6-v2 + FAISS, 88% schema reduction, 67% token savings), STRAP clustering, necessity gate, OATS feedback. Solves all 12 skill alignment problems. Two-Phase Schema Loader integrated into NexusLoop. See `docs/NATE.md`.
+8.  **Self-Improving Lifecycle:** `evolution/local_trainer/` â€” auto harvests tool logs â†’ fine-tunes embedding + Zupra-50M â†’ exports GGUF â†’ reloads. Triggered when 20-50+ examples accumulate.
+9.  **Zupra Local Provider:** `models/providers/api/zupra.py` â€” MultivexAI/Zupra-1.6-50M-Instruct-Ultra-exp for fully offline CPU inference. Registered in factory as "zupra". No API key needed.
 
 ---
 
@@ -74,5 +74,5 @@ The current `NexusLoop` uses a unified model/tool runtime rather than the remove
 ## Verification
 ```powershell
 python -m pytest tests/ -v --tb=short
-python -c "from evolution.version.scripts.version import VersionManager; vm=VersionManager('.'); print(vm.get_all_versions_report())"
+python -c "from versioning.version.scripts.version import VersionManager; vm=VersionManager('.'); print(vm.get_all_versions_report())"
 ```

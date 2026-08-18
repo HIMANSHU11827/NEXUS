@@ -31,8 +31,8 @@ NEW_COMMANDS = [
 
 def _build_state(root: Path) -> None:
     """Fabricate realistic session / checkpoint / config / plan state."""
-    # logs/sessions/latest.json — newest session file (for /context and /cost).
-    sessions = root / "logs" / "sessions"
+    # .nexus/logs/sessions/latest.json — newest session file (for /context and /cost).
+    sessions = root / ".nexus" / "logs" / "sessions"
     sessions.mkdir(parents=True, exist_ok=True)
     (sessions / "latest.json").write_text(
         json.dumps(
@@ -44,8 +44,8 @@ def _build_state(root: Path) -> None:
         ),
         encoding="utf-8",
     )
-    # .nexus_v5/checkpoints/turn_abc_planning.json — for /resume and /rewind.
-    checkpoints = root / ".nexus_v5" / "checkpoints"
+    # .nexus/v5/checkpoints/turn_abc_planning.json — for /resume and /rewind.
+    checkpoints = root / ".nexus" / "v5" / "checkpoints"
     checkpoints.mkdir(parents=True, exist_ok=True)
     (checkpoints / "turn_abc_planning.json").write_text(
         json.dumps(
@@ -137,7 +137,7 @@ def test_handlers_degrade_softly_on_empty_state(tmp_path):
 
 
 def test_resume_is_session_scoped_and_ignores_completed_turn_history(tmp_path):
-    checkpoints = tmp_path / ".nexus_v5" / "checkpoints"
+    checkpoints = tmp_path / ".nexus" / "v5" / "checkpoints"
     checkpoints.mkdir(parents=True, exist_ok=True)
     (checkpoints / "old_planning.json").write_text(json.dumps({
         "turn_id": "old", "phase": "planning", "session": "test",
@@ -160,7 +160,7 @@ def test_resume_is_session_scoped_and_ignores_completed_turn_history(tmp_path):
 
 
 def test_resume_without_terminal_done_event_is_not_reported_successfully(tmp_path):
-    checkpoints = tmp_path / ".nexus_v5" / "checkpoints"
+    checkpoints = tmp_path / ".nexus" / "v5" / "checkpoints"
     checkpoints.mkdir(parents=True, exist_ok=True)
     (checkpoints / "turn_planning.json").write_text(json.dumps({
         "turn_id": "turn", "phase": "planning", "session": "test",
@@ -179,7 +179,7 @@ def test_resume_without_terminal_done_event_is_not_reported_successfully(tmp_pat
 
 
 def test_successful_resume_claim_prevents_duplicate_dispatch(tmp_path):
-    checkpoints = tmp_path / ".nexus_v5" / "checkpoints"
+    checkpoints = tmp_path / ".nexus" / "v5" / "checkpoints"
     checkpoints.mkdir(parents=True, exist_ok=True)
     (checkpoints / "turn_planning.json").write_text(json.dumps({
         "turn_id": "turn", "phase": "planning", "session": "test",

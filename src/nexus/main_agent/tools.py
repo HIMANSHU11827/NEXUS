@@ -1051,7 +1051,7 @@ class V5ToolExecutor:
     def _write_code_action_file(self, code: str) -> str:
         """Write a bounded code-action file under the runtime temp root."""
         root = os.path.realpath(os.path.abspath(str(self.root_dir or os.getcwd())))
-        tmp_dir = os.path.realpath(os.path.join(root, ".nexus_v5", "tmp"))
+        tmp_dir = os.path.realpath(os.path.join(root, ".nexus", "v5", "tmp"))
         os.makedirs(tmp_dir, exist_ok=True)
         turn = str(getattr(self, "_current_turn_id", "") or "default")
         safe_turn = re.sub(r"[^A-Za-z0-9_.-]+", "_", turn).strip("._")[:120] or "default"
@@ -1067,7 +1067,7 @@ class V5ToolExecutor:
 
         Active only when ``_set_code_action_enabled(True)`` was called or
         ``NEXUS_CODE_ACTION=1`` is set (env wins, "0" disables). Code is
-        written to ``<root>/.nexus_v5/tmp/code_action_<turn>.py`` and executed
+        written to ``<root>/.nexus/v5/tmp/code_action_<turn>.py`` and executed
         via ``sandbox.stream_execute`` when available (output capped at 20000
         chars). If no sandbox is active, it fails closed instead of spawning
         an unsandboxed interpreter. Non-zero exits append an "Error:" line.

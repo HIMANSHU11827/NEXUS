@@ -1,0 +1,4 @@
+# NEXUS AI pnpm workspace — only app directories that contain a package.json.
+packages:
+  - apps/web
+  - apps/tui

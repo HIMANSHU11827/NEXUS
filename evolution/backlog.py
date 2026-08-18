@@ -27,7 +27,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
-BACKLOG_RELPATH = os.path.join("logs", "improvements", "action_backlog.jsonl")
+BACKLOG_RELPATH = os.path.join(".nexus", "logs", "improvements", "action_backlog.jsonl")
 
 _STATUS_PENDING = "pending"
 _VALID_STATUSES = {"pending", "in_progress", "done", "rejected"}

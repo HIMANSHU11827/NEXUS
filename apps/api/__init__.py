@@ -449,10 +449,10 @@ _CHECKPOINTS_ROOT = os.path.join(_PROJECT_ROOT, ".nexus", "workspace", "checkpoi
 # (checkpoints, work events) must be excluded by name or every snapshot copies
 # all prior checkpoints and a restore can delete newer ones.
 _CHECKPOINT_SKIP_NAMES = frozenset({
-    ".git", ".venv", ".voice-venv", ".research", ".kilo", ".opencode", ".tmp",
+    ".git", ".venv", ".voice-venv", ".opencode", ".tmp",
     ".cache", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".tox",
     ".playwright-cli", ".playwright-mcp", ".nexus", "workspace", "models",
-    "native", "logs", "graphify-out", "queues", "dist", "build", "node_modules",
+    "native", "logs", "queues", "data", "dist", "build", "node_modules",
     "__pycache__", ".idea", ".vscode", ".next", "coverage", "htmlcov", "deployment",
     "checkpoints", "work_events",
 })
@@ -1664,7 +1664,7 @@ def append_work_event(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any
             try:
                 from nexus.main_agent.verification_state import VerifierStateStore
 
-                state_path = Path(_PROJECT_ROOT) / ".nexus_v5" / "verifier_state.json"
+                state_path = Path(_PROJECT_ROOT) / ".nexus" / "v5" / "verifier_state.json"
                 VerifierStateStore(state_path).mark_stale(
                     event["conversation_id"], _PROJECT_ROOT, [event.get("path") or target]
                 )
@@ -5236,7 +5236,7 @@ def list_evolution():
     lifecycle = []
     forges = []
     try:
-        from evolution.version_manager import VersionManager
+        from versioning.version.scripts.version import VersionManager
         vm = VersionManager()
         lifecycle.append({
             "id": "version_manager",
@@ -5455,7 +5455,7 @@ def _invalidate_verifier_after_file_mutation(session_id: Any, *paths: Any) -> No
     try:
         from nexus.main_agent.verification_state import VerifierStateStore
 
-        state_path = Path(_PROJECT_ROOT) / ".nexus_v5" / "verifier_state.json"
+        state_path = Path(_PROJECT_ROOT) / ".nexus" / "v5" / "verifier_state.json"
         VerifierStateStore(state_path).mark_stale(
             safe_session_id(str(session_id or "default")), _PROJECT_ROOT, paths
         )
@@ -7468,7 +7468,7 @@ def _invalidate_workspace_summary_cache() -> None:
 
 
 def _workspace_summary_snapshot_path() -> str:
-    return os.path.join(_PROJECT_ROOT, ".cache", "workspace_summary.json")
+    return os.path.join(_PROJECT_ROOT, ".nexus", "cache", "workspace_summary.json")
 
 
 def _save_workspace_summary_snapshot(payload: Dict[str, Any], root: str) -> None:
@@ -7938,13 +7938,13 @@ def _storage_stats() -> Dict[str, Any]:
     sessions = os.path.join(_PROJECT_ROOT, ".nexus", "logs", "sessions")
     work_events = os.path.join(_PROJECT_ROOT, ".nexus", "workspace", "work_events")
     knowledge = os.path.join(_PROJECT_ROOT, "knowledge")
-    cache = os.path.join(_PROJECT_ROOT, ".cache")
+    cache = os.path.join(_PROJECT_ROOT, ".nexus", "cache")
     return {
         "session_count": len(_LOOPS),
         "session_storage_size": dir_size(sessions),
         "cache_size": dir_size(cache),
         "index_size": dir_size(knowledge),
-        "temp_size": dir_size(os.path.join(_PROJECT_ROOT, "tmp")),
+        "temp_size": dir_size(os.path.join(_PROJECT_ROOT, ".nexus", "temp")),
         "work_event_count": _WORK_EVENT_MAX_RECORDS,
     }
 
@@ -8359,7 +8359,7 @@ def _clear_workspace_storage_sync(root: str, target: str) -> int:
                 raise RuntimeError(f"Could not clear index: {exc}") from exc
         return 0
     else:
-        path = {"temp": os.path.join(root, "tmp"), "cache": os.path.join(root, ".cache")}.get(target, "")
+        path = {"temp": os.path.join(root, ".nexus", "temp"), "cache": os.path.join(root, ".nexus", "cache")}.get(target, "")
         preserved = set()
     if not path or not os.path.isdir(path):
         return 0
@@ -8382,8 +8382,8 @@ async def workspace_storage_clear(request: Request):
     root = _PROJECT_ROOT
     _invalidate_workspace_summary_cache()
     removable = {
-        "temp": os.path.join(root, "tmp"),
-        "cache": os.path.join(root, ".cache"),
+        "temp": os.path.join(root, ".nexus", "temp"),
+        "cache": os.path.join(root, ".nexus", "cache"),
     }
     if target == "sessions":
         count = await asyncio.to_thread(_clear_workspace_storage_sync, root, target)

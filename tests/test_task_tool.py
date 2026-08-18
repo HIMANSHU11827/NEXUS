@@ -20,7 +20,7 @@ def test_missing_delete_id_never_deletes_all_tasks(tmp_path):
     asyncio.run(tool.execute(action="create", id="task-1", title="Keep me"))
 
     result = asyncio.run(tool.execute(action="delete"))
-    plan = (tmp_path / "todo.md").read_text(encoding="utf-8")
+    plan = (tmp_path / ".nexus" / "workspace" / "todo.md").read_text(encoding="utf-8")
 
     assert result.success is True
     assert result.metadata["skipped"] is True
@@ -41,7 +41,7 @@ def test_task_create_list_update_and_status_share_planning_todo(tmp_path):
     assert "Inspect the system" in listed.output
     assert updated.success is True
     assert "completed" in current.output
-    assert "[x] [task-1] Inspect the system" in (tmp_path / "todo.md").read_text(encoding="utf-8")
+    assert "[x] [task-1] Inspect the system" in (tmp_path / ".nexus" / "workspace" / "todo.md").read_text(encoding="utf-8")
 
 
 def test_concurrent_task_creates_preserve_both_plan_updates(tmp_path):
@@ -52,7 +52,7 @@ def test_concurrent_task_creates_preserve_both_plan_updates(tmp_path):
         results = list(pool.map(create, ("First concurrent task", "Second concurrent task")))
 
     assert all(result.success for result in results)
-    plan = (tmp_path / "todo.md").read_text(encoding="utf-8")
+    plan = (tmp_path / ".nexus" / "workspace" / "todo.md").read_text(encoding="utf-8")
     assert "First concurrent task" in plan
     assert "Second concurrent task" in plan
 
@@ -68,7 +68,9 @@ def test_unknown_task_id_remains_a_real_failure(tmp_path):
 
 
 def test_task_tool_reads_and_updates_a_plan_created_by_planning(tmp_path):
-    (tmp_path / "todo.md").write_text(
+    todo_path = tmp_path / ".nexus" / "workspace" / "todo.md"
+    todo_path.parent.mkdir(parents=True)
+    todo_path.write_text(
         "TODO LIST\n\nTASK NAME: Existing plan\nPLAN TYPE: Simple\n\n"
         "1. [ ] Inspect the code\n2. [ ] Run focused tests\n",
         encoding="utf-8",
@@ -80,7 +82,7 @@ def test_task_tool_reads_and_updates_a_plan_created_by_planning(tmp_path):
 
     assert "task-1: [pending] Inspect the code" in listed.output
     assert updated.success is True
-    assert "2. [x] [task-2] Run focused tests" in (tmp_path / "todo.md").read_text(encoding="utf-8")
+    assert "2. [x] [task-2] Run focused tests" in todo_path.read_text(encoding="utf-8")
 
 
 def test_legacy_json_tasks_are_migrated_to_the_planning_todo(tmp_path):
@@ -92,7 +94,7 @@ def test_legacy_json_tasks_are_migrated_to_the_planning_todo(tmp_path):
 
     assert result.success is True
     assert "legacy-1: [completed] Old task" in result.output
-    assert "[x] [legacy-1] Old task" in (tmp_path / "todo.md").read_text(encoding="utf-8")
+    assert "[x] [legacy-1] Old task" in (tmp_path / ".nexus" / "workspace" / "todo.md").read_text(encoding="utf-8")
 
 
 def test_task_completion_does_not_override_active_projected_run(tmp_path):

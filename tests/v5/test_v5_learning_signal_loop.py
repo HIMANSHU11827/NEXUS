@@ -209,7 +209,7 @@ async def test_collect_turn_signals_writes_exactly_one_replay_line(tmp_path):
     loop.root_dir = str(tmp_path)
     result = _fake_result_with_failure()
     await loop._collect_turn_signals(None, result, None)
-    replay = tmp_path / ".nexus_v5" / "replays.jsonl"
+    replay = tmp_path / ".nexus" / "v5" / "replays.jsonl"
     assert replay.exists(), "replay JSONL was not written to disk"
     lines = [l for l in replay.read_text(encoding="utf-8").splitlines() if l.strip()]
     assert len(lines) == 1, f"expected exactly 1 replay line, got {len(lines)}"
@@ -238,7 +238,7 @@ async def test_distinct_tool_failures_persist_to_failure_memory(tmp_path):
         ],
     }
     await loop._collect_turn_signals(None, result, None)
-    fm_path = tmp_path / "workspace" / "failure_memory.jsonl"
+    fm_path = tmp_path / ".nexus" / "workspace" / "failure_memory.jsonl"
     assert fm_path.exists(), "failure memory was not persisted"
     import json
     lines = [l for l in fm_path.read_text(encoding="utf-8").splitlines() if l.strip()]
@@ -266,7 +266,7 @@ async def test_repeated_failure_not_redundantly_persisted(tmp_path):
             ],
         }
         await loop._collect_turn_signals(None, result, None)
-    fm_path = tmp_path / "workspace" / "failure_memory.jsonl"
+    fm_path = tmp_path / ".nexus" / "workspace" / "failure_memory.jsonl"
     lines = [l for l in fm_path.read_text(encoding="utf-8").splitlines() if l.strip()]
     assert len(lines) == 1, f"expected dedupe to 1 line, got {len(lines)}"
 

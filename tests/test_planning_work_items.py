@@ -126,4 +126,4 @@ def test_planner_accepts_legacy_phase_keys_and_reports_persisted_path(tmp_path):
 
     assert result.success is True
     assert "PHASE 1: Prepare" in result.output
-    assert f"Persisted file: {tmp_path / 'todo.md'}" in result.output
+    assert f"Persisted file: {tmp_path / '.nexus' / 'workspace' / 'todo.md'}" in result.output

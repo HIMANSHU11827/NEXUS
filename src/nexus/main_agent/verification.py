@@ -247,7 +247,7 @@ class V5Verifier:
             if command_evidence.get("output_summary"):
                 output_summary = command_evidence["output_summary"]
             event = VerifierEventStore(
-                Path(root_dir) / ".nexus_v5" / "verifier_events.sqlite3"
+                Path(root_dir) / ".nexus" / "v5" / "verifier_events.sqlite3"
             ).record(
                 session_id, root_dir, verifier_id=verifier_id,
                 status="failed" if failed else "passed",
@@ -259,7 +259,7 @@ class V5Verifier:
                 else (result.get("exit_code") if isinstance(result.get("exit_code"), int) else None),
                 output_summary=output_summary,
             )
-            store = VerifierStateStore(Path(root_dir) / ".nexus_v5" / "verifier_state.json")
+            store = VerifierStateStore(Path(root_dir) / ".nexus" / "v5" / "verifier_state.json")
             state = store.record_verification(
                 session_id,
                 root_dir,

@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 class EvolutionLedger:
     def __init__(self, root_dir: str = "."):
         self.root = os.path.abspath(root_dir)
-        self.path = os.path.join(self.root, "logs", "evolution_ledger.jsonl")
-        self.summary_path = os.path.join(self.root, "logs", "evolution_summary.json")
+        self.path = os.path.join(self.root, ".nexus", "logs", "evolution_ledger.jsonl")
+        self.summary_path = os.path.join(self.root, ".nexus", "logs", "evolution_summary.json")
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
 
     def record(self, kind: str, summary: str, detail: str = "", metadata: Dict = None) -> Dict[str, Any]:

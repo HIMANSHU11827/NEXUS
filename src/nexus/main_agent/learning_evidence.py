@@ -6,7 +6,7 @@ already records per-turn failures/reflections, but nothing persisted
 later planning turn. This module provides:
 
 - ``LearningEvidenceStore`` — a JSONL store at
-  ``<root>/.nexus_v5/evidence.jsonl``. Every record carries an
+  ``<root>/.nexus/v5/evidence.jsonl``. Every record carries an
   ``evidence_id``, run/turn/conversation identity, kind, statement,
   ``claim_source`` (exactly ``"verified"`` or ``"assumption"``), confidence,
   tz-aware UTC ``created_at`` and a provenance dict (tool_name,
@@ -46,7 +46,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-EVIDENCE_DIR_NAME = ".nexus_v5"
+EVIDENCE_DIR_NAME = ".nexus/v5"
 EVIDENCE_FILE_NAME = "evidence.jsonl"
 
 EVIDENCE_KINDS = frozenset({

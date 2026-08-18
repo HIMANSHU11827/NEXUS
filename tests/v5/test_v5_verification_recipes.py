@@ -16,8 +16,8 @@ def test_detects_node_phase_checks_from_package_scripts(tmp_path):
 
 
 def test_manifest_recipe_is_preferred_and_read_only(tmp_path):
-    manifest_dir = tmp_path / ".nexus_v5"
-    manifest_dir.mkdir()
+    manifest_dir = tmp_path / ".nexus" / "v5"
+    manifest_dir.mkdir(parents=True)
     manifest = manifest_dir / "verification.json"
     manifest.write_text(json.dumps({
         "name": "workspace checks", "kind": "custom",

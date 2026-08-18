@@ -84,7 +84,7 @@ nexus-gateway-app = "apps.gateway.nexus_gateway_app:main"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["apps*", "benchmarks*", "configure*", "evaluation*", "evolution*", "extensions*", "gateways*", "hive*", "knowledge*", "maintenance*", "memory*", "models*", "nexus*", "observability*", "queues*", "reliability*", "sandbox*", "scripts*", "security*"]
+include = ["apps*", "benchmarks*", "configure*", "evaluation*", "evolution*", "extensions*", "gateways*", "hive*", "knowledge*", "maintenance*", "memory*", "models*", "nexus*", "observability*", "queues*", "reliability*", "sandbox*", "scripts*", "security*", "versioning*"]
 exclude = [
     "tests*",
     "workspace*",

@@ -21,7 +21,7 @@ def test_verification_freshness_detects_referenced_file_edits(tmp_path):
     verification = result["verification"]
     assert verification["status"] == "passed"
     assert verification["event_id"].startswith("ve_")
-    assert VerifierEventStore(tmp_path / ".nexus_v5" / "verifier_events.sqlite3").list_events(
+    assert VerifierEventStore(tmp_path / ".nexus" / "v5" / "verifier_events.sqlite3").list_events(
         "default", str(tmp_path)
     )[0]["event_id"] == verification["event_id"]
     assert verification["freshness"]["status"] == "fresh"
@@ -58,7 +58,7 @@ def test_run_evidence_keeps_bounded_verifier_freshness():
 
 
 def test_run_evidence_projects_cross_process_stale_state(tmp_path):
-    state_path = tmp_path / ".nexus_v5" / "verifier_state.json"
+    state_path = tmp_path / ".nexus" / "v5" / "verifier_state.json"
     store = VerifierStateStore(state_path)
     store.record_verification("session-1", str(tmp_path), status="passed", verifier_id="v-1")
     store.mark_stale("session-1", str(tmp_path), ["changed.txt"])

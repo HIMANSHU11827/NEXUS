@@ -1,9 +1,9 @@
-"""ToolForge — creates new NEXUS tools from LLM-generated specifications.
+"""ToolForge â€” creates new NEXUS tools from LLM-generated specifications.
 
 Each tool gets its own folder under tools/<name>/ with:
-  - <name>.json     — schema (name, version, description, defaults, permissions)
-  - scripts/<name>.py — Python implementation (BaseTool subclass)
-  - read.md         — documentation
+  - <name>.json     â€” schema (name, version, description, defaults, permissions)
+  - scripts/<name>.py â€” Python implementation (BaseTool subclass)
+  - read.md         â€” documentation
 
 Redesigned (2026-08-05):
 - Versioning goes through ONE path: ``VersionManager`` (``ensure``/``bump``).
@@ -27,7 +27,7 @@ from evolution.quality import (
     rejected_result,
     validate_forge_output,
 )
-from evolution.version.scripts.version import VersionManager
+from versioning.version.scripts.version import VersionManager
 from models.providers.core.router import ModelRouter
 
 logger = logging.getLogger(__name__)
@@ -140,7 +140,7 @@ class ToolForge:
         return {"created": True, "name": name, "version": new_ver, "refined": True,
                 "status": "ok", "promoted": True}
 
-    # ── shared helpers ───────────────────────────────────────────────────
+    # â”€â”€ shared helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _rejected(self, name: str, reason: str, action: str = "forge") -> Dict[str, Any]:
         self._audit(name, action, old_version=None, new_version=None,
@@ -174,7 +174,7 @@ class ToolForge:
         script_path = os.path.join(tool_dir, SCRIPTS_DIR, f"{name}.py")
         if os.path.exists(script_path):
             return
-        content = f'''"""Tool: {name} — {description}"""
+        content = f'''"""Tool: {name} â€” {description}"""
 
 import json
 from typing import Any, Dict

@@ -230,10 +230,10 @@ Legend: **M** = major (new mixin), **m** = medium (extend existing module),
 18. **Queue lanes + message priority + timeout** (OpenClaw): task→network
     backlog; idle watchdog in `_safe_model_call`. `cron.py`,
     `background_runner.py`, `model.py`. **M**
-19. **Per-session / per-repo instruction dirs** (`.devin/` → `.nexus_v5/agents/`)
+19. **Per-session / per-repo instruction dirs** (`.devin/` → `.nexus/v5/agents/`)
     merged into planning prompt. `planning.py`. **S**
 20. **Config-driven profiles** (permissions.mode + sandbox.tier + tool allowlist
-    per session); tiered policy files in `~/.nexus_v5/`. `config.py`,
+    per session); tiered policy files in `~/.nexus/v5/`. `config.py`,
     `permissions.py`, `sandbox.py`. **S**
 21. **V5 eval harness** (SWE-bench subset / GAIA / pass^k): replay `replays.jsonl`
     turns with programmatic PASS/FAIL; wire into tests. New `bench.py`. **M**

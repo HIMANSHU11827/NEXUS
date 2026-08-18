@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NEXUS Tool Metadata",
+  "description": "Metadata document for a NEXUS tool, e.g. extensions/tools/built_in/<tool>/<tool>.jsnol. Informational schema only; not enforced at runtime.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["name", "version", "description", "params"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Tool identifier used to invoke it."
+    },
+    "version": {
+      "type": "string",
+      "description": "Tool metadata version."
+    },
+    "description": {
+      "type": "string",
+      "description": "What the tool does; used by the model to decide when to call it."
+    },
+    "entry": {
+      "type": "string",
+      "description": "Relative path to the tool's Python entrypoint (e.g. scripts/terminal.py)."
+    },
+    "class": {
+      "type": "string",
+      "description": "Tool class name implementing the tool (e.g. TerminalTool)."
+    },
+    "params": {
+      "type": "object",
+      "description": "Tool parameters keyed by parameter name.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["type", "description"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["string", "integer", "number", "boolean", "array", "object"],
+            "description": "JSON type of the parameter."
+          },
+          "description": {
+            "type": "string",
+            "description": "What the parameter controls."
+          },
+          "required": {
+            "type": "boolean",
+            "description": "Whether the parameter is required for the call."
+          },
+          "default": {
+            "description": "Default value used when the parameter is omitted."
+          },
+          "enum": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Allowed values for the parameter."
+          }
+        }
+      }
+    },
+    "category": {
+      "type": "string",
+      "description": "Tool category used for grouping (e.g. system, knowledge)."
+    },
+    "riskLevel": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "critical"],
+      "description": "Optional risk classification used for permission/sandbox decisions."
+    },
+    "capabilities": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Optional capability tags describing what the tool can do."
+    }
+  }
+}

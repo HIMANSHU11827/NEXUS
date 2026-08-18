@@ -17,7 +17,7 @@ def _ensure_path(root: str) -> str:
     normalized_root = os.path.abspath(root or ".")
     path = _SESSION_PATHS.get(normalized_root)
     if path is None:
-        path = os.path.join(normalized_root, "workspace", "active_session.json")
+        path = os.path.join(normalized_root, ".nexus", "workspace", "active_session.json")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         _SESSION_PATHS[normalized_root] = path
     return path

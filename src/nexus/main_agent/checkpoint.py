@@ -1,6 +1,6 @@
 """V5Checkpoint — per-phase durable snapshots and resume for the V5 loop.
 
-Checkpoints are JSON files under .nexus_v5/checkpoints/, written at loop
+Checkpoints are JSON files under .nexus/v5/checkpoints/, written at loop
 phase transitions and loadable to resume a turn.
 
 This module is part of the V5 loop architecture — a V5 module, not V1.
@@ -121,7 +121,7 @@ class V5Checkpoint:
 
     Expected attributes when mixed into ``NexusLoopV5``:
     - ``self.root_dir`` - project root used to resolve the checkpoint
-      directory (``.nexus_v5/checkpoints``).
+      directory (``.nexus/v5/checkpoints``).
     - ``self.session_id`` - session id stamped on every snapshot.
     - ``self.logger`` - python logger exposing ``.info``/``.warning``.
     - ``self.runtime`` - object carrying ``current_turn``, ``turn_history``,
@@ -134,7 +134,7 @@ class V5Checkpoint:
         """Resolve the checkpoint directory; "" on failure."""
         try:
             root = getattr(self, "root_dir", None) or os.getcwd()
-            return os.path.join(root, ".nexus_v5", "checkpoints")
+            return os.path.join(root, ".nexus", "v5", "checkpoints")
         except Exception:
             return ""
 

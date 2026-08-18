@@ -87,7 +87,7 @@ def test_persisted_state_round_trips_and_digest_changes_on_stale(tmp_path):
 
 
 def test_successful_file_mutation_event_marks_state_stale(tmp_path):
-    state_path = tmp_path / ".nexus_v5" / "verifier_state.json"
+    state_path = tmp_path / ".nexus" / "v5" / "verifier_state.json"
     store = VerifierStateStore(state_path)
     store.record_verification("session-1", str(tmp_path), status="passed")
 

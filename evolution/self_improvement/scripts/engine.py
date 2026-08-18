@@ -28,7 +28,7 @@ class ImprovementRecord:
 class SelfImprovementEngine:
     def __init__(self, root_dir: str = "."):
         self.root = os.path.abspath(root_dir)
-        self.log_path = os.path.join(self.root, "logs", "improvements", "self_improvement.jsonl")
+        self.log_path = os.path.join(self.root, ".nexus", "logs", "improvements", "self_improvement.jsonl")
         os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
 
     def analyze_session(self, messages: List[Dict[str, str]]) -> Optional[ImprovementRecord]:

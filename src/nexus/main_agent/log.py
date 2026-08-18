@@ -1,7 +1,7 @@
 """V5Logger — structured loop logging for the V5 loop.
 
 Own logging surface for the V5 loop: stage transitions, tool lifecycle,
-runtime events, and a JSONL audit trail (``.nexus_v5/v5_log.jsonl``).
+runtime events, and a JSONL audit trail (``.nexus/v5/v5_log.jsonl``).
 
 This module is part of the V5 loop architecture — it is a V5 module, not a
 V1 module and not a port of V1. It is dependency-free: no imports from
@@ -25,7 +25,7 @@ class V5Logger:
 
     Expected attributes when mixed into ``NexusLoopV5``:
     - ``self.root_dir`` - project root used to resolve the audit log path
-      (``.nexus_v5/v5_log.jsonl``).
+      (``.nexus/v5/v5_log.jsonl``).
     - ``self.session_id`` - session id stamped on every audit entry.
     - ``self.logger`` - python logger exposing ``.info``/``.warning``.
     """
@@ -34,7 +34,7 @@ class V5Logger:
         """Resolve the JSONL audit log path; "" on failure."""
         try:
             root = getattr(self, "root_dir", None) or os.getcwd()
-            return os.path.join(root, ".nexus_v5", "v5_log.jsonl")
+            return os.path.join(root, ".nexus", "v5", "v5_log.jsonl")
         except Exception:
             return ""
 

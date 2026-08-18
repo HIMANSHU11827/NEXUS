@@ -74,7 +74,7 @@ class AtlasASTIndexer:
         of MB.
         """
         if exclude is None:
-            exclude = [".git", "__pycache__", "node_modules", "workspace", "knowledge", ".venv", ".voice-venv", ".research", ".tmp"]
+            exclude = [".git", "__pycache__", "node_modules", ".nexus", "knowledge", ".venv", ".voice-venv", ".research", ".tmp", "data"]
         excludes = set(exclude)
 
         self.symbols = []

@@ -24,8 +24,7 @@ _PLAN_LOCKS_GUARD = threading.RLock()
 
 def _todo_path_for_root(root_dir: str | None) -> str:
     root = os.path.abspath(root_dir or os.getcwd())
-    workspace = os.path.join(root, "workspace")
-    return os.path.join(workspace, "todo.md") if os.path.isdir(workspace) else os.path.join(root, "todo.md")
+    return os.path.join(root, ".nexus", "workspace", "todo.md")
 
 
 @contextmanager
@@ -183,8 +182,7 @@ class PlanningTool(BaseTool):
     def _todo_path(self) -> str:
         if not self.root_dir:
             return "todo.md"
-        workspace = os.path.join(self.root_dir, "workspace")
-        return os.path.join(workspace, "todo.md") if os.path.isdir(workspace) else os.path.join(self.root_dir, "todo.md")
+        return os.path.join(self.root_dir, ".nexus", "workspace", "todo.md")
 
     def _output_with_location(self, plan: str) -> str:
         """Make the durable destination explicit in the model-visible result."""

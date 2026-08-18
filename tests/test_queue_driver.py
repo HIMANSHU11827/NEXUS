@@ -128,8 +128,8 @@ def test_queue_driver_resumes_retry_from_durable_context():
     assert "phase 2 is unfinished" in loop.received[0]
 
 
-def test_queue_driver_uses_isolated_queue_root_with_a_kernel():
-    queue_root = os.path.abspath(os.path.join(".tmp", "queue-root-test"))
+def test_queue_driver_uses_isolated_queue_root_with_a_kernel(tmp_path):
+    queue_root = os.path.abspath(str(tmp_path / "queue-root-test"))
     os.makedirs(queue_root, exist_ok=True)
     queue = TaskQueue(db_path=os.path.join(queue_root, "queue.sqlite"), root=queue_root)
     driver = QueueDriver(kernel=_Kernel(_Loop()), queue=queue)

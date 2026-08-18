@@ -653,7 +653,7 @@ class NexusLoopV5(
         """Persist short-term conversation memory to disk."""
         try:
             from nexus.session_store import atomic_write_json, session_write_lock
-            path = os.path.join(self.root_dir, "logs", "sessions", f"{self.session_id}.json")
+            path = os.path.join(self.root_dir, ".nexus", "logs", "sessions", f"{self.session_id}.json")
             os.makedirs(os.path.dirname(path), exist_ok=True)
             memory = getattr(self.runtime, "memory", [])
             with self._session_write_lock:
@@ -673,9 +673,9 @@ class NexusLoopV5(
                 except Exception:
                     pass
         try:
-            path = os.path.join(self.root_dir, "logs", "sessions", f"{self.session_id}.json")
+            path = os.path.join(self.root_dir, ".nexus", "logs", "sessions", f"{self.session_id}.json")
             if not os.path.exists(path) and self.session_id == "default":
-                path = os.path.join(self.root_dir, "logs", "session_memory.json")
+                path = os.path.join(self.root_dir, ".nexus", "logs", "session_memory.json")
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:
                     self.runtime.memory = json.load(f)
@@ -698,9 +698,9 @@ class NexusLoopV5(
     def sync_memory(self) -> None:
         """High-performance sync — CLI/GUI cohesion. Reload from disk if changed."""
         try:
-            path = os.path.join(self.root_dir, "logs", "sessions", f"{self.session_id}.json")
+            path = os.path.join(self.root_dir, ".nexus", "logs", "sessions", f"{self.session_id}.json")
             if not os.path.exists(path) and self.session_id == "default":
-                path = os.path.join(self.root_dir, "logs", "session_memory.json")
+                path = os.path.join(self.root_dir, ".nexus", "logs", "session_memory.json")
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:
                     disk_mem = json.load(f)
@@ -716,7 +716,7 @@ class NexusLoopV5(
         """Write session to session_bus for CLI/GUI/Gateway sync."""
         try:
             from nexus.session_store import atomic_write_json, session_write_lock
-            path = os.path.join(self.root_dir, "logs", "sessions", f"{self.session_id}.json")
+            path = os.path.join(self.root_dir, ".nexus", "logs", "sessions", f"{self.session_id}.json")
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with self._session_write_lock:
                 with session_write_lock(path):
@@ -1438,10 +1438,10 @@ class NexusLoopV5(
                 pass
 
     def _read_todo_md(self):
-        # Canonical plan path is ``workspace/todo.md`` (lowercase, written by
+        # Canonical plan path is ``.nexus/workspace/todo.md`` (lowercase, written by
         # the planning tool); ``TODO.md`` is accepted as a legacy fallback so
         # a case-sensitive filesystem never loses the plan (audit P39).
-        workspace = os.path.join(self.root_dir, "workspace")
+        workspace = os.path.join(self.root_dir, ".nexus", "workspace")
         for name in ("todo.md", "TODO.md"):
             p = os.path.join(workspace, name)
             try:

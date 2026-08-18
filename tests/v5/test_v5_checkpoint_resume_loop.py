@@ -230,7 +230,7 @@ def test_checkpoint_directory_is_bounded_for_long_running_sessions(tmp_path):
     for turn in range(overshoot):
         loop._checkpoint_save(turn_id=f"run-{turn}", phase="executing")
 
-    files = list((Path(tmp_path) / ".nexus_v5" / "checkpoints").glob("*.json"))
+    files = list((Path(tmp_path) / ".nexus" / "v5" / "checkpoints").glob("*.json"))
     assert len(files) <= MAX_CHECKPOINT_FILES, (
         f"checkpoint directory grew unbounded: {len(files)} files"
     )
