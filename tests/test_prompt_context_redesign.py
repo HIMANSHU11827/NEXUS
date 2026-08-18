@@ -66,7 +66,7 @@ class TestDirectLoopSystemPrompt:
         real_import = builtins.__import__
 
         def fake_import(name, *args, **kwargs):
-            if name == "prompts":
+            if name == "nexus.conversation.prompts":
                 raise ImportError("prompt engine unavailable")
             return real_import(name, *args, **kwargs)
 

@@ -13,7 +13,7 @@ from nexus.session_store import atomic_write_json, session_write_lock
 
 def _configure_session_module(module_name, tmp_path, monkeypatch):
     module = importlib.import_module(module_name)
-    if module_name == "server":
+    if module_name == "apps.api":
         monkeypatch.setattr(module, "_SESSION_DIR", str(tmp_path))
     else:
         monkeypatch.setattr(module, "_ROOT", str(tmp_path))
@@ -22,7 +22,7 @@ def _configure_session_module(module_name, tmp_path, monkeypatch):
 
 
 def test_server_clear_session_uses_atomic_store_and_updates_cached_loop(tmp_path, monkeypatch):
-    import apps.api
+    import apps.api as server
 
     class CachedLoop:
         def __init__(self):
@@ -44,7 +44,7 @@ def test_server_clear_session_uses_atomic_store_and_updates_cached_loop(tmp_path
 
 
 def test_server_title_writer_uses_session_lock_and_atomic_json(tmp_path):
-    import apps.api
+    import apps.api as server
 
     meta_path = tmp_path / "session_a.meta"
     server._write_session_title_sync(str(meta_path), "Renamed")
@@ -64,7 +64,7 @@ def test_gui_clear_session_uses_atomic_store_and_updates_cached_loop(tmp_path, m
     monkeypatch.setattr(gui_api, "_LOOPS", {"session_a": CachedLoop()})
 
     assert gui_api._clear_session_files("session_a") is True
-    sessions = tmp_path / "logs" / "sessions"
+    sessions = tmp_path / ".nexus" / "logs" / "sessions"
     assert json.loads((sessions / "session_a.json").read_text(encoding="utf-8")) == []
     assert json.loads((sessions / "session_a.meta").read_text(encoding="utf-8")) == {"title": "New Chat"}
     assert gui_api._LOOPS["session_a"].memory == []
@@ -80,7 +80,7 @@ def test_gui_title_writer_uses_shared_store(tmp_path):
     assert not list(tmp_path.glob(".session-meta-*.tmp"))
 
 
-@pytest.mark.parametrize("module_name", ["server", "gui.api"])
+@pytest.mark.parametrize("module_name", ["apps.api", "apps.web.api"])
 def test_non_default_delete_removes_transcript_metadata_and_cached_loop(
     module_name, tmp_path, monkeypatch
 ):
@@ -99,7 +99,7 @@ def test_non_default_delete_removes_transcript_metadata_and_cached_loop(
     assert session_id not in module._LOOPS
 
 
-@pytest.mark.parametrize("module_name", ["server", "gui.api"])
+@pytest.mark.parametrize("module_name", ["apps.api", "apps.web.api"])
 def test_non_default_delete_waits_for_inflight_shared_store_write(
     module_name, tmp_path, monkeypatch
 ):
@@ -139,7 +139,7 @@ def test_non_default_delete_waits_for_inflight_shared_store_write(
     assert not Path(path).exists()
 
 
-@pytest.mark.parametrize("module_name", ["server", "gui.api"])
+@pytest.mark.parametrize("module_name", ["apps.api", "apps.web.api"])
 def test_default_clear_checks_existence_after_acquiring_shared_lock(
     module_name, tmp_path, monkeypatch
 ):
@@ -186,7 +186,7 @@ def test_default_clear_checks_existence_after_acquiring_shared_lock(
     assert json.loads(Path(path).read_text(encoding="utf-8")) == []
 
 
-@pytest.mark.parametrize("module_name", ["server", "gui.api"])
+@pytest.mark.parametrize("module_name", ["apps.api", "apps.web.api"])
 def test_non_default_delete_cleans_orphaned_metadata(module_name, tmp_path, monkeypatch):
     module = _configure_session_module(module_name, tmp_path, monkeypatch)
     session_id = "metadata_only"
@@ -202,7 +202,7 @@ def test_non_default_delete_cleans_orphaned_metadata(module_name, tmp_path, monk
 
 
 def test_default_delete_semantics_remain_clear_not_remove(tmp_path, monkeypatch):
-    for module_name in ("server", "gui.api"):
+    for module_name in ("apps.api", "apps.web.api"):
         module_root = tmp_path / module_name.replace(".", "_")
         module = _configure_session_module(module_name, module_root, monkeypatch)
         path = Path(module.session_file_path("default"))

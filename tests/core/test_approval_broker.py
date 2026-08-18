@@ -116,7 +116,7 @@ def test_request_renders_as_the_event_the_gui_expects():
 
 def test_approve_route_resolves_a_pending_request():
     """/api/approve must actually reach the broker the loop waits on."""
-    import apps.api
+    import apps.api as server
     from security.permissions.approval_broker import get_approval_broker
 
     broker = get_approval_broker()
@@ -134,7 +134,7 @@ def test_approve_route_resolves_a_pending_request():
 
 
 def test_approve_route_rejects_a_missing_request_id():
-    import apps.api
+    import apps.api as server
     from fastapi import HTTPException
 
     class FakeRequest:
@@ -148,7 +148,7 @@ def test_approve_route_rejects_a_missing_request_id():
 
 def test_approve_route_is_registered_on_the_app():
     """The GUI POSTs to /api/approve; the route must actually exist."""
-    import apps.api
+    import apps.api as server
 
     paths = {getattr(route, "path", "") for route in server.app.routes}
     assert "/api/approve" in paths

@@ -108,7 +108,7 @@ def test_timeout_status_is_always_retryable():
 
 
 def test_authentication_loopback_gate_only_allows_local_peers():
-    import security.core.auth
+    import security.core.auth as authentication
 
     # A genuine loopback request passes the check when the opt-in is on.
     lb_request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"), headers={}, cookies={})

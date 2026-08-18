@@ -2,7 +2,7 @@ import asyncio
 
 
 def test_saved_model_listing_can_run_off_event_loop(tmp_path, monkeypatch):
-    import apps.api
+    import apps.api as server
 
     config = tmp_path / "provider.yml"
     config.write_text("providers: {}\n", encoding="utf-8")

@@ -52,7 +52,7 @@ def test_compiler_reports_unavailable_instead_of_fake_success():
 
 
 def test_engine_reload_path_is_contained_in_local_model_directory(tmp_path, monkeypatch):
-    import apps.api
+    import apps.api as server
 
     monkeypatch.setattr(server, "_PROJECT_ROOT", str(tmp_path))
     local_root = tmp_path / "models" / "local"
@@ -65,7 +65,7 @@ def test_engine_reload_path_is_contained_in_local_model_directory(tmp_path, monk
 
 
 def test_engine_reload_path_rejects_traversal_and_external_absolute_paths(tmp_path, monkeypatch):
-    import apps.api
+    import apps.api as server
 
     monkeypatch.setattr(server, "_PROJECT_ROOT", str(tmp_path))
     (tmp_path / "models" / "local").mkdir(parents=True)
@@ -81,7 +81,7 @@ def test_engine_reload_path_rejects_traversal_and_external_absolute_paths(tmp_pa
 
 @pytest.mark.asyncio
 async def test_engine_reload_endpoint_preserves_path_boundary_status(tmp_path, monkeypatch):
-    import apps.api
+    import apps.api as server
 
     monkeypatch.setattr(server, "_PROJECT_ROOT", str(tmp_path))
     (tmp_path / "models" / "local").mkdir(parents=True)

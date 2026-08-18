@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-import apps.api
+import apps.api as server
 
 
 class _Request:

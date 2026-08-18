@@ -59,7 +59,7 @@ async def test_server_cancel_handler_releases_a_live_v5_tool_wait(tmp_path):
     """The API cancellation boundary must reach the actual cooperative wait."""
     from nexus.run_control import RunControlRegistry
     from nexus.main_agent.tools import V5ToolExecutor
-    import apps.api
+    import apps.api as server
 
     store_path = str(tmp_path / "route-cancel.sqlite3")
     running = RunControlRegistry(store_path=store_path)
@@ -100,7 +100,7 @@ async def test_server_cancel_handler_releases_a_live_v5_tool_wait(tmp_path):
 
 
 def test_set_model_can_switch_to_an_enabled_named_profile(tmp_path, monkeypatch):
-    import apps.api
+    import apps.api as server
 
     monkeypatch.setattr(server, "_CONFIG_PATH", str(tmp_path / "configure" / "settings.yml"))
 
@@ -126,7 +126,7 @@ def test_set_model_can_switch_to_an_enabled_named_profile(tmp_path, monkeypatch)
 
 
 def test_set_model_rejects_an_unavailable_profile(monkeypatch):
-    import apps.api
+    import apps.api as server
 
     class Store:
         @staticmethod
@@ -142,7 +142,7 @@ def test_set_model_rejects_an_unavailable_profile(monkeypatch):
 
 
 def test_saved_models_route_matches_gui_picker_contract(tmp_path, monkeypatch):
-    import apps.api
+    import apps.api as server
 
     config_dir = tmp_path / "configure"
     config_dir.mkdir()
@@ -186,7 +186,7 @@ def test_server_chat_passes_turn_and_max_tokens_to_loop(monkeypatch):
             captured["kwargs"] = kwargs
             yield {"type": "content", "data": "ok"}
 
-    import apps.api
+    import apps.api as server
 
     monkeypatch.setattr(server, "get_loop", lambda _sid: FakeLoop())
     monkeypatch.setattr(server, "set_active_session", lambda *args, **kwargs: None)
@@ -218,7 +218,7 @@ def test_server_chat_passes_turn_and_max_tokens_to_loop(monkeypatch):
 
 
 def test_server_chat_resolves_auto_to_configured_provider_and_model(monkeypatch):
-    import apps.api
+    import apps.api as server
 
     captured = {}
 
@@ -253,7 +253,7 @@ def test_server_chat_resolves_auto_to_configured_provider_and_model(monkeypatch)
 
 def test_server_chat_timeout_emits_error_before_one_terminal_marker(monkeypatch):
     import asyncio
-    import apps.api
+    import apps.api as server
 
     captured = {}
 
@@ -293,7 +293,7 @@ def test_server_chat_timeout_emits_error_before_one_terminal_marker(monkeypatch)
 
 def test_server_chat_timeout_marks_workflow_failed(monkeypatch):
     import asyncio
-    import apps.api
+    import apps.api as server
 
     captured = {}
 
@@ -334,7 +334,7 @@ def test_server_chat_timeout_marks_workflow_failed(monkeypatch):
 
 
 def test_server_chat_stream_failure_marks_workflow_failed(monkeypatch):
-    import apps.api
+    import apps.api as server
 
     captured = {}
 
@@ -371,7 +371,7 @@ def test_server_chat_stream_failure_marks_workflow_failed(monkeypatch):
 
 
 def test_server_chat_uses_resume_workflow_context_and_completes_workflow(monkeypatch):
-    import apps.api
+    import apps.api as server
 
     captured = {}
 
@@ -410,7 +410,7 @@ def test_server_chat_uses_resume_workflow_context_and_completes_workflow(monkeyp
 
 
 def test_server_failed_terminal_chunk_marks_workflow_failed(monkeypatch):
-    import apps.api
+    import apps.api as server
 
     captured = {}
 
@@ -438,7 +438,7 @@ def test_server_failed_terminal_chunk_marks_workflow_failed(monkeypatch):
 
 def test_server_non_stream_timeout_requests_run_abort(monkeypatch):
     import asyncio
-    import apps.api
+    import apps.api as server
 
     captured = {}
 
@@ -470,7 +470,7 @@ def test_server_non_stream_timeout_requests_run_abort(monkeypatch):
 
 
 def test_server_run_context_endpoints_list_and_read_runs(tmp_path, monkeypatch):
-    import apps.api
+    import apps.api as server
     from nexus.run_context import start_run_context
     from apps.api import app
 
@@ -551,7 +551,7 @@ def test_server_run_context_endpoints_list_and_read_runs(tmp_path, monkeypatch):
 
 
 def test_server_work_event_append_assigns_monotonic_sequences(tmp_path, monkeypatch):
-    import apps.api
+    import apps.api as server
     from apps.api import app
 
     monkeypatch.setattr(server, "_WORK_EVENTS_DIR", str(tmp_path / "work_events"))

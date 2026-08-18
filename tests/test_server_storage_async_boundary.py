@@ -2,9 +2,9 @@ import asyncio
 
 
 def test_storage_cleanup_runs_in_worker_and_preserves_session_index(tmp_path):
-    import apps.api
+    import apps.api as server
 
-    sessions = tmp_path / "logs" / "sessions"
+    sessions = tmp_path / ".nexus" / "logs" / "sessions"
     sessions.mkdir(parents=True)
     (sessions / "old.json").write_text("old", encoding="utf-8")
     (sessions / "session_index.json").write_text("keep", encoding="utf-8")

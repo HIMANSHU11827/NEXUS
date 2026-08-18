@@ -158,7 +158,7 @@ class TestV1ChatCompletions:
 
     @pytest.mark.asyncio
     async def test_loop_eviction_closes_only_evicted_loop(self):
-        import apps.api
+        import apps.api as server
 
         evicted = MagicMock()
         evicted.aclose = AsyncMock()

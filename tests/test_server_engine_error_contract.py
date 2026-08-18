@@ -1,7 +1,7 @@
 import pytest
 from fastapi import HTTPException
 
-import apps.api
+import apps.api as server
 
 
 def test_engine_status_returns_public_error_only(monkeypatch):

@@ -151,8 +151,8 @@ def test_tui_runner_prefers_local_tsx(monkeypatch, tmp_path):
 def test_ink_tui_starts_without_waiting_for_api(monkeypatch, tmp_path):
     import nexus
 
-    tui_dir = tmp_path / "tui"
-    tui_dir.mkdir()
+    tui_dir = tmp_path / "apps" / "tui"
+    tui_dir.mkdir(parents=True)
     (tui_dir / "nexus-tui.tsx").write_text("// test", encoding="utf-8")
     calls = []
 
@@ -192,8 +192,8 @@ def test_ink_tui_propagates_dashboard_token_to_children(monkeypatch, tmp_path):
     import subprocess
     import nexus
 
-    tui_dir = tmp_path / "tui"
-    tui_dir.mkdir()
+    tui_dir = tmp_path / "apps" / "tui"
+    tui_dir.mkdir(parents=True)
     (tui_dir / "nexus-tui.tsx").write_text("// test", encoding="utf-8")
     token = "token-for-test-only"
     captured = {}

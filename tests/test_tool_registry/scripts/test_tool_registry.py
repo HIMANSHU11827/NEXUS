@@ -109,9 +109,9 @@ class TestToolEntry:
 
 def test_registry_uses_explicit_root_when_cwd_differs(tmp_path, monkeypatch):
     project = tmp_path / "project"
-    tool_dir = project / "tools" / "demo" / "scripts"
+    tool_dir = project / "extensions" / "tools" / "built_in" / "demo" / "scripts"
     tool_dir.mkdir(parents=True)
-    (project / "tools" / "demo" / "demo.jsnol").write_text(
+    (project / "extensions" / "tools" / "built_in" / "demo" / "demo.jsnol").write_text(
         '{"name":"demo","version":"1.0.0","description":"Demo","params":{}}',
         encoding="utf-8",
     )
@@ -129,9 +129,9 @@ def test_registry_uses_explicit_root_when_cwd_differs(tmp_path, monkeypatch):
 
 def test_registry_summary_explains_unavailable_tools(tmp_path):
     project = tmp_path / "project"
-    tool_dir = project / "tools" / "demo" / "scripts"
+    tool_dir = project / "extensions" / "tools" / "built_in" / "demo" / "scripts"
     tool_dir.mkdir(parents=True)
-    (project / "tools" / "demo" / "demo.jsnol").write_text(
+    (project / "extensions" / "tools" / "built_in" / "demo" / "demo.jsnol").write_text(
         '{"name":"demo","version":"1.0.0","description":"Demo","requires_env":["DEMO_KEY"],"params":{}}',
         encoding="utf-8",
     )
@@ -148,7 +148,7 @@ def test_registry_summary_explains_unavailable_tools(tmp_path):
 
 
 def test_registry_list_tools_exposes_structured_contract(tmp_path):
-    tool_dir = tmp_path / "project" / "tools" / "demo" / "scripts"
+    tool_dir = tmp_path / "project" / "extensions" / "tools" / "built_in" / "demo" / "scripts"
     tool_dir.mkdir(parents=True)
     (tool_dir.parent / "demo.jsnol").write_text(
         '{"name":"demo","version":"2.0.0","description":"Demo tool",'
@@ -188,7 +188,7 @@ def test_registry_discovers_active_skills_as_model_tools(tmp_path):
 
 
 def test_registry_discovers_nested_skill_tree(tmp_path):
-    skill_dir = tmp_path / "skills" / "software-development" / "python" / "code-review"
+    skill_dir = tmp_path / "extensions" / "skills" / "built_in" / "software-development" / "python" / "code-review"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         "---\nid: nested_code_review\nname: Nested Code Review\ndescription: Review code\n---\nReview the requested code.",
@@ -366,7 +366,7 @@ def test_registry_discovers_json_metadata_and_marks_stub_unavailable(tmp_path):
     import asyncio
     import json
 
-    tool_dir = tmp_path / "tools" / "legacy_probe"
+    tool_dir = tmp_path / "extensions" / "tools" / "built_in" / "legacy_probe"
     scripts = tool_dir / "scripts"
     scripts.mkdir(parents=True)
     (tool_dir / "legacy_probe.json").write_text(

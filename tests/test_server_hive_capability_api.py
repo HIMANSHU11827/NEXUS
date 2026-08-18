@@ -41,7 +41,7 @@ def client(tmp_path, monkeypatch):
     # picked up by the module-level _AUTH_TOKEN loader.
     monkeypatch.setenv("NEXUS_HIVE_ROOT", str(tmp_path / "hive_runs"))
     monkeypatch.setenv("NEXUS_DASHBOARD_TOKEN", "test-hive-token")
-    import apps.api
+    import apps.api as server
     import security.core.auth as auth_mod
     # Override the cached token directly so the test is independent of the
     # order in which server/authentication were first imported in the session.

@@ -57,7 +57,7 @@ def _wait_for(predicate, timeout=10.0):
 
 
 def test_checkpoint_create_list_restore_and_delete(tmp_path):
-    import apps.api
+    import apps.api as server
     from apps.api import app
 
     ws = _reset(server, tmp_path)
@@ -112,7 +112,7 @@ def test_checkpoint_create_list_restore_and_delete(tmp_path):
 
 
 def test_timed_out_run_unregisters_checkpoint_stream_pusher(tmp_path):
-    import apps.api
+    import apps.api as server
 
     _reset(server, tmp_path)
 
@@ -133,7 +133,7 @@ def test_timed_out_run_unregisters_checkpoint_stream_pusher(tmp_path):
 
 
 def test_checkpoint_restore_wrong_session_is_404(tmp_path):
-    import apps.api
+    import apps.api as server
     from apps.api import app
 
     ws = _reset(server, tmp_path)
@@ -153,7 +153,7 @@ def test_checkpoint_restore_wrong_session_is_404(tmp_path):
 
 
 def test_checkpoint_missing_and_corrupt_errors(tmp_path):
-    import apps.api
+    import apps.api as server
     from apps.api import app
 
     ws = _reset(server, tmp_path)
@@ -183,7 +183,7 @@ def test_checkpoint_missing_and_corrupt_errors(tmp_path):
 
 
 def test_checkpoint_restore_conflict_when_in_progress(tmp_path):
-    import apps.api
+    import apps.api as server
     from apps.api import app
 
     ws = _reset(server, tmp_path)
@@ -206,7 +206,7 @@ def test_checkpoint_restore_conflict_when_in_progress(tmp_path):
 
 
 def test_checkpoint_snapshot_skips_venv_and_generated_dirs(tmp_path):
-    import apps.api
+    import apps.api as server
 
     ws = _reset(server, tmp_path)
     (ws / ".venv").mkdir()
@@ -232,7 +232,7 @@ def test_checkpoint_snapshot_skips_venv_and_generated_dirs(tmp_path):
 
 def test_checkpoint_trigger_fires_on_canonical_envelope(tmp_path):
     """Canonical envelopes use `type` (not `event_type`) and nest state in payload."""
-    import apps.api
+    import apps.api as server
 
     ws = _reset(server, tmp_path)
     canonical = {
@@ -266,7 +266,7 @@ def test_checkpoint_trigger_fires_on_canonical_envelope(tmp_path):
 
 
 def test_checkpoint_trigger_ignores_unrelated_events(tmp_path):
-    import apps.api
+    import apps.api as server
 
     ws = _reset(server, tmp_path)
     server._append_work_event(
@@ -297,7 +297,7 @@ def test_checkpoint_trigger_ignores_unrelated_events(tmp_path):
 
 
 def test_checkpoint_trigger_appends_created_event(tmp_path):
-    import apps.api
+    import apps.api as server
 
     ws = _reset(server, tmp_path)
     server._workspace_root = lambda: str(ws)

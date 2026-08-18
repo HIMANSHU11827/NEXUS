@@ -2,7 +2,7 @@ import json
 
 from fastapi.testclient import TestClient
 
-import security.core.auth
+import security.core.auth as authentication
 from apps.web import api
 from security.permissions import PermissionMode, PermissionSystem
 

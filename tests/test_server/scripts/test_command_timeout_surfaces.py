@@ -18,7 +18,7 @@ def test_server_command_stream_forwards_timeout_and_matches_failed_status(monkey
         for mod in list(sys.modules):
             if mod.startswith("apps.api"):
                 del sys.modules[mod]
-        import apps.api
+        import apps.api as server
 
         monkeypatch.setattr(server, "_RUN_ROOT", str(tmp_path), raising=False)
         monkeypatch.setattr(server, "_WORK_EVENTS_DIR", str(tmp_path / "events"), raising=False)

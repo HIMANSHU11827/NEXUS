@@ -334,8 +334,8 @@ def test_skill_registry_prefers_canonical_and_emits_usage_identity(tmp_path):
 
 
 def test_skill_registry_supports_legacy_flat_files(tmp_path):
-    skills = tmp_path / "skills"
-    skills.mkdir()
+    skills = tmp_path / "extensions" / "skills" / "built_in"
+    skills.mkdir(parents=True)
     (skills / "legacy.md").write_text("---\nname: legacy\n---\nPrompt", encoding="utf-8")
     record = SkillRegistry(tmp_path).get("legacy")
     assert record is not None
@@ -372,7 +372,7 @@ def test_skill_master_delete_protects_legacy_skills_without_force(tmp_path):
     from extensions.skills.built_in import NexusSkillMaster
 
     NexusSkillMaster._reset_instance()
-    legacy_dir = tmp_path / "skills" / "legacy"
+    legacy_dir = tmp_path / "extensions" / "skills" / "built_in" / "legacy"
     legacy_dir.mkdir(parents=True)
     skill_file = legacy_dir / "SKILL.md"
     skill_file.write_text("---\nid: legacy\nname: legacy\n---\nLegacy", encoding="utf-8")

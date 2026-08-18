@@ -1,7 +1,7 @@
 import pytest
 from fastapi import HTTPException
 
-import apps.api
+import apps.api as server
 
 
 @pytest.mark.asyncio

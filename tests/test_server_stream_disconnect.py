@@ -29,7 +29,7 @@ def _request(payload):
 
 @pytest.mark.asyncio
 async def test_server_stream_disconnect_aborts_underlying_run(monkeypatch):
-    import apps.api
+    import apps.api as server
 
     captured = {}
 

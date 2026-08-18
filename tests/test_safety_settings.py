@@ -308,8 +308,8 @@ def test_sync_sandbox_from_legacy(isolated_store):
 def safety_server(tmp_path, monkeypatch):
     """TestClient for the real FastAPI app, fully redirected to a temp config."""
     monkeypatch.setenv("NEXUS_ALLOW_LOCAL_ANON", "true")
-    import apps.api
-    import security.core.auth
+    import apps.api as server
+    import security.core.auth as authentication
 
     ws_dir = tmp_path / "ws"
     ws_dir.mkdir(exist_ok=True)

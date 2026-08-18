@@ -39,7 +39,7 @@ def test_forced_plugin_install_preserves_existing_on_download_failure(monkeypatc
 
     monkeypatch.setenv("NEXUS_ALLOW_UNVERIFIED_PLUGIN_INSTALL", "1")
     monkeypatch.setattr(api, "_ROOT", str(tmp_path))
-    target = tmp_path / "plugins" / "demo"
+    target = tmp_path / ".nexus" / "plugins" / "demo"
     target.mkdir(parents=True)
     (target / "existing.txt").write_text("keep", encoding="utf-8")
 
@@ -54,7 +54,7 @@ def test_forced_plugin_install_preserves_existing_on_download_failure(monkeypatc
 
     assert getattr(raised.value, "status_code", None) == 500
     assert (target / "existing.txt").read_text(encoding="utf-8") == "keep"
-    assert not list((tmp_path / "plugins").glob(".demo.*"))
+    assert not list((tmp_path / ".nexus" / "plugins").glob(".demo.*"))
 
 
 def test_plugin_install_promotes_staged_source(monkeypatch, tmp_path):
@@ -71,11 +71,11 @@ def test_plugin_install_promotes_staged_source(monkeypatch, tmp_path):
     monkeypatch.setattr(api.subprocess, "run", fake_git)
     result = api.install_plugin_from_source("https://github.com/acme/demo.git")
 
-    target = tmp_path / "plugins" / "demo"
+    target = tmp_path / ".nexus" / "plugins" / "demo"
     assert result["path"] == str(target)
     assert (target / "source.py").read_text(encoding="utf-8") == "new"
     assert (target / ".codex-plugin" / "plugin.json").exists()
-    assert not list((tmp_path / "plugins").glob(".demo.*"))
+    assert not list((tmp_path / ".nexus" / "plugins").glob(".demo.*"))
 
 
 def test_artifact_archive_path_rejects_symlink_escape(tmp_path):

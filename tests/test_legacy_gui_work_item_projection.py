@@ -4,7 +4,7 @@ from nexus.work_items import create_work_item, load_work_item
 
 
 def test_legacy_gui_append_projects_runtime_task_event(tmp_path, monkeypatch):
-    legacy_api = importlib.import_module("gui.api")
+    legacy_api = importlib.import_module("apps.web.api")
     monkeypatch.setattr(legacy_api, "_ROOT", str(tmp_path))
     monkeypatch.setattr(legacy_api, "_WORK_EVENTS_DIR", str(tmp_path / "events"))
     legacy_api._WORK_EVENT_SEQUENCES.clear()

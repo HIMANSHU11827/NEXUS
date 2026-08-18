@@ -1,5 +1,5 @@
 def test_health_projects_lifecycle_persistence(monkeypatch):
-    import apps.api
+    import apps.api as server
 
     monkeypatch.setattr(
         server,
@@ -24,13 +24,13 @@ def test_health_projects_lifecycle_persistence(monkeypatch):
 
 
 def test_lifecycle_health_failure_is_bounded_and_redacted(monkeypatch):
-    import apps.api
+    import apps.api as server
 
     class BrokenSupervisor:
         def get_stats(self):
             raise RuntimeError("token=sk-health-secret")
 
-    import nexus.lifecycle.managers
+    import nexus.lifecycle.managers as lifecycle
     monkeypatch.setattr(lifecycle, "get_component_supervisor", lambda: BrokenSupervisor())
 
     result = server._lifecycle_persistence_health()

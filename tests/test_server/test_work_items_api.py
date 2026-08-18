@@ -4,8 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-import apps.api
-import security.core.auth
+import apps.api as server
+import security.core.auth as authentication
 from nexus.work_items import create_work_item
 from nexus.run_context import start_run_context
 

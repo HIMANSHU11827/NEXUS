@@ -102,7 +102,7 @@ class TestShellRunPath:
             def __init__(self, *a, **k):
                 spawned.append(a)
 
-        monkeypatch.setattr("tui.subprocess.run", FakePopen)
+        monkeypatch.setattr("apps.tui.subprocess.run", FakePopen)
         assert shell._run_bash("rm -rf C:\\Users") == 1
         assert spawned == []
 
@@ -121,7 +121,7 @@ class TestShellRunPath:
             executed.append(command)
             return FakeCompleted()
 
-        monkeypatch.setattr("tui.subprocess.run", fake_run)
+        monkeypatch.setattr("apps.tui.subprocess.run", fake_run)
         assert shell._run_bash("git status") == 0
         assert executed == ["git status"]
 
@@ -133,7 +133,7 @@ class TestShellRunPath:
         def hang(**kwargs):
             raise TimeoutError("timed out")
 
-        monkeypatch.setattr("tui.subprocess.run", lambda *a, **k: (_ for _ in ()).throw(TimeoutError("timed out")))
+        monkeypatch.setattr("apps.tui.subprocess.run", lambda *a, **k: (_ for _ in ()).throw(TimeoutError("timed out")))
         assert shell._run_bash("echo ok") == 1
         assert hang
 
@@ -141,7 +141,7 @@ class TestShellRunPath:
 class TestOAuthRedirectValidation:
     @pytest.fixture
     def oauth_providers(self, monkeypatch):
-        import security.core.auth
+        import security.core.auth as authentication
 
         monkeypatch.setattr(
             authentication,

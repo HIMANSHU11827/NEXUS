@@ -9,7 +9,7 @@ class _Request:
 
 
 def test_voice_start_launches_child_from_worker_thread(monkeypatch):
-    import apps.api
+    import apps.api as server
 
     main_thread = threading.get_ident()
     called = {}

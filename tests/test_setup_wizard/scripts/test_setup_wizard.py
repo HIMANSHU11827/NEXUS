@@ -121,7 +121,7 @@ class TestSetupWizardRun:
 
     def test_masked_input(self):
         from apps.tui.setup_wizard import masked_input
-        with patch("tui.setup_wizard.Prompt.ask", return_value="secret123"):
+        with patch("apps.tui.setup_wizard.Prompt.ask", return_value="secret123"):
             result = masked_input("Enter key")
             assert result == "secret123"
 

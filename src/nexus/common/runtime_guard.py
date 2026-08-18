@@ -42,7 +42,7 @@ PROTECTED_DIRS = ("src", "apps", "extensions", "models", "security", "knowledge"
                   "queues", "sandbox", "reliability", "evolution")
 
 # Repo root = src/nexus/common/ -> src/nexus -> src -> root
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 PathLike = Union[str, "os.PathLike[str]"]
 

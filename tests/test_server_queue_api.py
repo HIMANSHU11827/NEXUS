@@ -2,7 +2,7 @@ from queues.store import TaskQueue
 
 
 def test_queue_snapshot_is_session_scoped_and_does_not_expose_lease_tokens(monkeypatch, tmp_path):
-    import apps.api
+    import apps.api as server
 
     monkeypatch.setattr(server, "_PROJECT_ROOT", str(tmp_path))
     queue = TaskQueue(root=str(tmp_path))
@@ -26,7 +26,7 @@ def test_queue_snapshot_is_session_scoped_and_does_not_expose_lease_tokens(monke
 
 
 def test_queue_snapshot_reports_worker_mode_without_claiming_external_worker(monkeypatch, tmp_path):
-    import apps.api
+    import apps.api as server
 
     monkeypatch.setattr(server, "_PROJECT_ROOT", str(tmp_path))
     monkeypatch.delenv("NEXUS_EMBED_QUEUE_DRIVER", raising=False)
@@ -37,7 +37,7 @@ def test_queue_snapshot_reports_worker_mode_without_claiming_external_worker(mon
 
 
 def test_queue_snapshot_external_mode_when_explicitly_disabled(monkeypatch, tmp_path):
-    import apps.api
+    import apps.api as server
 
     monkeypatch.setattr(server, "_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("NEXUS_EMBED_QUEUE_DRIVER", "false")
