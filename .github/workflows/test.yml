@@ -51,5 +51,5 @@ jobs:
       - name: Build Docker image
         run: |
           python scripts/release_gate.py
-          docker compose -f deploy/docker-compose.yml config --quiet
-          docker build -t nexus-ai -f deploy/Dockerfile .
+          docker compose -f docker-compose.yml config --quiet
+          docker build -t nexus-ai -f deployment/Dockerfile .

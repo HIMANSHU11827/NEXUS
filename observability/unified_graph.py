@@ -17,8 +17,8 @@ class UnifiedNexusGraph:
 
     def __init__(self, root: str) -> None:
         self.root = root
-        self.graphify_path = os.path.join(root, "graphify-out", "graph.json")
-        self.events_dir = os.path.join(root, "workspace", "work_events")
+        self.graphify_path = os.path.join(root, ".nexus", "graphify-out", "graph.json")
+        self.events_dir = os.path.join(root, ".nexus", "workspace", "work_events")
 
     def load(self) -> GraphSnapshot:
         if not os.path.exists(self.graphify_path):

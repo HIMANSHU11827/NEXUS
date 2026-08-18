@@ -5297,16 +5297,16 @@ def list_config_files():
     # Search in key directories
     search_dirs = [
         os.path.join(project_root, 'configure'),
-        os.path.join(project_root, 'workspace'),
-        os.path.join(project_root, 'skills'),
-        os.path.join(project_root, 'tools'),
-        os.path.join(project_root, 'plugins'),
-        os.path.join(project_root, 'mcp'),
+        os.path.join(project_root, '.nexus', 'workspace'),
+        os.path.join(project_root, 'extensions', 'skills', 'built_in'),
+        os.path.join(project_root, 'extensions', 'tools', 'built_in'),
+        os.path.join(project_root, 'extensions', 'plugins', 'built_in'),
+        os.path.join(project_root, 'extensions', 'mcp', 'core'),
         os.path.join(project_root, 'hive'),
         os.path.join(project_root, 'evolution'),
-        os.path.join(project_root, 'safety'),
-        os.path.join(project_root, 'voice'),
-        os.path.join(project_root, 'providers'),
+        os.path.join(project_root, 'security', 'policies'),
+        os.path.join(project_root, 'apps', 'voice'),
+        os.path.join(project_root, 'models', 'providers'),
         os.path.join(project_root, 'knowledge'),
     ]
     

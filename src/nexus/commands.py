@@ -1060,7 +1060,7 @@ async def _cmd_plans(ctx: CommandContext) -> CommandResult:
     except Exception:
         return CommandResult(output="no data yet", formatted="[dim]Planning tool unavailable[/dim]")
     root = _nexus_root(ctx)
-    for base in (os.path.join(root, ".nexus", "workspace"), os.path.join(root, "workspace"), root):
+    for base in (os.path.join(root, ".nexus", "workspace"), root):
         try:
             tool = PlanningTool(root_dir=base)
             plan = tool._read_plan()

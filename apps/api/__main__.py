@@ -1,4 +1,4 @@
-"""Run the NEXUS API server with `python -m server`."""
+"""Run the NEXUS API server with `python -m apps.api`."""
 
 from __future__ import annotations
 

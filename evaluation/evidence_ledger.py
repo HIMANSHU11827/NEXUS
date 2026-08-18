@@ -35,7 +35,7 @@ class EvidenceLedger:
 
     def __init__(self, root: str) -> None:
         self.root = root
-        self.path = os.path.join(root, "workspace", "evidence_ledger.jsonl")
+        self.path = os.path.join(root, ".nexus", "workspace", "evidence_ledger.jsonl")
 
     def record_claim(
         self,

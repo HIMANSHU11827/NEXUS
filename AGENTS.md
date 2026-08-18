@@ -78,7 +78,7 @@ Canonical events in `src/nexus/events.py`. ~50 event types covering run, message
 For **every meaningful task**, use a multi-agent workflow — never solve a complex task with a single agent.
 
 1. **Understand & inspect** — read the full request and all relevant project files, docs, logs, configs, errors, and existing implementation.
-2. **Plan** — objectives, subtasks, dependencies, risks, completion criteria. Track in `MULTI_AGENT_TASKS.md`.
+2. **Plan** — objectives, subtasks, dependencies, risks, completion criteria. Track in `docs/MULTI_AGENT_TASKS.md`.
 3. **Assign specialists** — Coordinator, Research, Repository Analyst, Architecture, Implementation, Debugging, Testing, Security, Performance, UI/UX, Documentation, Critical Reviewer. Only create the agents the task needs; every agent must do real work.
 4. **Execute in parallel** when tasks are independent; sequential when dependent. Give each agent clear file/module ownership to avoid concurrent writes to the same file.
 5. **Communicate & verify** — agents share findings, file paths, conflicts; a reviewer verifies accuracy via inspection, execution, and testing.
@@ -89,4 +89,4 @@ For **every meaningful task**, use a multi-agent workflow — never solve a comp
 
 **Hard rules:** never claim something works without evidence; never stop at a plan or first error; never hide failures; never use fake/placeholder/simulated output; never delete important files, expose secrets, publish, spend money, or do irreversible/destructive/security-sensitive actions without explicit authorization.
 
-Full rule: see `HERMES.md` and skill `multi-agent-workflow`.
+Full rule: see skill `multi-agent-workflow`.

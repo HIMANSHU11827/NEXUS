@@ -197,10 +197,10 @@ function Restart-Server {
     }
     Start-Sleep -Seconds 1
     $py = Get-Python
-    Write-Step "Starting API server (python -m server) on :8000..."
+    Write-Step "Starting API server (python -m apps.api) on :8000..."
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $py
-    $psi.Arguments = "-m server"
+    $psi.Arguments = "-m apps.api"
     $psi.WorkingDirectory = $Root
     $psi.UseShellExecute = $true
     try {

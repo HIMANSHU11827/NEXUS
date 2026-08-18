@@ -30,7 +30,7 @@ def main() -> int:
 
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     except Exception as exc:  # pragma: no cover - depends on environment
-        fail(f"could not parse config/settings.yml: {exc}")
+        fail(f"could not parse configure/settings.yml: {exc}")
     if not isinstance(config, dict):
         fail("configure/settings.yml must contain a mapping")
 
@@ -58,9 +58,9 @@ def main() -> int:
         fail("missing deployment artifacts: " + ", ".join(missing))
 
     try:
-        compose = yaml.safe_load((ROOT / "deploy" / "docker-compose.yml").read_text(encoding="utf-8"))
+        compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
     except Exception as exc:  # pragma: no cover
-        fail(f"could not parse deploy/docker-compose.yml: {exc}")
+        fail(f"could not parse docker-compose.yml: {exc}")
     services = compose.get("services") if isinstance(compose, dict) else None
     if not isinstance(services, dict) or not {"nexus", "nexus-gui"}.issubset(services):
         fail("compose must define nexus and nexus-gui services")
@@ -105,7 +105,7 @@ def main() -> int:
 
             # Test fixtures and vendored reference material intentionally hold
             # fake/placeholder keys; scan everything else for real secrets.
-            excluded_parts = ("/tests/", "/.research/", "/references/")
+            excluded_parts = ("/tests/", "/data/references/")
             scan_paths = [
                 p
                 for p in tracked_all

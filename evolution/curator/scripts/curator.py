@@ -12,9 +12,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-USAGE_FILE = "workspace/skill_usage.json"
-ARCHIVE_DIR = "skills/.archive"
-SKILLS_DIR = "skills"
+USAGE_FILE = ".nexus/workspace/skill_usage.json"
+ARCHIVE_DIR = ".nexus/skills/archive"
+SKILLS_DIR = "extensions/skills/built_in"
 STALE_AFTER_DAYS = 30
 ARCHIVE_AFTER_DAYS = 90
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)

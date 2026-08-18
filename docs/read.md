@@ -11,7 +11,7 @@ Documentation resources, guides, API references, and architectural notes.
 - `ROADMAP.md` / `ROADMAP_STATUS.md` — Project roadmap and completion status (67.9%)
 - `PROJECT_MEMORY.md` — A-to-Z project memory (historical)
 - `NEXUS_UNIFIED_AGENT_ARCHITECTURE.md` — Target unified architecture
-- `NEXUS_WORKFLOW_MODEL.md` — Workflow and phase model
+- `workflows/NEXUS_WORKFLOW_MODEL.md` — Workflow and phase model
 - `NEXUS_OPTIMIZATION_NEXTGEN_BLUEPRINT.md` — Next-gen optimization plan
 - `NEXUS.md` — NEXUS platform persona/soul
 - `MCP_CODE_GRAPH.md` — MCP code graph setup

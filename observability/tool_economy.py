@@ -10,7 +10,7 @@ class ToolEconomy:
 
     def __init__(self, root: str) -> None:
         self.root = root
-        self.events_dir = os.path.join(root, "workspace", "work_events")
+        self.events_dir = os.path.join(root, ".nexus", "workspace", "work_events")
 
     def rank(self) -> List[Dict[str, Any]]:
         counts: Dict[str, Dict[str, Any]] = {}

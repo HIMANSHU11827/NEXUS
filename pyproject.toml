@@ -80,7 +80,7 @@ point = "nexus:boot"
 nexus-fix = "nexus:boot"
 nexus-mcp = "extensions.mcp.core.server:main"
 nexus-voice = "apps.voice.voice_chat:main"
-nexus-gateway-app = "apps.gateway.nexus_gateway_app:main"
+nexus-gateway-app = "apps.gateway.nexus_gateway_app.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]

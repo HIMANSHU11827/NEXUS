@@ -3,8 +3,8 @@ version: "3.9"
 services:
   nexus:
     build:
-      context: ..
-      dockerfile: deploy/Dockerfile
+      context: .
+      dockerfile: deployment/Dockerfile
     container_name: nexus-ai
     restart: unless-stopped
     ports:
@@ -13,11 +13,8 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - nexus_data:/home/nexus/.nexus
-      - nexus_config:/app/config
-      - ../workspace:/app/workspace
-      - ../logs:/app/logs
     env_file:
-      - ../config/.env
+      - .env
     environment:
       - NEXUS_HOME=/home/nexus/.nexus
       - NEXUS_ROOT=/app
@@ -37,7 +34,7 @@ services:
       - ALL
     pids_limit: 256
     mem_limit: 2g
-    command: python -m server
+    command: python -m nexus --server
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
       interval: 10s
@@ -46,8 +43,8 @@ services:
 
   nexus-gui:
     build:
-      context: ..
-      dockerfile: gui/Dockerfile
+      context: .
+      dockerfile: apps/web/Dockerfile
     container_name: nexus-gui
     restart: unless-stopped
     ports:
@@ -60,7 +57,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-    working_dir: /app/gui
+    working_dir: /app/apps/web
     command: ["nginx", "-g", "daemon off;"]
     read_only: true
     tmpfs:

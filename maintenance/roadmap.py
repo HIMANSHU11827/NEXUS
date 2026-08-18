@@ -61,7 +61,7 @@ class RoadmapAuditor:
 
     def write_status(self) -> str:
         audit = self.audit()
-        path = os.path.join(self.root, "workspace", "roadmap_status.md")
+        path = os.path.join(self.root, ".nexus", "workspace", "roadmap_status.md")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         lines = [
             "# Roadmap Status",

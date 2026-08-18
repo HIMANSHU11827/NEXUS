@@ -10,7 +10,7 @@ class MissionReplay:
 
     def __init__(self, root: str) -> None:
         self.root = root
-        self.events_dir = os.path.join(root, "workspace", "work_events")
+        self.events_dir = os.path.join(root, ".nexus", "workspace", "work_events")
 
     def recent(self, limit: int = 12) -> List[Dict[str, Any]]:
         if not os.path.isdir(self.events_dir):

@@ -4,7 +4,7 @@ See `docs/NEXUS_OPTIMIZATION_NEXTGEN_BLUEPRINT.md` for the broader research-back
 next-generation architecture and invention backlog.
 
 See `docs/NEXUS_UNIFIED_AGENT_ARCHITECTURE.md` and
-`docs/NEXUS_WORKFLOW_MODEL.md` for the unified mission runtime and workflow
+`workflows/NEXUS_WORKFLOW_MODEL.md` for the unified mission runtime and workflow
 model that combines TUI, GUI, Gateway, memory, tools, and visual
 agent timelines into one system.
 

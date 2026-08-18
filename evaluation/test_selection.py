@@ -13,7 +13,7 @@ logger = logging.getLogger("NEXUS_TEST_SELECTION")
 
 _EXCLUDED_DIRS = {
     ".git", "__pycache__", ".venv", "node_modules", "workspace", "knowledge",
-    "graphify-out", ".pytest_cache", "dist", "build", ".mypy_cache", ".ruff_cache",
+    ".pytest_cache", "dist", "build", ".mypy_cache", ".ruff_cache",
 }
 
 

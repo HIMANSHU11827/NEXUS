@@ -51,7 +51,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 The target unified agent architecture is defined in
 [docs/NEXUS_UNIFIED_AGENT_ARCHITECTURE.md](docs/NEXUS_UNIFIED_AGENT_ARCHITECTURE.md),
 with the mission workflow model in
-[docs/NEXUS_WORKFLOW_MODEL.md](docs/NEXUS_WORKFLOW_MODEL.md).
+[workflows/NEXUS_WORKFLOW_MODEL.md](workflows/NEXUS_WORKFLOW_MODEL.md).
 
 ## Roadmap
 

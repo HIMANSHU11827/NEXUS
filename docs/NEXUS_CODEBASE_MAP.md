@@ -231,7 +231,7 @@
 | `docs/VOICE_ASSISTANT.md` | Voice assistant integration | Current |
 | `docs/MCP_CODE_GRAPH.md` | MCP code graph guide | Current |
 | `docs/UNIFIED_GRAPH.md` | Unified knowledge graph | Current |
-| `docs/NEXUS_WORKFLOW_MODEL.md` | Workflow/phase model | Current |
+| `workflows/NEXUS_WORKFLOW_MODEL.md` | Workflow/phase model | Current |
 | `docs/NEXUS_UNIFIED_AGENT_ARCHITECTURE.md` | Unified agent architecture | Current |
 | `docs/NEXUS_OPTIMIZATION_NEXTGEN_BLUEPRINT.md` | Optimization blueprint | Current |
 | `docs/HERMES_COMPARISON.md` | Hermes comparison | Historical |

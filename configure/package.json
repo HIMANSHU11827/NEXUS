@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "cd tui && npm start",
-    "api": "python -m server",
-    "ui": "npm --prefix gui run dev"
+    "start": "cd apps/tui && npm start",
+    "api": "python -m apps.api",
+    "ui": "npm --prefix apps/web run dev"
   },
   "devDependencies": {
     "jest": "^30.4.2"
