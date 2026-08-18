@@ -35,7 +35,7 @@ context_archive/
 graphify-out/
 *.lock.sqlite
 *.lock.sqlite3
-src/nexus/lifecycle/managers/skill_lifecycle_state.json
+.nexus/lifecycle/
 knowledge/store.json
 
 # Local test and agent scratch directories
