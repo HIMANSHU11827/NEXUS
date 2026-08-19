@@ -1,6 +1,7 @@
 """Regression coverage for V5 continuing after tool execution failures."""
 
 import asyncio
+import os
 
 import pytest
 
@@ -71,34 +72,43 @@ async def test_tool_timeout_becomes_observation_and_loop_finalizes_after_retry(t
     loop = NexusLoopV5(str(tmp_path), session_id="timeout-continuation")
     model_rounds = 0
     seen_attempts = []
+    # Pin retry to 1 so this test isolates the timeout->observation->model-retry
+    # contract (no inner retry conflating the timed-out attempt).
+    _prev = os.environ.get("NEXUS_TOOL_MAX_RETRIES")
+    os.environ["NEXUS_TOOL_MAX_RETRIES"] = "1"
+    try:
+        async def model(messages, **_kwargs):
+            nonlocal model_rounds
+            model_rounds += 1
+            if model_rounds == 1:
+                return _tool_call("fixture_tool", '{"attempt":"timed-out"}', "timeout")
+            if model_rounds == 2:
+                return _tool_call("fixture_tool", '{"attempt":"after-timeout"}', "after-timeout")
+            return _final_response("The timed-out check was recovered and verified.")
 
-    async def model(messages, **_kwargs):
-        nonlocal model_rounds
-        model_rounds += 1
-        if model_rounds == 1:
-            return _tool_call("fixture_tool", '{"attempt":"timed-out"}', "timeout")
-        if model_rounds == 2:
-            return _tool_call("fixture_tool", '{"attempt":"after-timeout"}', "after-timeout")
-        return _final_response("The timed-out check was recovered and verified.")
+        async def tool(call):
+            attempt = call.params["attempt"]
+            seen_attempts.append(attempt)
+            if attempt == "timed-out":
+                raise asyncio.TimeoutError("fixture tool timed out")
+            return "verified after timeout"
 
-    async def tool(call):
-        attempt = call.params["attempt"]
-        seen_attempts.append(attempt)
-        if attempt == "timed-out":
-            raise asyncio.TimeoutError("fixture tool timed out")
-        return "verified after timeout"
+        loop._safe_model_call_raw = model
+        loop._get_direct_tool_schemas = lambda **_kwargs: []
+        loop._run_tool = tool
 
-    loop._safe_model_call_raw = model
-    loop._get_direct_tool_schemas = lambda **_kwargs: []
-    loop._run_tool = tool
+        result = await loop._run_direct_model_tool_loop("finish the timed check", max_rounds=3)
 
-    result = await loop._run_direct_model_tool_loop("finish the timed check", max_rounds=3)
-
-    assert result["success"] is True
-    assert result["response"] == "The timed-out check was recovered and verified."
-    assert seen_attempts == ["timed-out", "after-timeout"]
-    assert result["actions"][0]["error"].startswith("Error: fixture tool timed out")
-    assert result["actions"][0]["repaired"] is True
+        assert result["success"] is True
+        assert result["response"] == "The timed-out check was recovered and verified."
+        assert seen_attempts == ["timed-out", "after-timeout"]
+        assert result["actions"][0]["error"].startswith("Error: fixture tool timed out")
+        assert result["actions"][0]["repaired"] is True
+    finally:
+        if _prev is None:
+            os.environ.pop("NEXUS_TOOL_MAX_RETRIES", None)
+        else:
+            os.environ["NEXUS_TOOL_MAX_RETRIES"] = _prev
     assert result["actions"][1]["success"] is True
 
 

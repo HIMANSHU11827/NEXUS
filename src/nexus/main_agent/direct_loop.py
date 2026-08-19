@@ -26,6 +26,36 @@ MAX_TOOL_RESULT_CHARS = 50_000
 TOOL_RESULT_PREVIEW_CHARS = 2_000
 RECENT_MESSAGES_LIMIT = 12
 
+# ── Explicit capability intent → registered tool mapping ────────────────────
+# When the user explicitly names a capability (e.g. "use web search", "search
+# the web", "latest news"), the loop must EXECUTE that capability rather than
+# accept a prose narration. These patterns map natural-language intent to a
+# concrete registered tool name plus an argument builder, so the loop can force
+# or synthesize the tool call deterministically. Matching is by substring/word
+# only; the tool is only used if it is actually present in the live schema.
+CAPABILITY_INTENT_PATTERNS: List[Tuple[str, "re.Pattern[str]", str]] = [
+    # (tool_name, compiled_pattern, arg_key)
+    ("web_search", re.compile(
+        r"\b(?:use|run|call|invoke|do|perform|with|via|using)\s+(?:the\s+)?"
+        r"web[ _-]?search\b|\bweb[ _-]?search\b|\bsearch\s+(?:the\s+)?web\b|"
+        r"\b(?:latest|today'?s|current|recent|breaking|world)\s+news\b|"
+        r"\bnews\s+(?:about|on|regarding|headlines?)\b|\bsearch\s+for\s+news\b|"
+        r"\bgoogle\s+(?:it|that|for)\b|\bbrowse\s+(?:the\s+)?web\b|"
+        r"\blook\s+(?:it|that)\s+up\s+(?:online|on\s+the\s+web)\b",
+        re.IGNORECASE,
+    ), "query"),
+    ("web_fetch", re.compile(
+        r"\b(?:fetch|open|get|read|visit|load)\s+(?:the\s+)?(?:url|link|page|website)\b|"
+        r"\bopen\s+this\s+(?:url|link)\b|\bfetch\s+url\b",
+        re.IGNORECASE,
+    ), "url"),
+    ("code_search", re.compile(
+        r"\b(?:search|grep|find)\s+(?:the\s+)?(?:code|codebase|repo(?:sitory)?|source)\b|"
+        r"\bcode[ _-]?search\b|\bgrep\s+the\s+(?:code|repo)\b",
+        re.IGNORECASE,
+    ), "query"),
+]
+
 # Legacy hardcoded system prompt — the exact text the direct loop used before
 # the live prompt engine. Kept as the soft-degrade fallback so a prompt-engine
 # failure never changes the loop's behavior.
@@ -665,6 +695,39 @@ class V5DirectModelToolLoop:
             r"|\bask[_ -]?question\b",
             text,
         ))
+
+    @staticmethod
+    def _capability_args(tool_name: str, arg_key: str, task_desc: str) -> Dict[str, Any]:
+        """Build the argument dict for a synthesized capability call.
+
+        The argument is derived from the original request so the tool runs on
+        the user's actual intent (e.g. web_search gets the user's query, not a
+        generic placeholder). Falls back to the raw task when no cleaner signal
+        can be extracted.
+        """
+        task = re.sub(r"\s+", " ", str(task_desc or "")).strip()
+        if arg_key == "url":
+            m = re.search(r"https?://[^\s)'\"\]>]+", task)
+            return {"url": m.group(0) if m else task}
+        return {arg_key: task}
+
+    def _explicit_capability_request(self, task_desc: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Detect an explicit capability request and map it to a tool call.
+
+        Returns ``(tool_name, args)`` when the user clearly asked for a concrete
+        registered capability (web search, web fetch, code search, ...), else
+        ``None``. This is the deterministic intent gate that guarantees a named
+        capability is actually executed instead of narrated -- the model may
+        still call it on its own via ``tool_choice="auto"``; when it does not,
+        the loop forces or synthesizes the call.
+        """
+        text = re.sub(r"\s+", " ", str(task_desc or "")).strip()
+        if not text:
+            return None
+        for tool_name, pattern, arg_key in CAPABILITY_INTENT_PATTERNS:
+            if pattern.search(text):
+                return (tool_name, self._capability_args(tool_name, arg_key, task_desc))
+        return None
 
     def _get_direct_tool_schemas(self, top_k: int | None = None, *, query: str = "",
                                  provider: str | None = None) -> List[Dict[str, Any]]:
@@ -1580,10 +1643,25 @@ class V5DirectModelToolLoop:
                     and self._explicit_question_request(task_desc)
                     and "ask_question" in available_names
                 )
-                model_kwargs["tool_choice"] = (
-                    {"type": "function", "function": {"name": "ask_question"}}
-                    if force_question else "auto"
-                )
+                # Explicit capability intent (e.g. "use web search") must be
+                # executed, not narrated. Force the matching tool on round 0 so
+                # the provider is required to emit that tool call. Falls back to
+                # the question-tool force, then to auto.
+                capability = None
+                if round_index == 0:
+                    cap = self._explicit_capability_request(task_desc)
+                    if cap is not None and cap[0] in available_names:
+                        capability = cap
+                if capability is not None:
+                    model_kwargs["tool_choice"] = {
+                        "type": "function",
+                        "function": {"name": capability[0]},
+                    }
+                else:
+                    model_kwargs["tool_choice"] = (
+                        {"type": "function", "function": {"name": "ask_question"}}
+                        if force_question else "auto"
+                    )
             request_messages = self._bounded_model_messages(messages, provider)
             # A cloud provider may reject the prompt as too long once the
             # transcript grows. Compact-and-retry exactly once before treating
@@ -1599,6 +1677,30 @@ class V5DirectModelToolLoop:
             else:
                 self._record_model_usage(raw)
             text, calls = self._model_turn_parts(raw)
+            # ── Capability execution enforcement ───────────────────────────────
+            # The user explicitly requested a capability (e.g. "use web search")
+            # but the model returned no tool call -- either it narrated, or the
+            # provider silently dropped the tool. Do NOT accept the prose as the
+            # answer. Synthesize the requested tool call and execute it through
+            # the shared ``_run_tool`` pipeline so the real result is produced
+            # and fed back for a truthful final answer. This is the hard
+            # guarantee behind "execute the capability, don't just describe it".
+            if (
+                not calls
+                and schemas
+                and not finalization_round
+                and capability is not None
+                and capability[0] in available_names
+            ):
+                from .tools import _TextToolCall
+                synthesized = _TextToolCall(capability[0], dict(capability[1] or {}))
+                await self._emit_tool_event(synthesized, status="running")
+                if getattr(self, "logger", None) is not None:
+                    self.logger.info(
+                        "Capability enforcement: synthesizing tool call %s for request",
+                        capability[0],
+                    )
+                calls = [synthesized]
             # Some OpenAI-compatible gateways accept the first tool catalogue
             # but reject a later request after tool results expand the
             # transcript. Recover with a deterministic transport cap; this is
@@ -1811,38 +1913,63 @@ class V5DirectModelToolLoop:
                 plan_link = self._plan_link_for_call(call, actions)
                 self._transition_plan_step(plan_link, "running")
                 await self._emit_tool_progress(call, "started")
+                # Resolve the run-control deadline once for this call.
+                _registry = getattr(self, "_run_controls", None)
+                _current = str(getattr(self, "_current_turn_id", "") or "")
+                _control = _registry.get(_current) if _registry is not None and _current else None
+                remaining = getattr(_control, "remaining", None) if _control is not None else None
+                # Retry a retryable tool failure directly (up to the configured
+                # limit) before recording it as failed. This implements the
+                # "if a capability fails, retry it, then fall back" contract
+                # without waiting for the model to re-issue the call. A hard
+                # "tool unavailable" error is not retried (it would never
+                # succeed); only transient/retryable failures are retried.
+                tool_max_retries = max(0, int(os.environ.get("NEXUS_TOOL_MAX_RETRIES", "2")))
+                _ran_ok = False
+                _last_exc = None
+                content = ""
                 try:
-                    registry = getattr(self, "_run_controls", None)
-                    current = str(getattr(self, "_current_turn_id", "") or "")
-                    control = registry.get(current) if registry is not None and current else None
-                    remaining = getattr(control, "remaining", None) if control is not None else None
-                    # Consume a pre-computed parallel read result when present;
-                    # otherwise run the tool here in a child task (a tool may
-                    # cancel its own operation without cancelling the parent
-                    # NEXUS loop; parent cancellation still propagates).
-                    if parallel_batch is not None and call_id in parallel_batch:
-                        _ok, content = parallel_batch[call_id]
-                        if not _ok:
-                            raise RuntimeError(content)  # normal error handling below
+                    for _attempt in range(1, tool_max_retries + 1):
+                        try:
+                            if parallel_batch is not None and call_id in parallel_batch:
+                                _ok, _c = parallel_batch[call_id]
+                                if not _ok:
+                                    raise RuntimeError(_c)  # normal error handling below
+                            else:
+                                tool_task = asyncio.ensure_future(self._run_tool(call))
+                                if remaining is not None:
+                                    content = redact_secrets(
+                                        await asyncio.wait_for(tool_task, timeout=max(0.001, remaining))
+                                    )
+                                else:
+                                    content = redact_secrets(await tool_task)
+                            _ran_ok = True
+                            break
+                        except (asyncio.CancelledError, Exception) as _exc:  # noqa: PERF203
+                            if isinstance(_exc, asyncio.CancelledError) and self._is_run_level_cancellation():
+                                raise
+                            _last_exc = _exc
+                            if _attempt < tool_max_retries:
+                                await self._emit_tool_event(
+                                    call, status="retry",
+                                    error=f"attempt {_attempt} failed: {redact_secrets(_exc)[:200]}",
+                                )
+                    if _ran_ok:
+                        self._mark_repaired_actions(actions, call.name, round_index)
+                        action = {"tool": call.name, "name": call.name, "params": dict(call.params or {}),
+                                  "call_id": call_id, "output": content, "success": True,
+                                  "status": "completed", "model_round": round_index,
+                                  "exit_code": getattr(self, "_last_tool_exit_code", None),
+                                  **plan_link}
+                        self._transition_plan_step(
+                            plan_link, "succeeded",
+                            evidence={"tool": call.name, "call_id": call_id,
+                                      "output": str(content or "")[:2000]},
+                        )
                     else:
-                        tool_task = asyncio.ensure_future(self._run_tool(call))
-                        if remaining is not None:
-                            content = redact_secrets(
-                                await asyncio.wait_for(tool_task, timeout=max(0.001, remaining))
-                            )
-                        else:
-                            content = redact_secrets(await tool_task)
-                    self._mark_repaired_actions(actions, call.name, round_index)
-                    action = {"tool": call.name, "name": call.name, "params": dict(call.params or {}),
-                              "call_id": call_id, "output": content, "success": True,
-                              "status": "completed", "model_round": round_index,
-                              "exit_code": getattr(self, "_last_tool_exit_code", None),
-                              **plan_link}
-                    self._transition_plan_step(
-                        plan_link, "succeeded",
-                        evidence={"tool": call.name, "call_id": call_id,
-                                  "output": str(content or "")[:2000]},
-                    )
+                        # Fall through to the existing failure handling below.
+                        _exc = _last_exc if _last_exc is not None else RuntimeError("tool failed")
+                        raise _exc
                 except (asyncio.CancelledError, Exception) as exc:
                     if isinstance(exc, asyncio.CancelledError):
                         if self._is_run_level_cancellation():

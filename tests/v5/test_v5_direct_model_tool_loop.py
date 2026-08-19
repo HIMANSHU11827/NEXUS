@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import time
 
 import nexus.main_agent.direct_loop as direct_loop_module
@@ -333,33 +334,42 @@ def test_direct_loop_recovers_from_tool_owned_cancelled_error(tmp_path):
     loop = NexusLoopV5(str(tmp_path), session_id="tool-owned-cancel-test")
     rounds = 0
     calls = 0
+    # Pin retry to 1 so this test isolates the tool-owned-cancel recovery path
+    # (no inner retry inflating the call count).
+    _prev = os.environ.get("NEXUS_TOOL_MAX_RETRIES")
+    os.environ["NEXUS_TOOL_MAX_RETRIES"] = "1"
+    try:
+        async def model(_messages, **_kwargs):
+            nonlocal rounds
+            rounds += 1
+            if rounds == 1:
+                return _native("fixture_tool", '{"attempt": 1}', "cancelled-call")
+            if rounds == 2:
+                return _native("fixture_tool", '{"attempt": 2}', "retry-call")
+            return {"choices": [{"message": {"content": "The retry completed successfully."}}]}
 
-    async def model(_messages, **_kwargs):
-        nonlocal rounds
-        rounds += 1
-        if rounds == 1:
-            return _native("fixture_tool", '{"attempt": 1}', "cancelled-call")
-        if rounds == 2:
-            return _native("fixture_tool", '{"attempt": 2}', "retry-call")
-        return {"choices": [{"message": {"content": "The retry completed successfully."}}]}
+        async def tool(call):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise asyncio.CancelledError("tool-local cancellation")
+            return "verified retry output"
 
-    async def tool(call):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise asyncio.CancelledError("tool-local cancellation")
-        return "verified retry output"
+        loop._safe_model_call_raw = model
+        loop._get_direct_tool_schemas = lambda **_kwargs: []
+        loop._run_tool = tool
 
-    loop._safe_model_call_raw = model
-    loop._get_direct_tool_schemas = lambda **_kwargs: []
-    loop._run_tool = tool
+        result = asyncio.run(loop._run_direct_model_tool_loop("recover from the tool error"))
 
-    result = asyncio.run(loop._run_direct_model_tool_loop("recover from the tool error"))
-
-    assert result["success"] is True
-    assert result["calls_executed"] == 2
-    assert calls == 2
-    assert result["response"] == "The retry completed successfully."
+        assert result["success"] is True
+        assert result["calls_executed"] == 2
+        assert calls == 2
+        assert result["response"] == "The retry completed successfully."
+    finally:
+        if _prev is None:
+            os.environ.pop("NEXUS_TOOL_MAX_RETRIES", None)
+        else:
+            os.environ["NEXUS_TOOL_MAX_RETRIES"] = _prev
 
 
 def test_direct_loop_allows_repair_after_last_tool_round(tmp_path):
@@ -396,36 +406,48 @@ def test_same_model_response_cannot_repair_an_unobserved_failure(tmp_path):
     loop = NexusLoopV5(str(tmp_path), session_id="same-response-repair-test")
     rounds = 0
     executed = []
+    # Pin retry to 1 so this test isolates the model-driven repair path (no
+    # inner retry conflating the two distinct tool calls in one response).
+    _prev = os.environ.get("NEXUS_TOOL_MAX_RETRIES")
+    os.environ["NEXUS_TOOL_MAX_RETRIES"] = "1"
+    try:
+        async def model(messages, **kwargs):
+            nonlocal rounds
+            rounds += 1
+            if rounds == 1:
+                return {"choices": [{"message": {
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "bad", "type": "function", "function": {"name": "terminal", "arguments": '{"command":"bad"}'}},
+                        {"id": "good", "type": "function", "function": {"name": "terminal", "arguments": '{"command":"good"}'}},
+                    ],
+                }}]}
+            return {"choices": [{"message": {"content": "The run is complete."}}]}
 
-    async def model(messages, **kwargs):
-        nonlocal rounds
-        rounds += 1
-        if rounds == 1:
-            return {"choices": [{"message": {
-                "content": None,
-                "tool_calls": [
-                    {"id": "bad", "type": "function", "function": {"name": "terminal", "arguments": '{"command":"bad"}'}},
-                    {"id": "good", "type": "function", "function": {"name": "terminal", "arguments": '{"command":"good"}'}},
-                ],
-            }}]}
-        return {"choices": [{"message": {"content": "The run is complete."}}]}
+        async def tool(call):
+            executed.append(call.params.get("command"))
+            if call.params.get("command") == "bad":
+                raise RuntimeError("command failed")
+            return "good output"
 
-    async def tool(call):
-        executed.append(call.params.get("command"))
-        if call.params.get("command") == "bad":
-            raise RuntimeError("command failed")
-        return "good output"
+        loop._safe_model_call_raw = model
+        loop._get_direct_tool_schemas = lambda **kwargs: []
+        loop._run_tool = tool
 
-    loop._safe_model_call_raw = model
-    loop._get_direct_tool_schemas = lambda **kwargs: []
-    loop._run_tool = tool
+        result = asyncio.run(loop._run_direct_model_tool_loop("run both", max_rounds=3))
 
-    result = asyncio.run(loop._run_direct_model_tool_loop("run both", max_rounds=3))
-
-    assert result["success"] is False
-    assert result["verification"]["failed_actions"] == 1
-    assert result["actions"][0].get("repaired") is not True
-    assert executed == ["bad"]
+        assert result["success"] is False
+        # A failed command in a batch causes the remainder of that batch to be
+        # skipped (fail-fast), so only the failing tool actually executes.
+        assert executed == ["bad"]
+        assert len(result["actions"]) == 2
+        assert result["actions"][0].get("success") is False
+        assert "Skipped" in (result["actions"][1].get("error") or "")
+    finally:
+        if _prev is None:
+            os.environ.pop("NEXUS_TOOL_MAX_RETRIES", None)
+        else:
+            os.environ["NEXUS_TOOL_MAX_RETRIES"] = _prev
 
 
 def test_text_tool_calls_get_unique_ids_across_a_batch(tmp_path):
@@ -506,25 +528,34 @@ def test_provider_error_retries_with_clean_current_turn_transcript(tmp_path):
 def test_direct_loop_bounds_repeated_non_unavailable_failures(tmp_path):
     loop = NexusLoopV5(str(tmp_path), session_id="repair-budget-test")
     calls = 0
+    # This test asserts the model-driven repair budget (no inner retry), so pin
+    # the retry count to 1 to isolate the repair-path accounting.
+    _prev_retries = os.environ.get("NEXUS_TOOL_MAX_RETRIES")
+    os.environ["NEXUS_TOOL_MAX_RETRIES"] = "1"
+    try:
+        async def model(messages, **kwargs):
+            return _native("terminal", {"command": "always-bad"}, f"call-{len(messages)}")
 
-    async def model(messages, **kwargs):
-        return _native("terminal", {"command": "always-bad"}, f"call-{len(messages)}")
+        async def tool(call):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("compiler failed")
 
-    async def tool(call):
-        nonlocal calls
-        calls += 1
-        raise RuntimeError("compiler failed")
+        loop._safe_model_call_raw = model
+        loop._get_direct_tool_schemas = lambda **kwargs: []
+        loop._run_tool = tool
 
-    loop._safe_model_call_raw = model
-    loop._get_direct_tool_schemas = lambda **kwargs: []
-    loop._run_tool = tool
+        result = asyncio.run(loop._run_direct_model_tool_loop("keep trying", max_rounds=8))
 
-    result = asyncio.run(loop._run_direct_model_tool_loop("keep trying", max_rounds=8))
-
-    assert result["success"] is False
-    assert calls == loop.repair_attempt_budget
-    assert result["error"] == "repair attempts exhausted"
-    assert result["verification"]["failed_actions"] == loop.repair_attempt_budget
+        assert result["success"] is False
+        assert calls == loop.repair_attempt_budget
+        assert result["error"] == "repair attempts exhausted"
+        assert result["verification"]["failed_actions"] == loop.repair_attempt_budget
+    finally:
+        if _prev_retries is None:
+            os.environ.pop("NEXUS_TOOL_MAX_RETRIES", None)
+        else:
+            os.environ["NEXUS_TOOL_MAX_RETRIES"] = _prev_retries
 
 
 def test_direct_loop_redacts_secret_from_failed_tool_observation(tmp_path):
