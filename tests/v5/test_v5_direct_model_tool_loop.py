@@ -1433,6 +1433,105 @@ def test_chaos_repeated_identical_success_triggers_stagnation(tmp_path):
     assert "made no progress" in (result.get("error") or "")
 
 
+def test_stagnation_warns_the_model_before_stopping(tmp_path):
+    """OpenClaw warning tier: one call before the stop the model receives a
+    model-visible LOOP WARNING instead of an abrupt end, then the stop."""
+    loop = NexusLoopV5(str(tmp_path), session_id="stagnation-warn")
+    n = {"i": 0}
+
+    async def model(messages, **kwargs):
+        n["i"] += 1
+        return _native("stuck_tool", '{"q": "same"}', f"call-{n['i']}")
+
+    async def tool(call):
+        return "identical result"
+
+    loop._safe_model_call_raw = model
+    loop._get_tool_schemas = lambda **kwargs: [
+        {"type": "function", "function": {"name": "stuck_tool"}}
+    ]
+    loop._run_tool = tool
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("do the stuck thing"))
+
+    assert result["success"] is False
+    assert result["error"] == "repeated identical tool call made no progress"
+    warnings = [
+        m.get("content") for m in result["messages"]
+        if m.get("role") == "system" and "LOOP WARNING" in str(m.get("content") or "")
+    ]
+    assert warnings, "model must receive a loop warning before the stop"
+
+
+def test_outcome_aware_detection_ignores_output_variance(tmp_path):
+    """Outcome-aware identity: the same (tool, params) call whose OUTPUT
+    changes between executions (progress percentages, timestamps) is real
+    progress even when the exit code is stable — never falsely stopped."""
+    loop = NexusLoopV5(str(tmp_path), session_id="outcome-variance")
+    loop._last_tool_exit_code = 0
+    n = {"i": 0}
+
+    async def model(messages, **kwargs):
+        n["i"] += 1
+        if n["i"] <= 5:
+            return _native("watch_job", '{"job": "build"}', f"watch-{n['i']}")
+        return {"choices": [{"message": {"content": "The job finished."}}]}
+
+    async def tool(call):
+        return f"progress {n['i'] * 13}%"
+
+    loop._safe_model_call_raw = model
+    loop._get_tool_schemas = lambda **kwargs: [
+        {"type": "function", "function": {"name": "watch_job"}}
+    ]
+    loop._run_tool = tool
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("watch until done"))
+
+    assert result["success"] is True
+    assert "stagnation" not in result
+    assert result["calls_executed"] == 5
+
+
+def test_pingpong_loop_is_detected_and_stopped(tmp_path):
+    """OpenClaw ping-pong semantics: a run alternating between two distinct
+    calls whose outcomes are stable on BOTH sides is a stuck loop. The model
+    is warned first, then the run stops with a truthful ping-pong envelope."""
+    loop = NexusLoopV5(str(tmp_path), session_id="pingpong-test")
+    loop.repeat_call_budget = 100
+    n = {"i": 0}
+
+    async def model(messages, **kwargs):
+        n["i"] += 1
+        if n["i"] % 2 == 1:
+            return _native("ping_tool", '{"x": 1}', f"ping-{n['i']}")
+        return _native("pong_tool", '{"y": 2}', f"pong-{n['i']}")
+
+    async def tool(call):
+        if call.name == "ping_tool":
+            return "pong"
+        return "ping"
+
+    loop._safe_model_call_raw = model
+    loop._get_tool_schemas = lambda **kwargs: [
+        {"type": "function", "function": {"name": "ping_tool"}},
+        {"type": "function", "function": {"name": "pong_tool"}},
+    ]
+    loop._run_tool = tool
+
+    result = asyncio.run(loop._run_direct_model_tool_loop("alternate forever"))
+
+    assert result["success"] is False
+    assert result["error"] == "alternating calls made no progress"
+    assert result["loop"]["kind"] == "ping_pong"
+    assert result["loop"]["alternations"] == loop.pingpong_stop_streak
+    warnings = [
+        m.get("content") for m in result["messages"]
+        if m.get("role") == "system" and "ping-pong" in str(m.get("content") or "").lower()
+    ]
+    assert warnings, "model must receive a ping-pong warning before the stop"
+
+
 def test_direct_actions_are_linked_to_durable_plan_steps(tmp_path):
     loop = NexusLoopV5(str(tmp_path), session_id="plan-link-test")
     plan = create_plan_version(

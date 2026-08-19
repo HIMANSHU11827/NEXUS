@@ -197,17 +197,17 @@ claims of parity with coding agents are credible.
 
 ## Prioritized Nexus backlog
 
-| Priority | Capability | Why it matters | Proposed acceptance evidence |
-|---|---|---|---|
-| P0 | Mission acceptance verifier | Prevents a “successful” queue task from falsely ending a large goal | A verifier rejection replans the milestone; only verified evidence marks it done |
-| P0 | Unified durable run projection | Prevents V5, queue, and Hive from disagreeing about progress | Restart/replay test shows identical goal/step/attempt state across surfaces |
-| P0 | Mission heartbeat/stuck recovery | Prevents a live lease from hiding a permanently stalled milestone | Artificially age heartbeat; watchdog requeues exactly once and records why |
-| P1 | Background task status/partial-result contract | Makes parallel work inspectable and resumable | Parent receives running/failed/partial/done state without treating partial as success |
-| P1 | Side-effect reconciliation adapters | Makes retries safe for external APIs/files | Duplicate attempt reconciles existing effect instead of repeating it |
-| P1 | Backpressure and event retention policy | Prevents long runs from exhausting memory or SSE clients | Slow consumer receives bounded loss/replay gap, while durable state remains intact |
-| P1 | Trajectory/eval artifact | Makes progress measurable against other agents | Same task set produces JSON trajectories and success/evidence/recovery metrics |
-| P2 | Declarative agent profiles | Makes roles, tools, skills, model, and policy reproducible | Profile loads deterministically and is persisted with the run |
-| P2 | Distributed worker protocol | Allows scaling beyond one process/host | Two workers can claim, heartbeat, resume, and fence attempts without duplication |
+| Priority | Capability | Why it matters | Status | Acceptance evidence |
+|---|---|---|---|---|
+| P0 | Mission acceptance verifier | Prevents a “successful” queue task from falsely ending a large goal | **IMPLEMENTED + WIRED** (`reliability/acceptance.py` → `queues/driver.py::_verify_goal_acceptance`) | `tests/test_reliability/test_acceptance.py` + `tests/test_queue_driver.py::test_goal_acceptance_*` — on task success the linked goal is verified; unmet criteria → `BLOCKED_NON_RECOVERABLE`, satisfied → `GOAL_COMPLETED`. **Hardened**: whole-word evidence match; blank criteria never auto-pass; watchdog skips `BLOCKED_NON_RECOVERABLE` goals (resumable, not stalled) |
+| P0 | Unified durable run projection | Prevents V5, queue, and Hive from disagreeing about progress | **IMPLEMENTED** (`reliability/run_projection.py`) | `tests/test_reliability/test_run_projection.py` — reconcile() picks terminal/most-progressed, surfaces disagreements; `RunProjectionStore` keys by `(run_id, surface)` so concurrent heartbeats don't clobber, `load_reconciled` merges them. **Hardened**: reconcile() refuses to merge distinct goal/run identities |
+| P0 | Mission heartbeat/stuck recovery | Prevents a live lease from hiding a permanently stalled milestone | **IMPLEMENTED + WIRED** (`reliability/mission_watchdog.py` into `queues/driver.py::_maybe_reap`) | `tests/test_reliability/test_mission_watchdog.py` + `tests/test_queue_driver.py::test_maybe_reap_requeues_stalled_goal_through_wired_store` — watchdog requeues stuck step **exactly once** (durable ledger), durably persists via wired GoalStore, records why; runs every `REAP_INTERVAL`. **Hardened**: store-write failure no longer false-reports; cross-process file lock prevents double-recovery; `>=` boundary; per-step `last_progress_at`; skips `BLOCKED_NON_RECOVERABLE` |
+| P1 | Background task status/partial-result contract | Makes parallel work inspectable and resumable | Open | Parent receives running/failed/partial/done state without treating partial as success |
+| P1 | Side-effect reconciliation adapters | Makes retries safe for external APIs/files | **IMPLEMENTED + WIRED + VERIFIED** (`reliability/side_effect.py` over `hive.effects.HiveEffectLedger`, invoked from `queues/driver.py::_update_cron_run`) | `tests/test_reliability/test_side_effect.py` + `tests/test_queue_driver.py::test_side_effect_guard_reconciles_retry_with_same_key` (retried task with same `idempotency_key` reconciles prior effect = REPLAY) + `::test_driver_side_effect_guard_reconciles_cron_run_write` (guard actually invoked on the driver's cron-run write; duplicate same-status update called once). Results JSON-encoded so type (dict/None) survives replay. |
+| P1 | Backpressure and event retention policy | Prevents long runs from exhausting memory or SSE clients | Open | Slow consumer receives bounded loss/replay gap, while durable state remains intact |
+| P1 | Trajectory/eval artifact | Makes progress measurable against other agents | Open | Same task set produces JSON trajectories and success/evidence/recovery metrics |
+| P2 | Declarative agent profiles | Makes roles, tools, skills, model, and policy reproducible | Open | Profile loads deterministically and is persisted with the run |
+| P2 | Distributed worker protocol | Allows scaling beyond one process/host | Open | Two workers can claim, heartbeat, resume, and fence attempts without duplication |
 
 ## Evidence sources
 

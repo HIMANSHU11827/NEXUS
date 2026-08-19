@@ -6766,37 +6766,39 @@ def list_commands():
 async def run_command(request: Request):
     """Execute a slash command — shared across TUI, GUI, and gateways.
 
+    Routes through the unified CommandBus (same bus as TUI, Gateway, CLI).
+
     Request body:
         {"command": "/status", "args": ["/status"]}
 
     Returns CommandResult with formatted output for Rich rendering.
     """
-    from nexus.commands import get_registry, CommandContext
+    from nexus.command_system.bridge import patched_get_bus
+    from nexus.command_system.core.command import CommandRequest as BusRequest, CommandContext as BusContext
 
     data = await request.json()
     raw = str(data.get("command", "")).strip()
     args_raw = data.get("args", raw)
-
-    registry = get_registry()
-    cmd = registry.get(raw)
-    if not cmd:
-        raise HTTPException(status_code=404, detail=f"Unknown command: {raw}")
 
     from nexus.common.session_bus import get_active_session_id
     requested_session = str(data.get("session_id") or "").strip()
     session_id = safe_session_id(requested_session) if requested_session else get_active_session_id(
         _PROJECT_ROOT, str(_RUNTIME_SETTINGS.get("session_id") or "default")
     )
-    ctx = CommandContext(
-        session_id=session_id,
-        mode=_RUNTIME_SETTINGS.get("mode", "auto"),
-        provider=_RUNTIME_SETTINGS.get("provider", ""),
-        model=_RUNTIME_SETTINGS.get("model", ""),
-        thinking=_RUNTIME_SETTINGS.get("thinking", True),
-        extra={
+
+    bus = patched_get_bus()
+    bus_request = BusRequest(
+        command=raw,
+        args=[args_raw] if args_raw else [],
+        options={
             "args": args_raw,
             "command": raw,
             "root": str(_PROJECT_ROOT),
+            "session_id": session_id,
+            "mode": _RUNTIME_SETTINGS.get("mode", "auto"),
+            "provider": _RUNTIME_SETTINGS.get("provider", ""),
+            "model": _RUNTIME_SETTINGS.get("model", ""),
+            "thinking": _RUNTIME_SETTINGS.get("thinking", True),
             "runtime_settings": _RUNTIME_SETTINGS,
             "persist_runtime": _save_runtime_preferences,
             "apply_runtime": apply_runtime_to_all_loops,
@@ -6807,15 +6809,26 @@ async def run_command(request: Request):
             "sync_permission_mode": _command_sync_permission_mode,
             "sync_sandbox_tier": _command_sync_sandbox_tier,
         },
+        context=BusContext(
+            source="api",
+            session_id=session_id,
+        ),
     )
-    result = await cmd.execute(ctx)
+
+    try:
+        result = await bus.execute(bus_request)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    # Extract legacy-compatible response fields from bus result
+    data_out = result.data if isinstance(result.data, dict) else {}
     return {
-        "status": "success" if result.success else "error",
-        "output": result.output,
-        "formatted": result.formatted,
-        "content_type": result.content_type,
-        "data": result.data,
-        "error": result.error if not result.success else "",
+        "status": "success" if result.is_success() else "error",
+        "output": data_out.get("output", result.message or ""),
+        "formatted": data_out.get("formatted", result.message or ""),
+        "content_type": data_out.get("content_type"),
+        "data": data_out.get("data"),
+        "error": result.error or "",
     }
 
 

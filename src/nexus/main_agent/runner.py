@@ -17,7 +17,7 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
-from nexus.commands import CommandContext, get_registry
+from nexus.command_system.bridge import patched_get_bus
 
 console = Console()
 _verbose = os.environ.get("NEXUS_V5_VERBOSE", "").lower() in ("1", "true", "yes")
@@ -103,15 +103,16 @@ def _make_sink(verbose: bool):
     return fn
 
 
-def _show_help(registry):
-    for cat in registry.categories():
-        cmds = registry.list(cat)
-        t = Table(title=f"[bold]{cat.upper()}[/bold]", box=box.ROUNDED, border_style="cyan")
-        t.add_column("Command", style="bold green"); t.add_column("Description", style="dim")
-        for c in cmds:
-            a = f" ({', '.join(c.aliases)})" if c.aliases else ""
-            t.add_row(f"/{c.name}{a}", c.description)
-        console.print(t)
+def _show_help(bus):
+    """Show available commands from the unified CommandBus."""
+    commands = bus.dispatcher.commands
+    t = Table(title="[bold]COMMANDS[/bold]", box=box.ROUNDED, border_style="cyan")
+    t.add_column("Command", style="bold green"); t.add_column("Description", style="dim")
+    for name in commands:
+        handler = bus.dispatcher.get(name)
+        desc = handler.description if handler else ""
+        t.add_row(f"/{name}", desc)
+    console.print(t)
     console.print("[dim]/verbose — toggle detail | Anything else → V5 engine[/dim]")
 
 
@@ -142,11 +143,11 @@ async def run_v5_repl(root_dir: str):
     except Exception as e:
         console.print(f"[red]Init: {e}[/red]"); return
     loop.set_work_event_sink(_make_sink(_verbose))
-    reg = get_registry()
+    bus = patched_get_bus()
     k_ok = getattr(loop, "kernel", None) is not None
     console.print(f"[{'green' if k_ok else 'yellow'}]Kernel: {'connected' if k_ok else 'standalone'}[/]  "
                   f"Session: [bold]{loop.session_id}[/bold]  "
-                  f"Commands: [bold]{len(reg.list())}[/bold]  "
+                  f"Commands: [bold]{len(bus.dispatcher.commands)}[/bold]  "
                   f"Verbose: [bold]{'ON' if _verbose else 'OFF'}[/bold]")
     console.print(SEP)
     while True:
@@ -159,20 +160,28 @@ async def run_v5_repl(root_dir: str):
         if ui.startswith("/"):
             parts = ui.split(maxsplit=1); cn = parts[0].lstrip("/").lower()
             if cn in ("quit", "exit"): console.print("[dim]Bye.[/dim]"); break
-            if cn == "help": _show_help(reg); continue
+            if cn == "help": _show_help(bus); continue
             if cn == "verbose":
                 _verbose = not _verbose
                 loop.set_work_event_sink(_make_sink(_verbose))
                 console.print(f"Verbose: [bold]{'ON' if _verbose else 'OFF'}[/bold]")
                 continue
-            cmd = reg.get(cn)
-            if cmd:
-                ctx = CommandContext(session_id=loop.session_id, loop=loop,
-                    extra={"args": parts[1] if len(parts) > 1 else ""})
+            if bus.dispatcher.has(cn):
+                from nexus.command_system.core.command import CommandRequest, CommandContext
+                bus_request = CommandRequest(
+                    command=cn,
+                    args=[parts[1]] if len(parts) > 1 else [],
+                    options={"args": parts[1] if len(parts) > 1 else "", "loop": loop},
+                    context=CommandContext(
+                        source="tui",
+                        session_id=loop.session_id,
+                    ),
+                )
                 try:
-                    r = await cmd.execute(ctx)
-                    if r.formatted: console.print(r.formatted)
-                    elif r.output: console.print(r.output)
+                    r = await bus.execute(bus_request)
+                    data = r.data if isinstance(r.data, dict) else {}
+                    output = data.get("formatted") or data.get("output") or r.message or ""
+                    if output: console.print(output)
                     if r.error: console.print(f"[red]{r.error}[/red]")
                 except Exception as e:
                     console.print(f"[red]Error: {e}[/red]")

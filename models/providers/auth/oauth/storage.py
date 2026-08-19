@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 
+from models.providers.auth.oauth.expiry import OAUTH_REFRESH_SKEW_MS
 from models.providers.auth.oauth.types import OAuthCredentials
 
 OAUTH_STORE_DIR = Path(os.path.expanduser("~")) / ".nexus" / "auth"
@@ -169,7 +170,7 @@ async def get_oauth_api_key(
     if credentials is None:
         return None
 
-    if time.time() * 1000 >= credentials.expires:
+    if time.time() * 1000 + OAUTH_REFRESH_SKEW_MS >= credentials.expires:
         provider = get_oauth_provider(provider_id)
         if provider is not None:
             try:
@@ -177,7 +178,7 @@ async def get_oauth_api_key(
                     # Another waiter may have completed the refresh while it
                     # was queued. Re-read and avoid issuing a second token.
                     current = store.get(provider_id)
-                    if current is not None and time.time() * 1000 < current.expires:
+                    if current is not None and time.time() * 1000 + OAUTH_REFRESH_SKEW_MS < current.expires:
                         credentials = current
                     else:
                         credentials = await provider.refresh_token(current or credentials)

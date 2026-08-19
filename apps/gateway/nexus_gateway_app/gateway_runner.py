@@ -1,16 +1,10 @@
-"""Gateway command adapter.
+"""Unified gateway command runner — routes all messages through the CommandBus.
 
-Wraps the engine's ``GatewayRunner`` and, when the central command bus is
-initialised AND a matching command is registered, routes inbound gateway
-messages through it (``nexus.commands``), preserving the mandate's "one
-central command system" rule (spec section 12 / 33).
-
-If the bus is unavailable or no gateway command is registered, the engine's
-existing Nexus-loop pipeline is used unchanged — behaviour is never regressed
-and no non-existent command is invented.
+This is the single authoritative gateway adapter.  Every inbound message
+(API, TUI, Web, Telegram, Discord, Slack, WhatsApp) is routed through the
+same CommandBus with middleware, alias resolution, timeout enforcement, and
+lifecycle events.
 """
-
-from __future__ import annotations
 
 import logging
 from typing import Any, Optional
@@ -18,43 +12,51 @@ from typing import Any, Optional
 logger = logging.getLogger("NEXUS-GATEWAY-RUNNER")
 
 
-def _command_registry():
-    """Return the central command registry if Nexus has initialised one."""
-    try:
-        from nexus.commands import get_registry
-
-        return get_registry()
-    except Exception:
-        return None
-
-
 class CommandBusGatewayRunner:
-    """Adapter that feeds gateway messages to the central command bus."""
+    """Adapter that feeds gateway messages to the unified CommandBus."""
 
     def __init__(self, engine_runner=None, command_name: str = "gateway.message"):
         self._engine_runner = engine_runner
         self._command_name = command_name
-        self._registry = _command_registry()
 
     @property
     def uses_command_bus(self) -> bool:
-        return self._registry is not None and self._registry.get(self._command_name) is not None
+        try:
+            from nexus.command_system.bridge import patched_get_bus
+            bus = patched_get_bus()
+            return bus.dispatcher.has(self._command_name)
+        except Exception:
+            return False
 
     async def handle_message(self, event) -> Any:
-        """Route an inbound message event to the command bus or the engine."""
+        """Route an inbound message event through the unified CommandBus.
+
+        Falls back to the engine runner if the command is not registered.
+        """
+        # Only route through bus if the command is registered
         if self.uses_command_bus:
             try:
-                from nexus.commands import CommandContext
+                from nexus.command_system.bridge import patched_get_bus
+                from nexus.command_system.core.command import CommandRequest, CommandContext
 
-                ctx = CommandContext(
-                    session_id=getattr(event, "chat_id", "default"),
-                    extra={
+                bus = patched_get_bus()
+                request = CommandRequest(
+                    command=self._command_name,
+                    args=[getattr(event, "text", "")],
+                    options={
                         "platform": getattr(event, "platform", None),
                         "text": getattr(event, "text", ""),
+                        "chat_id": getattr(event, "chat_id", "default"),
+                        "sender_id": getattr(event, "sender_id", None),
                     },
+                    context=CommandContext(
+                        source=getattr(event, "platform", "gateway"),
+                        session_id=getattr(event, "chat_id", "default"),
+                        user_id=getattr(event, "sender_id", None),
+                    ),
                 )
-                return await self._registry.execute(self._command_name, ctx)
-            except Exception as exc:  # fall back rather than drop the message
+                return await bus.execute(request)
+            except Exception as exc:
                 logger.warning("Command-bus routing failed, using engine pipeline: %s", exc)
 
         if self._engine_runner is not None:

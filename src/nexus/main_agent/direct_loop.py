@@ -127,6 +127,13 @@ class V5DirectModelToolLoop:
     # budgets and the identical-call detector cannot. Anti-stuck valve, not
     # a task-size limit. Override via NEXUS_FAILURE_STREAK_LIMIT.
     failure_streak_limit = _env_int("NEXUS_FAILURE_STREAK_LIMIT", 5)
+    # Ping-pong loop detector (OpenClaw semantics): a run alternating between
+    # two distinct (tool, params) signatures whose outcomes are stable on
+    # BOTH sides is not making progress. Warn the model once at
+    # ``pingpong_warning_streak`` alternating calls, stop at
+    # ``pingpong_stop_streak``. Anti-stuck valve, not a task-size limit.
+    pingpong_warning_streak = _env_int("NEXUS_PINGPONG_WARNING", 6)
+    pingpong_stop_streak = _env_int("NEXUS_PINGPONG_LIMIT", 10)
 
     def _is_run_level_cancellation(self) -> bool:
         """Return whether cancellation belongs to the active NEXUS run.
@@ -179,6 +186,135 @@ class V5DirectModelToolLoop:
             "were spent. Change the approach, the arguments, or the tool to continue."
         )
         return f"{message}\n\n{detail}".strip()
+
+    @staticmethod
+    def _repeat_outcome_hash(action: Dict[str, Any]) -> str:
+        """Normalized identity of one tool OUTCOME, not its raw transcript text.
+
+        Mirrors OpenClaw's outcome-aware no-progress hashing: identical
+        (tool, params) calls count as non-progress only when their *outcome
+        facts* match. Structured facts (exit code, failure signature) are
+        preferred over the result text so trivial output variance (a changing
+        timestamp, a progress percentage) does not mask a real loop, while a
+        byte-identical transcript alone never proves progress.
+        """
+        try:
+            if not action.get("success"):
+                signature = str(action.get("failure_signature") or "").strip()
+                return f"error:{signature[:64]}" if signature else "error"
+            head = str(action.get("output") or "")[:4000]
+            digest = hashlib.sha256(head.encode("utf-8", errors="replace")).hexdigest()[:16]
+            exit_code = action.get("exit_code")
+            if exit_code is not None:
+                try:
+                    exit_code = int(exit_code)
+                except (TypeError, ValueError):
+                    pass
+                return f"ok:exit={exit_code}:{digest}"
+            return f"ok:{digest}"
+        except Exception:
+            return "ok"
+
+    @staticmethod
+    def _pingpong_signal(history: List[Tuple[str, str]]) -> Optional[Tuple[str, str, int]]:
+        """Detect an alternating two-signature call pattern with stable
+        outcomes on BOTH sides (OpenClaw ping-pong semantics).
+
+        ``history`` is a list of (signature, outcome_hash) executed-call
+        pairs. Returns ``(signature_a, signature_b, alternating_count)``
+        when the recent tail alternates A,B,A,B,... with each side's outcome
+        unchanged, or None. A legitimately advancing A/B workflow changes at
+        least one side's outcome, which breaks the pattern immediately.
+        """
+        if not isinstance(history, list) or len(history) < 6:
+            return None
+        tail = history[-16:]
+        signature_a, outcome_a = tail[0]
+        signature_b, outcome_b = tail[1]
+        if signature_a == signature_b:
+            return None
+        alternating = 0
+        for index, (signature, outcome) in enumerate(tail):
+            if index % 2 == 0:
+                if signature != signature_a or outcome != outcome_a:
+                    break
+            elif signature != signature_b or outcome != outcome_b:
+                break
+            alternating += 1
+        if alternating < 6:
+            return None
+        return signature_a, signature_b, alternating
+
+    @staticmethod
+    def _pingpong_response(signature_a: str, signature_b: str, count: int) -> str:
+        tool_a = str(signature_a).split(":", 1)[0] or "tool"
+        tool_b = str(signature_b).split(":", 1)[0] or "tool"
+        return (
+            f"I stopped because the run alternated between `{tool_a}` and "
+            f"`{tool_b}` calls {count} times with identical outcomes on both "
+            "sides — a ping-pong loop that never advances the task. Change the "
+            "strategy, the arguments, or ask for guidance; no further provider "
+            "requests were spent."
+        )
+
+    def _repeat_warning_message(self, name: str, count: int) -> str:
+        return (
+            f"LOOP WARNING: `{name}` has now executed {count} times with "
+            "identical arguments and the SAME outcome. This looks like a "
+            "non-progressing loop: if the next identical call returns the same "
+            "outcome again, the run will stop. Change the arguments, the tool, "
+            "or the approach now."
+        )
+
+    def _pingpong_warning_message(self, tool_a: str, tool_b: str, count: int) -> str:
+        return (
+            f"LOOP WARNING: the run is alternating between `{tool_a}` and "
+            f"`{tool_b}` calls ({count} consecutive alternations) with stable "
+            "outcomes on both sides. This looks like a ping-pong loop: change "
+            "the strategy now, or the run will stop."
+        )
+
+    async def _skip_remaining_batch_calls(
+        self, calls: List[Any], start_slot: int, round_index: int, reason: str,
+        actions: List[Dict[str, Any]], batch_outcomes: List[Dict[str, Any]],
+        messages: List[Dict[str, Any]],
+    ) -> int:
+        """Record explicit skipped results for every call after ``start_slot``.
+
+        OpenAI-compatible providers require one tool result per assistant
+        tool call in a batch, so a mid-batch stop must still persist a valid
+        envelope. Returns the number of skipped calls recorded.
+        """
+        persist_direct = getattr(self, "_persist_direct_message", None)
+        persist_direct_async = getattr(self, "_persist_direct_message_async", None)
+        skipped = 0
+        for skipped_slot, skipped_call in enumerate(calls[start_slot + 1:], start=start_slot + 1):
+            skipped_id = str(
+                getattr(skipped_call, "call_id", "") or f"call_v5_r{round_index}_n{skipped_slot}"
+            )
+            skipped_action = {
+                "tool": skipped_call.name, "name": skipped_call.name,
+                "params": dict(skipped_call.params or {}), "call_id": skipped_id,
+                "output": "", "error": reason, "success": False,
+                "status": "skipped", "model_round": round_index,
+            }
+            actions.append(skipped_action)
+            batch_outcomes.append(skipped_action)
+            messages.append({
+                "role": "tool", "name": skipped_call.name,
+                "tool_call_id": skipped_id, "content": reason,
+            })
+            self._stamp_recent_messages(messages)
+            if callable(persist_direct):
+                if callable(persist_direct_async):
+                    await persist_direct_async(
+                        messages[-1],
+                        str(getattr(self, "_current_turn_id", "") or ""),
+                    )
+                else:
+                    persist_direct(messages[-1], str(getattr(self, "_current_turn_id", "") or ""))
+            skipped += 1
+        return skipped
 
     async def _direct_loop_state(self, state_name: str) -> None:
         """Publish loop phases without adding a second planner or router."""
@@ -1029,6 +1165,19 @@ class V5DirectModelToolLoop:
             try:
                 compacted = self._compact_oldest_half(request_messages)
                 if isinstance(compacted, list) and compacted != request_messages:
+                    # A compaction is a stall symptom, not progress: record it
+                    # so the loop's stall watchdog can stop a compaction loop
+                    # (repeated compact-and-retry without verified progress)
+                    # instead of burning provider requests forever.
+                    record_compaction = getattr(self, "_progress_record", None)
+                    if callable(record_compaction):
+                        try:
+                            record_compaction(
+                                "compaction", signature="prompt_too_long_retry",
+                                status="compacted",
+                            )
+                        except Exception:
+                            pass
                     retried = await self._safe_model_call_raw(compacted, **model_kwargs)
                     retried_text, _retried_calls = self._model_turn_parts(retried)
                     if not self._is_prompt_too_long_error(retried_text):
@@ -1111,12 +1260,23 @@ class V5DirectModelToolLoop:
                 requires_tooling = requires_planning
         system = _live_system_prompt(
             str(getattr(self, "root_dir", "") or "") or os.getcwd(),
-            role="ARCHITECT",
             intent="task" if requires_planning else "chat",
             complexity="complex" if requires_planning else "simple",
             needs_tools=requires_planning,
         )
         system = await self._append_project_context(system)
+        # Aider-style repo map: inject symbol-level code overview for the planner
+        if requires_planning:
+            try:
+                from .repo_map import build_repo_map_async, inject_repo_map
+                repo_map = await build_repo_map_async(
+                    str(getattr(self, "root_dir", "") or "") or os.getcwd(),
+                    max_chars=6000,
+                )
+                if repo_map:
+                    system = inject_repo_map(system, repo_map)
+            except Exception:
+                pass  # repo map is best-effort; never blocks the loop
         provider_id = str(provider or "").strip().lower().replace("-", "_")
         context_limit = 2500 if provider_id in {"lm_studio", "lmstudio", "ollama", "local"} else 6000
         if context_summary:
@@ -1200,6 +1360,15 @@ class V5DirectModelToolLoop:
         # Closed loop-detection state: how many times each identical
         # (tool, params) signature has actually been executed this turn.
         repeat_counts: Dict[str, int] = {}
+        # Outcome-aware non-progress tracking: (outcome_hash, consecutive
+        # stable streak) per (tool, params) signature. The streak resets when
+        # the outcome changes, so a genuinely advancing poll is never stopped.
+        repeat_outcomes: Dict[str, Tuple[str, int]] = {}
+        repeat_warned: set = set()
+        # Executed-call history (signature, outcome_hash) for ping-pong
+        # detection; only this run's calls, never a previous turn's.
+        executed_signatures: List[Tuple[str, str]] = []
+        pingpong_warned = False
         repair_attempts_by_signature: Dict[str, int] = {}
         # Consecutive rounds in which every executed action failed. Reset by
         # any verified success; bounded by ``failure_streak_limit``.
@@ -1457,6 +1626,15 @@ class V5DirectModelToolLoop:
                             recovery_messages, **retry_kwargs
                         )
                         self._record_model_usage(recovered)
+                        record_compaction = getattr(self, "_progress_record", None)
+                        if callable(record_compaction):
+                            try:
+                                record_compaction(
+                                    "compaction", signature="provider_recovery",
+                                    status="compacted",
+                                )
+                            except Exception:
+                                pass
                         recovered_text, recovered_calls = self._model_turn_parts(recovered)
                         if recovered_calls or not self._is_provider_error_text(recovered_text):
                             raw, text, calls = recovered, recovered_text, recovered_calls
@@ -1760,55 +1938,45 @@ class V5DirectModelToolLoop:
                         persist_direct(tool_message, str(getattr(self, "_current_turn_id", "") or ""))
                 calls_executed += 1
                 await self._direct_loop_state("OBSERVING")
-                # CLOSED LOOP DETECTION: an identical (tool, params) call that
-                # has now run `repeat_call_budget` times is not making progress.
-                # Stop here instead of spending more provider requests on it.
-                # Failed actions are governed by the repair budget below;
-                # this detector owns the harder case of a call that keeps
-                # *succeeding* with the same result while nothing advances.
-                # Identity includes the OBSERVATION, not just the request:
-                # a legitimate poll/wait-until-ready workflow repeats the same
-                # call but sees the result change, and must not be stopped.
-                # Only a call whose result is also unchanged is stagnation.
-                repeat_key = self._call_signature(
-                    call.name, {"params": call.params, "observation": content}
-                )
+                # CLOSED LOOP DETECTION: an identical (tool, params) call whose
+                # OUTCOME is also unchanged `repeat_call_budget` times is not
+                # making progress. Stop here instead of spending more provider
+                # requests on it. Failed actions are governed by the repair
+                # budget below; this detector owns the harder case of a call
+                # that keeps *succeeding* with the same result while nothing
+                # advances.
+                # Identity is outcome-aware (OpenClaw semantics): a legitimate
+                # poll/wait-until-ready workflow repeats the same call but sees
+                # the result change, and must not be stopped. Only a call whose
+                # normalized outcome is also unchanged is stagnation. A warning
+                # tier fires one call before the stop so the model gets a
+                # chance to change strategy without losing the turn.
+                repeat_key = self._call_signature(call.name, {"params": call.params})
                 repeat_counts[repeat_key] = repeat_counts.get(repeat_key, 0) + 1
                 repeat_seen = repeat_counts[repeat_key]
-                if action["success"] and repeat_seen >= max(2, int(self.repeat_call_budget)):
+                outcome_key = self._repeat_outcome_hash(action)
+                last_outcome, stable_streak = repeat_outcomes.get(repeat_key, ("", 0))
+                stable_streak = (
+                    stable_streak + 1
+                    if outcome_key and outcome_key == last_outcome else 1
+                )
+                repeat_outcomes[repeat_key] = (outcome_key, stable_streak)
+                executed_signatures.append((repeat_key, outcome_key))
+                if action["success"] and stable_streak >= max(2, int(self.repeat_call_budget)):
                     stagnation_response = self._stagnation_response(
-                        str(call.name), repeat_seen, actions
+                        str(call.name), stable_streak, actions
                     )
                     # The provider requires one tool result for every tool
                     # call in the assistant batch. Record explicit skipped
                     # results for the remainder so the persisted transcript
                     # stays a valid envelope for the next request/resume.
-                    for skipped_slot, skipped in enumerate(calls[call_slot + 1:], start=call_slot + 1):
-                        skipped_id = str(getattr(skipped, "call_id", "") or f"call_v5_r{round_index}_n{skipped_slot}")
-                        skipped_content = (
-                            "Skipped: the turn stopped because an earlier call in "
-                            "this batch repeated without making progress."
-                        )
-                        skipped_action = {
-                            "tool": skipped.name, "name": skipped.name,
-                            "params": dict(skipped.params or {}), "call_id": skipped_id,
-                            "output": "", "error": skipped_content, "success": False,
-                            "status": "skipped", "model_round": round_index,
-                        }
-                        actions.append(skipped_action)
-                        batch_outcomes.append(skipped_action)
-                        messages.append({"role": "tool", "name": skipped.name,
-                                         "tool_call_id": skipped_id, "content": skipped_content})
-                        self._stamp_recent_messages(messages)
-                        if callable(persist_direct):
-                            if callable(persist_direct_async):
-                                await persist_direct_async(
-                                    messages[-1],
-                                    str(getattr(self, "_current_turn_id", "") or ""),
-                                )
-                            else:
-                                persist_direct(messages[-1], str(getattr(self, "_current_turn_id", "") or ""))
-                        calls_executed += 1
+                    _skipped_count = await self._skip_remaining_batch_calls(
+                        calls, call_slot, round_index,
+                        "Skipped: the turn stopped because an earlier call in "
+                        "this batch repeated without making progress.",
+                        actions, batch_outcomes, messages,
+                    )
+                    calls_executed += _skipped_count
                     await self._emit_tool_batch_progress(batch_outcomes)
                     return {
                         "success": False, "response": stagnation_response,
@@ -1819,11 +1987,73 @@ class V5DirectModelToolLoop:
                             "repeated identical tool call made no progress",
                         ),
                         "stagnation": {
-                            "tool": str(call.name), "repeats": repeat_seen,
+                            "tool": str(call.name), "repeats": stable_streak,
                             "signature": repeat_key[:200],
                         },
                         "error": "repeated identical tool call made no progress",
                     }
+                if (
+                    action["success"]
+                    and stable_streak >= max(2, int(self.repeat_call_budget) - 1)
+                    and repeat_key not in repeat_warned
+                ):
+                    repeat_warned.add(repeat_key)
+                    messages.append({
+                        "role": "system",
+                        "content": self._repeat_warning_message(
+                            str(call.name), stable_streak
+                        ),
+                    })
+                    self._stamp_recent_messages(messages)
+                pingpong = self._pingpong_signal(executed_signatures)
+                if pingpong is not None:
+                    signature_a, signature_b, alternating = pingpong
+                    if (
+                        action["success"]
+                        and alternating >= self.pingpong_stop_streak
+                    ):
+                        pingpong_response = self._pingpong_response(
+                            signature_a, signature_b, alternating
+                        )
+                        _skipped_count = await self._skip_remaining_batch_calls(
+                            calls, call_slot, round_index,
+                            "Skipped: the turn stopped because the run entered "
+                            "a ping-pong loop.",
+                            actions, batch_outcomes, messages,
+                        )
+                        calls_executed += _skipped_count
+                        await self._emit_tool_batch_progress(batch_outcomes)
+                        return {
+                            "success": False, "response": pingpong_response,
+                            "actions": actions, "tool_rounds": round_index + 1,
+                            "calls_executed": calls_executed, "messages": messages,
+                            "verification": self._verification_payload(
+                                actions, calls_executed, pingpong_response,
+                                "alternating calls made no progress",
+                            ),
+                            "loop": {
+                                "kind": "ping_pong",
+                                "signature_a": signature_a[:200],
+                                "signature_b": signature_b[:200],
+                                "alternations": alternating,
+                            },
+                            "error": "alternating calls made no progress",
+                        }
+                    if (
+                        action["success"]
+                        and alternating >= self.pingpong_warning_streak
+                        and not pingpong_warned
+                    ):
+                        pingpong_warned = True
+                        messages.append({
+                            "role": "system",
+                            "content": self._pingpong_warning_message(
+                                str(signature_a).split(":", 1)[0] or "tool",
+                                str(signature_b).split(":", 1)[0] or "tool",
+                                alternating,
+                            ),
+                        })
+                        self._stamp_recent_messages(messages)
                 if not action["success"]:
                     failure_signature = str(action.get("failure_signature") or "unknown")
                     repair_attempts = repair_attempts_by_signature.get(failure_signature, 0) + 1
@@ -1944,29 +2174,12 @@ class V5DirectModelToolLoop:
                     # call in an assistant batch.  We still stop side effects
                     # after the first failure, but record explicit skipped
                     # results so the next request is a valid transcript.
-                    for skipped_slot, skipped in enumerate(calls[call_slot + 1:], start=call_slot + 1):
-                        skipped_id = str(getattr(skipped, "call_id", "") or f"call_v5_r{round_index}_n{skipped_slot}")
-                        skipped_content = "Skipped because an earlier tool call in this batch failed."
-                        skipped_action = {
-                            "tool": skipped.name, "name": skipped.name,
-                            "params": dict(skipped.params or {}), "call_id": skipped_id,
-                            "output": "", "error": skipped_content, "success": False,
-                            "status": "skipped", "model_round": round_index,
-                        }
-                        actions.append(skipped_action)
-                        batch_outcomes.append(skipped_action)
-                        messages.append({"role": "tool", "name": skipped.name,
-                                         "tool_call_id": skipped_id, "content": skipped_content})
-                        self._stamp_recent_messages(messages)
-                        if callable(persist_direct):
-                            if callable(persist_direct_async):
-                                await persist_direct_async(
-                                    messages[-1],
-                                    str(getattr(self, "_current_turn_id", "") or ""),
-                                )
-                            else:
-                                persist_direct(messages[-1], str(getattr(self, "_current_turn_id", "") or ""))
-                        calls_executed += 1
+                    _skipped_count = await self._skip_remaining_batch_calls(
+                        calls, call_slot, round_index,
+                        "Skipped because an earlier tool call in this batch failed.",
+                        actions, batch_outcomes, messages,
+                    )
+                    calls_executed += _skipped_count
                     break
             await self._emit_tool_batch_progress(batch_outcomes)
             self._last_run_had_tool_execution = True

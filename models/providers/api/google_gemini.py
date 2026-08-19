@@ -23,7 +23,16 @@ class GoogleGeminiProvider(NexusBaseProvider):
         # Model baked into the default endpoint at construction; a per-call
         # ``model`` kwarg must override it, so keep the raw default around.
         self._default_model = model
-        self.headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
+        # An OAuth credential (JSON {"token": ..., "projectId": ...}) authenticates
+        # via Authorization: Bearer; a raw key uses the x-goog-api-key header.
+        try:
+            parsed = json.loads(self.api_key) if self.api_key else None
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict) and isinstance(parsed.get("token"), str) and parsed["token"]:
+            self.headers = {"Content-Type": "application/json", "Authorization": f"Bearer {parsed['token']}"}
+        else:
+            self.headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
 
     def _request_model(self, kwargs: dict) -> str:
         """Resolve the per-call model, honoring a runtime override."""

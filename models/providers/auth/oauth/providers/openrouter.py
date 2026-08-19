@@ -10,13 +10,38 @@ from models.providers.auth.oauth.types import OAuthAuthInfo, OAuthCredentials
 
 logger = logging.getLogger("nexus.oauth.openrouter")
 
-CLIENT_ID = "openrouter"
-AUTHORIZE_URL = "https://openrouter.ai/api/v1/oauth/authorize"
-TOKEN_URL = "https://openrouter.ai/api/v1/oauth/token"
+AUTHORIZE_URL = "https://openrouter.ai/auth"
+TOKEN_URL = "https://openrouter.ai/api/v1/auth/keys"
+CALLBACK_HOST = "localhost"
 CALLBACK_PORT = 3000
-CALLBACK_PATH = "/callback"
-REDIRECT_URI = f"http://127.0.0.1:{CALLBACK_PORT}{CALLBACK_PATH}"
-SCOPES = "openai"
+CALLBACK_PATH = "/openrouter-oauth/callback"
+REDIRECT_URI = f"http://{CALLBACK_HOST}:{CALLBACK_PORT}{CALLBACK_PATH}"
+# OpenRouter OAuth issues an API key, not a rotating bearer token. The key has
+# no expiry; this horizon only prevents pointless "refresh" attempts.
+KEY_LIFETIME_MS = 10 * 365 * 24 * 3600 * 1000
+
+
+def _build_authorize_url(challenge: str, state: str) -> str:
+    from urllib.parse import quote
+    callback_url = f"{REDIRECT_URI}?state={state}"
+    return (
+        f"{AUTHORIZE_URL}?callback_url={quote(callback_url, safe='')}"
+        f"&code_challenge={quote(challenge, safe='')}"
+        f"&code_challenge_method=S256"
+    )
+
+
+def _parse_credentials(data: dict) -> OAuthCredentials:
+    key = data.get("key")
+    if not isinstance(key, str) or not key:
+        raise RuntimeError("OpenRouter OAuth key exchange returned no API key")
+    user_id = data.get("user_id") or data.get("userId")
+    return OAuthCredentials(
+        access=key,
+        refresh="",
+        expires=time.time() * 1000 + KEY_LIFETIME_MS,
+        account_id=user_id,
+    )
 
 
 async def login_openrouter(
@@ -30,19 +55,7 @@ async def login_openrouter(
 
     verifier, challenge = generate_pkce()
     expected_state = generate_oauth_state()
-
-    auth_params = {
-        "client_id": CLIENT_ID,
-        "response_type": "code",
-        "redirect_uri": REDIRECT_URI,
-        "scope": SCOPES,
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-        "state": expected_state,
-    }
-
-    from urllib.parse import urlencode
-    url = f"{AUTHORIZE_URL}?{urlencode(auth_params)}"
+    url = _build_authorize_url(challenge, expected_state)
 
     on_auth(OAuthAuthInfo(url=url, instructions="Complete login in your browser."))
 
@@ -54,69 +67,45 @@ async def login_openrouter(
             callback_path=CALLBACK_PATH,
         )
         code = result.code
-    except Exception:
-        logger.warning("providers/oauth/providers/openrouter.py: suppressed error in login_openrouter", exc_info=True)
-        pass
+    except Exception as exc:
+        logger.warning("openrouter.py: callback server unavailable: %s", exc)
 
     if not code and on_manual_code_input:
         manual = await on_manual_code_input()
         if manual:
             parsed = parse_oauth_authorization_input(manual)
+            if parsed.state and parsed.state != expected_state:
+                raise RuntimeError("OpenRouter OAuth state mismatch. Please retry login.")
             code = parsed.code
 
     if not code:
-        input_text = await on_prompt("Paste the authorization code or full redirect URL:")
+        input_text = await on_prompt("Paste the OpenRouter redirect URL:")
         parsed = parse_oauth_authorization_input(input_text)
+        if parsed.state and parsed.state != expected_state:
+            raise RuntimeError("OpenRouter OAuth state mismatch. Please retry login.")
         code = parsed.code
 
     if not code:
-        raise RuntimeError("Missing authorization code")
+        raise RuntimeError("Missing OpenRouter OAuth code")
 
-    on_progress("Exchanging authorization code for tokens...")
+    on_progress("Exchanging OpenRouter OAuth code...")
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             TOKEN_URL,
-            data={
-                "grant_type": "authorization_code",
-                "client_id": CLIENT_ID,
+            json={
                 "code": code,
-                "redirect_uri": REDIRECT_URI,
                 "code_verifier": verifier,
+                "code_challenge_method": "S256",
             },
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
         resp.raise_for_status()
         data = resp.json()
 
-    access_token = data.get("access_token")
-    refresh_token = data.get("refresh_token", "")
-    expires_in = data.get("expires_in", 3600)
-
-    return OAuthCredentials(
-        access=access_token,
-        refresh=refresh_token,
-        expires=time.time() * 1000 + float(expires_in) * 1000,
-    )
+    return _parse_credentials(data)
 
 
-def refresh_openrouter_token(refresh_token: str) -> OAuthCredentials:
-    """Refresh the OAuth token using the refresh token."""
-    import httpx
-
-    response = httpx.post(
-        TOKEN_URL,
-        data={
-            "grant_type": "refresh_token",
-            "client_id": CLIENT_ID,
-            "refresh_token": refresh_token,
-        },
-    )
-    response.raise_for_status()
-    data = response.json()
-
-    return OAuthCredentials(
-        access=data.get("access_token"),
-        refresh=data.get("refresh_token", refresh_token),
-        expires=time.time() * 1000 + float(data.get("expires_in", 3600)) * 1000,
-    )
-
+def refresh_openrouter_token(credentials: OAuthCredentials) -> OAuthCredentials:
+    """OpenRouter OAuth keys do not rotate; re-run login to issue a new key."""
+    raise RuntimeError("OpenRouter OAuth keys do not rotate. Run `nexus auth login openrouter` to issue a new key.")

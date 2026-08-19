@@ -1,7 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+package = true
+
 [project]
 name = "nexus-ai"
 version = "2.1.0"
 description = "NEXUS AI - The Operating System of Intelligence"
+requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.9",
     "beautifulsoup4>=4.12",

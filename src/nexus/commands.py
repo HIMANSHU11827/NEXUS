@@ -11,6 +11,8 @@ import inspect
 import json
 import logging
 import os
+import platform
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -230,7 +232,8 @@ async def _cmd_stop(ctx: CommandContext) -> CommandResult:
 async def _cmd_retry(ctx: CommandContext) -> CommandResult:
     """Client-owned retry; the client preserves the exact original prompt."""
     return CommandResult(
-        output="Retry requires an interactive client with conversation history.",
+        output="Retry: resends the last user prompt\nRequires: active session with conversation history",
+        formatted="[yellow]Retry:[/yellow] resends the last user prompt",
         data={"client_action": "retry"},
     )
 
@@ -323,8 +326,16 @@ async def _cmd_run(ctx: CommandContext) -> CommandResult:
 
 
 async def _cmd_gui(ctx: CommandContext) -> CommandResult:
+    """Launch the NEXUS GUI or show GUI status."""
     if not ctx.shell:
-        return CommandResult(output="GUI requires a shell context", success=False)
+        # Show GUI status instead of failing
+        root = _nexus_root(ctx)
+        web_dir = os.path.join(root, "apps", "web")
+        has_web = os.path.isdir(web_dir)
+        return CommandResult(
+            output=f"GUI: {'available' if has_web else 'not installed'}\nWeb app: {web_dir if has_web else 'not found'}",
+            formatted=f"[bold]GUI[/bold] {'[green]available[/green]' if has_web else '[dim]not installed[/dim]'}",
+        )
     import os as _os
     import subprocess as _sp
     script_path = _os.path.join(ctx.shell.brain.root, "scripts", "run-gui.ps1")
@@ -531,33 +542,40 @@ async def _cmd_mode_shortcut(ctx: CommandContext, mode: str) -> CommandResult:
 
 
 async def _cmd_config(ctx: CommandContext) -> CommandResult:
+    """Show configuration from runtime context, config file, or defaults."""
     if ctx.shell:
         ctx.shell._show_config()
     runtime = _runtime(ctx)
     if runtime is not None:
         keys = ("mode", "sandbox_tier", "provider", "model", "profile", "thinking", "effort")
         return CommandResult(output=json.dumps({key: runtime.get(key) for key in keys}, indent=2, sort_keys=True))
-    return CommandResult(output="No runtime configuration context is attached.", success=False)
+    # Fallback: read from nexus.config.json
+    root = _nexus_root(ctx)
+    config_path = os.path.join(root, "nexus.config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path) as f:
+                cfg = json.load(f)
+            return CommandResult(
+                output=json.dumps(cfg, indent=2, sort_keys=True),
+                formatted=f"[bold]Config[/bold]\n{json.dumps(cfg, indent=2)}",
+                data=cfg,
+            )
+        except Exception:
+            pass
+    # Fallback: show defaults
+    defaults = {"mode": "auto", "provider": "not set", "model": "not set", "thinking": True, "effort": "medium"}
+    return CommandResult(
+        output=json.dumps(defaults, indent=2, sort_keys=True),
+        formatted=f"[bold]Config (defaults)[/bold]\n{json.dumps(defaults, indent=2)}",
+        data=defaults,
+    )
 
 
 async def _cmd_provider(ctx: CommandContext) -> CommandResult:
-    parts = ctx.extra.get("args", "")
-    parts = parts.split() if isinstance(parts, str) else list(parts or [])
-    raw = " ".join(parts[1:]).strip() if len(parts) > 1 else ""
-    if not raw or raw.lower() in {"status", "show", "current"}:
-        return CommandResult(output=f"Provider: {ctx.provider}", data={"provider": ctx.provider})
-    if raw.lower() in {"clear", "reset", "off", "auto"}:
-        provider = ""
-    else:
-        provider = raw.lower().replace(" ", "_")
-    runtime = _runtime(ctx)
-    if runtime is not None:
-        runtime["provider"] = provider
-        await _apply_runtime(ctx)
-        await _persist_runtime(ctx)
-    if ctx.shell:
-        ctx.shell.provider = provider
-    return CommandResult(output=f"Provider: {provider or 'auto'}", data={"provider": provider})
+    """Comprehensive provider management: local, API, and auth providers."""
+    from nexus.commands_provider import provider_command
+    return await provider_command(ctx)
 
 
 async def _cmd_sandbox(ctx: CommandContext) -> CommandResult:
@@ -737,15 +755,73 @@ async def _cmd_tasks(ctx: CommandContext) -> CommandResult:
 
 
 async def _cmd_skills(ctx: CommandContext) -> CommandResult:
+    """List installed skills from the skill engine."""
+    try:
+        from extensions.skills.engine import NexusSkillMaster
+        master = NexusSkillMaster()
+        skills = master.list_skills() if hasattr(master, 'list_skills') else []
+        if skills:
+            lines = [f"  {s.get('name', '?'):<30} {s.get('description', '')[:50]}" for s in skills]
+            return CommandResult(
+                output=f"Skills ({len(skills)}):\n" + "\n".join(lines),
+                formatted=f"[bold]Skills ({len(skills)})[/bold]\n" + "\n".join(
+                    f"  [magenta]{s.get('name', '?')}[/magenta] [dim]{s.get('description', '')[:50]}[/dim]"
+                    for s in skills
+                ),
+                data={"skills": skills},
+            )
+    except Exception:
+        pass
+    # Fallback: scan SKILL.md files
+    import glob
+    skill_files = glob.glob("extensions/skills/*/SKILL.md")
+    if skill_files:
+        names = [os.path.basename(os.path.dirname(f)) for f in skill_files]
+        lines = [f"  {n}" for n in sorted(names)]
+        return CommandResult(
+            output=f"Skills ({len(names)}):\n" + "\n".join(lines),
+            formatted=f"[bold]Skills ({len(names)})[/bold]\n" + "\n".join(
+                f"  [magenta]{n}[/magenta]" for n in sorted(names)
+            ),
+        )
     if ctx.shell:
         ctx.shell._show_skills()
-    return CommandResult()
+    return CommandResult(output="No skills found", formatted="[dim]No skills installed[/dim]")
 
 
 async def _cmd_tools(ctx: CommandContext) -> CommandResult:
+    """List registered tools from the tool registry."""
+    try:
+        from extensions.tools.registry import ToolRegistry
+        registry = ToolRegistry()
+        tools = registry.list_tools() if hasattr(registry, 'list_tools') else []
+        if tools:
+            lines = [f"  {t.get('name', '?'):<30} {t.get('description', '')[:50]}" for t in tools[:50]]
+            return CommandResult(
+                output=f"Tools ({len(tools)}):\n" + "\n".join(lines),
+                formatted=f"[bold]Tools ({len(tools)})[/bold]\n" + "\n".join(
+                    f"  [green]{t.get('name', '?')}[/green] [dim]{t.get('description', '')[:50]}[/dim]"
+                    for t in tools[:50]
+                ),
+                data={"tools": tools},
+            )
+    except Exception:
+        pass
+    # Fallback: scan built-in tool directories
+    tools_dir = "extensions/tools/built_in"
+    if os.path.isdir(tools_dir):
+        tool_names = sorted([d for d in os.listdir(tools_dir) if os.path.isdir(os.path.join(tools_dir, d))])
+        if tool_names:
+            lines = [f"  {n}" for n in tool_names]
+            return CommandResult(
+                output=f"Tools ({len(tool_names)}):\n" + "\n".join(lines),
+                formatted=f"[bold]Tools ({len(tool_names)})[/bold]\n" + "\n".join(
+                    f"  [green]{n}[/green]" for n in tool_names
+                ),
+            )
     if ctx.shell:
         ctx.shell._show_tools()
-    return CommandResult()
+    return CommandResult(output="No tools found", formatted="[dim]No tools registered[/dim]")
 
 
 async def _cmd_agents(ctx: CommandContext) -> CommandResult:
@@ -787,6 +863,7 @@ async def _cmd_agents(ctx: CommandContext) -> CommandResult:
 
 
 async def _cmd_memory(ctx: CommandContext) -> CommandResult:
+    """Show memory and session info from filesystem or shell context."""
     if ctx.shell:
         h = len(ctx.shell.conversation_history)
         s = ctx.shell.session_id
@@ -794,43 +871,178 @@ async def _cmd_memory(ctx: CommandContext) -> CommandResult:
             output=f"History: {h} messages, Session: {s}",
             formatted=f"[cyan]History: {h} messages[/cyan]\n[cyan]Session: {s}[/cyan]",
         )
-    return CommandResult(output="No shell context", success=False)
+    # Fallback: scan session files
+    root = _nexus_root(ctx)
+    sessions_dir = os.path.join(root, ".nexus", "sessions")
+    total_size = 0
+    count = 0
+    if os.path.isdir(sessions_dir):
+        for d in os.listdir(sessions_dir):
+            dp = os.path.join(sessions_dir, d)
+            if os.path.isdir(dp):
+                count += 1
+                for f in os.listdir(dp):
+                    fp = os.path.join(dp, f)
+                    if os.path.isfile(fp):
+                        total_size += os.path.getsize(fp)
+    memory_path = os.path.join(root, ".nexus", "memory.json")
+    memories = 0
+    if os.path.exists(memory_path):
+        try:
+            with open(memory_path) as f:
+                memories = len(json.load(f))
+        except Exception:
+            pass
+    return CommandResult(
+        output=f"Session: {ctx.session_id}\nSessions: {count} ({total_size // 1024}KB)\nMemories: {memories}",
+        formatted=f"[bold]Memory[/bold]\n  Session: {ctx.session_id}\n  Sessions: {count} ({total_size // 1024}KB)\n  Memories: {memories}",
+        data={"session": ctx.session_id, "sessions": count, "memories": memories},
+    )
 
 
 async def _cmd_events(ctx: CommandContext) -> CommandResult:
+    """Show work events from filesystem or shell context."""
     if ctx.shell:
         ctx.shell._show_work_events()
-    return CommandResult()
+    # Fallback: scan event files
+    root = _nexus_root(ctx)
+    events_dir = os.path.join(root, ".nexus", "events")
+    if os.path.isdir(events_dir):
+        files = sorted([f for f in os.listdir(events_dir) if f.endswith(".json")])[-5:]
+        if files:
+            lines = [f"  {f}" for f in files]
+            return CommandResult(
+                output=f"Events ({len(files)} recent):\n" + "\n".join(lines),
+                formatted=f"[bold]Events[/bold]\n" + "\n".join(f"  [cyan]{f}[/cyan]" for f in files),
+            )
+    return CommandResult(output="No events recorded", formatted="[dim]No events recorded[/dim]")
 
 
 async def _cmd_system(ctx: CommandContext) -> CommandResult:
+    """Show comprehensive system overview."""
     if ctx.shell:
         ctx.shell._show_system_map()
-    return CommandResult()
+    # Fallback: real system overview
+    import platform
+    root = _nexus_root(ctx)
+    subsystems = []
+    for name, path in [("Core", "src/nexus"), ("Tools", "extensions/tools"),
+                        ("Skills", "extensions/skills"), ("Plugins", "extensions/plugins"),
+                        ("Hive", "hive"), ("Gateways", "gateways"),
+                        ("Models", "models"), ("Memory", "memory"),
+                        ("Queues", "queues"), ("Security", "security")]:
+        full = os.path.join(root, path)
+        status = "ok" if os.path.isdir(full) else "missing"
+        subsystems.append(f"  {name:<15} {status}")
+    return CommandResult(
+        output=f"System:\n  Python: {sys.version.split()[0]}\n  Platform: {platform.platform()}\n  Root: {root}\n" + "\n".join(subsystems),
+        formatted=f"[bold]System[/bold]\n  [dim]Python:[/dim] {sys.version.split()[0]}\n  [dim]Platform:[/dim] {platform.platform()}\n" + "\n".join(subsystems),
+    )
 
 
 async def _cmd_plugins(ctx: CommandContext) -> CommandResult:
+    """Show plugin registry."""
+    try:
+        from extensions.plugins.registry import PluginRegistry
+        registry = PluginRegistry()
+        plugins = registry.list_plugins() if hasattr(registry, 'list_plugins') else []
+        if plugins:
+            lines = [f"  {p.get('name', '?'):<30} {p.get('status', 'active'):<10} {p.get('description', '')[:40]}" for p in plugins]
+            return CommandResult(
+                output=f"Plugins ({len(plugins)}):\n" + "\n".join(lines),
+                formatted=f"[bold]Plugins ({len(plugins)})[/bold]\n" + "\n".join(
+                    f"  [blue]{p.get('name', '?')}[/blue] [dim]{p.get('status', 'active')}[/dim] [grey70]{p.get('description', '')[:40]}[/grey70]"
+                    for p in plugins
+                ),
+                data={"plugins": plugins},
+            )
+    except Exception:
+        pass
+    # Fallback: scan plugin directories
+    plugins_dir = "extensions/plugins"
+    if os.path.isdir(plugins_dir):
+        plugin_names = sorted([d for d in os.listdir(plugins_dir) if os.path.isdir(os.path.join(plugins_dir, d)) and not d.startswith('_')])
+        if plugin_names:
+            lines = [f"  {n}" for n in plugin_names]
+            return CommandResult(
+                output=f"Plugins ({len(plugin_names)}):\n" + "\n".join(lines),
+                formatted=f"[bold]Plugins ({len(plugin_names)})[/bold]\n" + "\n".join(
+                    f"  [blue]{n}[/blue]" for n in plugin_names
+                ),
+            )
     if ctx.shell:
         ctx.shell._show_plugins()
-    return CommandResult()
+    return CommandResult(output="No plugins found", formatted="[dim]No plugins installed[/dim]")
 
 
 async def _cmd_forge(ctx: CommandContext) -> CommandResult:
-    if ctx.shell:
-        ctx.shell._show_forge_status()
-    return CommandResult()
+    """Show forge/evolution subsystem status with real data."""
+    root = _nexus_root(ctx)
+    forge_dir = os.path.join(root, "evolution")
+    items = []
+    if os.path.isdir(forge_dir):
+        for fn in sorted(os.listdir(forge_dir)):
+            fp = os.path.join(forge_dir, fn)
+            if os.path.isfile(fp):
+                size = os.path.getsize(fp)
+                items.append(f"  {fn:<40} {size:>8} bytes")
+            elif os.path.isdir(fp):
+                count = len([f for f in os.listdir(fp) if os.path.isfile(os.path.join(fp, f))])
+                items.append(f"  {fn}/{' ':<38} {count:>6} files")
+    if not items:
+        items = ["  [dim]No evolution/forge content found[/dim]"]
+    return CommandResult(
+        output="Forge Status:\n" + "\n".join(items),
+        formatted="[bold]Forge / Evolution[/bold]\n" + "\n".join(items),
+    )
 
 
 async def _cmd_providers(ctx: CommandContext) -> CommandResult:
-    if ctx.shell:
-        ctx.shell._show_provider_dashboard()
-    return CommandResult()
+    """List all providers by category (local/api/auth)."""
+    from nexus.commands_provider import _list_all
+    return _list_all()
+
+
+async def _cmd_models(ctx: CommandContext) -> CommandResult:
+    """List and manage models per provider."""
+    from nexus.commands_models import models_command
+    return await models_command(ctx)
 
 
 async def _cmd_monitor(ctx: CommandContext) -> CommandResult:
-    if ctx.shell:
-        ctx.shell._show_agent_monitor()
-    return CommandResult()
+    """Show agent monitor dashboard with real stats."""
+    stats = {}
+    try:
+        from nexus.health import HealthMonitor
+        monitor = HealthMonitor(_nexus_root(ctx))
+        if hasattr(monitor, 'get_stats'):
+            stats = monitor.get_stats()
+    except Exception:
+        pass
+    lines = []
+    if stats:
+        for k, v in stats.items():
+            lines.append(f"  {k:<25} {v}")
+    else:
+        # Fallback: show basic info
+        import time
+        lines = [
+            f"  uptime:            {time.time():.0f}",
+            f"  pid:               {os.getpid()}",
+            f"  cwd:               {os.getcwd()}",
+            f"  platform:          {os.name}",
+        ]
+    return CommandResult(
+        output="Agent Monitor:\n" + "\n".join(lines),
+        formatted="[bold]Agent Monitor[/bold]\n" + "\n".join(
+            f"  [cyan]{k:<25}[/cyan] {v}" for k, v in (stats or {
+                'uptime': f'{time.time():.0f}',
+                'pid': os.getpid(),
+                'cwd': os.getcwd(),
+                'platform': os.name,
+            }.items())
+        ),
+    )
 
 
 # ── Shared helpers for state-backed commands ──────────────────────────────
@@ -1226,6 +1438,182 @@ async def _cmd_cost(ctx: CommandContext) -> CommandResult:
     )
 
 
+# ── Missing Critical Commands (from Claude Code / Codex / Cursor) ──────────────
+
+async def _cmd_undo(ctx: CommandContext) -> CommandResult:
+    """Revert the last workspace file changes using workspace snapshots."""
+    try:
+        from nexus.main_agent.workspace_snapshot import WorkspaceSnapshot
+        ws = WorkspaceSnapshot(_nexus_root(ctx))
+        success = ws.undo_last()
+        if success:
+            return CommandResult(
+                output="Undo successful — last snapshot reverted",
+                formatted="[green]Undo successful[/green] — last workspace snapshot reverted",
+            )
+        return CommandResult(
+            output="Nothing to undo",
+            formatted="[dim]Nothing to undo — no snapshots available[/dim]",
+        )
+    except Exception as exc:
+        return CommandResult(output=f"Undo failed: {exc}", success=False)
+
+
+async def _cmd_remember(ctx: CommandContext) -> CommandResult:
+    """Save a persistent note/memory that survives across sessions."""
+    args = ctx.extra.get("args", "")
+    if isinstance(args, str):
+        args = args.strip()
+    if not args:
+        return CommandResult(
+            output="Usage: /remember <note text>",
+            formatted="[yellow]Usage:[/yellow] /remember <note text>",
+        )
+    # Store in .nexus/memory.json
+    import json
+    mem_path = os.path.join(_nexus_root(ctx), ".nexus", "memory.json")
+    memories = []
+    if os.path.exists(mem_path):
+        try:
+            with open(mem_path, "r") as f:
+                memories = json.load(f)
+        except Exception:
+            memories = []
+    import datetime
+    memories.append({
+        "text": args,
+        "session_id": ctx.session_id,
+        "timestamp": datetime.datetime.now().isoformat(),
+    })
+    os.makedirs(os.path.dirname(mem_path), exist_ok=True)
+    with open(mem_path, "w") as f:
+        json.dump(memories, f, indent=2)
+    return CommandResult(
+        output=f"Remembered: {args}",
+        formatted=f"[green]Remembered:[/green] {args}",
+    )
+
+
+async def _cmd_forget(ctx: CommandContext) -> CommandResult:
+    """List memories or forget the last one."""
+    args = ctx.extra.get("args", "")
+    if isinstance(args, str):
+        args = args.strip()
+    mem_path = os.path.join(_nexus_root(ctx), ".nexus", "memory.json")
+    if not os.path.exists(mem_path):
+        return CommandResult(output="No memories saved", formatted="[dim]No memories saved yet[/dim]")
+    try:
+        import json
+        with open(mem_path, "r") as f:
+            memories = json.load(f)
+    except Exception:
+        return CommandResult(output="No memories saved", formatted="[dim]No memories saved yet[/dim]")
+    if not memories:
+        return CommandResult(output="No memories saved", formatted="[dim]No memories saved yet[/dim]")
+    if args in ("last", "undo", "pop"):
+        removed = memories.pop()
+        with open(mem_path, "w") as f:
+            json.dump(memories, f, indent=2)
+        return CommandResult(
+            output=f"Forgot: {removed.get('text', '?')}",
+            formatted=f"[yellow]Forgot:[/yellow] {removed.get('text', '?')}",
+        )
+    # List all memories
+    lines = [f"  {i+1}. [{m.get('timestamp', '?')[:10]}] {m.get('text', '?')}" for i, m in enumerate(memories[-20:])]
+    return CommandResult(
+        output=f"Memories ({len(memories)}):\n" + "\n".join(lines),
+        formatted=f"[bold]Memories ({len(memories)})[/bold]\n" + "\n".join(
+            f"  [cyan]{i+1}.[/cyan] [dim]{m.get('timestamp', '?')[:10]}[/dim] {m.get('text', '?')}"
+            for i, m in enumerate(memories[-20:])
+        ),
+    )
+
+
+async def _cmd_search(ctx: CommandContext) -> CommandResult:
+    """Search across files, commands, skills, or memory."""
+    args = ctx.extra.get("args", "")
+    if isinstance(args, str):
+        args = args.strip()
+    if not args:
+        return CommandResult(
+            output="Usage: /search <query>",
+            formatted="[yellow]Usage:[/yellow] /search <query>",
+        )
+    # Search files using code_search tool
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["grep", "-r", "-l", args, "--include=*.py", "--include=*.md", "--include=*.json", "."],
+            capture_output=True, text=True, timeout=10, cwd=_nexus_root(ctx)
+        )
+        files = [f for f in result.stdout.strip().split("\n") if f and not f.startswith("./.venv") and not f.startswith("./.git")]
+        if files:
+            lines = [f"  {f}" for f in files[:20]]
+            return CommandResult(
+                output=f"Found '{args}' in {len(files)} files:\n" + "\n".join(lines),
+                formatted=f"[bold]Found '{args}' in {len(files)} files[/bold]\n" + "\n".join(
+                    f"  [green]{f}[/green]" for f in files[:20]
+                ),
+                data={"files": files, "query": args},
+            )
+    except Exception:
+        pass
+    return CommandResult(
+        output=f"No results for '{args}'",
+        formatted=f"[dim]No results for '{args}'[/dim]",
+    )
+
+
+async def _cmd_explain(ctx: CommandContext) -> CommandResult:
+    """Explain the codebase structure or a specific file/module."""
+    args = ctx.extra.get("args", "")
+    if isinstance(args, str):
+        args = args.strip()
+    if not args:
+        # Explain overall structure
+        dirs = [d for d in os.listdir(_nexus_root(ctx)) if os.path.isdir(os.path.join(_nexus_root(ctx), d)) and not d.startswith(".")]
+        lines = [f"  {d}/" for d in sorted(dirs)]
+        return CommandResult(
+            output=f"Nexus AI Structure:\n" + "\n".join(lines),
+            formatted=f"[bold]Nexus AI Structure[/bold]\n" + "\n".join(
+                f"  [cyan]{d}/[/cyan]" for d in sorted(dirs)
+            ),
+        )
+    # Explain a specific path
+    target = os.path.join(_nexus_root(ctx), args)
+    if os.path.isfile(target):
+        try:
+            with open(target, "r") as f:
+                content = f.read(2000)
+            return CommandResult(
+                output=f"{args}:\n{content}",
+                formatted=f"[bold]{args}[/bold]\n[dim]{content}[/dim]",
+            )
+        except Exception:
+            return CommandResult(output=f"Cannot read {args}", success=False)
+    return CommandResult(output=f"Path not found: {args}", success=False)
+
+
+async def _cmd_undo_status(ctx: CommandContext) -> CommandResult:
+    """Show available workspace snapshots for undo."""
+    try:
+        from nexus.main_agent.workspace_snapshot import WorkspaceSnapshot
+        ws = WorkspaceSnapshot(_nexus_root(ctx))
+        snapshots = ws.list_snapshots() if hasattr(ws, 'list_snapshots') else []
+        if snapshots:
+            lines = [f"  {s.get('timestamp', '?')} — {s.get('description', '?')}" for s in snapshots[-10:]]
+            return CommandResult(
+                output=f"Snapshots ({len(snapshots)}):\n" + "\n".join(lines),
+                formatted=f"[bold]Snapshots ({len(snapshots)})[/bold]\n" + "\n".join(
+                    f"  [cyan]{s.get('timestamp', '?')}[/cyan] — {s.get('description', '?')}"
+                    for s in snapshots[-10:]
+                ),
+            )
+    except Exception:
+        pass
+    return CommandResult(output="No snapshots available", formatted="[dim]No workspace snapshots available[/dim]")
+
+
 # ── Initialize Built-in Commands ────────────────────────────────────────────
 
 def init_registry(registry: Optional[CommandRegistry] = None) -> CommandRegistry:
@@ -1279,6 +1667,7 @@ def init_registry(registry: Optional[CommandRegistry] = None) -> CommandRegistry
         Command("plugins", "Show plugin registry", _cmd_plugins, category="info"),
         Command("forge", "Show forge/evolution subsystem status", _cmd_forge, category="info"),
         Command("providers", "Show provider dashboard with health", _cmd_providers, category="info"),
+        Command("models", "List and manage models per provider", _cmd_models, category="info"),
         Command("monitor", "Show agent monitor dashboard", _cmd_monitor, category="info"),
         Command("compact", "Compact the conversation context", _cmd_compact, category="general"),
         Command("context", "Report session context usage (tokens, % window)", _cmd_context, category="info"),
@@ -1289,6 +1678,14 @@ def init_registry(registry: Optional[CommandRegistry] = None) -> CommandRegistry
         Command("mcp", "List MCP servers and status", _cmd_mcp, category="info"),
         Command("login", "Login to an OAuth provider (auth CLI bridge)", _cmd_login, category="settings"),
         Command("cost", "Estimate cost of the latest run", _cmd_cost, category="info"),
+
+        # workspace & memory
+        Command("undo", "Revert last workspace snapshot", _cmd_undo, category="general", aliases=["revert"]),
+        Command("undo-status", "Show available snapshots for undo", _cmd_undo_status, category="info"),
+        Command("remember", "Save a persistent note across sessions", _cmd_remember, category="general", aliases=["note", "memo"]),
+        Command("forget", "List or remove saved memories", _cmd_forget, category="general"),
+        Command("search", "Search files, code, or content", _cmd_search, category="general", aliases=["find", "grep"]),
+        Command("explain", "Explain codebase structure or a file", _cmd_explain, category="info"),
     ]
     for cmd in builtins:
         reg.register(cmd)
@@ -1406,9 +1803,112 @@ def init_registry(registry: Optional[CommandRegistry] = None) -> CommandRegistry
         ("back", "Return to the previous panel", "general"),
         ("engine", "Show local engine integration support", "integrations"),
     ]
+    # Import real implementations for commands that need them
+    try:
+        from nexus.commands_real import (
+            _cmd_health as _real_health, _cmd_doctor as _real_doctor,
+            _cmd_queue as _real_queue, _cmd_scheduler as _real_scheduler,
+            _cmd_evolution as _real_evolution, _cmd_git as _real_git,
+            _cmd_diff as _real_diff, _cmd_branch as _real_branch,
+            _cmd_log as _real_log, _cmd_fork as _real_fork,
+            _cmd_batch as _real_batch, _cmd_multi_agent as _real_multi_agent,
+            _cmd_code_review as _real_code_review, _cmd_security_review as _real_security_review,
+            _cmd_ultraplan as _real_ultraplan, _cmd_ultrareview as _real_ultrareview,
+            _cmd_deep_research as _real_deep_research, _cmd_powerup as _real_powerup,
+            _cmd_teleport as _real_teleport,
+        )
+        from nexus.commands_real_all import (
+            _cmd_pwd as _r_pwd, _cmd_where as _r_where, _cmd_files as _r_files,
+            _cmd_ls as _r_ls, _cmd_tree as _r_tree, _cmd_cat as _r_cat,
+            _cmd_cd as _r_cd, _cmd_add_dir as _r_add_dir, _cmd_readme as _r_readme,
+            _cmd_init as _r_init, _cmd_docs as _r_docs,
+            _cmd_enable as _r_enable, _cmd_disable as _r_disable, _cmd_fast as _r_fast,
+            _cmd_reset as _r_reset, _cmd_reload as _r_reload, _cmd_settings as _r_settings,
+            _cmd_env as _r_env, _cmd_theme as _r_theme, _cmd_color as _r_color,
+            _cmd_statusline as _r_statusline, _cmd_output_style as _r_output_style,
+            _cmd_tui as _r_tui, _cmd_keybindings as _r_keybindings,
+            _cmd_scroll_speed as _r_scroll_speed, _cmd_terminal_setup as _r_terminal_setup,
+            _cmd_voice as _r_voice, _cmd_api as _r_api, _cmd_open_gui as _r_open_gui,
+            _cmd_ide as _r_ide, _cmd_chrome as _r_chrome, _cmd_desktop as _r_desktop,
+            _cmd_mobile as _r_mobile, _cmd_engine as _r_engine,
+            _cmd_install_github_app as _r_install_github, _cmd_install_slack_app as _r_install_slack,
+            _cmd_setup_bedrock as _r_setup_bedrock, _cmd_setup_vertex as _r_setup_vertex,
+            _cmd_claude_api as _r_claude_api, _cmd_run_skill_generator as _r_skill_gen,
+            _cmd_conversations as _r_conversations, _cmd_load as _r_load,
+            _cmd_rename as _r_rename, _cmd_delete_session as _r_delete_session,
+            _cmd_export as _r_export,
+            _cmd_usage as _r_usage, _cmd_logs as _r_logs, _cmd_debug as _r_debug,
+            _cmd_heapdump as _r_heapdump, _cmd_recap as _r_recap,
+            _cmd_insights as _r_insights, _cmd_btw as _r_btw, _cmd_sources as _r_sources,
+            _cmd_copy as _r_copy, _cmd_paste as _r_paste,
+            _cmd_usage_credits as _r_usage_credits, _cmd_passes as _r_passes,
+            _cmd_privacy_settings as _r_privacy, _cmd_radio as _r_radio,
+            _cmd_stickers as _r_stickers, _cmd_upgrade as _r_upgrade,
+            _cmd_advisor as _r_advisor, _cmd_focus as _r_focus,
+            _cmd_fewer_permission_prompts as _r_fewer_perm, _cmd_background as _r_background,
+            _cmd_check as _r_check, _cmd_build as _r_build,
+            _cmd_open as _r_open, _cmd_detail as _r_detail, _cmd_close as _r_close,
+            _cmd_panel as _r_panel, _cmd_back as _r_back,
+            _cmd_goal as _r_goal, _cmd_todo as _r_todo,
+            _cmd_features as _r_features, _cmd_logout as _r_logout, _cmd_loop as _r_loop,
+            _cmd_reminders as _r_reminders, _cmd_remote_control as _r_remote_control,
+            _cmd_remote_env as _r_remote_env, _cmd_retry as _r_retry, _cmd_schedule as _r_schedule,
+            _cmd_team_onboarding as _r_team_onboarding, _cmd_work as _r_work,
+        )
+        _real_overrides = {
+            "health": _real_health, "doctor": _real_doctor, "queue": _real_queue,
+            "scheduler": _real_scheduler, "evolution": _real_evolution,
+            "git": _real_git, "diff": _real_diff, "branch": _real_branch,
+            "log": _real_log, "fork": _real_fork, "batch": _real_batch,
+            "multi-agent": _real_multi_agent, "multi_agent": _real_multi_agent,
+            "code-review": _real_code_review, "security-review": _real_security_review,
+            "ultraplan": _real_ultraplan, "ultrareview": _real_ultrareview,
+            "deep-research": _real_deep_research, "powerup": _real_powerup,
+            "teleport": _real_teleport,
+            "pwd": _r_pwd, "where": _r_where, "files": _r_files,
+            "ls": _r_ls, "tree": _r_tree, "cat": _r_cat,
+            "cd": _r_cd, "add-dir": _r_add_dir, "readme": _r_readme,
+            "init": _r_init, "docs": _r_docs,
+            "enable": _r_enable, "disable": _r_disable, "fast": _r_fast,
+            "reset": _r_reset, "reload": _r_reload, "settings": _r_settings,
+            "env": _r_env, "theme": _r_theme, "color": _r_color,
+            "statusline": _r_statusline, "output-style": _r_output_style,
+            "tui": _r_tui, "keybindings": _r_keybindings,
+            "scroll-speed": _r_scroll_speed, "terminal-setup": _r_terminal_setup,
+            "voice": _r_voice, "api": _r_api, "open-gui": _r_open_gui,
+            "ide": _r_ide, "chrome": _r_chrome, "desktop": _r_desktop,
+            "mobile": _r_mobile, "engine": _r_engine,
+            "install-github-app": _r_install_github, "install-slack-app": _r_install_slack,
+            "setup-bedrock": _r_setup_bedrock, "setup-vertex": _r_setup_vertex,
+            "claude-api": _r_claude_api, "run-skill-generator": _r_skill_gen,
+            "conversations": _r_conversations, "load": _r_load,
+            "rename": _r_rename, "delete-session": _r_delete_session,
+            "export": _r_export,
+            "usage": _r_usage, "logs": _r_logs, "debug": _r_debug,
+            "heapdump": _r_heapdump, "recap": _r_recap,
+            "insights": _r_insights, "btw": _r_btw, "sources": _r_sources,
+            "copy": _r_copy, "paste": _r_paste,
+            "usage-credits": _r_usage_credits, "passes": _r_passes,
+            "privacy-settings": _r_privacy, "radio": _r_radio,
+            "stickers": _r_stickers, "upgrade": _r_upgrade,
+            "advisor": _r_advisor, "focus": _r_focus,
+            "fewer-permission-prompts": _r_fewer_perm, "background": _r_background,
+            "check": _r_check, "build": _r_build,
+            "open": _r_open, "detail": _r_detail, "close": _r_close,
+            "panel": _r_panel, "back": _r_back,
+            "goal": _r_goal, "todo": _r_todo,
+            "features": _r_features, "logout": _r_logout, "loop": _r_loop,
+            "reminders": _r_reminders, "remote-control": _r_remote_control,
+            "remote-env": _r_remote_env, "retry": _r_retry, "schedule": _r_schedule,
+            "team-onboarding": _r_team_onboarding, "work": _r_work,
+        }
+    except Exception:
+        _real_overrides = {}
+
     for name, description, category in interactive_commands:
         if reg.get(name) is None:
-            reg.register(Command(name, description, _cmd_client_catalog_entry, category=category, execution="client"))
+            handler = _real_overrides.get(name, _cmd_client_catalog_entry)
+            reg.register(Command(name, description, handler, category=category, execution="client"))
 
     # Compatibility aliases are catalog data too. Keep them here so TUI, GUI,
     # headless CLI, and gateways resolve the same spelling to the same command.
@@ -1423,6 +1923,7 @@ def init_registry(registry: Optional[CommandRegistry] = None) -> CommandRegistry
         "mobile": ("ios", "android"), "teleport": ("tp",),
         "remote-control": ("rc",), "reload": ("reload-plugins", "reload-skills"),
         "check": ("test-check",),
+        "hiveteam": ("hive-team",),
     }
     for canonical, names in aliases.items():
         command = reg.get(canonical)
@@ -1452,11 +1953,26 @@ class TaskTracker:
     _tasks: list[dict[str, Any]] = []
 
     @classmethod
-    def create(cls, prompt: str) -> str:
+    def create(cls, prompt: str, **kwargs: Any) -> str:
         import uuid
         task_id = str(uuid.uuid4())
-        cls._tasks.append({"id": task_id, "prompt": prompt, "status": "running"})
+        entry = {"id": task_id, "prompt": prompt, "subject": prompt, "status": "running"}
+        entry.update(kwargs)
+        cls._tasks.append(entry)
         return task_id
+
+    @classmethod
+    def update(cls, task_id: str, status: str) -> None:
+        """Update the status of a task by ID."""
+        for t in cls._tasks:
+            if t["id"] == task_id:
+                t["status"] = status
+                return
+
+    @classmethod
+    def delete(cls, task_id: str) -> None:
+        """Remove a task by ID."""
+        cls._tasks = [t for t in cls._tasks if t["id"] != task_id]
 
     @classmethod
     def list(cls) -> list[dict[str, Any]]:

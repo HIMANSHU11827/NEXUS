@@ -25,6 +25,7 @@ class ContextConfig:
     compact_threshold: int = 20
     compact_keep: int = 6
     context_file_names: tuple = (
+        "NEXUS.md",
         "AGENTS.md", "agents.md",
         "CLAUDE.md", "claude.md",
         ".cursorrules",

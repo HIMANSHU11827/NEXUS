@@ -295,8 +295,10 @@ def _make_parser() -> argparse.ArgumentParser:
         from nexus.command_system.auth import init_auth_cli
         subparsers = p.add_subparsers(dest="command")
         init_auth_cli(subparsers)
-    except Exception as exc:  # never break normal boot if auth wiring fails
-        print(f"warning: auth CLI unavailable: {exc}")
+        from nexus.project_cli import init_project_cli
+        init_project_cli(subparsers)
+    except Exception as exc:  # never break normal boot if auth/project wiring fails
+        print(f"warning: CLI subcommands unavailable: {exc}")
     return p
 
 
@@ -791,6 +793,12 @@ def boot():
         result = handler(args)
         if asyncio.iscoroutine(result):
             asyncio.run(result)
+        return
+
+    # Dispatch `nexus project <command>` to the project CLI handlers.
+    if getattr(args, "command", None) == "project":
+        from nexus.project_cli import handle_project_command
+        handle_project_command(args)
         return
 
     signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))

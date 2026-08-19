@@ -35,6 +35,10 @@ from .store import TaskQueue
 from .status import QueueRuntimeStatus
 from nexus.control_store import ControlStore
 from nexus.runtime import build_resume_prompt
+from reliability.mission_watchdog import (
+    MissionWatchdog,
+    DEFAULT_STALL_TIMEOUT_S,
+)
 
 log = logging.getLogger("nexus.queue.driver")
 
@@ -119,6 +123,64 @@ class QueueDriver:
         # advances active missions (enqueues the next milestone) whenever the
         # queue goes idle — so an epic goal keeps producing work 24/7 by itself.
         self.mission_runner = mission_runner
+
+        # P0-3 mission heartbeat / stuck-recovery watchdog. It sweeps active
+        # goals on the same cadence as expired-lease reaping and requeues a
+        # stalled step EXACTLY ONCE (durable ledger), so a live lease can
+        # never hide a permanently stalled milestone. Goals are persisted by
+        # GoalStore under <root>/.nexus/v5/goals; the watchdog is given the
+        # same store so a requeue is durably persisted (not just in-memory).
+        try:
+            from reliability.goal import GoalStore as _GoalStore
+
+            self._goal_store = _GoalStore(
+                root_dir=os.path.join(self.root, ".nexus", "v5", "goals")
+            )
+            self.mission_watchdog = MissionWatchdog(
+                store=self._goal_store,
+                stall_timeout_s=float(
+                    os.environ.get("NEXUS_WATCHDOG_STALL_S", str(DEFAULT_STALL_TIMEOUT_S))
+                ),
+                ledger_path=os.path.join(
+                    self.root, ".nexus", "v5", "watchdog_ledger.json"
+                ),
+            )
+        except Exception as exc:
+            log.warning("could not build mission watchdog: %s", exc)
+            self.mission_watchdog = None
+
+        # P1 side-effect reconciliation guard. Reuses the durable
+        # HiveEffectLedger so any retry of a task carrying the same
+        # idempotency_key reconciles the previously-recorded effect instead
+        # of repeating it (e.g. a retried webhook must not fire twice).
+        try:
+            from reliability.side_effect import SideEffectGuard as _SideEffectGuard
+
+            self.side_effect_guard = _SideEffectGuard(
+                self.root,
+                db_path=os.path.join(
+                    self.root, ".nexus", "hive_effects.sqlite3"
+                ),
+                lease_seconds=float(
+                    os.environ.get("NEXUS_EFFECT_LEASE_S", "300")
+                ),
+            )
+        except Exception as exc:
+            log.warning("could not build side-effect guard: %s", exc)
+            self.side_effect_guard = None
+
+        # P0-1 mission acceptance verifier. After a queue task succeeds, the
+        # driver can verify the associated goal's verification_criteria are
+        # actually met by evidence before the goal is marked done -- otherwise
+        # a "successful" task could falsely complete a large milestone. Wired
+        # to the same GoalStore as the watchdog so it sees the same goals.
+        try:
+            from reliability.acceptance import MilestoneAcceptanceVerifier
+
+            self.acceptance_verifier = MilestoneAcceptanceVerifier()
+        except Exception as exc:
+            log.warning("could not build acceptance verifier: %s", exc)
+            self.acceptance_verifier = None
 
         self._stopping = False
         self._tasks: List[asyncio.Task] = []
@@ -661,6 +723,7 @@ class QueueDriver:
                     # acceptance verification; queue completion alone is not
                     # proof that the milestone's acceptance contract passed.
                     self._reconcile_mission(task, "success", detail=summary)
+                    self._verify_goal_acceptance(task, summary)
                 except asyncio.CancelledError:
                     # A cancelled worker may already have caused an external
                     # side effect. Never silently replay it as a retry; leave
@@ -828,6 +891,21 @@ class QueueDriver:
                 log.info("reaped %s expired canonical run(s)", canonical)
         except Exception as exc:
             log.warning("requeue_expired_leases failed: %s", exc)
+        # P0-3: recover stalled milestones exactly once on the same cadence.
+        if self.mission_watchdog is not None:
+            try:
+                # The watchdog owns its GoalStore (wired in __init__), so a
+                # requeue is durably persisted. sweep() loads active goals
+                # from that store; pass goals=None to use it.
+                actions = self.mission_watchdog.sweep(goals=None)
+                if actions:
+                    recovered = sum(1 for a in actions if a.action == "requeued")
+                    if recovered:
+                        log.info(
+                            "mission watchdog recovered %s stalled step(s)", recovered
+                        )
+            except Exception as exc:
+                log.warning("mission watchdog sweep failed: %s", exc)
         self._publish_runtime_status()
 
     def _publish_runtime_status(self, *, state: str = "running", error: str = "", force: bool = False) -> None:
@@ -962,13 +1040,76 @@ class QueueDriver:
         except Exception as exc:
             log.warning("mission reconcile failed: %s", exc)
 
+    def _verify_goal_acceptance(self, task: Dict[str, Any], summary: str) -> None:
+        """Gate goal completion on verified evidence (P0-1 acceptance).
+
+        When a completed queue task is linked to a durable goal (via
+        ``meta.goal_id``) and the driver owns a GoalStore, the associated goal
+        is verified before being marked done: only evidence-backed acceptance
+        flips it to GOAL_COMPLETED; an unmet criterion routes it to
+        BLOCKED_NON_RECOVERABLE (replannable) instead of a false success.
+
+        Best-effort: any failure here is logged and never blocks the already
+        completed queue task.
+        """
+        if self.acceptance_verifier is None or self._goal_store is None:
+            return
+        meta = (task.get("payload") or {}).get("meta") or {}
+        goal_id = str(meta.get("goal_id") or "")
+        if not goal_id:
+            return
+        try:
+            goal = self._goal_store.load(goal_id)
+            if goal is None:
+                return
+            # Append the worker's returned summary as completion evidence so the
+            # verifier can match declared verification_criteria against it.
+            if summary:
+                goal.completion_evidence.append(f"queue_result: {summary}")
+            result = self.acceptance_verifier.mark_completed_if_verified(
+                goal, store=self._goal_store
+            )
+            if result.accepted:
+                log.info("goal %s accepted by verifier", goal_id)
+            else:
+                log.warning(
+                    "goal %s NOT accepted by verifier; missing=%s",
+                    goal_id, result.missing,
+                )
+        except Exception as exc:
+            log.warning("goal acceptance verification failed: %s", exc)
+
     def _update_cron_run(self, task: Dict[str, Any], status: str, error: str = "") -> None:
-        """Project queue ownership/outcome onto a linked durable cron run."""
+        """Project queue ownership/outcome onto a linked durable cron run.
+
+        The write is reconciled through ``self.side_effect_guard`` keyed by
+        ``(cron_run_id, status)``. A retried or duplicate driver attempt (e.g.
+        after a crash between claiming the task and persisting its outcome)
+        will replay the already-recorded effect instead of re-writing the
+        control plane — closing the "duplicate side-effect" gap the guard was
+        built to prevent. The write is the external side-effect; if the guard
+        is unavailable we degrade to the plain write so the path still works.
+        """
         meta = (task.get("payload") or {}).get("meta") or {}
         run_id = str(meta.get("cron_run_id") or "")
         updater = getattr(self.queue, "update_cron_run", None)
         if not run_id or not callable(updater):
             return
+        guard = getattr(self, "side_effect_guard", None)
+        if guard is not None and getattr(guard, "healthy", False):
+            effect_key = f"cron_run:{run_id}:{status}"
+            try:
+                outcome = guard.execute_once(
+                    effect_key,
+                    agent_id="queue_driver",
+                    tool="update_cron_run",
+                    call=lambda: updater(run_id, status, error=error),
+                )
+                if outcome.verdict == "replay":
+                    log.debug("cron run %s status=%s reconciled (no rewrite)", run_id, status)
+                return
+            except Exception:
+                log.debug("side-effect guard failed for cron run %s; falling back", run_id, exc_info=True)
         try:
             updater(run_id, status, error=error)
         except Exception:

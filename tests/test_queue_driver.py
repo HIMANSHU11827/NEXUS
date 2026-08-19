@@ -575,3 +575,152 @@ def test_cancelled_lease_is_not_requeued():
     assert queue.cancel(task_id, "forced shutdown", leased["lease_token"])
     assert queue.get(task_id)["state"] == STATE_CANCELLED
     assert queue.pending_count() == 0
+
+
+def test_driver_wires_side_effect_guard(tmp_path):
+    driver = QueueDriver(kernel=_Kernel(_Loop()), queue=object(), root=str(tmp_path))
+    assert driver.side_effect_guard is not None
+
+
+def test_side_effect_guard_reconciles_retry_with_same_key(tmp_path):
+    """P1: a retried task sharing an idempotency_key must reconcile the
+    prior effect (replay) instead of re-executing the side-effect."""
+    driver = QueueDriver(kernel=_Kernel(_Loop()), queue=object(), root=str(tmp_path))
+    guard = driver.side_effect_guard
+    key = guard.make_key("driver", "queue:ns:1", 0, "webhook", {"url": "x"})
+
+    first = guard.execute_once(
+        key, agent_id="driver", tool="webhook", call=lambda: "sent-once"
+    )
+    assert first.verdict == "execute"
+    assert first.result == "sent-once"
+
+    # Retry of the same logical task (same idempotency_key) reconciles.
+    second = guard.execute_once(
+        key, agent_id="driver", tool="webhook", call=lambda: "would-duplicate"
+    )
+    assert second.verdict == "replay"
+    assert second.result == "sent-once"
+
+
+def test_driver_side_effect_guard_reconciles_cron_run_write(tmp_path):
+    """P1 fix verification: the guard is actually invoked on the driver's
+    external cron-run write. A duplicate/retried update for the same
+    (run_id, status) must reconcile (updater called once), not rewrite twice.
+    """
+    class _Q:
+        def update_cron_run(self, run_id, status, error=""):
+            self.calls.append((run_id, status, error))
+
+        calls = []
+
+    driver = QueueDriver(kernel=_Kernel(_Loop()), queue=_Q(), root=str(tmp_path))
+    task = {"payload": {"meta": {"cron_run_id": "run-42"}}}
+
+    driver._update_cron_run(task, "running")
+    driver._update_cron_run(task, "running")  # duplicate/retry
+    assert driver.queue.calls == [("run-42", "running", "")], driver.queue.calls
+
+    # Different status is a distinct effect and should write again.
+    driver._update_cron_run(task, "completed")
+    assert ("run-42", "completed", "") in driver.queue.calls
+
+
+def test_maybe_reap_requeues_stalled_goal_through_wired_store(tmp_path):
+    """P0-3 integration: the 24/7 driver's periodic sweep must durably
+    requeue a stalled goal via the watchdog, not just reset in memory.
+
+    This proves the watchdog is wired to a real GoalStore (the
+    architecture reviewer flagged a dead-code risk when it was built with
+    store=None). Here the driver owns the store, so a requeue survives the
+    sweep and is visible when the goal is reloaded from disk.
+    """
+    import time
+
+    from reliability.goal import GoalState, GoalStep, GoalStore
+    from reliability.states import RunState
+
+    root = str(tmp_path)
+    store = GoalStore(root_dir=os.path.join(root, ".nexus", "v5", "goals"))
+    goal = GoalState.create("finish the epic")
+    goal.status = RunState.EXECUTING
+    goal.last_progress_at = time.time() - 10_000  # stalled well past timeout
+    goal.plan = [GoalStep(id="s1", description="x", status="active")]
+    store.save(goal)
+
+    driver = QueueDriver(kernel=_Kernel(_Loop()), queue=object(), root=root)
+    assert driver.mission_watchdog is not None
+
+    asyncio.run(driver._maybe_reap())
+
+    reloaded = store.load(goal.goal_id)
+    assert reloaded is not None
+    assert reloaded.plan[0].status == "pending"  # durably requeued
+    assert any(
+        r.get("kind") == "watchdog_requeue" for r in reloaded.recovery_history
+    )
+
+
+def test_goal_acceptance_is_verified_on_task_success(tmp_path):
+    """P0-1 wiring: a completed task linked to a goal runs the acceptance
+    verifier; an unmet verification_criterion routes the goal to
+    BLOCKED_NON_RECOVERABLE instead of a false GOAL_COMPLETED."""
+    import time
+
+    from reliability.goal import GoalState, GoalStep, GoalStore
+    from reliability.states import RunState
+
+    root = str(tmp_path)
+    store = GoalStore(root_dir=os.path.join(root, ".nexus", "v5", "goals"))
+    goal = GoalState.create("ship the api")
+    goal.status = RunState.EXECUTING
+    goal.verification_criteria = ["integration tests pass"]
+    goal.plan = [GoalStep(id="s1", description="implement", status="completed")]
+    store.save(goal)
+
+    driver = QueueDriver(kernel=_Kernel(_Loop()), queue=object(), root=root)
+    task = {
+        "id": 1,
+        "payload": {
+            "task_desc": "build it",
+            "meta": {"goal_id": goal.goal_id},
+        },
+    }
+    # The worker summary does NOT contain the required evidence.
+    driver._verify_goal_acceptance(task, "built but did not run tests")
+
+    reloaded = store.load(goal.goal_id)
+    assert reloaded.status == RunState.BLOCKED_NON_RECOVERABLE
+    assert any(
+        r.get("kind") == "acceptance_rejected" for r in reloaded.recovery_history
+    )
+
+
+def test_goal_acceptance_passes_when_evidence_present(tmp_path):
+    """P0-1 wiring: when the worker summary satisfies the criterion, the goal
+    is marked GOAL_COMPLETED (not blocked)."""
+    import time
+
+    from reliability.goal import GoalState, GoalStep, GoalStore
+    from reliability.states import RunState
+
+    root = str(tmp_path)
+    store = GoalStore(root_dir=os.path.join(root, ".nexus", "v5", "goals"))
+    goal = GoalState.create("ship the api")
+    goal.status = RunState.EXECUTING
+    goal.verification_criteria = ["integration tests pass"]
+    goal.plan = [GoalStep(id="s1", description="implement", status="completed")]
+    store.save(goal)
+
+    driver = QueueDriver(kernel=_Kernel(_Loop()), queue=object(), root=root)
+    task = {
+        "id": 1,
+        "payload": {
+            "task_desc": "build it",
+            "meta": {"goal_id": goal.goal_id},
+        },
+    }
+    driver._verify_goal_acceptance(task, "integration tests pass: 12 passed")
+
+    reloaded = store.load(goal.goal_id)
+    assert reloaded.status == RunState.GOAL_COMPLETED

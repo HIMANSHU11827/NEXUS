@@ -132,7 +132,14 @@ class ToolCall:
 
 
 class HookRegistry:
-    """Lifecycle hook system from V1 loop."""
+    """Lifecycle hook system with pattern matchers and JSON contract.
+
+    Upgraded from V1 to support:
+    - Pattern matchers: hook can fire only when tool/params match (like Claude Code's ``Bash(git*)``)
+    - JSON stdout contract: hook subprocess can return ``{"decision": "allow"|"block", "reason": ...}``
+    - Exit codes: 0 = allow, 2 = block (Claude Code contract)
+    - Pre/post phase hooks: fire on phase transitions, not just tool calls
+    """
     EVENTS = (
         "pre_llm_call",
         "post_llm_call",
@@ -140,24 +147,90 @@ class HookRegistry:
         "post_tool_call",
         "on_turn_end",
         "on_evolve",
+        "pre_phase",
+        "post_phase",
     )
 
     def __init__(self):
         self._callbacks: Dict[str, List[Callable]] = {e: [] for e in self.EVENTS}
+        # Matcher-registered hooks: ``(event, pattern, callback)``
+        # pattern is a glob-style string like ``Bash(git*)`` or ``modifying(*)``
+        self._matchers: List[Tuple[str, str, Callable]] = []
 
     def register(self, event: str, cb: Callable):
         if event in self._callbacks:
             self._callbacks[event].append(cb)
 
+    def register_matcher(self, event: str, pattern: str, cb: Callable):
+        """Register a hook that only fires when the tool/params match *pattern*.
+
+        Patterns use the ``Tool(match_glob)`` format:
+        - ``Bash(git*)`` fires only for bash commands starting with "git"
+        - ``modifying(*)`` fires for any modifying call
+        - ``*`` or empty matches everything
+        """
+        self._matchers.append((event, pattern, cb))
+        if event not in self._callbacks:
+            self._callbacks[event] = []
+
+    @staticmethod
+    def _pattern_matches(pattern: str, tool_name: str, params: Dict[str, Any]) -> bool:
+        """Check if a tool call matches a ``Tool(match_glob)`` pattern."""
+        import re as _re
+        if not pattern or pattern == "*":
+            return True
+        # Parse ``Tool(match_glob)``
+        m = _re.match(r"^(\w+)\((.+)\)$", pattern)
+        if m:
+            expected_tool = m.group(1).lower()
+            glob = m.group(2)
+            if expected_tool != "*" and expected_tool != tool_name.lower():
+                return False
+            # Match against command/path/text in params
+            text = str(params.get("command") or params.get("path") or params.get("text") or params.get("content") or "")
+            # Convert glob to regex
+            regex = _re.escape(glob).replace(r"\*", ".*").replace(r"\?", ".")
+            return bool(_re.search(regex, text, _re.IGNORECASE))
+        # Bare tool name: match if tool_name matches exactly
+        return pattern.lower() == tool_name.lower()
+
     async def trigger(self, event: str, *args, **kwargs):
+        """Fire all registered callbacks for *event*.
+
+        For ``pre_tool_call`` events, also fire matching-registered hooks.
+        Callbacks can return a dict ``{"decision": "block", "reason": ...}``
+        to veto the action (JSON stdout contract like Claude Code).
+        """
+        results = []
         for cb in self._callbacks.get(event, []):
             try:
                 if asyncio.iscoroutinefunction(cb):
-                    await cb(*args, **kwargs)
+                    result = await cb(*args, **kwargs)
                 else:
-                    await asyncio.to_thread(cb, *args, **kwargs)
+                    result = await asyncio.to_thread(cb, *args, **kwargs)
+                results.append(result)
             except Exception as e:
                 logging.getLogger("nexus.hooks").debug(f"Hook '{event}' error: {e}")
+        # Fire matcher-registered hooks for tool_call events
+        if event in ("pre_tool_call", "post_tool_call") and args:
+            tool_name = str(getattr(args[0], "name", "") if hasattr(args[0], "name") else "")
+            params = getattr(args[0], "params", {}) if hasattr(args[0], "params") else {}
+            if not isinstance(params, dict):
+                params = {}
+            for hook_event, pattern, cb in self._matchers:
+                if hook_event != event:
+                    continue
+                if not self._pattern_matches(pattern, tool_name, params):
+                    continue
+                try:
+                    if asyncio.iscoroutinefunction(cb):
+                        result = await cb(*args, **kwargs)
+                    else:
+                        result = await asyncio.to_thread(cb, *args, **kwargs)
+                    results.append(result)
+                except Exception as e:
+                    logging.getLogger("nexus.hooks").debug(f"Matcher hook '{event}' error: {e}")
+        return results
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2808,15 +2881,33 @@ class NexusLoopV5(
                 "turn_id": turn.turn_id,
                 "state": terminal_state.value,
             }
-            event_name = "run.completed" if done["success"] else "run.failed"
+            # A run that produced verified work but ended before completion is
+            # NOT the same terminal outcome as a run that produced nothing:
+            # surface it as run.completed_partial so observers can distinguish
+            # partial progress from bare failure without losing the failure
+            # semantics (success stays False; work items still transition
+            # failed rather than applied).
+            is_partial = bool(result.get("partial")) and bool(
+                isinstance(result.get("verification"), dict)
+                and (result.get("verification").get("verified_actions") or [])
+            )
+            event_name = (
+                "run.completed" if done["success"]
+                else ("run.completed_partial" if is_partial else "run.failed")
+            )
             event_status = "completed" if done["success"] else "failed"
             finish_run_context(event_status, event_name, str(done.get("error") or ""))
             await self._emit_runtime_event(
                 event_name,
-                "Run completed" if done["success"] else "Run produced no verified tool success",
+                (
+                    "Run completed" if done["success"]
+                    else ("Run finished with verified partial work" if is_partial
+                          else "Run produced no verified tool success")
+                ),
                 event_status,
                 event_id=f"run_{turn.turn_id}",
                 task_id=task_id,
+                payload=done,
             )
             for event in self._yield_pending_events():
                 yield event

@@ -110,3 +110,62 @@ def _perceived_input():
 
 def _successful_result():
     return {"success": True, "response": "ok", "calls_executed": 0}
+
+
+@pytest.mark.asyncio
+async def test_partial_run_emits_completed_partial_not_bare_failure(tmp_path):
+    """A run that ended with verified partial work must be reported as
+    run.completed_partial (not plain run.failed), while keeping success=False
+    and the failed run-context finish so work items still transition failed."""
+    loop = NexusLoopV5(root_dir=str(tmp_path), session_id="partial-run-event")
+    captured = []
+    loop.set_work_event_sink(captured.append)
+
+    loop.sync_memory = lambda: None
+    loop._persist_turn_message = lambda *args, **kwargs: None
+    loop._is_trivial_task = lambda _task: True
+
+    async def perceive_input(_turn):
+        return _perceived_input()
+
+    async def decide_planning(_perceived):
+        return None
+
+    async def inject_hive_context(_perceived):
+        return None
+
+    async def run_direct_model_tool_loop(*args, **kwargs):
+        return {
+            "success": False,
+            "partial": True,
+            "error": "context exhausted after partial work",
+            "response": "partial",
+            "calls_executed": 3,
+            "verification": {"verified_actions": [{"id": "act-1"}]},
+        }
+
+    loop._perceive_input = perceive_input
+    loop._decide_planning = decide_planning
+    loop._inject_hive_context = inject_hive_context
+    loop._run_direct_model_tool_loop = run_direct_model_tool_loop
+
+    streamed = [
+        event async for event in loop._turn_events(
+            "do the work",
+            turn_id="turn-partial-1",
+            task_id="task-partial",
+        )
+    ]
+    terminal = [
+        event["data"]
+        for event in streamed
+        if event.get("type") == "status"
+        and event.get("data", {}).get("event_type") in {"run.failed", "run.completed_partial"}
+    ]
+
+    assert [event["event_type"] for event in terminal] == ["run.completed_partial"]
+    payload = terminal[0]["payload"]
+    assert payload["success"] is False
+    assert payload["partial"] is True
+    assert payload["state"] == "failed"
+    assert payload["task_id"] == "task-partial"

@@ -230,7 +230,7 @@ class TestSetupWizardRun:
     def test_configure_gateways_reuses_existing_token(self, tmp_path, monkeypatch):
         import apps.tui.setup_wizard as wizard
 
-        selects = iter([0, 0, 1, 1, 1, 1, 1])
+        selects = iter([0, 0, 1, 1, 1, 1, 1, 1])
         monkeypatch.setattr(wizard, "wizard_header", lambda: None)
         monkeypatch.setattr(wizard, "select", lambda *args, **kwargs: next(selects))
         monkeypatch.setattr(wizard.Prompt, "ask", lambda *args, **kwargs: "*")

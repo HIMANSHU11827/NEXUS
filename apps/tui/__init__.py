@@ -77,30 +77,47 @@ class NexusShell:
         return completed.returncode
 
     def _handle_slash(self, value: str) -> bool:
-        from nexus.commands import CommandContext, get_registry
-
+        """Route slash commands through the unified CommandBus."""
         parts = value.strip().split(maxsplit=1)
-        command = get_registry().get(parts[0] if parts else "")
-        if command is None or command.execution != "shared":
-            return False
+        command_name = (parts[0] if parts else "").lstrip("/").lower()
+
         try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-        else:
+            from nexus.command_system.bridge import patched_get_bus
+            from nexus.command_system.core.command import CommandRequest, CommandContext
+
+            bus = patched_get_bus()
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                return False  # Don't block an already-running event loop
+
+            request = CommandRequest(
+                command=command_name,
+                args=[parts[1]] if len(parts) > 1 else [],
+                options={
+                    "args": value,
+                    "command": command_name,
+                    "shell": self,
+                },
+                context=CommandContext(
+                    source="tui",
+                    session_id=self.session_id,
+                ),
+            )
+            result = asyncio.run(bus.execute(request))
+        except Exception:
             return False
-        try:
-            result = asyncio.run(command.execute(CommandContext(
-                session_id=self.session_id,
-                shell=self,
-                extra={"args": value, "command": parts[0] if parts else ""},
-            )))
-        except RuntimeError:
-            return False
-        if not result.success:
-            console.print(result.error or result.output, style="red")
+
+        if not result.is_success():
+            console.print(result.error or result.message or "", style="red")
             return True
-        console.print(result.output or result.formatted)
+        # Extract formatted/output from data dict or message
+        data = result.data if isinstance(result.data, dict) else {}
+        output = data.get("formatted") or data.get("output") or result.message or ""
+        if output:
+            console.print(output)
         return True
 
     @staticmethod

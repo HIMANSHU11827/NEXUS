@@ -1,3 +1,4 @@
+# ─── Python ──────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -9,6 +10,7 @@ __pycache__/
 venv/
 .voice-venv/
 
+# ─── Node ────────────────────────────────────────────────────────────────────
 node_modules/
 dist/
 build/
@@ -17,27 +19,39 @@ build/
 hs_err_pid*.log
 replay_pid*.log
 
+# ─── Secrets & credentials ──────────────────────────────────────────────────
 .env
-# Secrets & credentials (oauth store for providers/oauth lives in ~/.nexus/auth
-# outside the repo, but key material placed in the tree must stay ignored)
 *.key
 *.pem
 *.p12
 *.pfx
 .oauth_store.json
-.nexus/
 
-# Local NEXUS runtime state, checkpoints, and generated evidence
+# ─── NEXUS runtime state (gitignored, not source) ───────────────────────────
+.nexus/
 .cache/
-context_archive/
-graphify-out/
+tmp/
+logs/
+workspace/
+scratch/
+memory/session_*/
+memory/incomplete_assistant_response/
+
+# ─── Runtime data (gitignored) ──────────────────────────────────────────────
+data/
+training_data/
+models/local/
+knowledge/store.json
+knowledge/*.db
+knowledge/*.enc
+knowledge/_rag_index*.json
+knowledge/atlas_index.json
+
+# ─── Lock files ─────────────────────────────────────────────────────────────
 *.lock.sqlite
 *.lock.sqlite3
-.nexus/lifecycle/
-knowledge/store.json
 
-# Local test and agent scratch directories
-.tmp/
+# ─── Test & agent scratch dirs ──────────────────────────────────────────────
 .audit_pytest_*/
 .codex_*/
 .gateway_specialist_pytest_elevated/
@@ -50,67 +64,47 @@ release*-temp*/
 release_test_tmp*/
 run-evidence-test-temp/
 tmp*/
+workspace-under-test/
 
-# External research clones are references, not NEXUS source
+# ─── External references (not NEXUS source) ────────────────────────────────
 external/
 references/
 
-# Local diagnostic output
+# ─── Local diagnostic output ───────────────────────────────────────────────
 FAILED
 response.txt
 subtasks-response.json
 hello_world.py
+nul
+
+# ─── Generated output ──────────────────────────────────────────────────────
+graphify-out/
+.opencode/
+.playwright-mcp/
+.nexus_queue.db
+
+# ─── App-specific ignores ──────────────────────────────────────────────────
 apps/tui/out.txt
 apps/tui/warn.txt
 apps/tui/_repro-app.tsx
 apps/tui/repro-dup-key.mts
 apps/tui/artifacts/
-.opencode/
-logs/
-workspace/
-scratch/
-memory/session_*/
-memory/incomplete_assistant_response/
-nul
-
-models/local/
-data/
-training_data/
-temp_gemini_cli/
+apps/tui/node_modules/
 apps/web/src/App.tsx.found_*.txt
-apps/web/vite_dev.log
-apps/web/workspace/
 apps/web/src/App.tsx.original_log_*.txt
 apps/web/src/*.patch_ui.py
-apps/tui/node_modules/
+apps/web/vite_dev.log
+apps/web/workspace/
+apps/web/test-results/
+apps/.cache/
+apps/logs/
+apps/workspace/
+apps/.nexus/
+temp_gemini_cli/
 
-knowledge/*.db
-knowledge/*.enc
-knowledge/_rag_index*.json
-knowledge/atlas_index.json
-
-graphify-out/cost.json
-graphify-out/cache/     # optional: commit for speed
-
+# ─── ML model files ────────────────────────────────────────────────────────
 *.safetensors
 *.pt
 *.pth
 *.onnx
 *.gguf
-*.bin
-# Playwright/MCP browser artifacts
-.playwright-mcp/
-.nexus_queue.db
-apps/.cache/
-apps/logs/
-apps/workspace/
-apps/.nexus/
-.tmp/research-gemini
-apps/web/src/*.patch_ui.py
-apps/web/src/App.tsx.found_*.txt
-apps/web/src/App.tsx.original_log_*.txt
-apps/web/vite_dev.log
-apps/web/workspace/
-apps/web/test-results/
-.nexus/
-workspace-under-test/

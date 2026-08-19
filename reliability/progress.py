@@ -25,6 +25,17 @@ _SUCCESS_KINDS = {"tool_call", "subagent", "model_call"}
 REPEAT_CALL_THRESHOLD = 4
 # Repeated identical error signatures beyond this many are a stall signal.
 REPEAT_ERROR_THRESHOLD = 4
+# Consecutive context compactions without verified progress are a stall
+# signal (the compaction-loop guard; mirrors OpenClaw's post-compaction
+# loop guard).
+DEFAULT_CONTEXT_EXHAUSTION_LIMIT = 3
+
+
+def _context_exhaustion_limit() -> int:
+    try:
+        return max(1, int(os.environ.get("NEXUS_CONTEXT_EXHAUSTION_LIMIT", "3") or 3))
+    except (TypeError, ValueError):
+        return DEFAULT_CONTEXT_EXHAUSTION_LIMIT
 
 
 @dataclass
@@ -54,6 +65,8 @@ class ProgressTracker:
         self._last_progress_at: Optional[float] = None
         self._call_signatures: Dict[str, int] = {}
         self._error_signatures: Dict[str, int] = {}
+        self._context_exhaustions: int = 0
+        self._context_exhaustion_limit: int = _context_exhaustion_limit()
         self._dirty = False
         self._load()
 
@@ -81,6 +94,7 @@ class ProgressTracker:
         now = self._clock()
         if kind in _PROGRESS_KINDS:
             self._last_progress_at = now
+            self._context_exhaustions = 0
             self._dirty = True
             return
 
@@ -94,6 +108,9 @@ class ProgressTracker:
                 self._call_signatures[signature] = (
                     self._call_signatures.get(signature, 0) + 1
                 )
+                # Verified tool/model success is real progress: a compaction
+                # loop that compacted just before a success is not a loop.
+                self._context_exhaustions = 0
             elif signature:
                 self._call_signatures[signature] = (
                     self._call_signatures.get(signature, 0) + 1
@@ -103,6 +120,12 @@ class ProgressTracker:
                 self._error_signatures[signature] = (
                     self._error_signatures.get(signature, 0) + 1
                 )
+        elif kind == "compaction":
+            # A context compaction is a stall symptom, not progress: repeated
+            # compactions without verified progress in between mean the agent
+            # is compacting and re-running the same work (compaction loop).
+            self._context_exhaustions += 1
+            self._dirty = True
         elif kind == "plan":
             self._dirty = True
 
@@ -153,6 +176,18 @@ class ProgressTracker:
                     recent_events=self.recent_events(),
                 )
 
+        if self._context_exhaustions >= self._context_exhaustion_limit:
+            return StallSignal(
+                kind="context_exhaustion",
+                detail=(
+                    f"context compacted {self._context_exhaustions} times "
+                    f"without verified progress (limit "
+                    f"{self._context_exhaustion_limit})"
+                ),
+                since=now,
+                recent_events=self.recent_events(),
+            )
+
         if self._last_progress_at is None:
             return None
         idle = now - self._last_progress_at
@@ -176,12 +211,14 @@ class ProgressTracker:
         self._events = []
         self._call_signatures = {}
         self._error_signatures = {}
+        self._context_exhaustions = 0
         self._last_progress_at = None
         self._dirty = False
         self._persist()
 
     def mark_progress(self) -> None:
         self._last_progress_at = self._clock()
+        self._context_exhaustions = 0
         self._dirty = True
         self._persist()
 
@@ -190,6 +227,7 @@ class ProgressTracker:
             "events": list(self._events),
             "call_signatures": dict(self._call_signatures),
             "error_signatures": dict(self._error_signatures),
+            "context_exhaustions": int(self._context_exhaustions),
             "last_progress_at": self._last_progress_at,
         }
 
@@ -205,6 +243,9 @@ class ProgressTracker:
             str(key): int(value)
             for key, value in (snapshot.get("error_signatures") or {}).items()
         }
+        self._context_exhaustions = max(
+            0, int(snapshot.get("context_exhaustions") or 0)
+        )
         self._last_progress_at = snapshot.get("last_progress_at")
 
     # ------------------------------------------------------------------ #

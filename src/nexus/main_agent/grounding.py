@@ -99,7 +99,7 @@ class V5ContextGrounding:
 
 
     def _load_progressive_rules(self) -> str:
-        patterns = ["AGENTS.md", "CLAUDE.md", ".cursorrules", "RULES.md",
+        patterns = ["NEXUS.md", "AGENTS.md", "CLAUDE.md", ".cursorrules", "RULES.md",
                      ".github/AGENTS.md", ".github/CLAUDE.md"]
         parts: List[str] = []
         for pattern in patterns:
@@ -155,9 +155,26 @@ class V5ContextGrounding:
             pass
         return ""
 
+    def _load_project_folder_context(self) -> str:
+        """Load project-specific context from .nexus/project.json and NEXUS.md."""
+        try:
+            from nexus.project import ProjectFolder
+            project = ProjectFolder(self.root_dir)
+            project.discover()
+            return project.load_project_context()
+        except Exception:
+            return ""
+
     async def _ground_context(self, task_desc: str) -> List[Dict[str, str]]:
         messages: List[Dict[str, str]] = []
         needs = self._requires_real_tooling(task_desc)
+        # Project folder context (NEXUS.md + README + docs) — highest priority
+        try:
+            project_ctx = await asyncio.to_thread(self._load_project_folder_context)
+            if project_ctx:
+                messages.append({"role": "system", "content": project_ctx[:6000]})
+        except Exception:
+            pass
         loader = getattr(self, "_build_stable_prompt", None)
         if callable(loader):
             try:

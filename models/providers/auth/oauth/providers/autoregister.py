@@ -9,7 +9,11 @@ from models.providers.auth.oauth.providers.copilot import (
     login_github_copilot,
     refresh_github_copilot_token,
 )
-from models.providers.auth.oauth.providers.gemini import login_gemini, refresh_gemini_token
+from models.providers.auth.oauth.providers.gemini import (
+    gemini_get_api_key,
+    login_gemini,
+    refresh_gemini_token,
+)
 from models.providers.auth.oauth.providers.grok import login_grok, refresh_grok_token
 from models.providers.auth.oauth.providers.minimax import login_minimax, refresh_minimax_token
 from models.providers.auth.oauth.providers.openrouter import (
@@ -30,6 +34,7 @@ def _make_oauth_provider(
     name: str,
     login_fn,
     refresh_fn,
+    api_key_fn=None,
 ) -> OAuthProviderInterface:
     class _Provider:
         @property
@@ -58,12 +63,14 @@ def _make_oauth_provider(
             return await login_fn(**kwargs)
 
         async def refresh_token(self, credentials: OAuthCredentials) -> OAuthCredentials:
-            result = refresh_fn(credentials.refresh)
+            result = refresh_fn(credentials)
             if inspect.isawaitable(result):
                 return await result
             return result
 
         def get_api_key(self, credentials: OAuthCredentials) -> str:
+            if api_key_fn is not None:
+                return api_key_fn(credentials)
             return credentials.access
 
     return _Provider()
@@ -75,13 +82,15 @@ def register_all_oauth_providers() -> None:
         ("claude", "Anthropic (Claude Pro/Max)", login_anthropic, refresh_anthropic_token),
         ("github-copilot", "GitHub Copilot", login_github_copilot, refresh_github_copilot_token),
         ("grok", "xAI Grok", login_grok, refresh_grok_token),
-        ("gemini", "Google Gemini", login_gemini, refresh_gemini_token),
+        ("gemini", "Google Gemini", login_gemini, refresh_gemini_token, gemini_get_api_key),
         ("openrouter", "OpenRouter", login_openrouter, refresh_openrouter_token),
         ("minimax", "MiniMax", login_minimax, refresh_minimax_token),
         ("chutes", "Chutes", login_chutes, refresh_chutes_token),
         ("qwen", "Qwen (Aliyun)", login_qwen, refresh_qwen_token),
     ]
 
-    for provider_id, name, login_fn, refresh_fn in providers:
-        provider_obj = _make_oauth_provider(provider_id, name, login_fn, refresh_fn)
+    for provider in providers:
+        provider_id, name, login_fn, refresh_fn = provider[0], provider[1], provider[2], provider[3]
+        api_key_fn = provider[4] if len(provider) > 4 else None
+        provider_obj = _make_oauth_provider(provider_id, name, login_fn, refresh_fn, api_key_fn)
         register_oauth_provider(provider_obj)

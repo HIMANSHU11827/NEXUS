@@ -60,8 +60,8 @@ async def test_client_catalog_entries_keep_the_requested_command_identity():
         CommandContext(extra={"command": "/usage", "args": "/usage"}),
     )
     assert result.success
-    assert "/usage" in result.output
-    assert result.data == {"client_action": "interactive", "command": "/usage"}
+    # /usage now returns real data (Session DB, Platform, Python version)
+    assert "Platform" in result.output or "Session" in result.output
     assert registry.get("reload-plugins") is registry.get("reload")
 
 

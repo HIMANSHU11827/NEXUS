@@ -1,8 +1,8 @@
 # NEXUS AI
 
-NEXUS AI is a local-first autonomous engineering agent platform. It is built to understand a codebase, execute tools directly, repair failures, remember project history, and operate through both a terminal-first workflow and a visual gui.
+NEXUS AI is an autonomous AI agent platform and multi-agent runtime. It is local-first but **provider-agnostic — not local-only**: it runs on local models (Ollama, LM Studio, llama.cpp), cloud APIs (OpenAI, Anthropic, Gemini, DeepSeek, and 20+ other vendors), and authenticated (OAuth) providers (Claude, Codex, Copilot, Gemini, Grok, OpenRouter, Qwen, MiniMax, Chutes, OpenCode CLI). It is built to understand a codebase, execute tools directly, repair failures, remember project history, and operate through both a terminal-first workflow and a visual GUI. Its built-in **Hive** engine provides full multi-agent orchestration — parallel, sequential, specialist, sub, and team agents.
 
-The project is not trying to be a chatbot with plugins. It is trying to become an operator-grade AI development system: fast command execution, codebase awareness, durable memory, multi-model routing, autonomous workflows, and a control surface for long-running engineering work.
+The project is not trying to be a chatbot with plugins. It is trying to become an operator-grade AI development and orchestration system: fast command execution, codebase awareness, durable memory, multi-model routing, autonomous multi-agent workflows, and a control surface for long-running engineering work.
 
 ## Core Capabilities
 
@@ -17,7 +17,7 @@ The project is not trying to be a chatbot with plugins. It is trying to become a
 - Multi-provider model routing, provider health telemetry, and local model experiments.
 - Capability-aware provider fallback with normalized provider error handling.
 - Environment-variable provider secrets and a repository secret scanner.
-- Local Hive orchestration with task queues, role planning, retries, cancellation, artifacts, and result merging.
+- Local-first **Hive** multi-agent orchestration with task queues, role planning, retries, cancellation, artifacts, and result merging. Hive supports five agent types: **parallel** (concurrent hive, bounded by `NEXUS_HIVE_MAX_CONCURRENCY`), **sequential** (staged execution plan), **specialist** (specialization registry), **sub** (isolated persona sub-agent emitting `subagent.*` events), and **team** (reusable `AgentTeamSpec`).
 - Hive agent contracts, scoped handoff packets, and checkpoints to reduce subagent forgetting and role drift.
 - Deterministic world-model impact analysis for command/file actions.
 - Adaptive memory graph with ranking, contradiction repair, cleanup, and compressed context packets.
@@ -80,23 +80,30 @@ A user can send a mission from **any** of these three interfaces:
 
 | Interface | Start | Path |
 |-----------|-------|------|
-| **TUI** (Ink client) | `python -m nexus` | `apps/tui/` + `apps.web.api` backend on `:8000` |
-| **GUI** | `python -m nexus --gui` | React app + `apps.web.api` backend |
-| **Server** | `python -m nexus --server` | standalone `apps.api:app` API |
-| **Gateway** | `python -m nexus --gateway` | `gateways/` â€” Telegram, Discord, WhatsApp, Slack |
+| **TUI** (Ink client) | `nexus` | `apps/tui/` + `apps.web.api` backend on `:8000` |
+| **GUI** | `nexus --gui` | React app + `apps.web.api` backend |
+| **Server** | `nexus --server` | standalone `apps.api:app` API |
+| Gateway | `nexus --gateway` | `gateways/` — Telegram, Discord, WhatsApp, Slack, SMS (Twilio) |
 
-TUI is **not** the terminal (host environment) â€” it is an Ink UI over the API.
+TUI is **not** the terminal (host environment) — it is an Ink UI over the API.
 
 All interfaces are **internally connected** via `src/nexus/common/session_bus.py`: one active `session_id`, shared chat history (`.nexus/logs/sessions/`), and mission timelines (`.nexus/workspace/work_events/`). Chat in GUI or TUI auto-join the same session and can continue without re-sending.
 
 ## Quick Start
 
 ```powershell
-python -m pip install -e .
-python -m nexus
+# First-time setup (uv is required; Python 3.12+)
+uv sync                      # creates .venv + installs NEXUS and all deps
+nexus --setup               # optional setup wizard
+
+# Start an interface
+nexus                       # TUI (default)
+nexus --gui                 # GUI
+nexus --server              # API server only
+nexus --gateway             # multi-platform gateway
 ```
 
-Provider keys are loaded from environment variables. Do not commit raw API keys:
+Provider keys are loaded from environment variables (or `configure/.env`). Do not commit raw API keys:
 
 ```powershell
 $env:OPENROUTER_API_KEY="..."
@@ -106,40 +113,40 @@ $env:QWEN_API_KEY="..."
 GUI:
 
 ```powershell
-python -m nexus --gui
+nexus --gui
 ```
 
 TUI:
 
 ```powershell
-python -m nexus
+nexus
 ```
 
 Gateway:
 
 ```powershell
-python -m nexus --gateway
+nexus --gateway
 ```
 
 Voice mode:
 
 ```powershell
-python -m pip install -e ".[voice]"
-python -m voice_chat --warmup
+uv sync --extra voice
+nexus-voice --warmup
 ```
 
 ## Verification
 
 ```powershell
-python -m pytest tests/ -v --tb=short
-cd apps/tui && npm run build && npm test
-cd apps/web && npm run build
+uv run pytest tests/ -v --tb=short
+cd apps/tui && pnpm install && pnpm build && pnpm test
+cd apps/web && pnpm install && pnpm build
 ```
 
 Version integrity:
 
 ```powershell
-python -c "from versioning.version.scripts.version import VersionManager; vm=VersionManager('.'); print(vm.get_all_versions_report())"
+uv run python -c "from versioning.version.scripts.version import VersionManager; vm=VersionManager('.'); print(vm.get_all_versions_report())"
 ```
 
 ## Current Status

@@ -68,6 +68,38 @@ class TestProgressTracker:
         signal = tracker.check()
         assert signal.kind == "repeated_error"
 
+    def test_context_exhaustion_signal_after_repeated_compactions(self):
+        tracker = ProgressTracker(max_idle_s=999.0)
+        for _ in range(3):
+            tracker.record({"kind": "compaction", "signature": "prompt_too_long_retry"})
+        signal = tracker.check()
+        assert signal is not None
+        assert signal.kind == "context_exhaustion"
+        assert "compacted 3 times" in signal.detail
+
+    def test_context_exhaustion_below_limit_is_not_a_stall(self):
+        tracker = ProgressTracker(max_idle_s=999.0)
+        tracker.record({"kind": "compaction", "signature": "prompt_too_long_retry"})
+        assert tracker.check() is None
+
+    def test_verified_success_resets_context_exhaustion(self):
+        tracker = ProgressTracker(max_idle_s=999.0)
+        for _ in range(3):
+            tracker.record({"kind": "compaction", "signature": "prompt_too_long_retry"})
+        tracker.record({"kind": "tool_call", "signature": "probe", "status": "success"})
+        assert tracker.check() is None
+
+    def test_context_exhaustion_persists_across_restart(self, tmp_path):
+        path = str(tmp_path / "progress-compaction.json")
+        tracker = ProgressTracker(max_idle_s=999.0, persist_path=path)
+        tracker.record({"kind": "compaction", "signature": "prompt_too_long_retry"})
+        tracker.record({"kind": "compaction", "signature": "provider_recovery"})
+        loaded = ProgressTracker(max_idle_s=999.0, persist_path=path)
+        loaded.record({"kind": "compaction", "signature": "prompt_too_long_retry"})
+        signal = loaded.check()
+        assert signal is not None
+        assert signal.kind == "context_exhaustion"
+
     def test_unknown_kinds_ignored(self):
         tracker = ProgressTracker(max_idle_s=1.0)
         tracker.record({"kind": "whatever"})

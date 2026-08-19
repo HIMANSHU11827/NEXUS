@@ -50,6 +50,11 @@ class GoalStep:
     attempts: int = 0
     error: Optional[str] = None
     artifacts: List[str] = field(default_factory=list)
+    # Per-step progress timestamp. When set (the execution loop records it as
+    # the step makes progress), the watchdog can flag a single wedged step
+    # even while the parent goal keeps heartbeating. Defaults to None so
+    # callers that don't track per-step progress fall back to goal-level.
+    last_progress_at: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -62,6 +67,7 @@ class GoalStep:
             "attempts": self.attempts,
             "error": self.error,
             "artifacts": list(self.artifacts),
+            "last_progress_at": self.last_progress_at,
         }
 
     @classmethod
@@ -76,6 +82,11 @@ class GoalStep:
             attempts=int(data.get("attempts") or 0),
             error=data.get("error"),
             artifacts=[str(item) for item in (data.get("artifacts") or [])],
+            last_progress_at=(
+                float(data["last_progress_at"])
+                if data.get("last_progress_at") is not None
+                else None
+            ),
         )
 
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import getpass
 import logging
+import importlib
 import os
 import subprocess
 import sys
@@ -414,11 +415,25 @@ PROVIDER_DEFS: Dict[str, Dict[str, Any]] = {
     },
 }
 
-GATEWAY_DEFS: Dict[str, Dict[str, str]] = {
+GATEWAY_DEFS: Dict[str, Dict[str, Any]] = {
     "telegram": {"env_key": "TELEGRAM_BOT_TOKEN", "docs": "https://t.me/botfather", "icon": "✈️"},
     "discord": {"env_key": "DISCORD_BOT_TOKEN", "docs": "https://discord.com/developers/applications", "icon": "🎮"},
     "slack": {"env_key": "SLACK_BOT_TOKEN", "docs": "https://api.slack.com/apps", "icon": "💬"},
     "whatsapp": {"env_key": "WHATSAPP_TOKEN", "docs": "https://developers.facebook.com/docs/whatsapp", "icon": "📱"},
+    # SMS via Twilio needs three secrets (account SID, auth token, sender
+    # number) and the optional `twilio`+`flask` packages for incoming
+    # webhooks. Listed as `env_keys` so the wizard prompts for each.
+    "sms": {
+        "env_keys": [
+            "TWILIO_ACCOUNT_SID",
+            "TWILIO_AUTH_TOKEN",
+            "TWILIO_FROM_NUMBER",
+        ],
+        "deps": ["twilio", "flask"],
+        "docs": "https://www.twilio.com/docs/messaging",
+        "icon": "💬",
+        "help": "Twilio Account SID, Auth Token, and a verified sender number (E.164, e.g. +14155550123).",
+    },
 }
 
 OAUTH_PROVIDER_ALIASES: Dict[str, str] = {
@@ -719,6 +734,59 @@ def is_configured_secret(value: object) -> bool:
     return not any(bit in lowered for bit in placeholder_bits)
 
 
+def _ensure_gateway_deps(deps: List[str]) -> None:
+    """Detect missing gateway dependencies and offer to install them.
+
+    Mirrors the "check the system, install what's needed" behavior of a good
+    setup wizard: nothing is assumed present. For each declared dependency we
+    try to import it; missing ones are reported and, when running inside the
+    managed environment, offered an install via ``uv pip install`` (falling
+    back to ``pip``). Installation failures degrade gracefully — the gateway
+    config is still saved so the user can install later.
+    """
+    missing = []
+    for dep in deps:
+        try:
+            importlib.import_module(dep)
+        except Exception:
+            missing.append(dep)
+
+    if not missing:
+        status_ok(f"Gateway deps present: {', '.join(deps)}")
+        return
+
+    status_dim(f"Missing gateway dependencies: {', '.join(missing)}")
+    if not Confirm.ask(
+        f"  Install {'/'.join(missing)} now?", default=True
+    ):
+        status_dim("Skipped. Install later, e.g. `uv pip install " + " ".join(missing) + "`")
+        return
+
+    for dep in missing:
+        for installer in ("uv pip install", "pip install"):
+            try:
+                console.print(f"  [dim]  $ {installer} {dep}[/dim]")
+                subprocess.run(
+                    installer.split() + [dep],
+                    check=False,
+                    timeout=180,
+                )
+                break
+            except Exception as exc:
+                logger.warning("dep install failed for %s: %s", dep, exc)
+    # Re-check so the user sees the final state.
+    still_missing = []
+    for dep in missing:
+        try:
+            importlib.import_module(dep)
+        except Exception:
+            still_missing.append(dep)
+    if still_missing:
+        status_fail(f"Could not install: {', '.join(still_missing)} (gateway may be send-only)")
+    else:
+        status_ok(f"Installed: {', '.join(missing)}")
+
+
 def ask_yes_no(prompt_text: str, default: bool = True) -> bool:
     """Prompt for a yes/no answer without requiring Rich.
 
@@ -813,12 +881,129 @@ def save_provider_yml(root_dir: str, config: Dict[str, Any]):
 # ── Connection testing ───────────────────────────────────────
 
 def test_provider(provider: str, api_key: str, endpoint: str, model: str) -> Tuple[bool, str, float]:
+    """Verify a provider can answer a tiny prompt.
+
+    Provider-aware: OpenAI-compatible, Anthropic, and Google Gemini use
+    different auth headers and request/response shapes, and local providers
+    (Ollama/LM Studio/vLLM) often run without any API key. A one-size-fits-all
+    POST produced false negatives for non-OpenAI providers; this routes each
+    family to its real wire format so the wizard's connection test is honest.
+    """
     import httpx
+
+    info = PROVIDER_DEFS.get(provider, {})
+    tier = info.get("tier", "cloud")
+    family = "openai"
+    if provider in ("anthropic", "claude"):
+        family = "anthropic"
+    elif provider in ("gemini", "gemini_oauth"):
+        family = "gemini"
+    elif tier == "local" or provider in ("ollama", "lm_studio", "llama_cpp", "zupra", "vllm", "sglang"):
+        family = "local"
+
+    # Local providers may not be running yet; report reachability clearly
+    # instead of a confusing auth error.
+    if family == "local":
+        if not endpoint:
+            return False, "no local endpoint configured (start Ollama/LM Studio)", 0.0
+        try:
+            start = time.monotonic()
+            with httpx.Client(timeout=10) as client:
+                # Ollama exposes /api/tags; other local servers may 404 the
+                # exact path but should at least answer on the host:port.
+                probe = endpoint.rsplit("/chat", 1)[0].rstrip("/") + "/"
+                try:
+                    resp = client.get(probe, timeout=10)
+                except Exception:
+                    resp = client.get(endpoint, timeout=10)
+            elapsed = time.monotonic() - start
+            if resp.status_code < 500:
+                return (
+                    True,
+                    f"local endpoint reachable (HTTP {resp.status_code})",
+                    elapsed,
+                )
+            return False, f"local endpoint returned HTTP {resp.status_code}", elapsed
+        except Exception as e:
+            return False, f"local endpoint not reachable: {e}", 0.0
+
+    if family == "anthropic":
+        if not api_key:
+            return False, "no API key configured", 0.0
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        }
+        payload = {
+            "model": model or "claude-3-5-haiku-20241022",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "Reply with only: OK"}],
+        }
+        for attempt in range(3):
+            try:
+                start = time.monotonic()
+                with httpx.Client(timeout=20) as client:
+                    resp = client.post(endpoint or "https://api.anthropic.com/v1/messages", json=payload, headers=headers)
+                elapsed = time.monotonic() - start
+                if resp.status_code == 200:
+                    return True, "OK", elapsed
+                msg = f"HTTP {resp.status_code}"
+                try:
+                    msg += f": {resp.json().get('error', {}).get('message', '')}"
+                except Exception:
+                    msg += f": {resp.text[:120]}"
+                if attempt < 2:
+                    time.sleep(1 * (attempt + 1))
+                    continue
+                return False, msg, elapsed
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(1 * (attempt + 1))
+                    continue
+                return False, str(e), 0.0
+
+    if family == "gemini":
+        if not api_key:
+            return False, "no API key configured", 0.0
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model or 'gemini-1.5-flash'}:generateContent?key={api_key}"
+        )
+        payload = {
+            "contents": [{"parts": [{"text": "Reply with only: OK"}]}],
+            "generationConfig": {"maxOutputTokens": 16},
+        }
+        for attempt in range(3):
+            try:
+                start = time.monotonic()
+                with httpx.Client(timeout=20) as client:
+                    resp = client.post(url, json=payload)
+                elapsed = time.monotonic() - start
+                if resp.status_code == 200:
+                    return True, "OK", elapsed
+                msg = f"HTTP {resp.status_code}"
+                try:
+                    msg += f": {resp.json().get('error', {}).get('message', '')}"
+                except Exception:
+                    msg += f": {resp.text[:120]}"
+                if attempt < 2:
+                    time.sleep(1 * (attempt + 1))
+                    continue
+                return False, msg, elapsed
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(1 * (attempt + 1))
+                    continue
+                return False, str(e), 0.0
+
+    # Default: OpenAI-compatible (OpenAI, DeepSeek, OpenRouter, Groq, Mistral,
+    # Cohere, Azure, Together, xAI, and the "universal" custom endpoint).
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     payload = {
-        "model": model,
+        "model": model or "auto",
         "messages": [{"role": "user", "content": "Reply with only: OK"}],
         "max_tokens": 10,
     }
@@ -886,12 +1071,19 @@ def check_git() -> Tuple[bool, str]:
 
 
 def check_nexus_installed() -> Tuple[bool, str]:
-    out = _run_cmd([sys.executable, "-m", "pip", "show", "nexus-ai"])
-    if out:
-        for line in out.splitlines():
-            if line.startswith("Version:"):
-                return True, line.split(":")[1].strip()
-    return False, "not installed"
+    try:
+        from importlib.metadata import version as _meta_version
+
+        return True, _meta_version("nexus-ai")
+    except Exception:
+        # Fall back to the repo's own version introspection.
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src"))
+            from nexus import __version__ as _v
+
+            return True, str(_v)
+        except Exception:
+            return False, "not installed"
 
 
 def check_nexus_update(current_version: str) -> Tuple[bool, str]:
@@ -1673,7 +1865,7 @@ def configure_gateways(root_dir: str, env: Dict[str, str]):
     sel = select("Set up messaging gateways?", ["Yes", "No (skip)"])
     console.print()
     if sel == 1:
-        status_dim("Skipped. Configure later with [bold]python -m nexus --gateway[/bold]")
+        status_dim("Skipped. Configure later with [bold]nexus --gateway[/bold]")
         console.print()
         return
 
@@ -1684,26 +1876,40 @@ def configure_gateways(root_dir: str, env: Dict[str, str]):
         if sel == 1:
             continue
         console.print(f"  [yellow]📋[/yellow] Docs: [cyan]{gw_info['docs']}[/cyan]")
+        help_text = gw_info.get("help")
+        if help_text:
+            console.print(f"  [dim]{help_text}[/dim]")
         sel = select("Open docs page in browser?", ["Yes", "No"])
         if sel == 0:
             _open_docs(gw_info["docs"])
         console.print()
-        existing = env.get(gw_info["env_key"], "")
-        if not is_configured_secret(existing):
-            existing = ""
-        token = ""
-        if existing:
-            masked = f"{existing[:8]}...{existing[-4:]}"
-            status_info(f"Existing token: [bold]{masked}[/bold]")
-            sel = select("Change token?", ["Yes", "No"])
-            if sel == 0:
-                token = secret_input(f"  Enter {gw_name} bot token")
-                env[gw_info["env_key"]] = token
-            else:
-                token = existing
-        if not token:
-            token = secret_input(f"  Enter {gw_name} bot token")
-            env[gw_info["env_key"]] = token
+
+        # A platform may need one token (env_key) or several secrets
+        # (env_keys) — e.g. SMS/Twilio needs SID + auth token + sender number.
+        keys = gw_info.get("env_keys") or [gw_info.get("env_key")]
+        for key in keys:
+            if not key:
+                continue
+            existing = env.get(key, "")
+            if not is_configured_secret(existing):
+                existing = ""
+            value = ""
+            if existing:
+                masked = f"{existing[:8]}...{existing[-4:]}"
+                status_info(f"Existing {key}: [bold]{masked}[/bold]")
+                sel = select(f"Change {key}?", ["Yes", "No"])
+                if sel == 0:
+                    value = secret_input(f"  Enter {key}")
+                    env[key] = value
+                else:
+                    value = existing
+            if not value:
+                value = secret_input(f"  Enter {key}")
+                env[key] = value
+
+        deps = gw_info.get("deps")
+        if deps:
+            _ensure_gateway_deps(deps)
 
         ids = Prompt.ask("  Allowed user IDs", default="*")
         if ids:
@@ -2559,18 +2765,17 @@ def run(root_dir: Optional[str] = None):
         sel = select("Enable API server for remote connections?", ["Yes, enable server", "No"])
         console.print()
         if sel == 0:
-            server_port = Prompt.ask("  Server port", default="8000")
+            server_port = Prompt.ask("  Server port", default="8000").strip()
+            if server_port:
+                env["NEXUS_SERVER_PORT"] = server_port
             sel = select("Require authentication token?", ["Yes, set a token", "No (open access)"])
             if sel == 0:
                 server_token = secret_input("  Enter server API token")
-                env["NEXUS_SERVER_TOKEN"] = server_token
-                with open(Path(root_dir) / "configure" / ".env", "a") as f:
-                    f.write(f"\nNEXUS_SERVER_TOKEN={server_token}\n")
-            env["NEXUS_SERVER_PORT"] = server_port
-            with open(Path(root_dir) / "configure" / ".env", "a") as f:
-                f.write(f"NEXUS_SERVER_PORT={server_port}\n")
-            status_ok(f"Server configured on port {server_port}")
-            status_dim("Start with: [bold]python -m nexus --server[/bold]")
+                if server_token:
+                    env["NEXUS_SERVER_TOKEN"] = server_token
+            save_env(root_dir, env)
+            status_ok(f"Server configured on port {server_port or '8000'}")
+            status_dim("Start with: [bold]nexus --server[/bold]")
         console.print()
 
         finish(root_dir)

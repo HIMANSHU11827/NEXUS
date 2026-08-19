@@ -6,7 +6,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from gateways.base import BasePlatformAdapter, MessageEvent
 from gateways.delivery import DeliveryLedger
@@ -333,8 +333,62 @@ class GatewayRunner:
         from security.core.auth import is_gateway_authorized
         return is_gateway_authorized(event.platform, event.sender_id)
 
+    async def _try_gateway_command(self, event: MessageEvent) -> bool:
+        """Try to handle a slash command through the unified command system.
+
+        Returns True if the message was a command and was handled (success or
+        error); False if it should be forwarded to the agent loop.
+        """
+        text = (event.text or "").strip()
+        if not text.startswith("/"):
+            return False
+
+        # Parse: /command args...
+        parts = text.split(None, 1)
+        command_name = parts[0].lstrip("/").lower()
+        args = parts[1] if len(parts) > 1 else ""
+
+        try:
+            from nexus.command_system.bridge import patched_get_bus
+            from nexus.command_system.core.command import CommandRequest, CommandContext
+
+            bus = patched_get_bus()
+            session_id = self.session_id_for(event)
+            request = CommandRequest(
+                command=command_name,
+                args=[args] if args else [],
+                options={
+                    "root": self._root,
+                    "platform": event.platform,
+                    "sender_id": event.sender_id,
+                    "raw_text": text,
+                },
+                context=CommandContext(
+                    source=event.platform,
+                    session_id=session_id,
+                    user_id=event.sender_id,
+                ),
+            )
+            result = await bus.execute(request)
+
+            # Send the command result back
+            response = result.message or result.error or "(no output)"
+            if response:
+                self._enqueue_delivery(event, 1, response)
+                await self._drain_deliveries()
+            return True
+
+        except Exception as exc:
+            logger.debug("gateway command '%s' failed: %s", command_name, exc)
+            return False  # Let agent loop handle it as a regular message
+
     async def handle_message(self, event: MessageEvent):
-        """Route incoming message to NexusLoop and send response back."""
+        """Route incoming message: slash commands go through the unified command
+        system, everything else goes through the agent loop.
+
+        This ensures TUI, API, web, and gateway all handle /status, /help,
+        /model, etc. identically through the same CommandRegistry.
+        """
         if not self.is_authorized(event):
             logger.warning(f"Unauthorized access attempt from {event.platform}:{event.sender_id}")
             return
@@ -343,8 +397,7 @@ class GatewayRunner:
         if not adapter:
             return
 
-        # Ingress de-duplication: webhook retry storms or re-delivered platform
-        # events must never double-process a message.
+        # Ingress de-duplication
         try:
             if seen_event(event):
                 logger.info(
@@ -352,7 +405,7 @@ class GatewayRunner:
                     event.platform, event.sender_id, event.message_id,
                 )
                 return
-        except Exception:  # degrade softly — never drop on dedupe failure
+        except Exception:
             logger.debug("message dedupe check failed", exc_info=True)
 
         from nexus.common.session_bus import set_active_session_id, sync_loop_from_disk
@@ -366,6 +419,14 @@ class GatewayRunner:
         # Send typing/action indicator (bounded retry for transient jitter)
         await bounded_tool_retry(adapter.send_typing, event.chat_id, retry_policy=2)
 
+        # Unified command routing: slash commands go through the command system
+        try:
+            if await self._try_gateway_command(event):
+                return  # Command was handled; skip agent loop
+        except Exception as exc:
+            logger.debug("gateway command routing failed, falling through: %s", exc)
+
+        # Regular message: route through agent loop
         try:
             loop = self._get_loop(event)
             set_active_session_id(self._root, session_id, source=f"gateway:{event.platform}")
@@ -413,9 +474,6 @@ class GatewayRunner:
         except Exception as e:
             safe_error = redact_secrets(e)
             logger.error("Error in gateway reasoning: %s", safe_error)
-            # Never reuse sequence 1 here: it collides with the first flushed
-            # chunk's idempotency key and the ledger silently drops the error
-            # message. Track the real counter so the error always lands.
             seq = response_sequence if "response_sequence" in locals() else 0
             self._enqueue_delivery(event, seq + 1, "[GATEWAY_ERROR]: The gateway could not complete this request.")
             await self._drain_deliveries()

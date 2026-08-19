@@ -1,9 +1,13 @@
+import logging
 import time
 from typing import Optional
 
+from models.providers.auth.oauth.expiry import OAUTH_REFRESH_SKEW_MS
 from models.providers.auth.oauth.registry import get_oauth_provider
 from models.providers.auth.oauth.storage import OAuthTokenStore, load_oauth_token_store
 from models.providers.auth.oauth.types import OAuthCredentials
+
+logger = logging.getLogger("nexus.oauth.refresh")
 
 
 async def refresh_oauth_token(
@@ -13,7 +17,8 @@ async def refresh_oauth_token(
     force: bool = False,
 ) -> Optional[OAuthCredentials]:
     now_ms = time.time() * 1000
-    if not force and now_ms < credentials.expires:
+    # Refresh before expiry (5-minute skew) so access never races an expiring token.
+    if not force and (now_ms + OAUTH_REFRESH_SKEW_MS) < credentials.expires:
         return credentials
 
     provider = get_oauth_provider(provider_id)
@@ -24,7 +29,8 @@ async def refresh_oauth_token(
         refreshed = await provider.refresh_token(credentials)
         store.set(provider_id, refreshed)
         return refreshed
-    except Exception:
+    except Exception as exc:
+        logger.warning("OAuth refresh failed for provider %s: %s", provider_id, exc)
         return None
 
 
